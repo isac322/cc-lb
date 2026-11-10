@@ -14,10 +14,21 @@ use crate::{SqliteStorage, map_sqlx_error};
 const CHECKPOINT_ID: &str = "high_water";
 const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
+const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
+
+async fn cleanup_gemini_reconciliation_markers(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> StorageResult<()> {
+    sqlx::query("DELETE FROM usage_rollup_reconciliation_markers_v1")
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RollupKey {
@@ -244,8 +255,8 @@ impl UsageRollupStore for SqliteStorage {
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
               cost_components_event_count \
-              FROM usage_rollups_v2 \
-              WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? \
+              FROM usage_rollups_v2 AS rollup \
+              WHERE rollup.resolution = ? AND rollup.bucket_start_unix_secs >= ? AND rollup.bucket_start_unix_secs < ? \
               ORDER BY bucket_start_unix_secs ASC",
         )
         .bind(resolution.as_str())
@@ -369,8 +380,555 @@ impl UsageTokenIntervalStore for SqliteStorage {
         Ok(sums)
     }
 }
+async fn merge_stale_gemini_rollups(
+    tx: &mut Transaction<'_, Sqlite>,
+    nested: bool,
+    rollup_upper_bound: i64,
+) -> StorageResult<()> {
+    let source_rows = sqlx::query(
+        "SELECT rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
+         rollup.upstream_id, rollup.model \
+         FROM usage_rollups_v2 AS rollup \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND rollup.rowid <= ? \
+           AND length(rollup.model) > 7 \
+           AND ( \
+             (? = 0 \
+              AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\') \
+             OR \
+             (? = 1 \
+              AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\') \
+           ) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+             WHERE marker.resolution = rollup.resolution \
+               AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+               AND marker.principal_id = rollup.principal_id \
+               AND marker.upstream_id = rollup.upstream_id \
+               AND marker.marker_model = rollup.model \
+           ) \
+           AND ( \
+             ? = 0 \
+             OR NOT EXISTS ( \
+               SELECT 1 FROM usage_rollups_v2 AS pending \
+               WHERE pending.resolution = rollup.resolution \
+                 AND pending.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                 AND pending.principal_id = rollup.principal_id \
+                 AND pending.upstream_id = rollup.upstream_id \
+                 AND pending.model = substr(rollup.model, 8) \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                   WHERE marker.resolution = pending.resolution \
+                     AND marker.bucket_start_unix_secs = pending.bucket_start_unix_secs \
+                     AND marker.principal_id = pending.principal_id \
+                     AND marker.upstream_id = pending.upstream_id \
+                     AND marker.marker_model = pending.model \
+                 ) \
+             ) \
+           ) \
+         ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
+                  rollup.upstream_id, rollup.model \
+         LIMIT ?",
+    )
+    .bind(rollup_upper_bound)
+    .bind(if nested { 1_i64 } else { 0_i64 })
+    .bind(if nested { 1_i64 } else { 0_i64 })
+    .bind(if nested { 1_i64 } else { 0_i64 })
+    .bind(ROLLUP_BATCH_LIMIT)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    for source in source_rows {
+        let resolution: String = source.try_get("resolution").map_err(map_sqlx_error)?;
+        let bucket_start: i64 = source
+            .try_get("bucket_start_unix_secs")
+            .map_err(map_sqlx_error)?;
+        let principal: String = source.try_get("principal_id").map_err(map_sqlx_error)?;
+        let upstream_id: String = source.try_get("upstream_id").map_err(map_sqlx_error)?;
+        let model: String = source.try_get("model").map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "INSERT INTO usage_rollups_v2 \
+             (resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
+              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
+              cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, \
+              cache_write_input_tokens_12h, error_count, latency_count, latency_ms_sum, \
+              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
+              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
+              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
+              upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
+              cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
+              cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+              cost_components_event_count, updated_at) \
+             SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, \
+                    substr(model, 8), request_count, input_tokens, output_tokens, \
+                    cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
+                    cache_write_input_tokens_30m, cache_write_input_tokens_12h, error_count, \
+                    latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, \
+                    proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, \
+                    sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, \
+                    upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros, \
+                    cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
+                    cost_cache_creation_1h_micros, cost_cache_read_micros, \
+                    cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+                    cost_components_event_count, updated_at \
+             FROM usage_rollups_v2 \
+             WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
+               AND upstream_id = ? AND model = ? \
+             ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) \
+             DO UPDATE SET \
+                 upstream_name = excluded.upstream_name, \
+                 request_count = usage_rollups_v2.request_count + excluded.request_count, \
+                 input_tokens = usage_rollups_v2.input_tokens + excluded.input_tokens, \
+                 output_tokens = usage_rollups_v2.output_tokens + excluded.output_tokens, \
+                 cache_creation_input_tokens = usage_rollups_v2.cache_creation_input_tokens + excluded.cache_creation_input_tokens, \
+                 cache_read_input_tokens = usage_rollups_v2.cache_read_input_tokens + excluded.cache_read_input_tokens, \
+                 cache_write_input_tokens = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN excluded.cache_write_input_tokens \
+                     WHEN excluded.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens \
+                     ELSE usage_rollups_v2.cache_write_input_tokens + excluded.cache_write_input_tokens END, \
+                 cache_write_input_tokens_30m = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN excluded.cache_write_input_tokens_30m \
+                     WHEN excluded.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m \
+                     ELSE usage_rollups_v2.cache_write_input_tokens_30m + excluded.cache_write_input_tokens_30m END, \
+                 cache_write_input_tokens_12h = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN excluded.cache_write_input_tokens_12h \
+                     WHEN excluded.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h \
+                     ELSE usage_rollups_v2.cache_write_input_tokens_12h + excluded.cache_write_input_tokens_12h END, \
+                 error_count = usage_rollups_v2.error_count + excluded.error_count, \
+                 latency_count = usage_rollups_v2.latency_count + excluded.latency_count, \
+                 latency_ms_sum = usage_rollups_v2.latency_ms_sum + excluded.latency_ms_sum, \
+                 latency_ms_min = CASE \
+                     WHEN usage_rollups_v2.latency_ms_min IS NULL THEN excluded.latency_ms_min \
+                     WHEN excluded.latency_ms_min IS NULL THEN usage_rollups_v2.latency_ms_min \
+                     ELSE MIN(usage_rollups_v2.latency_ms_min, excluded.latency_ms_min) END, \
+                 latency_ms_max = CASE \
+                     WHEN usage_rollups_v2.latency_ms_max IS NULL THEN excluded.latency_ms_max \
+                     WHEN excluded.latency_ms_max IS NULL THEN usage_rollups_v2.latency_ms_max \
+                     ELSE MAX(usage_rollups_v2.latency_ms_max, excluded.latency_ms_max) END, \
+                 proxy_setup_ms_count = usage_rollups_v2.proxy_setup_ms_count + excluded.proxy_setup_ms_count, \
+                 proxy_setup_ms_sum = usage_rollups_v2.proxy_setup_ms_sum + excluded.proxy_setup_ms_sum, \
+                 shape_ms_count = usage_rollups_v2.shape_ms_count + excluded.shape_ms_count, \
+                 shape_ms_sum = usage_rollups_v2.shape_ms_sum + excluded.shape_ms_sum, \
+                 sign_ms_count = usage_rollups_v2.sign_ms_count + excluded.sign_ms_count, \
+                 sign_ms_sum = usage_rollups_v2.sign_ms_sum + excluded.sign_ms_sum, \
+                 upstream_ttfb_ms_count = usage_rollups_v2.upstream_ttfb_ms_count + excluded.upstream_ttfb_ms_count, \
+                 upstream_ttfb_ms_sum = usage_rollups_v2.upstream_ttfb_ms_sum + excluded.upstream_ttfb_ms_sum, \
+                 upstream_body_ms_count = usage_rollups_v2.upstream_body_ms_count + excluded.upstream_body_ms_count, \
+                 upstream_body_ms_sum = usage_rollups_v2.upstream_body_ms_sum + excluded.upstream_body_ms_sum, \
+                 virtual_cost_micros = usage_rollups_v2.virtual_cost_micros + excluded.virtual_cost_micros, \
+                 cost_input_micros = usage_rollups_v2.cost_input_micros + excluded.cost_input_micros, \
+                 cost_output_micros = usage_rollups_v2.cost_output_micros + excluded.cost_output_micros, \
+                 cost_cache_creation_5m_micros = usage_rollups_v2.cost_cache_creation_5m_micros + excluded.cost_cache_creation_5m_micros, \
+                 cost_cache_creation_1h_micros = usage_rollups_v2.cost_cache_creation_1h_micros + excluded.cost_cache_creation_1h_micros, \
+                 cost_cache_read_micros = usage_rollups_v2.cost_cache_read_micros + excluded.cost_cache_read_micros, \
+                 cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + excluded.cost_cache_write_30m_micros, \
+                 cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + excluded.cost_cache_write_12h_micros, \
+                 cost_components_event_count = usage_rollups_v2.cost_components_event_count + excluded.cost_components_event_count, \
+                 updated_at = MAX(usage_rollups_v2.updated_at, excluded.updated_at)",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(&upstream_id)
+        .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "INSERT INTO usage_rollup_reconciliation_markers_v1 \
+             (resolution, bucket_start_unix_secs, principal_id, upstream_id, marker_model) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(&upstream_id)
+        .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "DELETE FROM usage_rollups_v2 \
+             WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
+               AND upstream_id = ? AND model = ?",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(&upstream_id)
+        .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
+async fn reconcile_gemini_model_identity(
+    storage: &SqliteStorage,
+) -> StorageResult<Option<UsageRollupRun>> {
+    let state = sqlx::query_as::<_, (String, i64, i64, i64)>(
+        "SELECT status, cursor, event_upper_bound, rollup_upper_bound \
+         FROM usage_rollup_reconciliations_v1 WHERE id = ?",
+    )
+    .bind(GEMINI_RECONCILIATION_ID)
+    .fetch_optional(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some((status, _, _, _)) = state else {
+        return Ok(None);
+    };
+    if status == "complete" {
+        return Ok(None);
+    }
+
+    let mut tx = storage.begin_immediate().await?;
+    let (status, event_cursor, event_upper_bound, rollup_upper_bound) =
+        sqlx::query_as::<_, (String, i64, i64, i64)>(
+            "SELECT status, cursor, event_upper_bound, rollup_upper_bound \
+             FROM usage_rollup_reconciliations_v1 WHERE id = ?",
+        )
+        .bind(GEMINI_RECONCILIATION_ID)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if status == "complete" {
+        tx.rollback().await.map_err(map_sqlx_error)?;
+        return Ok(None);
+    }
+
+    if status == "pending" {
+        let has_event_work = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.model LIKE 'models/%' \
+               AND events.model NOT LIKE 'models/models/%' \
+               AND events.model NOT LIKE 'models/tunedModels/%')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let has_rollup_work = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND length(rollup.model) > 7 \
+               AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+               AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+               AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                 WHERE marker.resolution = rollup.resolution \
+                   AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                   AND marker.principal_id = rollup.principal_id \
+                   AND marker.upstream_id = rollup.upstream_id \
+                   AND marker.marker_model = rollup.model \
+               ))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let event_upper_bound =
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(id), 0) FROM request_events_v1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        let rollup_upper_bound =
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(rowid), 0) FROM usage_rollups_v2")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        let has_nested_work = if has_event_work == 0 && has_rollup_work == 0 {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND events.id <= ? \
+                   AND events.model LIKE 'models/models/%' \
+                   AND events.model NOT LIKE 'models/models/tunedModels/%') \
+                 OR EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND rollup.rowid <= ? \
+                   AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                       AND marker.marker_model = rollup.model \
+                   ))",
+            )
+            .bind(event_upper_bound)
+            .bind(rollup_upper_bound)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+        } else {
+            0
+        };
+        let no_reconciliation_work =
+            has_event_work == 0 && has_rollup_work == 0 && has_nested_work == 0;
+        sqlx::query(
+            "UPDATE usage_rollup_reconciliations_v1 \
+             SET cursor = 0, event_upper_bound = ?, rollup_upper_bound = ?, \
+                 status = CASE WHEN ? <> 0 THEN 'rewriting' \
+                               WHEN ? <> 0 THEN 'rewriting' \
+                               WHEN ? <> 0 THEN 'rewriting_nested' \
+                               ELSE 'complete' END \
+             WHERE id = ?",
+        )
+        .bind(event_upper_bound)
+        .bind(rollup_upper_bound)
+        .bind(has_event_work)
+        .bind(has_rollup_work)
+        .bind(has_nested_work)
+        .bind(GEMINI_RECONCILIATION_ID)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if has_event_work == 0 && has_rollup_work != 0 {
+            merge_stale_gemini_rollups(&mut tx, false, rollup_upper_bound).await?;
+            let remaining = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND rollup.rowid <= ? \
+                   AND length(rollup.model) > 7 \
+                   AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                       AND marker.marker_model = rollup.model \
+                   ))",
+            )
+            .bind(rollup_upper_bound)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if remaining == 0 {
+                sqlx::query(
+                    "UPDATE usage_rollup_reconciliations_v1 SET cursor = 0, status = 'rewriting_nested' \
+                     WHERE id = ?",
+                )
+                .bind(GEMINI_RECONCILIATION_ID)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        }
+        if no_reconciliation_work {
+            cleanup_gemini_reconciliation_markers(&mut tx).await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        if no_reconciliation_work {
+            return Ok(None);
+        }
+        return Ok(Some(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: None,
+        }));
+    }
+
+    if status == "rewriting_nested" {
+        let ids = sqlx::query_scalar::<_, i64>(
+            "SELECT events.id \
+             FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.id > ? \
+               AND events.id <= ? \
+               AND events.model LIKE 'models/models/%' \
+               AND events.model NOT LIKE 'models/models/tunedModels/%' \
+             ORDER BY events.id ASC LIMIT ?",
+        )
+        .bind(event_cursor)
+        .bind(event_upper_bound)
+        .bind(ROLLUP_BATCH_LIMIT)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let nested_event_cursor = ids.last().copied().unwrap_or(event_cursor);
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE request_events_v1 SET model = substr(model, 8) \
+                 WHERE id IN ({placeholders}) AND id > ? AND id <= ?"
+            );
+            let mut query = sqlx::query(AssertSqlSafe(sql));
+            for id in &ids {
+                query = query.bind(id);
+            }
+            query = query.bind(event_cursor).bind(event_upper_bound);
+            query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET cursor = ? \
+                 WHERE id = ?",
+            )
+            .bind(nested_event_cursor)
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        merge_stale_gemini_rollups(&mut tx, true, rollup_upper_bound).await?;
+        let has_nested_work = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.id > ? \
+               AND events.id <= ? \
+               AND events.model LIKE 'models/models/%' \
+               AND events.model NOT LIKE 'models/models/tunedModels/%') \
+             OR EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND rollup.rowid <= ? \
+               AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                   AND marker.marker_model = rollup.model \
+                   ))",
+        )
+        .bind(nested_event_cursor)
+        .bind(event_upper_bound)
+        .bind(rollup_upper_bound)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if has_nested_work == 0 {
+            cleanup_gemini_reconciliation_markers(&mut tx).await?;
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
+                 WHERE id = ?",
+            )
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(Some(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: None,
+        }));
+    }
+
+    let ids = sqlx::query_scalar::<_, i64>(
+        "SELECT events.id \
+         FROM request_events_v1 AS events \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND events.id <= ? \
+           AND events.model LIKE 'models/%' \
+           AND events.model NOT LIKE 'models/models/%' \
+           AND events.model NOT LIKE 'models/tunedModels/%' \
+         ORDER BY events.id ASC LIMIT ?",
+    )
+    .bind(event_upper_bound)
+    .bind(ROLLUP_BATCH_LIMIT)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if ids.is_empty() {
+        merge_stale_gemini_rollups(&mut tx, false, rollup_upper_bound).await?;
+    } else {
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE request_events_v1 SET model = substr(model, 8) \
+             WHERE id IN ({placeholders}) AND id <= ?"
+        );
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for id in &ids {
+            query = query.bind(id);
+        }
+        query = query.bind(event_upper_bound);
+        query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        merge_stale_gemini_rollups(&mut tx, false, rollup_upper_bound).await?;
+    }
+    let has_event_work = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND events.id <= ? \
+           AND events.model LIKE 'models/%' \
+           AND events.model NOT LIKE 'models/models/%' \
+           AND events.model NOT LIKE 'models/tunedModels/%')",
+    )
+    .bind(event_upper_bound)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let has_rollup_work = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND rollup.rowid <= ? \
+           AND length(rollup.model) > 7 \
+           AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+           AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+             WHERE marker.resolution = rollup.resolution \
+               AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+               AND marker.principal_id = rollup.principal_id \
+               AND marker.upstream_id = rollup.upstream_id \
+               AND marker.marker_model = rollup.model \
+           ))",
+    )
+    .bind(rollup_upper_bound)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if has_event_work == 0 && has_rollup_work == 0 {
+        sqlx::query(
+            "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting_nested' \
+             WHERE id = ?",
+        )
+        .bind(GEMINI_RECONCILIATION_ID)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(Some(UsageRollupRun {
+        processed_events: 0,
+        updated_rollups: 0,
+        checkpoint: None,
+    }))
+}
 
 async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<UsageRollupRun> {
+    if let Some(run) = reconcile_gemini_model_identity(storage).await? {
+        return Ok(run);
+    }
     let pool = storage.pool();
     let previous_checkpoint = read_checkpoint(pool).await?.unwrap_or(0);
     let backfill_upper = read_named_checkpoint(pool, COST_BACKFILL_UPPER_ID).await?;

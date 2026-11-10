@@ -91,7 +91,8 @@ use crate::prompt_cache_simulator::{
 };
 use crate::provider_cache;
 use crate::provider_capability::{
-    ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
+    ProviderCapability, body_is_consistency_safe, canonical_gemini_model_id,
+    classify as classify_provider_capability,
 };
 use crate::provider_input_estimate::estimate_provider_input;
 use crate::request_classification::{
@@ -624,6 +625,26 @@ fn gemini_model_from_path(path: &str) -> Option<String> {
     .then(|| model.to_owned())
 }
 
+fn lifecycle_request_model(capability: Option<ProviderCapability>, model: &str) -> String {
+    if capability.is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
+    {
+        canonical_gemini_model_id(model).to_owned()
+    } else {
+        model.to_owned()
+    }
+}
+
+fn canonical_model_for_capability(capability: Option<ProviderCapability>, model: &str) -> &str {
+    let provider = capability
+        .map(ProviderCapability::provider)
+        .unwrap_or(Provider::Anthropic);
+    if provider == cc_lb_domain::Provider::Gemini {
+        canonical_gemini_model_id(model)
+    } else {
+        canonical_model_id(provider, model)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PreviewRouteInput {
     pub principal_id: String,
@@ -637,6 +658,67 @@ pub struct PreviewRouteInput {
     pub provider: Option<cc_lb_domain::Provider>,
     /// Provider-native path used to classify the request capability.
     pub path: String,
+}
+
+#[cfg(test)]
+mod lifecycle_model_identity_tests {
+    use super::{
+        ProviderCapability, canonical_model_for_capability, lifecycle_request_model,
+        request_cache_metadata_from_value_with_analysis_for_capability,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn canonicalizes_only_gemini_internal_request_identity() {
+        assert_eq!(
+            lifecycle_request_model(
+                Some(ProviderCapability::GeminiGenerateContent),
+                "models/gemini-2.5-flash",
+            ),
+            "gemini-2.5-flash"
+        );
+        assert_eq!(
+            lifecycle_request_model(
+                Some(ProviderCapability::GeminiGenerateContent),
+                "models/models/gemini-2.5-flash",
+            ),
+            "models/gemini-2.5-flash"
+        );
+        assert_eq!(
+            lifecycle_request_model(Some(ProviderCapability::OpenaiResponses), "models/gpt-5",),
+            "models/gpt-5"
+        );
+    }
+
+    #[test]
+    fn native_gemini_path_model_precedes_body_for_canonical_context() {
+        let headers = http::HeaderMap::new();
+        let body = json!({"model": "models/body-model"});
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&body),
+            None,
+            Some(ProviderCapability::GeminiGenerateContent),
+            Some("models/path-model"),
+        );
+        assert_eq!(metadata.canonical_model_id, "path-model");
+        assert_eq!(
+            canonical_model_for_capability(
+                Some(ProviderCapability::GeminiCachedContentsCreate),
+                "models/gemini-2.5-flash",
+            ),
+            "gemini-2.5-flash"
+        );
+
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            None,
+            None,
+            Some(ProviderCapability::GeminiGenerateContent),
+            Some("models/path-model"),
+        );
+        assert_eq!(metadata.canonical_model_id, "path-model");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3918,7 +4000,7 @@ impl Lifecycle {
             path_model.as_deref(),
         );
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        let canonical_model = if request_capability == ProviderCapability::GeminiGenerateContent {
+        let canonical_model = if request_capability.provider() == cc_lb_domain::Provider::Gemini {
             std::mem::take(&mut cache_metadata.canonical_model_id)
         } else {
             path_model
@@ -5066,9 +5148,12 @@ impl Lifecycle {
         } else {
             gemini_model_from_path(&ctx.path)
         };
-        let request_model = path_model.clone().or_else(|| body_view.model());
         let request_capability =
             classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope);
+        let request_model = path_model
+            .clone()
+            .or_else(|| body_view.model())
+            .map(|model| lifecycle_request_model(request_capability, &model));
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings {
             json_parse_ms: Some(body_view.json_parse_ms()),
             ..cc_lb_lifecycle::RequestSetupTimings::default()
@@ -5258,7 +5343,7 @@ impl Lifecycle {
                 let canonical_model = value
                     .get("model")
                     .and_then(Value::as_str)
-                    .map(|model| canonical_model_id(Provider::Anthropic, model))
+                    .map(|model| canonical_model_for_capability(Some(request_capability), model))
                     .unwrap_or_default()
                     .to_owned();
                 let token_threshold = Some(cache_threshold_tokens(&canonical_model));
@@ -5284,11 +5369,6 @@ impl Lifecycle {
             Some(request_capability),
             path_model.as_deref(),
         );
-        if request_capability == ProviderCapability::GeminiCachedContentsCreate
-            && let Some(model) = cache_metadata.canonical_model_id.strip_prefix("models/")
-        {
-            cache_metadata.canonical_model_id = model.to_owned();
-        }
         apply_thread_sticky_subagent_latch(
             &self.thread_sticky_subagent_latch,
             &principal.id,
@@ -5329,7 +5409,7 @@ impl Lifecycle {
             });
         }
         ctx.cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        ctx.canonical_model_id = if request_capability == ProviderCapability::GeminiGenerateContent
+        ctx.canonical_model_id = if request_capability.provider() == cc_lb_domain::Provider::Gemini
         {
             std::mem::take(&mut cache_metadata.canonical_model_id)
         } else {
@@ -10395,6 +10475,13 @@ impl LimitRequest {
             body_model.or(fallback)
         }
         .unwrap_or(if model_optional { "" } else { "unknown" });
+        let model = if capability
+            .is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
+        {
+            canonical_gemini_model_id(model)
+        } else {
+            model
+        };
         let max_tokens = match capability {
             Some(ProviderCapability::OpenaiResponses) => value
                 .and_then(|v| v.get("max_output_tokens"))
@@ -10705,6 +10792,15 @@ mod limit_request_estimate_tests {
                 LimitRequest::from_value(Some(&body), "fallback", Some(capability), &[], false);
             assert_eq!(request.model, "body-model");
         }
+        let cached_body = json!({"model":"models/gemini-2.5-flash"});
+        let cached = LimitRequest::from_value(
+            Some(&cached_body),
+            "",
+            Some(ProviderCapability::GeminiCachedContentsCreate),
+            &[],
+            false,
+        );
+        assert_eq!(cached.model, "gemini-2.5-flash");
     }
 }
 
@@ -11777,19 +11873,23 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             parent_session_id,
             client_app,
             session_id_source,
+            canonical_model_id: path_model
+                .map(|model| canonical_model_for_capability(capability, model).to_owned())
+                .unwrap_or_default(),
             ..Default::default()
         };
     };
     let model = if capability == Some(ProviderCapability::GeminiGenerateContent) {
         path_model
+    } else if capability
+        .is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
+    {
+        path_model.or_else(|| value.get("model").and_then(Value::as_str))
     } else {
         value.get("model").and_then(Value::as_str)
     };
-    let provider = capability
-        .map(ProviderCapability::provider)
-        .unwrap_or(Provider::Anthropic);
     let canonical_model_id = model
-        .map(|model| canonical_model_id(provider, model))
+        .map(|model| canonical_model_for_capability(capability, model))
         .unwrap_or_default()
         .to_owned();
     let modern_openai_interpretation = if capability == Some(ProviderCapability::OpenaiResponses)

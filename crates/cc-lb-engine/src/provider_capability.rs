@@ -222,6 +222,63 @@ pub(crate) fn body_is_consistency_safe(capability: ProviderCapability, body: &Va
             .and_then(Value::as_str)
             .is_some_and(gemini_cached_contents_model_supported)
 }
+/// Remove exactly one Gemini resource-model prefix from an internal identity.
+///
+/// The wire body and URL remain unchanged; this helper is only for provider
+/// identity values used by routing, limits, pricing, and observability.
+pub(crate) fn canonical_gemini_model_id(model: &str) -> &str {
+    if model.starts_with("tunedModels/") || model.starts_with("models/tunedModels/") {
+        return model;
+    }
+    model.strip_prefix("models/").unwrap_or(model)
+}
+
+#[cfg(test)]
+mod canonical_model_tests {
+    use super::canonical_gemini_model_id;
+
+    #[test]
+    fn strips_exactly_one_models_prefix() {
+        assert_eq!(
+            canonical_gemini_model_id("models/gemini-2.5-flash"),
+            "gemini-2.5-flash"
+        );
+        assert_eq!(
+            canonical_gemini_model_id("models/models/gemini-2.5-flash"),
+            "models/gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn preserves_tuned_model_identities() {
+        for model in ["tunedModels/custom", "models/tunedModels/custom"] {
+            assert_eq!(canonical_gemini_model_id(model), model);
+        }
+    }
+
+    #[test]
+    fn tuned_marker_only_matches_as_leading_resource_segment() {
+        assert_eq!(
+            canonical_gemini_model_id("models/gemini/tunedModels/custom"),
+            "gemini/tunedModels/custom"
+        );
+        assert_eq!(
+            canonical_gemini_model_id("models/tunedModels/custom/versions/1"),
+            "models/tunedModels/custom/versions/1"
+        );
+    }
+
+    #[test]
+    fn preserves_non_resource_gemini_identities() {
+        for model in [
+            "gemini-2.5-flash",
+            "tunedModels/custom",
+            "publishers/google/models/gemini-2.5-flash",
+        ] {
+            assert_eq!(canonical_gemini_model_id(model), model);
+        }
+    }
+}
 
 fn gemini_cached_contents_model_supported(model: &str) -> bool {
     let Some(model) = model.strip_prefix("models/") else {

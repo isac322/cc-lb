@@ -17,8 +17,10 @@ use cc_lb_engine::realtime_websocket::{
 use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
-use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
+use cc_lb_storage_api::upstream::{
+    UpstreamCreate, UpstreamKind as StorageUpstreamKind, UpstreamRecord,
+};
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -115,6 +117,122 @@ where
     let result = operation().await;
     let warnings = warnings.lock().expect("warning capture lock").clone();
     (result, warnings)
+}
+
+#[tokio::test]
+async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut update_rx = test_bus.bus.subscribe();
+    let authn = TestAuthn::new(TestState::default());
+    let upstream_id = uuid::Uuid::from_u128(1_204_001);
+    let upstream = storage
+        .create(UpstreamCreate {
+            id: upstream_id,
+            name: "gemini-identity-events".to_owned(),
+            kind: StorageUpstreamKind::GeminiApiKey,
+            base_url: Some("https://generativelanguage.googleapis.com/".parse()?),
+            api_key_ciphertext: Some(Vec::new()),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        })
+        .await?;
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![upstream])
+        .build();
+    let dispatcher = GeminiCapturingDispatch::default();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(dispatcher.clone()),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc())
+    .with_upstream_affinity_store(storage.clone());
+
+    let requests = [
+        (
+            "/v1beta/cachedContents",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","contents":[]}"#,
+            ),
+        ),
+        (
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","cachedContent":"cachedContents/example","contents":[]}"#,
+            ),
+        ),
+        (
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            Bytes::from_static(br#"{"contents":[]}"#),
+        ),
+        (
+            "/v1beta/cachedContents",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","contents":[]}"#,
+            ),
+        ),
+    ];
+    for (path, body) in &requests {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(*path)
+            .header("x-api-key", managed_api_key())
+            .body(body.clone())?;
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Gemini));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("Gemini request authenticates");
+        let response = lifecycle.handle(request, &auth).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{path} response");
+        response.into_body().collect().await?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    update_rx.recv().await.expect("request update delivered"),
+                    cc_lb_request_log::RequestEventUpdate::Final(_)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Gemini final request event arrives");
+    }
+
+    assert_eq!(
+        dispatcher
+            .bodies
+            .lock()
+            .expect("captured bodies lock")
+            .as_slice(),
+        requests
+            .iter()
+            .map(|(_, body)| body.clone())
+            .collect::<Vec<_>>()
+            .as_slice()
+    );
+    let events = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 4);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.model.as_deref() == Some("gemini-2.5-flash")),
+        "cached-content creation and URL-only requests share one canonical model identity"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -1066,6 +1184,37 @@ impl UpstreamDispatch for CapturingDispatch {
             br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
         )));
         *response.status_mut() = StatusCode::OK;
+        Ok(response)
+    }
+}
+
+#[derive(Clone, Default)]
+struct GeminiCapturingDispatch {
+    bodies: Arc<Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for GeminiCapturingDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        self.bodies
+            .lock()
+            .expect("captured Gemini bodies lock")
+            .push(request.body().clone());
+        let response_body = if request.url().path() == "/v1beta/cachedContents" {
+            Bytes::from_static(
+                br#"{"name":"cachedContents/example","expireTime":"2100-01-01T00:00:00Z"}"#,
+            )
+        } else {
+            Bytes::from_static(
+                br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#,
+            )
+        };
+        let mut response = Response::new(Body::from(response_body));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         Ok(response)
     }
 }
