@@ -12,14 +12,14 @@ use cc_lb_storage_api::{CacheKeepaliveSessionReadStore, PrincipalStore, Storage,
 use serde::Deserialize;
 
 use self::{
-    query::parse_query,
+    query::{parse_horizon, parse_query},
     view::{
         CacheKeepaliveViewContext, FIVE_MINUTES_MS, detail_for_item, list_upstream_names,
         load_activity_batch, row_for_item,
     },
 };
 use crate::AdminState;
-use crate::cache_keepalive_view::economics::rates_from_catalog;
+use crate::cache_keepalive_view::economics::{rates_from_catalog, renewal_avoided_micros};
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -36,6 +36,7 @@ pub fn router() -> Router<AdminState> {
 #[derive(Debug, Deserialize)]
 struct CacheKeepaliveDetailQuery {
     id: String,
+    horizon: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +74,7 @@ async fn list_cache_keepalive(
         catalog: cc_lb_pricing::global_catalog().as_ref(),
         now_ms,
         max_attempts,
+        horizon_start_ms: query.storage.horizon_start_ms,
     };
     let page = if query.limit == 0 {
         None
@@ -97,7 +99,7 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         };
     let mut avoided_micros = 0_i64;
-    let mut pricing_complete = true;
+    let mut pricing_complete = aggregate.unknown_costs == 0;
     for group in &aggregate.groups {
         let Some(rates) = rates_from_catalog(
             cc_lb_pricing::global_catalog().as_ref(),
@@ -107,36 +109,31 @@ async fn list_cache_keepalive(
             pricing_complete = false;
             continue;
         };
-        let group_avoided = (u128::from(group.avoided_cache_read_tokens)
-            .saturating_mul(u128::from(rates.avoided_create_micros_per_million))
-            / 1_000_000)
-            .min(i64::MAX as u128) as i64;
+        // Every renewal in a group read the same token count; price one renewal
+        // and multiply so the header rounds exactly like the per-row sum.
+        let per_renewal_tokens = group
+            .avoided_cache_read_tokens
+            .checked_div(group.renewals)
+            .unwrap_or(0);
+        let group_avoided = renewal_avoided_micros(per_renewal_tokens, rates)
+            .saturating_mul(i64::try_from(group.renewals).unwrap_or(i64::MAX));
         avoided_micros = avoided_micros.saturating_add(group_avoided);
     }
-    let economics_complete = pricing_complete && aggregate.evidence_status == "observed";
-    let resolved_complete = pricing_complete
-        && aggregate.unknown_cycles == 0
-        && (aggregate.evidence_status == "observed"
-            || (aggregate.evidence_status == "pending" && aggregate.successful_hits > 0));
     let total_spent = aggregate.total_spent_micros as f64 / 1_000_000.0;
-    let total_avoided = economics_complete.then(|| avoided_micros as f64 / 1_000_000.0);
-    let cost_saved = economics_complete.then(|| {
-        (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
-    });
-    let resolved_total_avoided = resolved_complete.then(|| avoided_micros as f64 / 1_000_000.0);
-    let resolved_cost_saved = resolved_complete.then(|| {
+    let total_avoided = pricing_complete.then(|| avoided_micros as f64 / 1_000_000.0);
+    let cost_saved = pricing_complete.then(|| {
         (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
     });
     let summary = view::CacheKeepaliveSummaryResponse {
         renewing_now: aggregate.renewing_now,
         sessions_last_5m: aggregate.sessions_last_5m,
-        renewals_fired: aggregate.successful_hits,
         retained_successful_hits: aggregate.successful_hits,
         cost_saved,
-        resolved_cost_saved,
         total_spent,
         total_avoided,
-        resolved_total_avoided,
+        unlisted_sessions: aggregate.unlisted_sessions,
+        unlisted_renewals: aggregate.unlisted_renewals,
+        unlisted_spent: aggregate.unlisted_spent_micros as f64 / 1_000_000.0,
         evidence_status: aggregate.evidence_status,
         unknown_cycles: aggregate.unknown_cycles,
         retained_from_ms: aggregate.retained_from_ms,
@@ -205,6 +202,13 @@ async fn get_cache_keepalive_detail(
         Err(error) => return storage_error(error),
     };
     let now_ms = cc_lb_clock::unix_secs(state.clock.now()).saturating_mul(1_000);
+    let horizon = match query.horizon.as_deref() {
+        Some(value) => match parse_horizon(Some(value)) {
+            Ok(horizon) => horizon,
+            Err(error) => return error.into_response(),
+        },
+        None => query::CacheKeepaliveHorizon::All,
+    };
     let max_attempts = principal
         .cache_keepalive
         .as_ref()
@@ -214,6 +218,7 @@ async fn get_cache_keepalive_detail(
         catalog: cc_lb_pricing::global_catalog().as_ref(),
         now_ms,
         max_attempts,
+        horizon_start_ms: horizon.start_ms(now_ms),
     };
     match detail_for_item(&context, &item).await {
         Ok(detail) => Json(detail).into_response(),

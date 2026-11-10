@@ -17,8 +17,8 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
     metrics: [
       ['Renewing now', 'current scheduled or mid-renewal'],
       ['Sessions (last 5m)', 'seen in last five minutes'],
-      ['Renewals fired', 'retained history'],
-      ['Cost saved', 'net, after renewal spend'],
+      ['Successful renewals · 24h', 'renewals that hit the cache'],
+      ['Cost saved · 24h', 'net, after renewal spend'],
     ],
     caption:
       'Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring.',
@@ -38,6 +38,7 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
     'Final turn',
     'waiting for follow-up',
     'cache used by follow-up',
+    'follow-up unknown',
     'no follow-up (loss)',
   ]);
   expect(cacheKeepaliveSettingsCopy.helperCopy).toEqual([

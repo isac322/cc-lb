@@ -63,7 +63,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 1,
         sessions_last_5m: 2,
-        renewals_fired: 3,
         retained_successful_hits: 3,
         cost_saved: 4.56,
       },
@@ -98,7 +97,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 1000,
         sessions_last_5m: 2000,
-        renewals_fired: 3182,
         retained_successful_hits: 3182,
         cost_saved: 4.56,
       },
@@ -121,11 +119,11 @@ describe('CacheKeepaliveCard', () => {
     expect(screen.getByText('seen in last five minutes')).toBeDefined();
     expect(screen.getByText('2,000')).toBeDefined();
 
-    expect(screen.getByText('Renewals fired')).toBeDefined();
-    expect(screen.getByText('retained history')).toBeDefined();
+    expect(screen.getByText('Successful renewals · 24h')).toBeDefined();
+    expect(screen.getByText('renewals that hit the cache')).toBeDefined();
     expect(screen.getByText('3,182')).toBeDefined();
 
-    expect(screen.getByText('Cost saved')).toBeDefined();
+    expect(screen.getByText('Cost saved · 24h')).toBeDefined();
     expect(screen.getByText('net, after renewal spend')).toBeDefined();
 
     expect(screen.getByText('$4.56')).toBeDefined();
@@ -274,7 +272,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 99,
         sessions_last_5m: 2,
-        renewals_fired: 3,
         retained_successful_hits: 3,
         cost_saved: 4.56,
       },
@@ -312,7 +309,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 99,
         sessions_last_5m: 2,
-        renewals_fired: 3,
         retained_successful_hits: 3,
         cost_saved: 4.56,
       },
@@ -356,7 +352,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 1,
         sessions_last_5m: 2,
-        renewals_fired: 3,
         retained_successful_hits: 0,
         cost_saved: -4.04,
         total_spent: 4.04,
@@ -381,7 +376,6 @@ describe('CacheKeepaliveCard', () => {
       data: {
         renewing_now: 7,
         sessions_last_5m: 1,
-        renewals_fired: 9,
         retained_successful_hits: 9,
         cost_saved: 2.5,
         total_spent: 1,

@@ -85,7 +85,12 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     let body: Value = serde_json::from_slice(&raw).expect("list response JSON");
     assert!(body["summary"]["renewing_now"].is_number());
     assert!(body["summary"]["sessions_last_5m"].is_number());
-    assert!(body["summary"]["renewals_fired"].is_number());
+    assert!(body["summary"].get("renewals_fired").is_none());
+    assert!(body["summary"].get("resolved_cost_saved").is_none());
+    assert!(body["summary"].get("resolved_total_avoided").is_none());
+    assert!(body["summary"]["unlisted_sessions"].is_number());
+    assert!(body["summary"]["unlisted_renewals"].is_number());
+    assert!(body["summary"]["unlisted_spent"].is_number());
     assert!(body["summary"]["cost_saved"].is_null());
     assert_eq!(body["summary"]["total_spent"], 0.0432);
     assert!(body["summary"]["total_avoided"].is_null());
@@ -219,7 +224,7 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
         ("7b204de1c83f", "scheduled"),
         ("f4b71a0c9d52", "capped"),
         ("0b33e9f71a2c", "expired"),
-        ("error-overlaps-reason", "capped"),
+        ("error-overlaps-reason", "failed"),
         ("decision-2d8077e9a1c4", "not_tracked"),
     ] {
         let uri = keepalive_detail_uri(&principal_id, id);

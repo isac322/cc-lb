@@ -54,10 +54,7 @@ pub fn derive_turn_pnl(
     rates: CacheKeepalivePnlRates,
 ) -> CacheKeepaliveTurnPnl {
     let avoided_micros = if input.followed_up {
-        token_cost_micros(
-            input.renewal_tokens,
-            rates.avoided_create_micros_per_million,
-        )
+        renewal_avoided_micros(input.renewal_tokens, rates)
     } else {
         0
     };
@@ -67,6 +64,14 @@ pub fn derive_turn_pnl(
         net_micros: avoided_micros.saturating_sub(input.spent_micros),
         pending: input.pending,
     }
+}
+
+/// Cache-creation cost one followed-up renewal avoided.
+///
+/// Rows and the summary header both price renewals one at a time through this
+/// function, so their totals round identically.
+pub fn renewal_avoided_micros(renewal_tokens: u64, rates: CacheKeepalivePnlRates) -> i64 {
+    token_cost_micros(renewal_tokens, rates.avoided_create_micros_per_million)
 }
 
 pub fn sum_turn_pnl(turns: &[CacheKeepaliveTurnPnl]) -> CacheKeepaliveSessionPnl {

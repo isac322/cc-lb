@@ -243,7 +243,7 @@ async fn list_and_detail_include_follow_up_at_turn_boundary_like_summary_async()
         summary["summary"]["retained_from_ms"],
         NOW_UNIX_SECS * 1_000 - 1_000
     );
-    assert_eq!(summary["summary"]["renewals_fired"], 1);
+    assert_eq!(summary["summary"]["retained_successful_hits"], 1);
     assert!(
         summary["summary"]["total_avoided"]
             .as_f64()

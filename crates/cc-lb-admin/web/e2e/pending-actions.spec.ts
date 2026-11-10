@@ -155,7 +155,7 @@ async function installPrincipalFixtures(page: Page) {
         summary: {
           renewing_now: 0,
           sessions_last_5m: 0,
-          renewals_fired: 0,
+          retained_successful_hits: 0,
           cost_saved: 0,
         },
         rows: [],

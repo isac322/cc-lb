@@ -264,10 +264,11 @@ fn batched_cache_keepalive_turns_preserve_serialized_summary_behavior() {
         .expect("batched summary");
     assert_eq!(summary.renewing_now, 1);
     assert_eq!(summary.sessions_last_5m, 1);
-    assert_eq!(summary.renewals_fired, 2);
+    assert_eq!(summary.retained_successful_hits, 2);
     assert_eq!(summary.total_spent, 0.0);
-    assert_eq!(summary.total_avoided, None);
-    assert_eq!(summary.cost_saved, None);
+    // Unknown follow-up evidence is $0 avoided so far, not an unknown price.
+    assert_eq!(summary.total_avoided, Some(0.0));
+    assert_eq!(summary.cost_saved, Some(0.0));
     assert_eq!(summary.evidence_status, "unknown");
 }
 #[test]
@@ -283,6 +284,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
             turns: &turns,
             evidence: &[],
             now_ms: NOW_MS,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -329,6 +331,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
             turns: &partial_turns,
             evidence: &[],
             now_ms: NOW_MS,
+            horizon_start_ms: None,
         },
         partial_catalog.as_ref(),
     );
@@ -340,7 +343,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         .expect("unknown pricing is tolerated");
     assert_eq!(summary.renewing_now, 1);
     assert_eq!(summary.sessions_last_5m, 1);
-    assert_eq!(summary.renewals_fired, 1);
+    assert_eq!(summary.retained_successful_hits, 1);
     assert_eq!(summary.cost_saved, None);
 }
 
@@ -410,6 +413,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
             turns: &turns,
             evidence: &[],
             now_ms: NOW_MS,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -423,6 +427,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
             turns: &turns,
             evidence: &[],
             now_ms: NOW_MS,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );

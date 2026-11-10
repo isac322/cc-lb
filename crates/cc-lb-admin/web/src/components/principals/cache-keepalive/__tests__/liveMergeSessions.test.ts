@@ -26,32 +26,29 @@ describe('mergeLiveSessions', () => {
   });
 
   it('Given empty input, When merged, Then returns empty array', () => {
-    expect(mergeLiveSessions([], 10)).toEqual([]);
+    expect(mergeLiveSessions([])).toEqual([]);
   });
 
-  it('Given overlapping pages, When merged, Then keeps the newest row object without cloning', () => {
-    const newest = makeRow('1', 'renewed');
+  it('Given a session on page 1 and a stale copy on page 2, When merged, Then the page-1 copy wins', () => {
+    const pageOneCopy = makeRow('1', 'renewed');
     const second = makeRow('2', 'scheduled');
-    const olderDuplicate = makeRow('1', 'scheduled');
+    const stalePageTwoCopy = makeRow('1', 'scheduled');
 
-    const result = mergeLiveSessions([newest, second, olderDuplicate], 10);
+    const result = mergeLiveSessions([pageOneCopy, second, stalePageTwoCopy]);
 
-    expect(result).toEqual([newest, second]);
-    expect(result[0]).toBe(newest);
+    expect(result).toEqual([pageOneCopy, second]);
+    expect(result[0]).toBe(pageOneCopy);
     expect(result[1]).toBe(second);
   });
 
-  it('Given rows exceeding maxRows, When merged, Then trims to maxRows', () => {
+  it('does not truncate rows after all pages are loaded', () => {
     const rows = [makeRow('1'), makeRow('2'), makeRow('3'), makeRow('4')];
-    const result = mergeLiveSessions(rows, 2);
-    expect(result).toHaveLength(2);
-    expect(result[0].id).toBe('1');
-    expect(result[1].id).toBe('2');
+    expect(mergeLiveSessions(rows)).toHaveLength(4);
   });
 
-  it('Given order, When merged, Then preserves newest-first order', () => {
+  it('Given order, When merged, Then preserves first-seen order', () => {
     const rows = [makeRow('3'), makeRow('1'), makeRow('2')];
-    const result = mergeLiveSessions(rows, 10);
+    const result = mergeLiveSessions(rows);
     expect(result.map((r) => r.id)).toEqual(['3', '1', '2']);
   });
 });

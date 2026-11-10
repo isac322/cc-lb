@@ -1,23 +1,15 @@
 import type { CacheKeepaliveRow } from '../../../lib/cacheKeepaliveApi';
 
+// Pages are ordered newest first. A session that moved to an earlier page
+// after a poll carries its freshest copy there, so the first copy wins.
 export function mergeLiveSessions(
   rows: CacheKeepaliveRow[],
-  maxRows: number,
 ): CacheKeepaliveRow[] {
-  if (!rows || rows.length === 0) return [];
-
-  const seen = new Set<string>();
-  const merged: CacheKeepaliveRow[] = [];
-
+  const byId = new Map<string, CacheKeepaliveRow>();
   for (const row of rows) {
-    if (!seen.has(row.id)) {
-      seen.add(row.id);
-      merged.push(row);
-      if (merged.length >= maxRows) {
-        break;
-      }
+    if (!byId.has(row.id)) {
+      byId.set(row.id, row);
     }
   }
-
-  return merged;
+  return [...byId.values()];
 }

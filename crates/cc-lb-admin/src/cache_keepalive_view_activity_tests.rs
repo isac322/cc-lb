@@ -200,6 +200,7 @@ fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decisi
             turns: &[],
             evidence: &[],
             now_ms: 0,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -210,6 +211,7 @@ fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decisi
             turns: &turns,
             evidence: &[],
             now_ms: 0,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -238,15 +240,22 @@ fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
             turns: &turns,
             evidence: &[],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
 
     // When: the list row consumes those records from the shared batch without the encrypted session.
     let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
-    let batched_activity =
-        activity_for_item(catalog.as_ref(), 1_730_000_100_000, &item, None, &batch)
-            .expect("batched activity");
+    let batched_activity = activity_for_item(
+        catalog.as_ref(),
+        1_730_000_100_000,
+        &item,
+        None,
+        &batch,
+        None,
+    )
+    .expect("batched activity");
     let legacy_row = row_from_activity(12, &item, &legacy_activity, Some("primary".to_owned()))
         .expect("legacy row");
     let batched_row = row_from_activity(12, &item, &batched_activity, Some("primary".to_owned()))
@@ -277,6 +286,7 @@ fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_t
             turns: &turns,
             evidence: &[],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -311,6 +321,7 @@ fn cache_keepalive_hit_without_followup_evidence_is_not_counted_as_followed_up()
             turns: &turns,
             evidence: &[],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
@@ -368,6 +379,7 @@ fn cache_keepalive_activity_requires_matching_followup_evidence() {
             turns: &turns,
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         PriceCatalog::new_empty().as_ref(),
     );
@@ -445,6 +457,7 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
             turns: &turns,
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         PriceCatalog::new_empty().as_ref(),
     );
@@ -500,6 +513,7 @@ fn active_same_cycle_miss_followup_resolves_pending_without_miss_credit() {
             turns: &[hit, miss],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -562,6 +576,7 @@ fn terminal_complete_negative_evidence_is_observed_without_follow_up() {
             turns: &[hit, miss],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -607,6 +622,7 @@ fn terminal_complete_hit_only_evidence_is_observed_without_avoided_credit() {
             turns: &[hit],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -645,6 +661,7 @@ fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
             turns: &[legacy_turn, c1_turn],
             evidence: &[unrelated_evidence],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         PriceCatalog::new_empty().as_ref(),
     );
@@ -676,6 +693,7 @@ fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
             turns: &[legacy, current],
             evidence: &[],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         PriceCatalog::new_empty().as_ref(),
     );
@@ -714,6 +732,7 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
             turns: &[c1_turn],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -766,6 +785,7 @@ fn persisted_zero_cost_is_real_zero_spend() {
             turns: &[turn],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -800,6 +820,7 @@ fn unknown_cost_keeps_hit_history_without_claiming_zero_pnl() {
             turns: &[renewal],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -851,6 +872,7 @@ fn hit_miss_counts_include_hits_but_not_misses() {
             turns: &[hit, miss],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -917,6 +939,7 @@ fn mixed_batch_evidence_stays_scoped_to_each_session() {
         &observed_item,
         None,
         &batch,
+        None,
     )
     .expect("observed activity");
     let unknown = activity_for_item(
@@ -925,6 +948,7 @@ fn mixed_batch_evidence_stays_scoped_to_each_session() {
         &unknown_item,
         None,
         &batch,
+        None,
     )
     .expect("unknown activity");
     let none = activity_for_item(
@@ -933,6 +957,7 @@ fn mixed_batch_evidence_stays_scoped_to_each_session() {
         &none_item,
         None,
         &batch,
+        None,
     )
     .expect("empty activity");
 
@@ -968,6 +993,7 @@ fn historical_turn_uses_its_persisted_ttl_for_avoided_cost() {
             turns: &[historical_turn],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -1006,6 +1032,7 @@ fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
             turns: &[turn],
             evidence: &evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -1057,6 +1084,7 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
             turns: &turns,
             evidence: &evidence,
             now_ms: 5_000_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -1108,18 +1136,36 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
 
 #[test]
 fn idle_gap_terminal_endings_and_fallback_timing_preserve_unknown_cost() {
-    for (terminal_reason, max_attempts, expected) in [
-        (None, 12, "ttl_expired_no_followup"),
-        (None, 1, "capped_no_followup"),
+    let cycle_id = Uuid::from_u128(77);
+    let proven = [renewal_evidence(
+        "unknown",
+        cycle_id,
+        1_000_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "hash",
+    )];
+    for (terminal_reason, max_attempts, evidence, expected) in [
+        (None, 12, &proven[..], "ttl_expired_no_followup"),
+        (None, 1, &proven[..], "capped_no_followup"),
         (
             Some(CacheKeepaliveTerminalReason::MaxRefreshes),
             12,
+            &proven[..],
             "capped_no_followup",
         ),
         (
             Some(CacheKeepaliveTerminalReason::MaxDuration),
             12,
+            &proven[..],
             "capped_no_followup",
+        ),
+        // Without renewal evidence nobody can tell whether a follow-up came.
+        (
+            Some(CacheKeepaliveTerminalReason::MaxRefreshes),
+            12,
+            &[][..],
+            "followup_unknown",
         ),
     ] {
         let mut item = item(CacheKeepaliveSessionEntrySource::Session);
@@ -1139,13 +1185,18 @@ fn idle_gap_terminal_endings_and_fallback_timing_preserve_unknown_cost() {
                 item: &item,
                 session: None,
                 turns: &[historical],
-                evidence: &[],
+                evidence,
                 now_ms: 2_000_000,
+                horizon_start_ms: None,
             },
             priced_catalog().as_ref(),
         );
         let gap = &activity.gaps[0];
-        assert_eq!(gap.cycle_id, None);
+        assert_eq!(
+            gap.cycle_id,
+            (!evidence.is_empty()).then_some(cycle_id),
+            "{expected}"
+        );
         assert_eq!(gap.pause_at_ms, 760_000);
         assert_eq!(gap.ending_kind, expected);
         assert_eq!(gap.ending_at_ms, 1_000_000);
@@ -1184,6 +1235,7 @@ fn null_cycle_gaps_split_by_ttl_or_max_attempts_and_price_unknown_or_pending_tur
             turns: &[first, second, third, fourth],
             evidence: &[],
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -1229,6 +1281,7 @@ fn null_cycle_gaps_split_by_ttl_or_max_attempts_and_price_unknown_or_pending_tur
             turns: &[pending_turn],
             evidence: &pending_evidence,
             now_ms: 1_730_000_100_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );
@@ -1259,6 +1312,7 @@ fn empty_active_gap_uses_snapshot_leads_without_fabricating_renewals() {
                 turns: &[],
                 evidence: &[],
                 now_ms: item.last_message_at_ms,
+                horizon_start_ms: None,
             },
             PriceCatalog::new_empty().as_ref(),
         );
@@ -1319,6 +1373,7 @@ fn idle_gaps_order_same_second_pulses_by_millisecond_evidence_timestamp() {
             turns: &[later_lex_first, earlier_lex_second],
             evidence: &evidence,
             now_ms: 1_005_000,
+            horizon_start_ms: None,
         },
         priced_catalog().as_ref(),
     );

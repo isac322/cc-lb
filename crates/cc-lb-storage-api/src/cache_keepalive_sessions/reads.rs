@@ -25,6 +25,8 @@ pub enum CacheKeepaliveSessionFilter {
     Scheduled,
     Tracked,
     Capped,
+    Cancelled,
+    Failed,
     Expired,
     NotTracked,
     Error,
@@ -38,6 +40,8 @@ impl CacheKeepaliveSessionFilter {
             Self::Scheduled => "scheduled",
             Self::Tracked => "tracked",
             Self::Capped => "capped",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
             Self::Expired => "expired",
             Self::NotTracked => "not_tracked",
             Self::Error => "error",
@@ -194,11 +198,17 @@ pub struct CacheKeepaliveEvidenceRecord {
     pub request_ref: Option<String>,
     pub event_ref: Option<String>,
 }
+/// Proven follow-up hits for one `(model, ttl, cache-read size)`.
+///
+/// Every renewal in a group read the same number of tokens, so the reader can
+/// price one renewal and multiply. That keeps the header's rounding identical
+/// to the per-row sum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKeepaliveSummaryGroup {
     pub model: String,
     pub ttl: CacheTtl,
     pub avoided_cache_read_tokens: u64,
+    pub renewals: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +219,10 @@ pub struct CacheKeepaliveSummaryAggregate {
     pub total_spent_micros: i64,
     pub successful_hits: u64,
     pub unknown_cycles: u64,
+    pub unknown_costs: u64,
+    pub unlisted_sessions: u64,
+    pub unlisted_renewals: u64,
+    pub unlisted_spent_micros: i64,
     pub retained_from_ms: Option<u64>,
     pub evidence_status: String,
     pub groups: Vec<CacheKeepaliveSummaryGroup>,

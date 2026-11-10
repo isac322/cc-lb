@@ -113,7 +113,7 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     );
     assert_eq!(
         state_from_item(&renewed_with_error),
-        CacheKeepaliveViewState::Capped
+        CacheKeepaliveViewState::Failed
     );
     assert_eq!(
         state_from_item(&cancelled_without_refresh),
@@ -121,7 +121,7 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     );
     assert_eq!(
         state_from_item(&cancelled_after_refresh),
-        CacheKeepaliveViewState::Capped
+        CacheKeepaliveViewState::Cancelled
     );
     assert_eq!(
         deduplicated,

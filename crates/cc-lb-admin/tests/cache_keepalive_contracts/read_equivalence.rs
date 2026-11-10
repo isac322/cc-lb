@@ -111,7 +111,6 @@ async fn legacy_summary_oracle(
     let cutoff = now_ms.saturating_sub(FIVE_MINUTES_MS);
     let mut renewing_now = 0_u64;
     let mut sessions_last_5m = 0_u64;
-    let mut renewals_fired = 0_u64;
     for row in rows {
         let last_message_at_ms: i64 = row.get("last_message_at_ms");
         if u64::try_from(last_message_at_ms).expect("fixture timestamp is nonnegative") >= cutoff {
@@ -121,20 +120,16 @@ async fn legacy_summary_oracle(
         if status.as_deref() == Some("active") {
             renewing_now = renewing_now.saturating_add(1);
         }
-        let refresh_count: Option<i64> = row.get("refresh_count");
-        renewals_fired = renewals_fired.saturating_add(
-            refresh_count
-                .map(|value| u64::try_from(value).expect("fixture refresh count is nonnegative"))
-                .unwrap_or(0),
-        );
     }
 
     json!({
         "summary": {
             "renewing_now": renewing_now,
             "sessions_last_5m": sessions_last_5m,
-            "renewals_fired": 0,
             "retained_successful_hits": 0,
+            "unlisted_sessions": 0,
+            "unlisted_renewals": 0,
+            "unlisted_spent": 0.0,
             "total_spent": 0.0,
             "total_avoided": null,
             "evidence_status": "none",
@@ -601,11 +596,13 @@ async fn empty_and_disabled_summary_are_zero() {
         "summary": {
             "renewing_now": 0,
             "sessions_last_5m": 0,
-            "renewals_fired": 0,
             "retained_successful_hits": 0,
-            "cost_saved": null,
+            "unlisted_sessions": 0,
+            "unlisted_renewals": 0,
+            "unlisted_spent": 0.0,
+            "cost_saved": 0.0,
             "total_spent": 0.0,
-            "total_avoided": null,
+            "total_avoided": 0.0,
             "evidence_status": "none",
             "unknown_cycles": 0,
             "retained_from_ms": null
@@ -666,12 +663,15 @@ async fn summary_five_minute_cutoff_is_inclusive() {
     .await;
 
     let mut expected = legacy_summary_oracle(&storage, &principal_id, now_ms).await;
-    expected["summary"]["renewals_fired"] = json!(1);
     expected["summary"]["retained_successful_hits"] = json!(1);
     expected["summary"]["evidence_status"] = json!("unknown");
     expected["summary"]["cost_saved"] = Value::Null;
     expected["summary"]["total_avoided"] = Value::Null;
     expected["summary"]["unknown_cycles"] = json!(1);
+    // The joined turn has neither a session row nor renewal evidence, so it is
+    // only visible through the deleted-sessions aggregate.
+    expected["summary"]["unlisted_sessions"] = json!(1);
+    expected["summary"]["unlisted_renewals"] = json!(1);
     let (status, candidate) = get_json(
         &state,
         &format!(
@@ -919,7 +919,7 @@ async fn reactivation_increments_generation_and_resets_summary_inputs() {
         "replacement summary: {summary:?}"
     );
     assert_eq!(summary["summary"]["renewing_now"], 1);
-    assert_eq!(summary["summary"]["renewals_fired"], 0);
+    assert_eq!(summary["summary"]["retained_successful_hits"], 0);
     let (list_status, list) = get_json(
         &state,
         &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=10"),
@@ -1143,7 +1143,9 @@ async fn assert_unknown_evidence_does_not_fabricate_pnl() {
     .await;
     assert_eq!(status, StatusCode::OK, "overflow response: {body:?}");
     assert_eq!(body["rows"][0]["evidence_status"], "unknown");
-    assert!(body["rows"][0]["net_pnl"].is_null());
-    assert!(body["rows"][0]["total_avoided"].is_null());
+    // Unknown follow-up evidence avoids $0 so far; the huge token count must
+    // not leak an overflowed saving into the row.
+    assert_eq!(body["rows"][0]["net_pnl"], 0.0);
+    assert_eq!(body["rows"][0]["total_avoided"], 0.0);
     assert_eq!(body["rows"][0]["total_spent"], 0.0);
 }

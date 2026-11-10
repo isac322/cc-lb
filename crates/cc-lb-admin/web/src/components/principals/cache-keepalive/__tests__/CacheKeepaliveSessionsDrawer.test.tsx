@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -44,11 +45,13 @@ const mockPrincipal: queries.Principal = {
 const summaryBase = {
   renewing_now: 1,
   sessions_last_5m: 2,
-  renewals_fired: 3,
   retained_successful_hits: 17,
   cost_saved: 4.56,
   total_spent: 4.18,
   total_avoided: 16.65,
+  unlisted_sessions: 0,
+  unlisted_renewals: 0,
+  unlisted_spent: 0,
   evidence_status: 'observed' as const,
   unknown_cycles: 0,
   retained_from_ms: 1_699_395_200_000,
@@ -208,8 +211,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     ).toBeDefined();
     expect(screen.getByText('Test Principal')).toBeDefined();
     const eq = screen.getByTestId('cache-keepalive-pnl-equation');
-    expect(eq.textContent).toContain('Net +$4.56');
-    expect(eq.textContent).toContain('Saved $16.65 − Spent $4.18');
+    expect(eq.textContent).toContain('Saved $16.65 · Spent $4.18');
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -542,11 +544,45 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       />,
     );
 
-    const loadOlder = screen.getByRole('button', {
-      name: 'Loading older sessions...',
-    });
-    expect(loadOlder).toBeDefined();
-    await userEvent.setup().click(loadOlder);
-    expect(fetchNextPage).toHaveBeenCalledOnce();
+    await waitFor(() => expect(fetchNextPage).toHaveBeenCalledOnce());
   });
+});
+
+it('renders the non-clickable deleted-session aggregate with real money', () => {
+  vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+    data: {
+      pages: [
+        {
+          summary: {
+            ...summaryBase,
+            unlisted_sessions: 2,
+            unlisted_renewals: 5,
+            unlisted_spent: 0.03,
+          },
+          rows: [],
+          next_cursor: null,
+        },
+      ],
+    },
+    isLoading: false,
+    isError: false,
+    hasNextPage: false,
+    isFetchingNextPage: false,
+    fetchNextPage: vi.fn(),
+  } as never);
+
+  renderWithProviders(
+    <CacheKeepaliveSessionsDrawer
+      open={true}
+      onOpenChange={() => {}}
+      principal={mockPrincipal}
+    />,
+  );
+
+  const deleted = screen.getByTestId('cache-keepalive-deleted-sessions');
+  expect(deleted.textContent).toContain('Deleted sessions (2)');
+  expect(deleted.textContent).toContain('5 renewals');
+  expect(deleted.textContent).toContain('Spent $0.03');
+  expect(deleted.textContent).toContain('−$0.03');
+  expect(deleted.querySelector('button')).toBeNull();
 });

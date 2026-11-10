@@ -9,6 +9,8 @@ pub enum CacheKeepaliveViewState {
     Renewed,
     Scheduled,
     Capped,
+    Cancelled,
+    Failed,
     Expired,
     NotTracked,
 }
@@ -34,9 +36,20 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
             Some(CacheKeepaliveTerminalReason::Cancelled),
-        ) if item.refresh_count.unwrap_or(0) == 0 && item.error.is_none() => {
-            CacheKeepaliveViewState::NotTracked
-        }
+        ) if item.refresh_count.unwrap_or(0) == 0 => CacheKeepaliveViewState::NotTracked,
+        (
+            Some(CacheKeepaliveSessionStatus::Terminal),
+            Some(CacheKeepaliveTerminalReason::Cancelled),
+        ) => CacheKeepaliveViewState::Cancelled,
+        (
+            Some(CacheKeepaliveSessionStatus::Terminal),
+            Some(
+                CacheKeepaliveTerminalReason::DispatchError
+                | CacheKeepaliveTerminalReason::DecryptFailed
+                | CacheKeepaliveTerminalReason::UnsupportedProvider
+                | CacheKeepaliveTerminalReason::Stale,
+            ),
+        ) => CacheKeepaliveViewState::Failed,
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
             Some(
@@ -44,7 +57,7 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
                 | CacheKeepaliveTerminalReason::MaxDuration,
             ),
         ) => CacheKeepaliveViewState::Capped,
-        (Some(CacheKeepaliveSessionStatus::Terminal), _) => CacheKeepaliveViewState::Capped,
+        (Some(CacheKeepaliveSessionStatus::Terminal), _) => CacheKeepaliveViewState::Expired,
         (None, _) => active_state(item.refresh_count),
     }
 }
@@ -82,6 +95,8 @@ pub fn next_renewal_display(
         CacheKeepaliveViewState::Scheduled => "first renewal",
         CacheKeepaliveViewState::Renewed => "next renewal",
         CacheKeepaliveViewState::Capped
+        | CacheKeepaliveViewState::Cancelled
+        | CacheKeepaliveViewState::Failed
         | CacheKeepaliveViewState::Expired
         | CacheKeepaliveViewState::NotTracked => return None,
     };

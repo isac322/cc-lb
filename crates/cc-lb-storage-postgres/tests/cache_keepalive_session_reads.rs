@@ -1859,7 +1859,10 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss_case(
     assert_eq!(aggregate.retained_from_ms, Some(1_001_000));
     assert_eq!(aggregate.evidence_status, "observed");
     assert!(
-        aggregate.groups.is_empty(),
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0),
         "no follow-up means zero avoided tokens"
     );
     fixture.drop_schema().await
@@ -1900,7 +1903,12 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending_c
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
     fixture.drop_schema().await
 }
 
@@ -2059,7 +2067,10 @@ async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_case
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
     assert!(
-        aggregate.groups.is_empty(),
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0),
         "the latest miss must suppress avoided-token credit for the shared follow-up"
     );
     fixture.drop_schema().await
@@ -2122,7 +2133,12 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
     fixture.drop_schema().await
 }
 
@@ -2288,7 +2304,12 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
     fixture.drop_schema().await
 }
 
@@ -2349,7 +2370,13 @@ async fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown_case(
             (missing != "evidence").then_some(1_000_000),
             "{missing}"
         );
-        assert!(aggregate.groups.is_empty(), "{missing}");
+        assert!(
+            aggregate
+                .groups
+                .iter()
+                .all(|group| group.avoided_cache_read_tokens == 0),
+            "{missing}"
+        );
         fixture.drop_schema().await?;
     }
     Ok(())
@@ -2379,7 +2406,12 @@ async fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs_case(
     assert_eq!(aggregate.total_spent_micros, 21_000);
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
     fixture.drop_schema().await
 }
 
@@ -2518,4 +2550,93 @@ impl Fixture {
         self.admin_pool.close().await;
         Ok(())
     }
+}
+
+#[test]
+fn unlisted_aggregate_counts_only_turns_without_renewal_evidence() {
+    run_postgres_case(
+        "unlisted_aggregate_counts_only_turns_without_renewal_evidence",
+        unlisted_aggregate_counts_only_turns_without_renewal_evidence_case,
+    );
+}
+
+async fn unlisted_aggregate_counts_only_turns_without_renewal_evidence_case(
+    url: String,
+) -> Result<()> {
+    let (fixture, storage) = initialized_storage(&url).await?;
+    let cycle_id = Uuid::from_u128(9_001);
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "reconstructable-purged",
+            cycle_id,
+            source_ref_id: "reconstructable-purged-turn",
+            ts: 10_000,
+            hit_miss: "hit",
+            cost_micros: 7_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "unlisted-purged",
+            cycle_id,
+            source_ref_id: "unlisted-purged-turn",
+            ts: 10_001,
+            hit_miss: "hit",
+            cost_micros: 11_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await?;
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE event_ref = $1")
+        .bind("unlisted-purged-turn")
+        .execute(&fixture.pool)
+        .await?;
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+        .await?;
+    assert_eq!(aggregate.unlisted_sessions, 1);
+    assert_eq!(aggregate.unlisted_renewals, 1);
+    assert_eq!(aggregate.unlisted_spent_micros, 11_000);
+    fixture.drop_schema().await
+}
+
+#[test]
+fn reconstructed_followed_purged_session_is_cancelled() {
+    run_postgres_case(
+        "reconstructed_followed_purged_session_is_cancelled",
+        reconstructed_followed_purged_session_is_cancelled_case,
+    );
+}
+
+async fn reconstructed_followed_purged_session_is_cancelled_case(url: String) -> Result<()> {
+    let (fixture, storage) = initialized_storage(&url).await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "purged-followed-terminal",
+            cycle_id: Uuid::from_u128(9_002),
+            source_ref_id: "purged-followed-terminal-turn",
+            ts: 10_000,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await?;
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "purged-followed-terminal")
+        .await?
+        .expect("reconstructed followed session");
+    assert_eq!(
+        item.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    fixture.drop_schema().await
 }

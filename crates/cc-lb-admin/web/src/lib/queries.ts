@@ -65,6 +65,7 @@ import {
 } from './api';
 
 import {
+  type CacheKeepaliveHorizon,
   type CacheKeepaliveSessionsFilters,
   getCacheKeepaliveSessionDetail,
   getCacheKeepaliveSessions,
@@ -348,8 +349,11 @@ export const qk = {
   ) => ['cache-keepalive', 'sessions', principalId, filters] as const,
   cacheKeepaliveSummary: (principalId: string) =>
     ['cache-keepalive', 'summary', principalId] as const,
-  cacheKeepaliveSessionDetail: (principalId: string, sessionId: string) =>
-    ['cache-keepalive', 'detail', principalId, sessionId] as const,
+  cacheKeepaliveSessionDetail: (
+    principalId: string,
+    sessionId: string,
+    horizon: CacheKeepaliveHorizon,
+  ) => ['cache-keepalive', 'detail', principalId, sessionId, horizon] as const,
 };
 
 async function invalidatePrincipalRecordQueries(
@@ -2098,7 +2102,11 @@ export function useCacheKeepaliveSummary(principalId: string, enabled = true) {
       enabled: enabled && Boolean(principalId),
       meta: { inlineError: true },
       placeholderData: undefined,
-      queryFn: () => getCacheKeepaliveSessions(principalId, { limit: 0 }),
+      queryFn: () =>
+        getCacheKeepaliveSessions(principalId, {
+          limit: 0,
+          horizon: '24h',
+        }),
       select: (response) => response.summary,
     },
     enabled ? POLLING_INTERVALS.CACHE_KEEPALIVE_SUMMARY_MS : false,
@@ -2108,6 +2116,7 @@ export function useCacheKeepaliveSummary(principalId: string, enabled = true) {
 export function useCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string | null,
+  horizon: CacheKeepaliveHorizon = 'all',
 ) {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
@@ -2115,7 +2124,11 @@ export function useCacheKeepaliveSessionDetail(
     error instanceof ApiError && error.status === 404;
 
   return useQuery({
-    queryKey: qk.cacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+    queryKey: qk.cacheKeepaliveSessionDetail(
+      principalId,
+      sessionId ?? '',
+      horizon,
+    ),
     enabled: (query) =>
       Boolean(principalId) &&
       Boolean(sessionId) &&
@@ -2130,6 +2143,7 @@ export function useCacheKeepaliveSessionDetail(
       isHidden || isMissing(query.state.error)
         ? false
         : POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
-    queryFn: () => getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+    queryFn: () =>
+      getCacheKeepaliveSessionDetail(principalId, sessionId ?? '', horizon),
   });
 }

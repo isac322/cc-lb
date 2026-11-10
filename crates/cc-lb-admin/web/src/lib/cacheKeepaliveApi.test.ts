@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { cacheKeepaliveRows } from '../components/principals/cache-keepalive/__fixtures__/cacheKeepaliveFixtures';
 import {
   CacheKeepaliveDetailSchema,
+  CacheKeepaliveGapSchema,
   CacheKeepaliveHorizonSchema,
   CacheKeepaliveListResponseSchema,
   CacheKeepaliveRowSchema,
@@ -27,11 +28,13 @@ describe('CacheKeepaliveSummarySchema', () => {
     expect(parsed).toEqual({
       renewing_now: 2,
       sessions_last_5m: 5,
-      renewals_fired: 128,
       retained_successful_hits: 96,
       cost_saved: 12.47,
       total_spent: 4.18,
       total_avoided: 16.65,
+      unlisted_sessions: 0,
+      unlisted_renewals: 0,
+      unlisted_spent: 0,
       evidence_status: 'observed',
       unknown_cycles: 0,
       retained_from_ms: 1_699_395_200_000,
@@ -395,6 +398,8 @@ describe('cache keepalive filter enums', () => {
       'scheduled',
       'capped',
       'expired',
+      'cancelled',
+      'failed',
       'not_tracked',
       'error',
     ]) {
@@ -410,5 +415,35 @@ describe('cache keepalive filter enums', () => {
         false,
       );
     }
+  });
+});
+describe('cache keepalive wire additions', () => {
+  it('accepts cancelled and failed row states', () => {
+    const row = apiRowFromFixture(cacheKeepaliveRows[0], 0);
+    expect(
+      CacheKeepaliveRowSchema.parse({ ...row, state: 'cancelled' }).state,
+    ).toBe('cancelled');
+    expect(
+      CacheKeepaliveRowSchema.parse({ ...row, state: 'failed' }).state,
+    ).toBe('failed');
+  });
+
+  it('accepts followup_unknown gap endings', () => {
+    const gap = {
+      cycle_id: null,
+      pause_at_ms: 1,
+      cached_tokens: 1,
+      pulses: [],
+      ending_kind: 'followup_unknown',
+      ending_at_ms: 2,
+      total_duration_sec: 1,
+      since_last_renewal_sec: null,
+      spent_usd: 0.01,
+      avoided_usd: 0,
+      net_pnl_usd: -0.01,
+    };
+    expect(CacheKeepaliveGapSchema.parse(gap).ending_kind).toBe(
+      'followup_unknown',
+    );
   });
 });
