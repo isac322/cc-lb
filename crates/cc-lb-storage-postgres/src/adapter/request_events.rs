@@ -888,8 +888,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts, display_reason) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE((SELECT s.display_reason FROM cache_keepalive_sessions s WHERE s.principal_id = $3 AND s.session_key_hash = $2), '')) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)

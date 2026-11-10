@@ -948,7 +948,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(row["evidence_status"], "pending");
     assert_json_dollars(&row["total_spent"], 21_000);
     assert!(row["total_avoided"].is_null());
-    assert!(row["net_pnl"].is_null());
+    assert_json_dollars(&row["net_pnl"], 54_000);
 
     let (detail_status, detail) = get_json(
         &state,
@@ -963,7 +963,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(detail["evidence_status"], "pending");
     assert_json_dollars(&detail["total_spent"], 21_000);
     assert!(detail["total_avoided"].is_null());
-    assert!(detail["net_pnl"].is_null());
+    assert_json_dollars(&detail["net_pnl"], 54_000);
     assert_eq!(detail["is_last_pending"], true);
     let turns = detail["turns"]
         .as_array()
@@ -1058,7 +1058,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
         .expect("active multi-turn row");
     assert_eq!(multi_turn_row["evidence_status"], "pending");
     assert_json_dollars(&multi_turn_row["total_spent"], 21_000);
-    assert!(multi_turn_row["net_pnl"].is_null());
+    assert_json_dollars(&multi_turn_row["net_pnl"], -21_000);
     assert!(multi_turn_row["total_avoided"].is_null());
 
     let (multi_turn_detail_status, multi_turn_detail) = get_json(
@@ -1073,7 +1073,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     assert_eq!(multi_turn_detail["evidence_status"], "pending");
     assert_json_dollars(&multi_turn_detail["total_spent"], 21_000);
-    assert!(multi_turn_detail["net_pnl"].is_null());
+    assert_json_dollars(&multi_turn_detail["net_pnl"], -21_000);
     assert!(multi_turn_detail["total_avoided"].is_null());
     assert_eq!(multi_turn_detail["is_last_pending"], true);
     let multi_turns = multi_turn_detail["turns"]
@@ -1160,7 +1160,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     assert_eq!(historical_detail["evidence_status"], "pending");
     assert_json_dollars(&historical_detail["total_spent"], 12_000);
-    assert!(historical_detail["net_pnl"].is_null());
+    assert_json_dollars(&historical_detail["net_pnl"], -12_000);
     assert!(historical_detail["total_avoided"].is_null());
     assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 1);
     assert_eq!(historical_detail["turns"][0]["pending"], true);

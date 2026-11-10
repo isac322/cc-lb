@@ -928,8 +928,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts, display_reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT s.display_reason FROM cache_keepalive_sessions s WHERE s.principal_id = ? AND s.session_key_hash = ?), '')) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -961,6 +961,8 @@ async fn insert_keepalive_turn_in_tx(
     .bind(row.cost_micros.is_some())
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
+    .bind(&row.principal_id)
+    .bind(&row.session_key_hash)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
