@@ -3760,6 +3760,34 @@ mod tests {
         assert!(body["status"]["last_apply_at_unix_secs"].is_null());
     }
 
+    #[test]
+    fn upstream_response_preserves_provider_oauth_reconnect_status() {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let mut record = UpstreamRecord {
+                kind,
+                last_apply_error: Some("status_401".to_owned()),
+                last_apply_at_unix_secs: Some(1234),
+                last_warmup_at_unix_secs: Some(5678),
+                ..UpstreamRecord::default()
+            };
+            let response = upstream_response(&record, None);
+            assert_eq!(
+                response.status.last_apply_error.as_deref(),
+                Some("status_401"),
+                "{kind:?}"
+            );
+            assert_eq!(response.status.last_apply_at_unix_secs, Some(1234));
+            assert_eq!(response.status.last_warmup_at_unix_secs, Some(5678));
+
+            record.last_apply_error = Some("network".to_owned());
+            let transient = upstream_response(&record, None);
+            assert_eq!(
+                transient.status.last_apply_error.as_deref(),
+                Some("network")
+            );
+        }
+    }
+
     #[tokio::test]
 
     async fn create_api_key_upstream_missing_secret_writes_no_row() {
