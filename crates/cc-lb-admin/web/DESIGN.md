@@ -1,3 +1,98 @@
+---
+name: cc-lb Admin Web
+description: Instrument cluster for an Anthropic-compatible quota pool
+colors:
+  bg: "#161719"
+  bg-sub: "#232527"
+  panel: "#1c1e20"
+  panel-strong: "#232527"
+  input-bg: "#161719"
+  toast-bg: "#232527"
+  border: "#2f3033"
+  border-strong: "#6a6c6f"
+  border-row: "#26282a"
+  progress-track: "#2c2d2f"
+  text: "#edeeee"
+  text-muted: "#c0c1c3"
+  text-faint: "#9d9ea0"
+  text-disabled: "#626365"
+  border-disabled: "#4a4c4e"
+  accent: "#ccddee"
+  accent-hover: "#dceaf8"
+  accent-text: "#779cc2"
+  accent-ink: "#181a1c"
+  ok: "#c0c1c3"
+  traffic-success: "#67d69c"
+  traffic-success-text: "#67d69c"
+  warn: "#f0b429"
+  warn-text: "#f0b429"
+  danger: "#ff6f61"
+  danger-text: "#ff8a7e"
+  danger-solid: "#c7372c"
+  danger-solid-hover: "#b02f25"
+  neutral: "#939495"
+  series-5h: "#63b1f9"
+  series-7d: "#cd5cac"
+  series-fable: "#bbe75f"
+  series-sonnet: "#629092"
+  series-opus: "#91745d"
+  series-overage: "#a3a5a8"
+  series-cache-read: "#24c27d"
+  series-cache-create-5m: "#e48d28"
+  series-cache-create-1h: "#cc612e"
+  series-input: "#96a6bb"
+  series-output: "#997fde"
+  series-latency-downstream: "#c56f9b"
+  series-latency-cclb: "#5d98f4"
+  series-latency-net: "#6f9436"
+  series-latency-wait: "#6dd9d6"
+typography:
+  display:
+    fontFamily: "\"Hanken Grotesk Variable\", \"Hanken Grotesk\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "2rem"
+    fontWeight: 300
+    lineHeight: "2.25rem"
+    letterSpacing: "-0.02em"
+  headline:
+    fontFamily: "\"Hanken Grotesk Variable\", \"Hanken Grotesk\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "1.5rem"
+    fontWeight: 600
+    lineHeight: "2rem"
+    letterSpacing: "-0.01em"
+  title:
+    fontFamily: "\"Hanken Grotesk Variable\", \"Hanken Grotesk\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "0.9375rem"
+    fontWeight: 600
+    lineHeight: "1.375rem"
+    letterSpacing: "0em"
+  body:
+    fontFamily: "\"Hanken Grotesk Variable\", \"Hanken Grotesk\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "0.875rem"
+    fontWeight: 400
+    lineHeight: "1.3125rem"
+  label:
+    fontFamily: "\"Hanken Grotesk Variable\", \"Hanken Grotesk\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "0.8125rem"
+    fontWeight: 500
+    lineHeight: "1.125rem"
+    letterSpacing: "0em"
+rounded:
+  xs: "2px"
+  sm: "4px"
+  md: "6px"
+spacing:
+  "1": "4px"
+  "2": "8px"
+  "3": "12px"
+  "4": "16px"
+  "5": "20px"
+  "6": "24px"
+  "8": "32px"
+  "10": "40px"
+  "12": "48px"
+  "16": "64px"
+---
+
 # cc-lb Admin Web Design System
 
 ## 1. Identity
@@ -19,7 +114,7 @@ The brand mark is the let-gate: two squared bracket "c" shapes facing each other
 - Flat graphite always: no gradients, glows, shadows or decorative noise, in any asset.
 - Below 24px the mark uses the 16-grid snapped variant (`mark/cc-lb-mark-16-*.svg`), which is what the favicon ships; 16px is the minimum rendered size.
 
-## 2. Color
+## 2. Colors
 
 ### Palette
 
