@@ -39,6 +39,7 @@ All notable changes to this project will be documented in this file.
 - API-key usage cards now preserve bounded provider error codes and classify documented OpenAI and Gemini billing or spend-limit failures with provider-specific remediation, while Anthropic billing-stop behavior and proxy responses remain unchanged. ([#1213](https://github.com/isac322/cc-lb/issues/1213))
 
 ### Fixed
+- OpenAI and Gemini OAuth reconnect latches now preserve same-generation terminal refresh failures when a delayed transient refresh status arrives, keeping affected accounts out of routing and visible for admin reconnection. ([#1221](https://github.com/isac322/cc-lb/issues/1221))
 - Active frame-only Shape plugins now remain in their provider's pipeline without requiring a request-shape hook; absent and noop frame hooks remain inactive. ([#1191](https://github.com/isac322/cc-lb/issues/1191))
 - OpenAI organization usage and cost reports now follow bounded opaque cursors across all pages, and successful OpenAI API-key creates, replacements, and first successful Re-checks enqueue an immediate usage poll. Incomplete reports remain stale without advancing their success timestamp. ([#1214](https://github.com/isac322/cc-lb/issues/1214))
 - Admin principal details now expose the existing cache keep-alive controls for OpenAI API-key and OAuth upstreams within the active provider scope, while labeling GPT-5.6+ Responses 30-minute renewal and 12-hour retention semantics. ([#1211](https://github.com/isac322/cc-lb/issues/1211))

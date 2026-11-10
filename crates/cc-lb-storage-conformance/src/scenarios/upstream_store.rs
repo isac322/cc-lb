@@ -66,6 +66,8 @@ where
     complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
     reconnect_rejects_stale_generation_status(Arc::clone(&backend)).await?;
     terminal_refresh_failure_dominates_late_status(Arc::clone(&backend)).await?;
+    provider_generic_terminal_latch_dominates_late_status(Arc::clone(&backend)).await?;
+    provider_generic_stale_status_cannot_poison_replacement(Arc::clone(&backend)).await?;
     api_key_credential_replacement_can_clear_apply_error(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
@@ -654,6 +656,150 @@ scenario!(
         Ok(())
     }
 );
+scenario!(
+    provider_generic_terminal_latch_dominates_late_status,
+    |store| async move {
+        for (kind, kind_name) in [
+            (UpstreamKind::OpenaiOauth, "openai"),
+            (UpstreamKind::GeminiOauth, "gemini"),
+        ] {
+            for (index, terminal_reason) in [
+                (0, "status_400"),
+                (1, "status_401"),
+                (2, "refresh_token_expired"),
+            ] {
+                let record = create_named_kind(
+                    store.as_ref(),
+                    &format!("upstream-{kind_name}-terminal-{index}"),
+                    kind,
+                )
+                .await?;
+                let aead = AeadService::from_master_key([48; 32]);
+                let encrypted = EncryptedOAuthTokens::encrypt(
+                    &aead,
+                    &token_bundle("initial-access", "initial-refresh"),
+                    record.id.as_bytes(),
+                )?;
+                let connected = store
+                    .store_oauth_tokens(record.id, record.revision, encrypted, false)
+                    .await?;
+                store
+                    .set_status(
+                        record.id,
+                        UpstreamStatusUpdate {
+                            last_apply_error: Some(Some(terminal_reason.to_owned())),
+                            expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                            ..UpstreamStatusUpdate::default()
+                        },
+                    )
+                    .await?;
+                store
+                    .set_status(
+                        record.id,
+                        UpstreamStatusUpdate {
+                            last_apply_error: Some(Some("network".to_owned())),
+                            last_apply_at_unix_secs: Some(Some(1234)),
+                            last_warmup_at_unix_secs: Some(Some(5678)),
+                            expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                        },
+                    )
+                    .await?;
+                let after_late_failure = store.get_by_id(record.id).await?.expect("record");
+                ensure!(
+                    after_late_failure.last_apply_error.as_deref() == Some(terminal_reason),
+                    "{kind_name} {terminal_reason}: late transient failure must not overwrite terminal latch"
+                );
+                ensure!(
+                    after_late_failure.last_apply_at_unix_secs == Some(1234)
+                        && after_late_failure.last_warmup_at_unix_secs == Some(5678),
+                    "{kind_name} {terminal_reason}: unrelated status patches must still apply"
+                );
+
+                store.set_last_apply_error(record.id, None).await?;
+                ensure!(
+                    store
+                        .get_by_id(record.id)
+                        .await?
+                        .expect("record")
+                        .last_apply_error
+                        .as_deref()
+                        == Some(terminal_reason),
+                    "{kind_name} {terminal_reason}: status clear must not reset terminal latch"
+                );
+            }
+        }
+        Ok(())
+    }
+);
+
+scenario!(
+    provider_generic_stale_status_cannot_poison_replacement,
+    |store| async move {
+        for (kind, kind_name) in [
+            (UpstreamKind::OpenaiOauth, "openai"),
+            (UpstreamKind::GeminiOauth, "gemini"),
+        ] {
+            let record =
+                create_named_kind(store.as_ref(), &format!("upstream-{kind_name}-stale"), kind)
+                    .await?;
+            let aead = AeadService::from_master_key([49; 32]);
+            let initial = EncryptedOAuthTokens::encrypt(
+                &aead,
+                &token_bundle("initial-access", "initial-refresh"),
+                record.id.as_bytes(),
+            )?;
+            let connected = store
+                .store_oauth_tokens(record.id, record.revision, initial, false)
+                .await?;
+            store
+                .set_status(
+                    record.id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("status_401".to_owned())),
+                        last_apply_at_unix_secs: Some(Some(1111)),
+                        last_warmup_at_unix_secs: Some(Some(2222)),
+                        expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                    },
+                )
+                .await?;
+            let replacement = EncryptedOAuthTokens::encrypt(
+                &aead,
+                &token_bundle("replacement-access", "replacement-refresh"),
+                record.id.as_bytes(),
+            )?;
+            let reconnected = store
+                .store_oauth_tokens(record.id, record.revision, replacement, false)
+                .await?;
+            ensure!(
+                reconnected.oauth_token_generation == connected.oauth_token_generation + 1
+                    && reconnected.last_apply_error.is_none(),
+                "{kind_name}: credential replacement must clear the latch"
+            );
+
+            let stale = store
+                .set_status(
+                    record.id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("status_500".to_owned())),
+                        last_apply_at_unix_secs: Some(Some(3333)),
+                        last_warmup_at_unix_secs: Some(Some(4444)),
+                        expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                    },
+                )
+                .await
+                .expect_err("stale status must conflict");
+            ensure!(
+                matches!(stale, StorageError::Conflict { .. }),
+                "{kind_name}: stale status must return a conflict"
+            );
+            ensure!(
+                store.get_by_id(record.id).await?.expect("record") == reconnected,
+                "{kind_name}: stale status must not poison replacement"
+            );
+        }
+        Ok(())
+    }
+);
 
 scenario!(
     api_key_credential_replacement_can_clear_apply_error,
@@ -1149,11 +1295,19 @@ where
 }
 
 async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamRecord> {
+    create_named_kind(store, name, UpstreamKind::AnthropicOauth).await
+}
+
+async fn create_named_kind(
+    store: &dyn UpstreamStore,
+    name: &str,
+    kind: UpstreamKind,
+) -> Result<UpstreamRecord> {
     Ok(store
         .create(UpstreamCreate {
             id: Uuid::new_v4(),
             name: name.to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
+            kind,
             base_url: None,
             api_key_ciphertext: None,
             oauth_tokens: None,
