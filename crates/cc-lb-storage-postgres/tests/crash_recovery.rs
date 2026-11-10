@@ -83,13 +83,12 @@ fn connection_drop_mid_commit() {
                     fixture.reset_iteration().await?;
                 }
 
-                let app_name = fixture.app_name.clone();
                 let storage = fixture.storage.clone();
                 let pool = fixture.pool.clone();
 
                 fixture.wait_for_events_eligible().await?;
                 let handle = tokio::spawn(async move { storage.rollup_usage_once().await });
-                let pid = fixture.wait_for_checkpoint_backend(&app_name).await?;
+                let pid = fixture.wait_for_checkpoint_backend().await?;
                 let terminated = sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
                     .bind(pid)
                     .fetch_one(&fixture.admin_pool)
@@ -131,6 +130,7 @@ struct CrashFixture {
     url: String,
     schema: String,
     app_name: String,
+    checkpoint_lock_key: i32,
     admin_pool: PgPool,
     pool: PgPool,
     storage: PostgresStorage,
@@ -155,17 +155,21 @@ impl CrashFixture {
         .await?;
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
+        let checkpoint_lock_key = (u32::from_be_bytes(Uuid::new_v4().as_bytes()[..4].try_into()?)
+            & 0x7fff_ffff)
+            .max(1) as i32;
         let pool = schema_pool(url, schema, &app_name, 1).await?;
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
         storage.initialize().await?;
-        install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs).await?;
+        install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs, checkpoint_lock_key).await?;
         seed_request_events(&storage).await?;
 
         Ok(Self {
             url: url.to_owned(),
             schema: schema.to_owned(),
             app_name,
+            checkpoint_lock_key,
             admin_pool,
             pool,
             storage,
@@ -180,6 +184,7 @@ impl CrashFixture {
             url: self.url.clone(),
             schema: self.schema.clone(),
             app_name: self.app_name.clone(),
+            checkpoint_lock_key: self.checkpoint_lock_key,
             admin_pool: self.admin_pool.clone(),
             pool,
             storage,
@@ -220,15 +225,17 @@ impl CrashFixture {
         })
     }
 
-    async fn wait_for_checkpoint_backend(
-        &self,
-        app_name: &str,
-    ) -> Result<i32, Box<dyn std::error::Error>> {
+    async fn wait_for_checkpoint_backend(&self) -> Result<i32, Box<dyn std::error::Error>> {
         for _ in 0..1000 {
             let pid = sqlx::query_scalar::<_, i32>(
-                "SELECT pid FROM pg_stat_activity                  WHERE application_name = $1                    AND state = 'active'                    AND query LIKE '%usage_rollup_checkpoints_v1%'                  ORDER BY query_start ASC                  LIMIT 1",
+                "SELECT pid FROM pg_locks \
+                 WHERE locktype = 'advisory' \
+                   AND classid = 0 \
+                   AND objid = $1::oid \
+                   AND granted \
+                 LIMIT 1",
             )
-            .bind(app_name)
+            .bind(self.checkpoint_lock_key)
             .fetch_optional(&self.admin_pool)
             .await?;
 
@@ -239,7 +246,11 @@ impl CrashFixture {
             time::sleep(Duration::from_millis(2)).await;
         }
 
-        Err(format!("timed out waiting for active checkpoint query for {app_name}").into())
+        Err(format!(
+            "timed out waiting for checkpoint advisory lock {}",
+            self.checkpoint_lock_key
+        )
+        .into())
     }
 
     // The rollup only consumes events whose tx_id has fallen below the snapshot
@@ -352,15 +363,29 @@ async fn schema_pool(
 async fn install_checkpoint_sleep_trigger(
     pool: &PgPool,
     sleep_secs: f64,
+    checkpoint_lock_key: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(AssertSqlSafe(format!(
-        "CREATE OR REPLACE FUNCTION cc_lb_sleep_before_checkpoint()          RETURNS trigger          LANGUAGE plpgsql          AS $$          BEGIN              PERFORM pg_sleep({sleep_secs});              RETURN NEW;          END;          $$"
+        "CREATE OR REPLACE FUNCTION cc_lb_sleep_before_checkpoint() \
+         RETURNS trigger \
+         LANGUAGE plpgsql \
+         AS $$ \
+         BEGIN \
+             PERFORM pg_advisory_lock({checkpoint_lock_key}); \
+             PERFORM pg_sleep({sleep_secs}); \
+             RETURN NEW; \
+         END; \
+         $$"
     )))
     .execute(pool)
     .await?;
 
     sqlx::query(
-        "CREATE TRIGGER cc_lb_sleep_before_checkpoint_trigger          BEFORE INSERT OR UPDATE ON usage_rollup_checkpoints_v1          FOR EACH ROW          WHEN (NEW.id = 'high_water')          EXECUTE FUNCTION cc_lb_sleep_before_checkpoint()",
+        "CREATE TRIGGER cc_lb_sleep_before_checkpoint_trigger \
+         BEFORE INSERT OR UPDATE ON usage_rollup_checkpoints_v1 \
+         FOR EACH ROW \
+         WHEN (NEW.id = 'high_water') \
+         EXECUTE FUNCTION cc_lb_sleep_before_checkpoint()",
     )
     .execute(pool)
     .await?;
