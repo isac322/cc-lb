@@ -136,7 +136,7 @@ async function installFixtures(page: Page) {
       });
     }
     if (/^\/admin\/v1\/principals\/[^/]+\/cache-keepalive$/.test(pathname)) {
-      return json({ summary, rows: [], next_cursor: null });
+      return json({ summary, groups: null, rows: [], next_cursor: null });
     }
     return json({});
   });

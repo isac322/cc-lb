@@ -4,7 +4,8 @@ use crate::cache_keepalive_view::status::CacheKeepaliveViewState;
 
 #[derive(Serialize)]
 pub(crate) struct CacheKeepaliveListResponse {
-    pub(crate) summary: CacheKeepaliveSummaryResponse,
+    pub(crate) summary: Option<CacheKeepaliveSummaryResponse>,
+    pub(crate) groups: Option<Vec<CacheKeepaliveGroupResponse>>,
     pub(crate) rows: Vec<CacheKeepaliveRowResponse>,
     pub(crate) next_cursor: Option<String>,
 }
@@ -48,6 +49,20 @@ pub(crate) struct CacheKeepaliveRowResponse {
     pub(crate) total_avoided: Option<f64>,
     pub(crate) evidence_status: String,
     pub(crate) session_key_hash: String,
+    pub(crate) group_key: String,
+    pub(crate) group_label: String,
+    pub(crate) group_kind: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CacheKeepaliveGroupResponse {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) kind: &'static str,
+    pub(crate) sessions: u64,
+    pub(crate) net_pnl: Option<f64>,
+    pub(crate) total_spent: f64,
+    pub(crate) total_avoided: Option<f64>,
 }
 
 #[derive(Serialize)]
