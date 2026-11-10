@@ -439,6 +439,25 @@ test('principal detail follows the effective provider scope for keepalive', () =
   expect(
     screen.queryByRole('switch', { name: 'Subscription preference' }),
   ).toBeNull();
+  expect(
+    screen.queryByText('Keep prompt cache warm by reusing upstreams'),
+  ).toBeNull();
+});
+test('principal detail hides keepalive when the active scope excludes capable upstreams', () => {
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: {
+      upstreams: [
+        { ...keepaliveUpstream, id: 'anthropic-1', kind: 'anthropic_oauth' },
+      ],
+    },
+    isLoading: false,
+    isPending: false,
+  } as never);
+  vi.mocked(previewControls.useProviderScope).mockReturnValue({
+    providers: ['openai'],
+  } as never);
+  renderPrincipalDetail();
+  expect(screen.queryByRole('heading', { name: 'Cache keepalive' })).toBeNull();
 });
 
 test.each(['gemini_api_key', 'gemini_oauth'] as const)(
