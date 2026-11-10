@@ -417,8 +417,12 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
   });
 
-  it('refreshes cached detail when the selected row reactivates', () => {
-    const rowForState = (is_active: boolean, generation: number) => ({
+  it('keys detail by the selected row lifecycle and same-generation economics', () => {
+    const rowForState = (
+      is_active: boolean,
+      generation: number,
+      net_pnl = 0.102,
+    ) => ({
       id: 'a1f39c2b7e04',
       last_message_at_ms: 1_700_000_000_000,
       state: 'renewed' as const,
@@ -431,7 +435,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       generation,
       upstream: 'anthropic',
       error: null,
-      net_pnl: 0.102,
+      net_pnl,
       total_spent: 0.048,
       total_avoided: 0.12,
       evidence_status: 'observed' as const,
@@ -475,13 +479,16 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    const detailKey = queries.qk.cacheKeepaliveSessionDetail(
-      'p-123',
-      'a1f39c2b7e04',
-      '24h',
-    );
-    queryClient.setQueryData(detailKey, { generation: 1, is_active: false });
-    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries');
+    const initialFingerprint = JSON.stringify([
+      1,
+      false,
+      'renewed',
+      'observed',
+      0.102,
+      0.048,
+      0.12,
+      3,
+    ]);
     const { rerender } = render(
       <QueryClientProvider client={queryClient}>
         <CacheKeepaliveSessionsDrawer
@@ -491,22 +498,43 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
         />
       </QueryClientProvider>,
     );
-    expect(invalidateQueries).not.toHaveBeenCalled();
-
-    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue(
-      listResult(rowForState(true, 2)) as never,
-    );
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <CacheKeepaliveSessionsDrawer
-          open={true}
-          onOpenChange={() => {}}
-          principal={mockPrincipal}
-        />
-      </QueryClientProvider>,
+    expect(queries.useCacheKeepaliveSessionDetail).toHaveBeenLastCalledWith(
+      'p-123',
+      'a1f39c2b7e04',
+      '24h',
+      initialFingerprint,
     );
 
-    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: detailKey });
+    for (const netPnl of [0.102, 9]) {
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue(
+        listResult(rowForState(true, 2, netPnl)) as never,
+      );
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <CacheKeepaliveSessionsDrawer
+            open={true}
+            onOpenChange={() => {}}
+            principal={mockPrincipal}
+          />
+        </QueryClientProvider>,
+      );
+
+      expect(queries.useCacheKeepaliveSessionDetail).toHaveBeenLastCalledWith(
+        'p-123',
+        'a1f39c2b7e04',
+        '24h',
+        JSON.stringify([
+          2,
+          true,
+          'renewed',
+          'observed',
+          netPnl,
+          0.048,
+          0.12,
+          3,
+        ]),
+      );
+    }
   });
 
   it('shows off-state banner when keepalive is disabled for the principal', () => {

@@ -463,25 +463,18 @@ export function CacheKeepaliveSessionsDrawer({
   const selectedDetailRow = loadedRows.find(
     (row) => row.id === desktopSessionId,
   );
-  useEffect(() => {
-    if (!desktopSessionId || !selectedDetailRow) return;
-    const queryKey = qk.cacheKeepaliveSessionDetail(
-      principal.id,
-      desktopSessionId,
-      horizon,
-    );
-    const cachedDetail = queryClient.getQueryData<{
-      generation: number;
-      is_active: boolean;
-    }>(queryKey);
-    if (
-      cachedDetail &&
-      (cachedDetail.generation !== selectedDetailRow.generation ||
-        cachedDetail.is_active !== selectedDetailRow.is_active)
-    ) {
-      void queryClient.invalidateQueries({ queryKey });
-    }
-  }, [desktopSessionId, horizon, principal.id, queryClient, selectedDetailRow]);
+  const detailRowFingerprint = selectedDetailRow
+    ? JSON.stringify([
+        selectedDetailRow.generation,
+        selectedDetailRow.is_active,
+        selectedDetailRow.state,
+        selectedDetailRow.evidence_status,
+        selectedDetailRow.net_pnl,
+        selectedDetailRow.total_spent,
+        selectedDetailRow.total_avoided,
+        selectedDetailRow.retained_renewals ?? null,
+      ])
+    : null;
   const showMobileDetail = hasSelection;
   const summary = query.data?.pages[0]?.summary ?? undefined;
   const totalSessions = groups.reduce(
@@ -748,6 +741,7 @@ export function CacheKeepaliveSessionsDrawer({
                     principalId={principal.id}
                     sessionId={desktopSessionId}
                     horizon={horizon}
+                    rowFingerprint={detailRowFingerprint}
                     onClose={() => setSelectedSessionId(null)}
                   />
                 ) : null}

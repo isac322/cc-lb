@@ -30,6 +30,89 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     (temp_dir, storage)
 }
 
+#[tokio::test]
+async fn activity_evidence_bounds_id_and_prefix_parameters_and_deduplicates_union() {
+    const COUNT: usize = 17_000;
+    let (_directory, storage) = storage().await;
+    let mut transaction = storage
+        .pool()
+        .begin()
+        .await
+        .expect("begin evidence fixture");
+    sqlx::query(
+        "WITH RECURSIVE ids(n) AS (
+            SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 17000
+         ), kinds(kind) AS (SELECT 'renewal' UNION ALL SELECT 'follow_up')
+         INSERT INTO cache_keepalive_evidence (
+            evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+            principal_id, upstream_id, model, ttl, event_ref, created_at_ms
+         )
+         SELECT kind || '-' || n,
+            CASE WHEN kind = 'renewal' THEN printf('00000000-0000-0000-0000-%012x', n) END,
+            kind, CASE WHEN kind = 'renewal' THEN 1000 ELSE 2000 END,
+            'prefix-' || n, 'principal-a', '00000000-0000-0000-0000-000000000007',
+            'claude-sonnet-4-5', '5m',
+            CASE WHEN kind = 'renewal' THEN 'source-' || n END, 1000
+         FROM ids CROSS JOIN kinds",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("insert all evidence in one transaction");
+    transaction.commit().await.expect("commit evidence fixture");
+    let cycle_ids = (1..=COUNT)
+        .map(|id| Uuid::from_u128(id as u128))
+        .collect::<Vec<_>>();
+    // Reverse the source scope so some rows match different id batches.
+    let source_refs = (1..=COUNT)
+        .rev()
+        .map(|id| format!("source-{id}"))
+        .collect::<Vec<_>>();
+    let evidence = storage
+        .list_cache_keepalive_evidence_for_activity(
+            PRINCIPAL_ID,
+            &cycle_ids,
+            &source_refs,
+            0,
+            300_000,
+        )
+        .await
+        .expect("read evidence beyond SQLite's parameter limit");
+    let ids = evidence
+        .iter()
+        .map(|entry| entry.evidence_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(evidence.len(), COUNT * 2);
+    assert_eq!(
+        ids.len(),
+        evidence.len(),
+        "union must not duplicate evidence"
+    );
+    assert!(
+        evidence
+            .windows(2)
+            .all(|pair| (pair[0].request_start_ms, &pair[0].evidence_id)
+                < (pair[1].request_start_ms, &pair[1].evidence_id))
+    );
+    let mut expected = std::collections::BTreeSet::new();
+    for (cycles, sources) in cycle_ids.chunks(500).zip(source_refs.chunks(500)) {
+        expected.extend(
+            storage
+                .list_cache_keepalive_evidence_for_activity(
+                    PRINCIPAL_ID,
+                    cycles,
+                    sources,
+                    0,
+                    300_000,
+                )
+                .await
+                .expect("read small evidence scope")
+                .into_iter()
+                .map(|entry| entry.evidence_id),
+        );
+    }
+    assert_eq!(ids, expected, "large scope must equal union of small reads");
+}
+
 fn snapshot() -> CacheKeepaliveConfigSnapshot {
     CacheKeepaliveConfigSnapshot {
         refresh_lead_time_5m_secs: 30,

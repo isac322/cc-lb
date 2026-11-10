@@ -79,8 +79,11 @@ not-tracked rows that carry an error or a 12h TTL. Other not-tracked decisions
 never leave the server for that view. A list request without a cursor is an
 overview: it returns the summary, the trigger groups (count, spent, avoided,
 net over every matching row, computed in bounded batches), and the first page,
-all for one horizon start, so the header always equals the group totals plus
-the deleted-sessions aggregate without the browser loading every row. A list
+all for one horizon start. The summary aggregate and the group batches are
+separate storage reads, not one snapshot, so the header equals the group
+totals plus the deleted-sessions aggregate whenever no renewal commits between
+those reads; a concurrent renewal can make one response differ until the next
+poll. The browser never needs to load every row to reconcile them. A list
 request with a cursor returns rows only and skips the summary and group
 aggregates. Rows carry their server-computed trigger group. Detail loads only
 the requested session. Current-cycle detail renewal counts use cycle-linked evidence;

@@ -6,6 +6,7 @@
 
 import {
   type InfiniteData,
+  keepPreviousData,
   type QueryClient,
   queryOptions,
   useInfiniteQuery,
@@ -354,7 +355,16 @@ export const qk = {
     principalId: string,
     sessionId: string,
     horizon: CacheKeepaliveHorizon,
-  ) => ['cache-keepalive', 'detail', principalId, sessionId, horizon] as const,
+    rowFingerprint: string | null = null,
+  ) =>
+    [
+      'cache-keepalive',
+      'detail',
+      principalId,
+      sessionId,
+      horizon,
+      rowFingerprint,
+    ] as const,
 };
 
 async function invalidatePrincipalRecordQueries(
@@ -2118,6 +2128,7 @@ export function useCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string | null,
   horizon: CacheKeepaliveHorizon = 'all',
+  rowFingerprint: string | null = null,
 ) {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
@@ -2129,13 +2140,14 @@ export function useCacheKeepaliveSessionDetail(
       principalId,
       sessionId ?? '',
       horizon,
+      rowFingerprint,
     ),
     enabled: (query) =>
       Boolean(principalId) &&
       Boolean(sessionId) &&
       !isMissing(query.state.error),
     meta: { inlineError: true },
-    placeholderData: undefined,
+    placeholderData: keepPreviousData,
     retry: (failureCount, error) => !isMissing(error) && failureCount < 1,
     refetchOnMount: (query) => !isMissing(query.state.error),
     refetchOnWindowFocus: (query) => !isMissing(query.state.error),
