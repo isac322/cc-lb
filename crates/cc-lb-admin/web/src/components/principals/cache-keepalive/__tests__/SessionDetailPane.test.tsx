@@ -159,6 +159,94 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       fireEvent.blur(btn);
     }
   });
+  it('maps capped 12-renewal pulses linearly across the interior rail', () => {
+    const pulses = Array.from({ length: 12 }, (_, index) => ({
+      pulse_number: index + 1,
+      time_ms: 1_700_000_000_000 + (index + 1) * 270_000,
+      offset_sec:
+        index === 10 ? 2980 : index === 11 ? 3250 : (index + 1) * 270,
+      since_prev_renewal_sec: null,
+      spent_usd: 0.1,
+      hit: false,
+    }));
+
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: {
+        id: 'p-123/thread:capped',
+        last_message_at_ms: 1_700_003_250_000,
+        state: 'capped',
+        is_active: false,
+        ttl: '5m',
+        attempts: 12,
+        retained_renewals: 12,
+        max_attempts: 12,
+        reason: 'agent-in-turn',
+        generation: 1,
+        upstream: 'anthropic',
+        error: null,
+        net_pnl: -1.2,
+        session_key_hash: 'capped',
+        renewal_tokens: 604_506,
+        total_avoided: 0,
+        total_spent: 1.2,
+        total_renewals_current_cycle: 12,
+        is_last_pending: false,
+        evidence_status: 'observed',
+        turns: [],
+        gaps: [
+          {
+            cycle_id: 'capped-cycle',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 604_506,
+            pulses,
+            ending_kind: 'capped_no_followup',
+            ending_at_ms: 1_700_003_250_000,
+            total_duration_sec: 3250,
+            since_last_renewal_sec: 0,
+            spent_usd: 1.2,
+            avoided_usd: 0,
+            net_pnl_usd: -1.2,
+          },
+        ],
+        config_snapshot: null,
+        raw_record: {
+          session_key_hash: 'capped',
+          principal_id: 'p-123',
+          upstream_id: 'anthropic',
+          generation: 1,
+          renewal_count: 12,
+          ttl: '5m',
+          status: 'capped',
+          enqueue_state: 'pending',
+        },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="p-123/thread:capped"
+        onClose={() => {}}
+      />,
+    );
+
+    const rail = screen.getByTestId('session-detail-time-rail');
+    const pulse11 = rail.querySelector('[data-rail-point="pulse-11"]')!;
+    const pulse12 = rail.querySelector('[data-rail-point="pulse-12"]')!;
+    const pulse11Pct = Number.parseFloat(
+      (pulse11 as HTMLElement).style.left.replace('%', ''),
+    );
+    const pulse12Pct = Number.parseFloat(
+      (pulse12 as HTMLElement).style.left.replace('%', ''),
+    );
+
+    expect(pulse11Pct).toBeCloseTo(85.855, 2);
+    expect(pulse12Pct).toBe(93);
+    expect(pulse11Pct).not.toBeCloseTo(91.7, 1);
+    expect(pulse11Pct).not.toBe(pulse12Pct);
+  });
   it('uses the 30m renewal window for OpenAI Responses sessions', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
