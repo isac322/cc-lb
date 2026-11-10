@@ -85,6 +85,7 @@ SELECT \
     r.error_code, \
     r.upstream_error_type, \
     r.upstream_error_message, \
+    r.upstream_error_code, \
     r.input_tokens, \
     r.output_tokens, \
     r.cache_creation_input_tokens, \
@@ -171,6 +172,7 @@ pub(super) struct ListRow {
     pub(super) error_code: Option<String>,
     pub(super) upstream_error_type: Option<String>,
     pub(super) upstream_error_message: Option<String>,
+    pub(super) upstream_error_code: Option<String>,
     pub(super) input_tokens: Option<i64>,
     pub(super) output_tokens: Option<i64>,
     pub(super) cache_creation_input_tokens: Option<i64>,

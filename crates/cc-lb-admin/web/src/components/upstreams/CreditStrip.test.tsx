@@ -107,47 +107,123 @@ describe('CreditStrip', () => {
     expect(strip.textContent).toContain('Since Oct 5 (UTC) · resets Nov 1');
   });
 
-  test.each<[KeyBillingStopKind, string, string, string]>([
+  test.each<
+    [
+      KeyBillingStopKind,
+      string,
+      string,
+      string,
+      string | null,
+      'openai' | 'gemini' | undefined,
+    ]
+  >([
     [
       'credits_exhausted',
       'Out of credits',
       'Seen',
       'Buy credits or turn on auto-reload in Console → Billing → requests resume.',
+      null,
+      undefined,
     ],
     [
       'tier_spend_cap',
       'Spend limit reached',
       'Resumes Nov 1',
       'Request a tier increase in Console → resume before Nov 1.',
+      null,
+      undefined,
     ],
     [
       'spend_limit',
       'Spend limit reached',
       'Seen',
       'Raise the limit in Console → Billing → requests resume.',
+      null,
+      undefined,
     ],
     [
       'billing_error',
       'Billing issue',
       'Seen',
       'Fix the payment method in Console → Billing → requests resume.',
+      null,
+      undefined,
+    ],
+    [
+      'openai_credit_balance_exhausted',
+      'Credit balance exhausted',
+      'Seen',
+      'Add credits to resume OpenAI requests.',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      'openai',
+    ],
+    [
+      'openai_organization_spend_limit_exceeded',
+      'Organization spend limit exceeded',
+      'Seen',
+      'Raise the organization spend limit to resume requests.',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      'openai',
+    ],
+    [
+      'openai_project_spend_limit_exceeded',
+      'Project spend limit exceeded',
+      'Seen',
+      'Raise the project spend limit to resume requests.',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      'openai',
+    ],
+    [
+      'openai_organization_usage_limit_exceeded',
+      'Organization usage limit exceeded',
+      'Seen',
+      'Request a higher organization usage limit to resume requests.',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      'openai',
+    ],
+    [
+      'gemini_payment_required',
+      'Payment required',
+      'Seen',
+      'Add credits or enable auto-reload to resume requests.',
+      'https://ai.google.dev/gemini-api/docs/api-errors',
+      'gemini',
+    ],
+    [
+      'gemini_failed_precondition',
+      'Billing prerequisite failed',
+      'Seen',
+      'Verify project billing and account prerequisites to resume requests.',
+      'https://ai.google.dev/gemini-api/docs/api-errors',
+      'gemini',
     ],
   ])(
     'billing stop %s shows on Balance with a visible fix',
-    (kind, label, fact, fix) => {
-      const strip = renderStrip({
-        ...MONTH,
-        billing_stop: {
-          kind,
-          observed_at_unix_secs: Math.floor(Date.now() / 1000) - 180,
+    (kind, label, fact, fix, href, provider) => {
+      const strip = renderStrip(
+        {
+          ...MONTH,
+          billing_stop: {
+            kind,
+            observed_at_unix_secs: Math.floor(Date.now() / 1000) - 180,
+          },
         },
-      });
+        provider ? { ...REPORTED, provider } : REPORTED,
+      );
       const balance = cell(strip, 'Balance');
       expect(balance.textContent).toContain(label);
       expect(balance.textContent).toContain(fact);
       expect(balance.textContent).not.toContain('Not in API');
-      // The fix is on screen, not in a tooltip.
       expect(strip.textContent).toContain(fix);
+      if (href) {
+        const link = within(strip).getByRole('link', {
+          name:
+            provider === 'openai'
+              ? /OpenAI error codes/i
+              : /Gemini API errors/i,
+        });
+        expect(link.getAttribute('href')).toBe(href);
+      }
     },
   );
 

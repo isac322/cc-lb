@@ -122,6 +122,8 @@ pub struct StreamSuccess {
 pub struct StreamError {
     pub error_type: String,
     pub error_message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_code: Option<String>,
     /// Provider-neutral stream fields captured before an abnormal
     /// termination. These remain available to the lifecycle row even when
     /// the stream result is `Err`.

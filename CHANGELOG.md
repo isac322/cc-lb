@@ -36,6 +36,8 @@ All notable changes to this project will be documented in this file.
 - Provider-native prompt-cache observations now preserve OpenAI Responses boundaries and scoped identities plus Gemini implicit and explicit cache evidence, while leaving Anthropic breakpoint semantics unchanged. Request events and diagnostics distinguish positive, zero, invalid, and absent provider evidence without recording raw prompts or cache keys. (#1126)
 - Provider-native prompt-cache routing now gives older OpenAI Responses requests a scoped soft preference when `prompt_cache_key` evidence and native pricing are available. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` keeps hard owner affinity. (#1127)
 
+- API-key usage cards now preserve bounded provider error codes and classify documented OpenAI and Gemini billing or spend-limit failures with provider-specific remediation, while Anthropic billing-stop behavior and proxy responses remain unchanged. ([#1213](https://github.com/isac322/cc-lb/issues/1213))
+
 ### Fixed
 - Active frame-only Shape plugins now remain in their provider's pipeline without requiring a request-shape hook; absent and noop frame hooks remain inactive. ([#1191](https://github.com/isac322/cc-lb/issues/1191))
 - V2 and V3 Wasm filter requests now remove case-insensitive `key` query parameters before encoding, matching V1 while preserving other query parameters and credential-header redaction. ([#1193](https://github.com/isac322/cc-lb/issues/1193))

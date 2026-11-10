@@ -163,6 +163,7 @@ fn kind_labels_cover_every_variant() {
             event_id: sample_event_id(),
             error_type: "rate_limit_error".into(),
             error_message: "bounded".into(),
+            upstream_error_code: None,
             retry_after: None,
         }
         .kind(),
@@ -243,6 +244,7 @@ fn event_id_accessor_returns_stable_reference() {
         event_id: id.clone(),
         error_type: "api_error".into(),
         error_message: "bounded".into(),
+        upstream_error_code: None,
         retry_after: None,
     };
     assert_eq!(event.event_id(), &id);

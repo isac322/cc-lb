@@ -40,6 +40,7 @@ SELECT \
     error_code, \
     upstream_error_type, \
     upstream_error_message, \
+    upstream_error_code, \
     list_auth_ms AS auth_ms, \
     list_route_ms AS route_ms, \
     list_limit_reserve_ms AS limit_reserve_ms, \
@@ -166,6 +167,7 @@ pub(super) struct ListRow {
     pub(super) error_code: Option<String>,
     pub(super) upstream_error_type: Option<String>,
     pub(super) upstream_error_message: Option<String>,
+    pub(super) upstream_error_code: Option<String>,
     pub(super) auth_ms: Option<i64>,
     pub(super) route_ms: Option<i64>,
     pub(super) limit_reserve_ms: Option<i64>,

@@ -411,6 +411,7 @@ mod tests {
             event_id: eid("rate-retry"),
             error_type: "rate_limit_error".to_owned(),
             error_message: "try again later".to_owned(),
+            upstream_error_code: None,
             retry_after: Some("7".to_owned()),
         })
         .await

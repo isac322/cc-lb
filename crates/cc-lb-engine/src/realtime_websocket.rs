@@ -606,10 +606,11 @@ impl RealtimeWebSocketSession {
                         error_message: error_message
                             .unwrap_or("realtime WebSocket stream ended before completion")
                             .to_owned(),
+                        upstream_error_code: None,
                         body_bytes: Some(latency.total_bytes),
                         body_chunk_count: Some(latency.stream_event_count),
                         first_body_chunk_ms: latency.stream_first_output_ms,
-                        stream_last_chunk_ms: latency.stream_last_chunk_ms,
+                        stream_last_chunk_ms: latency.stream_last_output_ms,
                         stream_total_ms: Some(latency.stream_total_ms),
                         ping_count: Some(latency.ping_count),
                         stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,

@@ -6601,9 +6601,10 @@ impl Lifecycle {
             .as_ref()
             .and_then(usage_parser::CanonicalUpstreamError::retry_after)
             .map(ToOwned::to_owned);
-        let (upstream_error_type, parsed_upstream_message) = canonical_upstream_error
-            .map(|error| error.into_parts(signer.as_ref()))
-            .unwrap_or_default();
+        let (upstream_error_type, parsed_upstream_message, upstream_error_code) =
+            canonical_upstream_error
+                .map(|error| error.into_parts(signer.as_ref()))
+                .unwrap_or_default();
         let upstream_error_message = match parsed_upstream_message {
             Some(message) => Some(message),
             None if status.is_client_error() || status.is_server_error() => semantic_body
@@ -6892,6 +6893,7 @@ impl Lifecycle {
                             event_id: o.event_id().to_owned(),
                             error_type: upstream_error_type.unwrap_or_default(),
                             error_message: upstream_error_message.unwrap_or_default(),
+                            upstream_error_code,
                             retry_after: (status == StatusCode::TOO_MANY_REQUESTS
                                 && parts.headers.get(RETRY_AFTER).is_none())
                             .then_some(retry_after.clone())
@@ -6927,6 +6929,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         error_type: stop.stop_reason.clone(),
                         error_message: abnormal_stop_error_message(stop),
+                        upstream_error_code: None,
                         retry_after: None,
                     },
                 );
@@ -7929,6 +7932,7 @@ impl Lifecycle {
                                                 .error_message
                                                 .clone()
                                                 .unwrap_or_default(),
+                                            upstream_error_code: err.upstream_error_code.clone(),
                                             ..Default::default()
                                         };
                                         o.emit_lifecycle(
@@ -8970,6 +8974,7 @@ impl Lifecycle {
                                             .error_message
                                             .clone()
                                             .unwrap_or_default(),
+                                        upstream_error_code: err.upstream_error_code.clone(),
                                         ..Default::default()
                                     };
                                     o.emit_lifecycle(
@@ -9684,7 +9689,7 @@ impl Lifecycle {
                     && !upstream_error_body_decode_failed
                     && !upstream_error_body.is_empty()
                 {
-                    let (error_type, message) = canonical_error
+                    let (error_type, message, upstream_error_code) = canonical_error
                         .map(|error| error.into_parts(signer.as_ref()))
                         .unwrap_or_default();
                     o.emit_lifecycle(
@@ -9699,6 +9704,7 @@ impl Lifecycle {
                                     upstream_error_body_truncated,
                                 ),
                             },
+                            upstream_error_code,
                             retry_after: (status == StatusCode::TOO_MANY_REQUESTS
                                 && !has_retry_after_header)
                                 .then_some(retry_after)
@@ -11530,7 +11536,7 @@ mod upstream_error_scrub_tests {
                 "error": { "type": "invalid_request_error", "message": message },
             })
             .to_string();
-            let (_, buffered) = usage_parser::observe_http_error_body(body.as_bytes())
+            let (_, buffered, _) = usage_parser::observe_http_error_body(body.as_bytes())
                 .map(|error| error.into_parts(&signer()))
                 .unwrap_or_default();
             let raw = format!("event: error\ndata: {body}\n\n");

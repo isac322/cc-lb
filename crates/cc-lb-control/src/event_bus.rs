@@ -428,6 +428,7 @@ impl RequestEventBus for InMemoryBus {
                     event_id,
                     error_type: String::new(),
                     error_message: String::new(),
+                    upstream_error_code: None,
                     retry_after: Some(retry_after),
                 };
                 let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
@@ -820,6 +821,7 @@ mod tests {
             event_id: "evt-private".into(),
             error_type: "rate_limit_error".into(),
             error_message: "bounded".into(),
+            upstream_error_code: Some("rate_limit_code".into()),
             retry_after: None,
         };
 
@@ -840,6 +842,7 @@ mod tests {
             event_id: "evt-retry".into(),
             error_type: "rate_limit_error".into(),
             error_message: "private".into(),
+            upstream_error_code: Some("rate_limit_code".into()),
             retry_after: Some("30".into()),
         };
 
@@ -849,6 +852,7 @@ mod tests {
             event_id: "evt-retry".into(),
             error_type: String::new(),
             error_message: String::new(),
+            upstream_error_code: None,
             retry_after: Some("30".into()),
         };
         assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);

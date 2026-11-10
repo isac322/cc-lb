@@ -616,7 +616,7 @@ async fn insert_request_event_in_tx(
         "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
         "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
         "cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, ",
-        "event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, ",
+        "event_id, error_code, upstream_error_type, upstream_error_message, upstream_error_code, thinking_tokens, ",
         "tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
         "cache_creation_input_tokens_1h, token_estimate_source, thinking_budget_tokens, ",
         "reasoning_effort, list_ts_ms, list_event_key, list_status, list_duration_ms, ",
@@ -646,7 +646,7 @@ async fn insert_request_event_in_tx(
         "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -700,6 +700,7 @@ async fn insert_request_event_in_tx(
     .bind(event.error_code.as_deref())
     .bind(event.upstream_error_type.as_deref())
     .bind(event.upstream_error_message.as_deref())
+    .bind(event.upstream_error_code.as_deref())
     .bind(option_u64_to_i64(
         event.thinking_tokens,
         "request event thinking_tokens",
