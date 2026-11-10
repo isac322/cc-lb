@@ -203,6 +203,7 @@ export function ApiUsageCard({
   const lastReported = provenance?.last_reported_unix_secs ?? null;
   // A background refetch failed while the previous answer stays on screen.
   const notRefreshed = month !== undefined && monthError !== null;
+  const nativeBillingStop = nativeProvider && month?.billing_stop != null;
 
   // The header holds only the provenance badge; chart controls sit in the
   // toolbar row above the chart. While the first report is on its way the
@@ -308,7 +309,7 @@ export function ApiUsageCard({
       action={action}
     >
       <div className="flex flex-col gap-4">
-        {nativeProvider ? (
+        {nativeProvider && !nativeBillingStop ? (
           <div className="flex flex-col gap-2">
             <p className="text-caption text-text-faint">This month (UTC)</p>
             {monthLoading && !month ? (

@@ -231,12 +231,87 @@ test.describe('API usage card', () => {
     await expect(card(page)).not.toContainText('org role');
   });
 
-  // UI-U-08: billing stops, each with its fix on screen.
-  for (const [kind, label, fix] of [
-    ['credits_exhausted', 'Out of credits', 'Buy credits or turn on auto-reload'],
-    ['tier_spend_cap', 'Spend limit reached', 'Request a tier increase in Console'],
-    ['spend_limit', 'Spend limit reached', 'Raise the limit in Console'],
-    ['billing_error', 'Billing issue', 'Fix the payment method in Console'],
+  for (const [kind, label, fix, provider, href, linkName] of [
+    [
+      'credits_exhausted',
+      'Out of credits',
+      'Buy credits or turn on auto-reload',
+      'anthropic',
+      'https://platform.claude.com/settings/billing',
+      /Billing/,
+    ],
+    [
+      'tier_spend_cap',
+      'Spend limit reached',
+      'Request a tier increase in Console',
+      'anthropic',
+      'https://platform.claude.com/settings/billing',
+      /Billing/,
+    ],
+    [
+      'spend_limit',
+      'Spend limit reached',
+      'Raise the limit in Console',
+      'anthropic',
+      'https://platform.claude.com/settings/billing',
+      /Billing/,
+    ],
+    [
+      'billing_error',
+      'Billing issue',
+      'Fix the payment method in Console',
+      'anthropic',
+      'https://platform.claude.com/settings/billing',
+      /Billing/,
+    ],
+    [
+      'openai_credit_balance_exhausted',
+      'Credit balance exhausted',
+      'Add credits to resume OpenAI requests',
+      'openai',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      /OpenAI error codes/i,
+    ],
+    [
+      'openai_organization_spend_limit_exceeded',
+      'Organization spend limit exceeded',
+      'Raise the organization spend limit',
+      'openai',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      /OpenAI error codes/i,
+    ],
+    [
+      'openai_project_spend_limit_exceeded',
+      'Project spend limit exceeded',
+      'Raise the project spend limit',
+      'openai',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      /OpenAI error codes/i,
+    ],
+    [
+      'openai_organization_usage_limit_exceeded',
+      'Organization usage limit exceeded',
+      'Request a higher organization usage limit',
+      'openai',
+      'https://developers.openai.com/api/docs/guides/error-codes',
+      /OpenAI error codes/i,
+    ],
+    [
+      'gemini_payment_required',
+      'Payment required',
+      'Add credits or enable auto-reload',
+      'gemini',
+      'https://ai.google.dev/gemini-api/docs/api-errors',
+      /Gemini API errors/i,
+    ],
+    [
+      'gemini_failed_precondition',
+      'Billing prerequisite failed',
+      'Verify project billing and account prerequisites',
+      'gemini',
+      'https://ai.google.dev/gemini-api/docs/api-errors',
+      /Gemini API errors/i,
+    ],
   ] as const) {
     test(`billing stop ${kind}`, async ({
       page,
@@ -245,10 +320,16 @@ test.describe('API usage card', () => {
     }) => {
       const upstream = await seedApiKeyUpstream({ key: apiKey(`bil-${kind}`) });
       const base = usage();
+      const providerUpstream =
+        provider === 'openai'
+          ? { ...upstream, kind: 'openai_api_key' as const }
+          : provider === 'gemini'
+            ? { ...upstream, kind: 'gemini_api_key' as const }
+            : upstream;
       await serve(
         routeEnvelope,
-        upstream,
-        ORG_OK,
+        providerUpstream,
+        { ...ORG_OK, provider },
         200,
         usage({
           month: {
@@ -258,11 +339,13 @@ test.describe('API usage card', () => {
         }),
       );
       await openUpstream(page, upstream.id);
-      const balance = page
-        .getByTestId('api-key-credits')
-        .locator('[data-cell="Balance"]');
+      const strip = page.getByTestId('api-key-credits');
+      const balance = strip.locator('[data-cell="Balance"]');
       await expect(balance).toContainText(label);
-      await expect(page.getByTestId('api-key-credits')).toContainText(fix);
+      await expect(strip).toContainText(fix);
+      const link = strip.getByRole('link', { name: linkName }).first();
+      await expect(link).toHaveAttribute('href', href);
+      await expect(strip.locator('.status-dot.danger')).toHaveCount(1);
     });
   }
 

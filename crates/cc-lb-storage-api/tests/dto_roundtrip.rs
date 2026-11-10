@@ -512,6 +512,7 @@ fn batch_b_wire_snapshots_are_stable() {
         service_tier: Some("priority".to_owned()),
         upstream_error_type: Some("overloaded_error".to_owned()),
         upstream_error_message: Some("upstream overloaded; retry".to_owned()),
+        upstream_error_code: None,
         upstream_http_version: Some("HTTP/2.0".to_owned()),
         upstream_request_id: Some("req_upstream_batch_b".to_owned()),
         upstream_content_encoding: Some("gzip".to_owned()),

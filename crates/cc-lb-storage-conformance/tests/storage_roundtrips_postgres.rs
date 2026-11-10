@@ -48,6 +48,8 @@ struct PostgresFixture {
 }
 
 static PRICE_CATALOG_SCENARIO_LOCK: Mutex<()> = Mutex::new(());
+static USAGE_ROLLUP_SCENARIO_LOCK: Mutex<()> = Mutex::new(());
+
 impl PostgresConformanceBackend {
     fn new(url: String) -> Self {
         Self {
@@ -340,7 +342,7 @@ fn request_event_kind_sets_filter_before_pagination_postgres() {
 
 #[test]
 fn usage_rollup_principal_cost_components_postgres() {
-    run_postgres_scenario(
+    run_postgres_usage_rollup_scenario(
         "usage_rollup_principal_cost_components",
         usage_rollup_principal_costs::principal_cost_components_aggregate_without_fabrication,
     );
@@ -589,7 +591,7 @@ fn upstream_subscription_quota_checkpoint_history_postgres() {
 
 #[test]
 fn upstream_subscription_quota_aggregate_store_postgres() {
-    run_postgres_scenario(
+    run_postgres_usage_rollup_scenario(
         "upstream_subscription_quota_aggregate_store",
         upstream_subscription_quota_store::aggregate_store,
     );
@@ -1089,6 +1091,17 @@ fn type_family(declared: &str) -> String {
 
 fn normalize_default(value: &str) -> String {
     value.trim_end_matches("::text").to_owned()
+}
+
+fn run_postgres_usage_rollup_scenario<F, Fut>(name: &str, scenario: F)
+where
+    F: FnOnce(Arc<PostgresConformanceBackend>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let _guard = USAGE_ROLLUP_SCENARIO_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    run_postgres_scenario(name, scenario);
 }
 
 fn run_postgres_price_scenario<F, Fut>(name: &str, scenario: F)

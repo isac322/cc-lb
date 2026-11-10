@@ -372,6 +372,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .execute(storage.pool())
     .await
     .expect("install reconciliation state");
+    sqlx::raw_sql(include_str!(
+        "../migrations/0117_request_events_upstream_error_code.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install provider error code column for current writer");
     sqlx::query(
         "UPDATE usage_rollup_reconciliations_v1
          SET status = 'complete'

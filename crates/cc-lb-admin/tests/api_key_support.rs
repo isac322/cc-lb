@@ -256,12 +256,22 @@ impl ApiKeyHarness {
     /// A pre-migration API-key upstream: the key sealed with AAD = id,
     /// `base_url` at the fake, and no details row.
     pub async fn seed_legacy_api_key_upstream(&self, name: &str, key: &str) -> UpstreamRecord {
+        self.seed_api_key_upstream(name, key, UpstreamKind::AnthropicApiKey)
+            .await
+    }
+
+    pub async fn seed_api_key_upstream(
+        &self,
+        name: &str,
+        key: &str,
+        kind: UpstreamKind,
+    ) -> UpstreamRecord {
         let created = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
-                kind: UpstreamKind::AnthropicApiKey,
+                kind,
                 base_url: Some(self.fake_url.clone()),
                 api_key_ciphertext: None,
                 oauth_tokens: None,

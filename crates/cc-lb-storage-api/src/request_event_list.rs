@@ -40,6 +40,7 @@ pub struct RequestEventListItem {
     pub error_code: Option<String>,
     pub upstream_error_type: Option<String>,
     pub upstream_error_message: Option<String>,
+    pub upstream_error_code: Option<String>,
     pub duration_ms: u64,
     pub request_body_read_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +215,7 @@ mod tests {
             error_code: None,
             upstream_error_type: None,
             upstream_error_message: None,
+            upstream_error_code: None,
             duration_ms: 0,
             request_body_read_ms: None,
             request_body_first_chunk_ms: None,

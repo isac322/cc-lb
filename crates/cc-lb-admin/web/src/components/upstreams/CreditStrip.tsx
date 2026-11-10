@@ -2,9 +2,10 @@
 // tokens used, credits used at list price, and the balance. No Anthropic API
 // returns a credit balance, so Balance is "—" with a Console Billing link,
 // unless the latest logged request for this upstream ran into a billing stop;
-// then the stop and its one fix are on screen. Provenance (reported or
-// estimated) is the card's header badge; key status and permission fixes
-// belong to the pane key notice and Access.
+// then the stop and its one fix are on screen. Provider-native billing stops
+// use the same danger surface with provider-specific guidance. Provenance
+// (reported or estimated) is the card's header badge; key status and
+// permission fixes belong to the pane key notice and Access.
 
 import type { ReactNode } from 'react';
 import type {
@@ -32,19 +33,109 @@ const STOP_LABEL: Record<KeyBillingStopKind, string> = {
   tier_spend_cap: 'Spend limit reached',
   spend_limit: 'Spend limit reached',
   billing_error: 'Billing issue',
+  openai_credit_balance_exhausted: 'Credit balance exhausted',
+  openai_organization_spend_limit_exceeded: 'Organization spend limit exceeded',
+  openai_project_spend_limit_exceeded: 'Project spend limit exceeded',
+  openai_organization_usage_limit_exceeded: 'Organization usage limit exceeded',
+  gemini_payment_required: 'Payment required',
+  gemini_failed_precondition: 'Billing prerequisite failed',
 };
 
-function stopHint(kind: KeyBillingStopKind, resumes: string): string {
+type StopGuidance = {
+  action: string;
+  href?: string;
+  linkLabel?: string;
+};
+
+const OPENAI_ERROR_CODES_URL =
+  'https://developers.openai.com/api/docs/guides/error-codes';
+const GEMINI_API_ERRORS_URL =
+  'https://ai.google.dev/gemini-api/docs/api-errors';
+
+function stopLabel(kind: string): string {
+  return STOP_LABEL[kind as KeyBillingStopKind] ?? 'Billing stop';
+}
+
+function stopGuidance(
+  kind: string,
+  provider: KeyUsageProvenance['provider'],
+  resumes: string,
+): StopGuidance {
   switch (kind) {
     case 'credits_exhausted':
-      return 'Buy credits or turn on auto-reload in Console → Billing → requests resume.';
+      return {
+        action:
+          'Buy credits or turn on auto-reload in Console → Billing → requests resume.',
+      };
     case 'tier_spend_cap':
-      return `Request a tier increase in Console → resume before ${resumes}.`;
+      return {
+        action: `Request a tier increase in Console → resume before ${resumes}.`,
+      };
     case 'spend_limit':
-      return 'Raise the limit in Console → Billing → requests resume.';
+      return {
+        action: 'Raise the limit in Console → Billing → requests resume.',
+      };
     case 'billing_error':
-      return 'Fix the payment method in Console → Billing → requests resume.';
+      return {
+        action:
+          'Fix the payment method in Console → Billing → requests resume.',
+      };
+    case 'openai_credit_balance_exhausted':
+      return {
+        action: 'Add credits to resume OpenAI requests.',
+        href: OPENAI_ERROR_CODES_URL,
+        linkLabel: 'OpenAI error codes',
+      };
+    case 'openai_organization_spend_limit_exceeded':
+      return {
+        action: 'Raise the organization spend limit to resume requests.',
+        href: OPENAI_ERROR_CODES_URL,
+        linkLabel: 'OpenAI error codes',
+      };
+    case 'openai_project_spend_limit_exceeded':
+      return {
+        action: 'Raise the project spend limit to resume requests.',
+        href: OPENAI_ERROR_CODES_URL,
+        linkLabel: 'OpenAI error codes',
+      };
+    case 'openai_organization_usage_limit_exceeded':
+      return {
+        action: 'Request a higher organization usage limit to resume requests.',
+        href: OPENAI_ERROR_CODES_URL,
+        linkLabel: 'OpenAI error codes',
+      };
+    case 'gemini_payment_required':
+      return {
+        action: 'Add credits or enable auto-reload to resume requests.',
+        href: GEMINI_API_ERRORS_URL,
+        linkLabel: 'Gemini API errors',
+      };
+    case 'gemini_failed_precondition':
+      return {
+        action:
+          'Verify project billing and account prerequisites to resume requests.',
+        href: GEMINI_API_ERRORS_URL,
+        linkLabel: 'Gemini API errors',
+      };
+    default:
+      return {
+        action:
+          provider === 'openai'
+            ? 'Review OpenAI billing settings to resume requests.'
+            : provider === 'gemini'
+              ? 'Review Gemini billing settings to resume requests.'
+              : 'Review the provider billing settings to resume requests.',
+      };
   }
+}
+
+function isAnthropicStop(kind: string): boolean {
+  return (
+    kind === 'credits_exhausted' ||
+    kind === 'tier_spend_cap' ||
+    kind === 'spend_limit' ||
+    kind === 'billing_error'
+  );
 }
 
 const CELL_CLASS = 'flex min-w-0 flex-col gap-0.5';
@@ -107,6 +198,11 @@ export function CreditStrip({
 
   const billing = <ConsoleLink href={CONSOLE_BILLING_URL}>Billing</ConsoleLink>;
   const stop = month?.billing_stop ?? null;
+  const stopKind = stop?.kind as string | undefined;
+  const guidance = stopKind
+    ? stopGuidance(stopKind, provenance?.provider, resets ?? '')
+    : null;
+  const anthropicStop = stopKind ? isAnthropicStop(stopKind) : false;
   const tokens = month ? splitNum(month.tokens) : null;
   const skeletonValue = (
     <Skeleton as="span" className="inline-block h-5 w-16" />
@@ -174,7 +270,7 @@ export function CreditStrip({
             loading ? (
               skeletonValue
             ) : stop ? (
-              <StatusBadge tone="danger" label={STOP_LABEL[stop.kind]} />
+              <StatusBadge tone="danger" label={stopLabel(stopKind ?? '')} />
             ) : (
               NO_READING
             )
@@ -184,7 +280,7 @@ export function CreditStrip({
               skeletonSub
             ) : stop ? (
               <>
-                {stop.kind === 'tier_spend_cap' ? (
+                {stopKind === 'tier_spend_cap' ? (
                   <>Resumes {resets}</>
                 ) : (
                   <>
@@ -195,8 +291,12 @@ export function CreditStrip({
                     />
                   </>
                 )}
-                {' · '}
-                {billing}
+                {anthropicStop ? (
+                  <>
+                    {' · '}
+                    {billing}
+                  </>
+                ) : null}
               </>
             ) : (
               <>Not in API · {billing}</>
@@ -206,7 +306,13 @@ export function CreditStrip({
       </dl>
       {stop ? (
         <p className="text-caption text-text-muted">
-          {stopHint(stop.kind, resets ?? '')} {billing}
+          {guidance?.action ??
+            'Review provider billing guidance to resume requests.'}{' '}
+          {guidance?.href && guidance.linkLabel ? (
+            <ConsoleLink href={guidance.href}>{guidance.linkLabel}</ConsoleLink>
+          ) : anthropicStop ? (
+            billing
+          ) : null}
         </p>
       ) : null}
       {!loading && loadError ? (

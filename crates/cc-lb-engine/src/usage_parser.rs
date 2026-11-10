@@ -137,6 +137,7 @@ pub(crate) struct SseUsageUpdate {
 pub(crate) struct UpstreamStreamError {
     pub(crate) error_type: Option<String>,
     pub(crate) error_message: Option<String>,
+    pub(crate) upstream_error_code: Option<String>,
 }
 
 /// An upstream `stop_reason` that ends the response abnormally even though the
@@ -162,6 +163,8 @@ impl BoundedErrorType {
         self.0
     }
 }
+
+type BoundedErrorCode = BoundedErrorType;
 
 /// Raw `error.message` text bounded to the collect window (not yet the store
 /// cap); `.1` records that the source exceeded the window. The store cap is
@@ -215,22 +218,21 @@ fn scrub_string(signer: Option<&dyn Signer>, text: String) -> String {
 /// A structured upstream error extracted from an HTTP error response body.
 ///
 /// `error_type` is `error.type`, or `error.code` when the provider emits no
-/// `type` (non-Anthropic gateways). `error_message` is `error.message`. Either
-/// field may be absent; present fields are never empty or fabricated.
+/// `type` (non-Anthropic gateways). `error_code` preserves the provider's
+/// string `error.code` independently. `error_message` is `error.message`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CanonicalUpstreamError {
     error_type: Option<BoundedErrorType>,
+    error_code: Option<BoundedErrorCode>,
     error_message: Option<BoundedErrorMessage>,
     retry_after: Option<String>,
 }
 
 impl CanonicalUpstreamError {
-    /// `(error_type, error_message)` with `signer`'s secret masked before the
-    /// store cap is applied; each is `None` when the upstream body carried no
-    /// usable value, so callers can fall back per field (e.g. a bounded raw
-    /// body for a missing message) instead of emitting a zero-value fake
-    /// message.
-    pub(crate) fn into_parts(self, signer: &dyn Signer) -> (Option<String>, Option<String>) {
+    pub(crate) fn into_parts(
+        self,
+        signer: &dyn Signer,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         self.into_parts_with(Some(signer))
     }
 
@@ -238,11 +240,16 @@ impl CanonicalUpstreamError {
         self.retry_after.as_deref()
     }
 
-    fn into_parts_with(self, signer: Option<&dyn Signer>) -> (Option<String>, Option<String>) {
+    fn into_parts_with(
+        self,
+        signer: Option<&dyn Signer>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         (
             self.error_type
                 .map(|error_type| scrub_string(signer, error_type.into_string())),
             self.error_message.map(|message| message.finish(signer)),
+            self.error_code
+                .map(|error_code| scrub_string(signer, error_code.into_string())),
         )
     }
 }
@@ -991,6 +998,7 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
     let (error_type, error_message) = bounded_upstream_error(value);
     Some(CanonicalUpstreamError {
         error_type: Some(error_type?),
+        error_code: None,
         error_message: Some(error_message?),
         retry_after: None,
     })
@@ -1014,6 +1022,11 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
 /// caller keeps its bounded raw-body fallback.
 pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstreamError> {
     let error_obj = value.get("error")?;
+    let error_code = error_obj
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|candidate| !candidate.is_empty())
+        .and_then(BoundedErrorCode::parse);
     let error_type = ["type", "code", "status"]
         .iter()
         .filter_map(|key| error_obj.get(*key).and_then(Value::as_str))
@@ -1053,11 +1066,16 @@ pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstrea
                 .map(ToOwned::to_owned)
             })
         });
-    if error_type.is_none() && error_message.is_none() && retry_after.is_none() {
+    if error_type.is_none()
+        && error_message.is_none()
+        && error_code.is_none()
+        && retry_after.is_none()
+    {
         return None;
     }
     Some(CanonicalUpstreamError {
         error_type,
+        error_code,
         error_message,
         retry_after,
     })
@@ -1134,8 +1152,14 @@ fn detect_mid_stream_error_with(
         value
     };
     let (mut error_type, error_message) = bounded_upstream_error(error_source);
+    let error_obj = error_source.get("error").unwrap_or(error_source);
+    let error_code = error_obj
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|candidate| !candidate.is_empty())
+        .and_then(BoundedErrorCode::parse)
+        .map(|code| scrub_string(signer, code.into_string()));
     if error_type.is_none() {
-        let error_obj = error_source.get("error").unwrap_or(error_source);
         let candidate_keys: &[&str] = if is_response_failed || nested_response_error.is_some() {
             &["code", "status"]
         } else {
@@ -1153,6 +1177,7 @@ fn detect_mid_stream_error_with(
     Some(UpstreamStreamError {
         error_type: error_type.map(|error_type| scrub_string(signer, error_type.into_string())),
         error_message: error_message.map(|message| message.finish(signer)),
+        upstream_error_code: error_code,
     })
 }
 
@@ -2922,7 +2947,7 @@ mod tests {
         // Then
         assert_eq!(
             error.into_parts_with(None),
-            (None, Some("bare upstream message".to_owned()))
+            (None, Some("bare upstream message".to_owned()), None)
         );
     }
 
@@ -2947,9 +2972,27 @@ mod tests {
             let error = observe_http_error_body(body).expect("type preserved");
             assert_eq!(
                 error.into_parts_with(None),
-                (Some(error_type.to_owned()), None),
+                (
+                    Some(error_type.to_owned()),
+                    None,
+                    (error_type == "rate_limit_exceeded").then(|| error_type.to_owned()),
+                ),
             );
         }
+    }
+
+    #[test]
+    fn http_error_body_preserves_provider_code_alongside_type() {
+        let body = br#"{"error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"quota exhausted"}}"#;
+        let error = observe_http_error_body(body).expect("structured provider error");
+        assert_eq!(
+            error.into_parts_with(None),
+            (
+                Some("insufficient_quota".to_owned()),
+                Some("quota exhausted".to_owned()),
+                Some("credit_balance_exhausted".to_owned()),
+            )
+        );
     }
 
     #[test]
@@ -3444,7 +3487,8 @@ mod tests {
             error.into_parts_with(None),
             (
                 Some("invalid_request_error".to_owned()),
-                Some("bad request".to_owned())
+                Some("bad request".to_owned()),
+                Some("invalid_prompt".to_owned())
             )
         );
     }
@@ -3469,7 +3513,8 @@ mod tests {
             error.into_parts_with(None),
             (
                 Some("server_error".to_owned()),
-                Some("the model failed before completion".to_owned())
+                Some("the model failed before completion".to_owned()),
+                Some("server_error".to_owned())
             )
         );
     }
@@ -3485,7 +3530,8 @@ mod tests {
             error.into_parts_with(None),
             (
                 Some("RESOURCE_EXHAUSTED".to_owned()),
-                Some("quota exceeded".to_owned())
+                Some("quota exceeded".to_owned()),
+                None
             )
         );
     }

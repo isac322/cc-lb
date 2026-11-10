@@ -179,6 +179,7 @@ struct Partial {
     stream_success: Option<u64>,
     stream_error_type: Option<String>,
     stream_error_message: Option<String>,
+    stream_error_code: Option<String>,
     upstream_stream_diagnostics: Option<UpstreamStreamDiagnostics>,
     cost: Option<LifecycleCostBreakdown>,
     cache_state: Option<RequestCacheState>,
@@ -1406,7 +1407,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             Err(error) => {
                 partial.stream_error_type = Some(error.error_type);
                 partial.stream_error_message = Some(error.error_message);
-                // Preserve provider-neutral fields collected before an
+                partial.stream_error_code = error.upstream_error_code;
                 // abnormal termination. Do not replace an earlier value with
                 // an empty error payload.
                 partial.stream_body_bytes = partial.stream_body_bytes.or(error.body_bytes);
@@ -1432,6 +1433,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::RequestLogUpstreamErrorObserved {
             error_type,
             error_message,
+            upstream_error_code,
             ..
         } => {
             if !error_type.is_empty() {
@@ -1440,6 +1442,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             } else if partial.stream_error_message.is_none() {
                 partial.stream_error_message = Some(error_message);
             }
+            partial.stream_error_code = upstream_error_code;
         }
         LifecycleEvent::UpstreamStreamDiagnosticsObserved { diagnostics, .. } => {
             partial.upstream_stream_diagnostics = Some(diagnostics);
@@ -1582,10 +1585,11 @@ fn finalize_base(
         upstream_name,
         model,
         status: client_status,
-        duration_ms,
         error_code,
+        duration_ms,
         upstream_error_type: partial.stream_error_type.clone(),
         upstream_error_message: partial.stream_error_message.clone(),
+        upstream_error_code: partial.stream_error_code.clone(),
         upstream_http_version: diagnostics.and_then(|d| d.http_version.clone()),
         upstream_request_id: diagnostics.and_then(|d| d.request_id.clone()),
         upstream_content_encoding: diagnostics.and_then(|d| d.content_encoding.clone()),
@@ -2065,6 +2069,7 @@ mod tests {
                 result: Err(StreamError {
                     error_type: "client_closed_request".to_owned(),
                     error_message: "downstream disconnected".to_owned(),
+                    upstream_error_code: None,
                     body_bytes: Some(123),
                     body_chunk_count: Some(7),
                     first_body_chunk_ms: Some(12),
@@ -2842,8 +2847,9 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: event_id.clone(),
-            error_type: "rate_limit_error".into(),
-            error_message: "bounded".into(),
+            error_type: "insufficient_quota".into(),
+            error_message: "quota exhausted".into(),
+            upstream_error_code: Some("credit_balance_exhausted".into()),
             retry_after: None,
         })
         .await
@@ -2878,9 +2884,16 @@ mod tests {
         assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
         assert_eq!(
             rows[0].upstream_error_type.as_deref(),
-            Some("rate_limit_error")
+            Some("insufficient_quota")
         );
-        assert_eq!(rows[0].upstream_error_message.as_deref(), Some("bounded"));
+        assert_eq!(
+            rows[0].upstream_error_message.as_deref(),
+            Some("quota exhausted")
+        );
+        assert_eq!(
+            rows[0].upstream_error_code.as_deref(),
+            Some("credit_balance_exhausted")
+        );
     }
 
     fn diagnostics_terminated(

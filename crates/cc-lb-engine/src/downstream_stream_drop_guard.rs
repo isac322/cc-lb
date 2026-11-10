@@ -279,6 +279,7 @@ impl DownstreamStreamDropGuard {
                 event_id: observer.event_id().to_owned(),
                 error_type,
                 error_message,
+                upstream_error_code: None,
                 retry_after: None,
             },
         );
