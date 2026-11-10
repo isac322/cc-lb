@@ -4,19 +4,14 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
   within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CacheKeepaliveRow } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
 import * as visibilityManager from '../../../../lib/visibilityManager';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
-import {
-  CacheKeepaliveSessionsDrawer,
-  extractTriggerLabel,
-} from '../CacheKeepaliveSessionsDrawer';
+import { CacheKeepaliveSessionsDrawer } from '../CacheKeepaliveSessionsDrawer';
 
 const mockPrincipal: queries.Principal = {
   id: 'p-123',
@@ -67,34 +62,6 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
-describe('extractTriggerLabel', () => {
-  const notTracked = (reason: string, displayReason: string) =>
-    ({
-      id: 'blank-display-reason',
-      state: 'not_tracked',
-      reason,
-      display_reason: displayReason,
-    }) as unknown as CacheKeepaliveRow;
-
-  it('falls back to reason when the persisted display reason is blank', () => {
-    for (const blank of ['', '   ']) {
-      expect(
-        extractTriggerLabel(
-          notTracked(
-            'cached prefix too small (5000 tokens < minimum 10000)',
-            blank,
-          ),
-        ),
-      ).toBe('Prefix < min tokens');
-      expect(
-        extractTriggerLabel(
-          notTracked('agent-in-turn (tool_use: `Bash`) — first renewal', blank),
-        ),
-      ).toBe('Bash');
-    }
-  });
-});
-
 describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   afterEach(() => {
     cleanup();
@@ -114,6 +81,44 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
         pages: [
           {
             summary: summaryBase,
+            groups: [
+              {
+                key: 'Bash',
+                label: 'Bash',
+                kind: 'tool',
+                sessions: 1,
+                net_pnl: 0.102,
+                total_spent: 0.048,
+                total_avoided: 0.12,
+              },
+              {
+                key: 'Edit',
+                label: 'Edit',
+                kind: 'tool',
+                sessions: 1,
+                net_pnl: 0,
+                total_spent: 0,
+                total_avoided: 0.12,
+              },
+              {
+                key: 'Agent in-turn',
+                label: 'Agent in-turn',
+                kind: 'state',
+                sessions: 4,
+                net_pnl: 0.1512,
+                total_spent: 0.204,
+                total_avoided: 0.48,
+              },
+              {
+                key: 'stop_reason=end_turn',
+                label: 'stop_reason=end_turn',
+                kind: 'state',
+                sessions: 1,
+                net_pnl: 0,
+                total_spent: 0,
+                total_avoided: 0,
+              },
+            ],
             rows: cacheKeepaliveRows.map((r) => ({
               ...r,
               net_pnl: r.netPnl,
@@ -122,6 +127,9 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
               last_message_at_ms: 1_700_000_000_000,
               session_key_hash: r.id,
               retained_renewals: r.attempts ?? 0,
+              group_key: r.groupKey,
+              group_label: r.groupLabel,
+              group_kind: r.groupKind,
             })),
             next_cursor: null,
           },
@@ -306,11 +314,49 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       last_message_at_ms: 1_700_000_000_000,
       session_key_hash: r.id,
       retained_renewals: r.attempts ?? 0,
+      group_key: idx === 0 ? longTrigger : r.groupKey,
+      group_label: idx === 0 ? longTrigger : r.groupLabel,
+      group_kind: idx === 0 ? 'tool' : r.groupKind,
     }));
 
     vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
       data: {
-        pages: [{ summary: summaryBase, rows, next_cursor: null }],
+        pages: [
+          {
+            summary: summaryBase,
+            groups: [
+              {
+                key: longTrigger,
+                label: longTrigger,
+                kind: 'tool',
+                sessions: 1,
+                net_pnl: 0.102,
+                total_spent: 0.048,
+                total_avoided: 0.12,
+              },
+              {
+                key: 'Agent in-turn',
+                label: 'Agent in-turn',
+                kind: 'state',
+                sessions: 4,
+                net_pnl: 0.1512,
+                total_spent: 0.204,
+                total_avoided: 0.48,
+              },
+              {
+                key: 'stop_reason=end_turn',
+                label: 'stop_reason=end_turn',
+                kind: 'state',
+                sessions: 1,
+                net_pnl: 0,
+                total_spent: 0,
+                total_avoided: 0,
+              },
+            ],
+            rows,
+            next_cursor: null,
+          },
+        ],
       },
       isLoading: false,
       isError: false,
@@ -387,7 +433,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
 
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
   });
-  it('keeps principal-wide OpenAI rows and applies tracked filtering for both TTLs', () => {
+  it('keeps server-visible OpenAI rows without client-side filtering', () => {
     const rows = [
       {
         id: 'openai-30m',
@@ -453,7 +499,29 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     ];
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
-        pages: [{ summary: summaryBase, rows, next_cursor: null }],
+        pages: [
+          {
+            summary: summaryBase,
+            groups: [
+              {
+                key: 'Agent in-turn',
+                label: 'Agent in-turn',
+                kind: 'state',
+                sessions: 3,
+                net_pnl: null,
+                total_spent: 0,
+                total_avoided: null,
+              },
+            ],
+            rows: rows.map((row) => ({
+              ...row,
+              group_key: 'Agent in-turn',
+              group_label: 'Agent in-turn',
+              group_kind: 'state',
+            })),
+            next_cursor: null,
+          },
+        ],
       },
       isLoading: false,
       isError: false,
@@ -475,12 +543,12 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     );
     expect(queries.useCacheKeepaliveSessions).toHaveBeenCalledWith(
       'p-123',
-      { horizon: '24h', status: 'all' },
+      { horizon: '24h', status: 'visible' },
       true,
     );
     expect(screen.getByTitle('openai-30m')).toBeDefined();
     expect(screen.getByTitle('openai-12h')).toBeDefined();
-    expect(screen.queryByTitle('openai-5m-untracked')).toBeNull();
+    expect(screen.getByTitle('openai-5m-untracked')).toBeDefined();
 
     cleanup();
     renderWithProviders(
@@ -499,13 +567,25 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(screen.getByTitle('openai-12h')).toBeDefined();
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
   });
-  it('keeps paging when a page contains only hidden not-tracked rows', async () => {
+  it('loads the next page only after the explicit control is clicked', async () => {
+    const user = userEvent.setup();
     const fetchNextPage = vi.fn();
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
         pages: [
           {
             summary: summaryBase,
+            groups: [
+              {
+                key: 'Other',
+                label: 'Other',
+                kind: 'state',
+                sessions: 2,
+                net_pnl: null,
+                total_spent: 0,
+                total_avoided: null,
+              },
+            ],
             rows: [
               {
                 id: 'openai-5m-hidden',
@@ -524,6 +604,9 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
                 total_avoided: null,
                 evidence_status: 'none',
                 session_key_hash: 'openai-5m-hidden',
+                group_key: 'Other',
+                group_label: 'Other',
+                group_kind: 'state',
               },
             ],
             next_cursor: 'next-page',
@@ -545,7 +628,11 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       />,
     );
 
-    await waitFor(() => expect(fetchNextPage).toHaveBeenCalledOnce());
+    expect(fetchNextPage).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole('button', { name: /Load more sessions/i }),
+    );
+    expect(fetchNextPage).toHaveBeenCalledOnce();
   });
 });
 
@@ -627,4 +714,43 @@ it('shows an unknown deleted-session net when a deleted renewal has no known cos
   const deleted = screen.getByTestId('cache-keepalive-deleted-sessions');
   expect(deleted.textContent).not.toContain('−$0.01');
   expect(deleted.textContent).toContain('Spent $0.01');
+});
+
+it('seeds the 24h card summary cache in the list-response shape the card selects from', () => {
+  cleanup();
+  vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
+    data: {
+      pages: [
+        {
+          summary: { ...summaryBase, cost_saved: 7.5 },
+          groups: [],
+          rows: [],
+          next_cursor: null,
+        },
+      ],
+    },
+    isLoading: false,
+    isError: false,
+    hasNextPage: false,
+    isFetchingNextPage: false,
+    fetchNextPage: vi.fn(),
+  } as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />
+    </QueryClientProvider>,
+  );
+
+  const cached = queryClient.getQueryData<{ summary: { cost_saved: number } }>(
+    queries.qk.cacheKeepaliveSummary(mockPrincipal.id),
+  );
+  expect(cached?.summary.cost_saved).toBe(7.5);
 });

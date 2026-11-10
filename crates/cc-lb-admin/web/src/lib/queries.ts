@@ -65,6 +65,7 @@ import {
 } from './api';
 
 import {
+  type CacheKeepaliveDetail,
   type CacheKeepaliveHorizon,
   type CacheKeepaliveSessionsFilters,
   getCacheKeepaliveSessionDetail,
@@ -2139,10 +2140,13 @@ export function useCacheKeepaliveSessionDetail(
     refetchOnMount: (query) => !isMissing(query.state.error),
     refetchOnWindowFocus: (query) => !isMissing(query.state.error),
     refetchOnReconnect: (query) => !isMissing(query.state.error),
-    refetchInterval: (query) =>
-      isHidden || isMissing(query.state.error)
-        ? false
-        : POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+    refetchInterval: (query) => {
+      if (isHidden || isMissing(query.state.error)) return false;
+      const detail = query.state.data as CacheKeepaliveDetail | undefined;
+      return detail?.is_active === true || detail?.evidence_status === 'pending'
+        ? POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS
+        : false;
+    },
     queryFn: () =>
       getCacheKeepaliveSessionDetail(principalId, sessionId ?? '', horizon),
   });

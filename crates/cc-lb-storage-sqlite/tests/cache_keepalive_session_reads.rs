@@ -454,7 +454,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
             "renewed-session",
             "capped-session",
             "expired-session",
-            "max-duration-session"
+            "max-duration-session",
         ]
     );
     let decision = &page.rows[1];
@@ -524,6 +524,17 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         (
             CacheKeepaliveSessionFilter::Error,
             vec!["not-tracked-decision"],
+        ),
+        (
+            CacheKeepaliveSessionFilter::Visible,
+            vec![
+                "scheduled-session",
+                "not-tracked-decision",
+                "renewed-session",
+                "capped-session",
+                "expired-session",
+                "max-duration-session",
+            ],
         ),
     ] {
         let filtered = storage

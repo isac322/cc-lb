@@ -303,6 +303,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         let include_decisions = matches!(
             query.filter,
             CacheKeepaliveSessionFilter::All
+                | CacheKeepaliveSessionFilter::Visible
                 | CacheKeepaliveSessionFilter::NotTracked
                 | CacheKeepaliveSessionFilter::Error
         );
@@ -1205,6 +1206,11 @@ fn push_session_branch(
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
+        CacheKeepaliveSessionFilter::Visible => {
+            builder.push(" AND (NOT ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
+            builder.push(" OR error IS NOT NULL OR ttl = '12h')");
+        }
         CacheKeepaliveSessionFilter::Tracked => {
             builder.push(" AND NOT ");
             builder.push(ZERO_TURN_CANCELLED_SQL);
@@ -1281,6 +1287,9 @@ fn push_decision_branch(
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All => {}
+        CacheKeepaliveSessionFilter::Visible => {
+            builder.push(" AND (error IS NOT NULL OR ttl = '12h')");
+        }
         CacheKeepaliveSessionFilter::NotTracked => {
             builder.push(" AND decision = 'not_tracked'");
         }

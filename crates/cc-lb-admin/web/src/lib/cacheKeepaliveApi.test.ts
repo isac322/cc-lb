@@ -391,9 +391,10 @@ describe('cache keepalive filter enums', () => {
     expect(CacheKeepaliveHorizonSchema.safeParse('banana').success).toBe(false);
   });
 
-  it('accepts all, tracked, every base state, and error as status filters', () => {
+  it('accepts all, visible, tracked, every base state, and error as status filters', () => {
     for (const status of [
       'all',
+      'visible',
       'tracked',
       'renewed',
       'scheduled',

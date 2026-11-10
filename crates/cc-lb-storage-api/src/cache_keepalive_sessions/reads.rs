@@ -21,6 +21,7 @@ pub struct CacheKeepaliveConfigSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum CacheKeepaliveSessionFilter {
     All,
+    Visible,
     Renewed,
     Scheduled,
     Tracked,
@@ -36,6 +37,7 @@ impl CacheKeepaliveSessionFilter {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
+            Self::Visible => "visible",
             Self::Renewed => "renewed",
             Self::Scheduled => "scheduled",
             Self::Tracked => "tracked",

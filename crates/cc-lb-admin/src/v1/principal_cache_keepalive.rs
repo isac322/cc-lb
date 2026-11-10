@@ -15,7 +15,7 @@ use self::{
     query::{parse_horizon, parse_query},
     view::{
         CacheKeepaliveViewContext, FIVE_MINUTES_MS, detail_for_item, list_upstream_names,
-        load_activity_batch, row_for_item,
+        load_activity_batch,
     },
 };
 use crate::AdminState;
@@ -76,6 +76,7 @@ async fn list_cache_keepalive(
         max_attempts,
         horizon_start_ms: query.storage.horizon_start_ms,
     };
+    let cursor_page = query.storage.cursor.is_some();
     let page = if query.limit == 0 {
         None
     } else {
@@ -86,18 +87,105 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         }
     };
-    let aggregate =
-        match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate_for_horizon(
-            storage,
-            &principal_id,
-            now_ms.saturating_sub(FIVE_MINUTES_MS),
-            query.storage.horizon_start_ms,
-        )
-        .await
-        {
-            Ok(aggregate) => aggregate,
+    let summary = if cursor_page {
+        None
+    } else {
+        let aggregate =
+            match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate_for_horizon(
+                storage,
+                &principal_id,
+                now_ms.saturating_sub(FIVE_MINUTES_MS),
+                query.storage.horizon_start_ms,
+            )
+            .await
+            {
+                Ok(aggregate) => aggregate,
+                Err(error) => return storage_error(error),
+            };
+        Some(summary_from_aggregate(aggregate))
+    };
+    let Some(page) = page else {
+        return Json(view::CacheKeepaliveListResponse {
+            summary,
+            groups: None,
+            rows: Vec::new(),
+            next_cursor: None,
+        })
+        .into_response();
+    };
+
+    let first_page_len = page.rows.len();
+    let mut all_items = page.rows;
+    let mut cursor = page.next_cursor.clone();
+    if !cursor_page {
+        while let Some(next_cursor) = cursor {
+            let mut all_query = query.storage.clone();
+            all_query.cursor = Some(next_cursor);
+            all_query.limit = 100;
+            let next_page = match CacheKeepaliveSessionReadStore::list_cache_keepalive_sessions(
+                storage, &all_query,
+            )
+            .await
+            {
+                Ok(page) => page,
+                Err(error) => return storage_error(error),
+            };
+            all_items.extend(next_page.rows);
+            cursor = next_page.next_cursor;
+        }
+    }
+    let activity_batch = match load_activity_batch(storage, &principal_id, all_items.iter()).await {
+        Ok(batch) => batch,
+        Err(error) => return storage_error(error),
+    };
+    let upstream_names = match list_upstream_names(storage, &all_items).await {
+        Ok(upstream_names) => upstream_names,
+        Err(error) => return storage_error(error),
+    };
+    let mut all_rows = Vec::with_capacity(all_items.len());
+    for item in &all_items {
+        let activity = match view::activity_for_item(
+            context.catalog,
+            context.now_ms,
+            item,
+            None,
+            &activity_batch,
+            context.horizon_start_ms,
+        ) {
+            Ok(activity) => activity,
             Err(error) => return storage_error(error),
         };
+        match view::row_from_activity(
+            context.max_attempts,
+            item,
+            &activity,
+            upstream_names.get(&item.upstream_id).cloned(),
+        ) {
+            Ok(row) => all_rows.push(row),
+            Err(error) => return storage_error(error),
+        }
+    }
+    let groups = (!cursor_page).then(|| groups_from_rows(&all_rows));
+    all_rows.truncate(first_page_len);
+    let next_cursor = match page.next_cursor {
+        Some(cursor) => match query::encode_cursor(&cursor, query.horizon) {
+            Ok(cursor) => Some(cursor),
+            Err(error) => return error.into_response(),
+        },
+        None => None,
+    };
+    Json(view::CacheKeepaliveListResponse {
+        summary,
+        groups,
+        rows: all_rows,
+        next_cursor,
+    })
+    .into_response()
+}
+
+fn summary_from_aggregate(
+    aggregate: cc_lb_storage_api::CacheKeepaliveSummaryAggregate,
+) -> view::CacheKeepaliveSummaryResponse {
     let mut avoided_micros = 0_i64;
     let mut pricing_complete = aggregate.unknown_costs == 0;
     for group in &aggregate.groups {
@@ -109,8 +197,6 @@ async fn list_cache_keepalive(
             pricing_complete = false;
             continue;
         };
-        // Every renewal in a group read the same token count; price one renewal
-        // and multiply so the header rounds exactly like the per-row sum.
         let per_renewal_tokens = group
             .avoided_cache_read_tokens
             .checked_div(group.renewals)
@@ -124,7 +210,7 @@ async fn list_cache_keepalive(
     let cost_saved = pricing_complete.then(|| {
         (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
     });
-    let summary = view::CacheKeepaliveSummaryResponse {
+    view::CacheKeepaliveSummaryResponse {
         renewing_now: aggregate.renewing_now,
         sessions_last_5m: aggregate.sessions_last_5m,
         retained_successful_hits: aggregate.successful_hits,
@@ -139,43 +225,70 @@ async fn list_cache_keepalive(
         evidence_status: aggregate.evidence_status,
         unknown_cycles: aggregate.unknown_cycles,
         retained_from_ms: aggregate.retained_from_ms,
-    };
-    let Some(page) = page else {
-        return Json(view::CacheKeepaliveListResponse {
-            summary,
-            rows: Vec::new(),
-            next_cursor: None,
-        })
-        .into_response();
-    };
-    let activity_batch = match load_activity_batch(storage, &principal_id, page.rows.iter()).await {
-        Ok(batch) => batch,
-        Err(error) => return storage_error(error),
-    };
-    let upstream_names = match list_upstream_names(storage, &page.rows).await {
-        Ok(upstream_names) => upstream_names,
-        Err(error) => return storage_error(error),
-    };
-    let mut rows = Vec::with_capacity(page.rows.len());
-    for item in &page.rows {
-        match row_for_item(&context, item, &activity_batch, &upstream_names) {
-            Ok(row) => rows.push(row),
-            Err(error) => return storage_error(error),
-        }
     }
-    let next_cursor = match page.next_cursor {
-        Some(cursor) => match query::encode_cursor(&cursor, query.horizon) {
-            Ok(cursor) => Some(cursor),
-            Err(error) => return error.into_response(),
-        },
-        None => None,
-    };
-    Json(view::CacheKeepaliveListResponse {
-        summary,
-        rows,
-        next_cursor,
-    })
-    .into_response()
+}
+
+const TRIGGER_ORDER: [&str; 6] = ["Bash", "Write", "Edit", "Read", "_advise", "Agent in-turn"];
+
+fn groups_from_rows(
+    rows: &[view::CacheKeepaliveRowResponse],
+) -> Vec<view::CacheKeepaliveGroupResponse> {
+    struct Totals {
+        key: String,
+        label: String,
+        kind: &'static str,
+        sessions: u64,
+        net_pnl: Option<f64>,
+        total_spent: f64,
+        total_avoided: Option<f64>,
+    }
+    let mut groups = Vec::<Totals>::new();
+    for row in rows {
+        let Some(group) = groups.iter_mut().find(|group| group.key == row.group_key) else {
+            groups.push(Totals {
+                key: row.group_key.clone(),
+                label: row.group_label.clone(),
+                kind: row.group_kind,
+                sessions: 1,
+                net_pnl: row.net_pnl,
+                total_spent: row.total_spent,
+                total_avoided: row.total_avoided,
+            });
+            continue;
+        };
+        group.sessions = group.sessions.saturating_add(1);
+        if row.group_kind == "tool" {
+            group.kind = "tool";
+        }
+        group.net_pnl = match (group.net_pnl, row.net_pnl) {
+            (Some(left), Some(right)) => Some(left + right),
+            _ => None,
+        };
+        group.total_spent += row.total_spent;
+        group.total_avoided = match (group.total_avoided, row.total_avoided) {
+            (Some(left), Some(right)) => Some(left + right),
+            _ => None,
+        };
+    }
+    groups.sort_by_key(|group| {
+        TRIGGER_ORDER
+            .iter()
+            .position(|known| known.eq_ignore_ascii_case(&group.label))
+            .unwrap_or(usize::MAX)
+    });
+    // Stable sort above preserves first appearance for all non-canonical labels.
+    groups
+        .into_iter()
+        .map(|group| view::CacheKeepaliveGroupResponse {
+            key: group.key,
+            label: group.label,
+            kind: group.kind,
+            sessions: group.sessions,
+            net_pnl: group.net_pnl,
+            total_spent: group.total_spent,
+            total_avoided: group.total_avoided,
+        })
+        .collect()
 }
 
 async fn get_cache_keepalive_detail(

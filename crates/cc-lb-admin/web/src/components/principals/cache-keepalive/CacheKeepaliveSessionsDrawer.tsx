@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import {
   ChevronDown,
   ChevronRight,
@@ -12,6 +13,7 @@ import type {
 } from '../../../lib/cacheKeepaliveApi';
 import {
   type Principal,
+  qk,
   useCacheKeepaliveSessions,
 } from '../../../lib/queries';
 import {
@@ -43,87 +45,6 @@ const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
   { value: '7d', label: '7d' },
   { value: 'all', label: 'All' },
 ];
-
-const TRIGGER_ORDER = [
-  'Bash',
-  'Write',
-  'Edit',
-  'Read',
-  '_advise',
-  'Agent in-turn',
-] as const;
-
-function normalizeToolTrigger(raw: string): string {
-  const trimmed = raw.trim();
-  const lower = trimmed.toLowerCase();
-  if (lower === 'bash') return 'Bash';
-  if (lower === 'write' || lower === 'write_file') return 'Write';
-  if (lower === 'edit' || lower === 'edit_file') return 'Edit';
-  if (lower === 'read' || lower === 'read_file') return 'Read';
-  const match = TRIGGER_ORDER.find((known) => known.toLowerCase() === lower);
-  return match ?? trimmed;
-}
-
-type TriggerKind = 'tool' | 'state';
-
-function extractTriggerDescriptor(row: CacheKeepaliveRow): {
-  label: string;
-  kind: TriggerKind;
-} {
-  // Rows written before display reasons existed store '' rather than null.
-  const displayReason = row.display_reason?.trim() ? row.display_reason : null;
-  const sourceText =
-    displayReason && displayReason !== row.reason
-      ? `${displayReason} · ${row.reason}`
-      : (displayReason ?? row.reason);
-  const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
-  if (backtickToolMatch?.[1]) {
-    return {
-      label: normalizeToolTrigger(backtickToolMatch[1]),
-      kind: 'tool',
-    };
-  }
-  const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
-  if (toolMatch?.[1]) {
-    return {
-      label: normalizeToolTrigger(toolMatch[1]),
-      kind: 'tool',
-    };
-  }
-  const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
-  if (stopMatch?.[1]) {
-    return { label: `stop_reason=${stopMatch[1]}`, kind: 'state' };
-  }
-  const unsupportedMatch = sourceText.match(
-    /zero-token renewal unsupported:\s*([^—·\n]+)/i,
-  );
-  if (unsupportedMatch?.[1]) {
-    return {
-      label: `Unsupported: ${unsupportedMatch[1].trim()}`,
-      kind: 'state',
-    };
-  }
-  if (/cached prefix too small/i.test(sourceText)) {
-    return { label: 'Prefix < min tokens', kind: 'state' };
-  }
-  if (/snapshot too large/i.test(sourceText)) {
-    return { label: 'Snapshot too large', kind: 'state' };
-  }
-  if (/ambiguous turn/i.test(sourceText)) {
-    return { label: 'Ambiguous turn', kind: 'state' };
-  }
-  if (/agent-in-turn/i.test(sourceText)) {
-    return { label: 'Agent in-turn', kind: 'state' };
-  }
-  if (row.state !== 'not_tracked') {
-    return { label: 'Agent in-turn', kind: 'state' };
-  }
-  return { label: 'Other', kind: 'state' };
-}
-
-export function extractTriggerLabel(row: CacheKeepaliveRow): string {
-  return extractTriggerDescriptor(row).label;
-}
 
 export interface SplitUsdParts {
   intPart: string;
@@ -436,6 +357,7 @@ export function CacheKeepaliveSessionsDrawer({
   onOpenChange,
   principal,
 }: Props) {
+  const queryClient = useQueryClient();
   const [collapsedTriggers, setCollapsedTriggers] = useState<
     Record<string, boolean>
   >({});
@@ -462,109 +384,88 @@ export function CacheKeepaliveSessionsDrawer({
     principal.id,
     {
       horizon,
-      status: 'all',
+      status: 'visible',
     },
     open,
   );
 
-  const allRows = useMemo(
+  const groups = query.data?.pages[0]?.groups ?? [];
+  const loadedRows = useMemo(
     () =>
       mergeLiveSessions(
         query.data?.pages.flatMap((page) => page.rows ?? []) ?? [],
       ),
     [query.data],
   );
-  const visibleRows = useMemo(
-    () =>
-      allRows.filter(
-        (row) =>
-          !enabled ||
-          row.state !== 'not_tracked' ||
-          row.error != null ||
-          row.ttl === '12h',
-      ),
-    [allRows, enabled],
-  );
-
-  useEffect(() => {
-    if (open && query.hasNextPage && !query.isFetchingNextPage) {
-      void query.fetchNextPage();
+  const loadedRowsByGroup = useMemo(() => {
+    const byGroup = new Map<string, CacheKeepaliveRow[]>();
+    for (const row of loadedRows) {
+      const rows = byGroup.get(row.group_key) ?? [];
+      rows.push(row);
+      byGroup.set(row.group_key, rows);
     }
-  }, [open, query.fetchNextPage, query.hasNextPage, query.isFetchingNextPage]);
+    return byGroup;
+  }, [loadedRows]);
 
   const pagesComplete =
     !query.isLoading && !query.hasNextPage && !query.isFetchingNextPage;
 
-  const groups = useMemo(() => {
-    const grouped = new Map<
-      string,
-      { sessions: CacheKeepaliveRow[]; kind: TriggerKind }
-    >();
-    for (const row of visibleRows) {
-      const { label: trigger, kind } = extractTriggerDescriptor(row);
-      const current = grouped.get(trigger) ?? { sessions: [], kind: 'state' };
-      current.sessions.push(row);
-      if (kind === 'tool') current.kind = 'tool';
-      grouped.set(trigger, current);
+  useEffect(() => {
+    const overviewSummary = query.data?.pages[0]?.summary;
+    if (open && horizon === '24h' && overviewSummary) {
+      // The summary query stores the list response and selects `.summary`.
+      queryClient.setQueryData(qk.cacheKeepaliveSummary(principal.id), {
+        summary: overviewSummary,
+        groups: null,
+        rows: [],
+        next_cursor: null,
+      });
     }
-    const orderedTriggers = [
-      ...TRIGGER_ORDER,
-      ...Array.from(grouped.keys()).filter(
-        (t) =>
-          !TRIGGER_ORDER.some(
-            (known) => known.toLowerCase() === t.toLowerCase(),
-          ),
-      ),
-    ];
-    return orderedTriggers
-      .map((trigger) => {
-        const group = grouped.get(trigger);
-        const sessions = group?.sessions ?? [];
-        const groupNet =
-          pagesComplete && sessions.every((session) => session.net_pnl !== null)
-            ? sessions.reduce((acc, session) => acc + (session.net_pnl ?? 0), 0)
-            : null;
-        return { trigger, kind: group?.kind ?? 'state', sessions, groupNet };
-      })
-      .filter((group) => group.sessions.length > 0);
-  }, [pagesComplete, visibleRows]);
+  }, [horizon, open, principal.id, query.data, queryClient]);
 
-  // 1. Group titles align their '.' with each other across all groups.
+  // Group totals come from the overview response, not from the loaded page subset.
   const maxGroupFracDigits = useMemo(
     () =>
-      groups.reduce((max, g) => {
+      groups.reduce((max, group) => {
         const { fracDigits } = splitUsdNoTrailingZeros(
-          g.groupNet,
-          g.groupNet !== null && Math.abs(g.groupNet) >= 0.00005,
+          group.net_pnl,
+          group.net_pnl !== null && Math.abs(group.net_pnl) >= 0.00005,
         );
         return Math.max(max, fracDigits.length);
       }, 0),
     [groups],
   );
 
-  // 2. Session items align their '.' with each other across all groups.
   const maxItemFracDigits = useMemo(
     () =>
-      visibleRows.reduce((max, s) => {
+      loadedRows.reduce((max, row) => {
         const { fracDigits } = splitUsdNoTrailingZeros(
-          s.net_pnl,
-          s.net_pnl !== null && Math.abs(s.net_pnl) >= 0.00005,
+          row.net_pnl,
+          row.net_pnl !== null && Math.abs(row.net_pnl) >= 0.00005,
         );
         return Math.max(max, fracDigits.length);
       }, 0),
-    [visibleRows],
+    [loadedRows],
   );
 
-  const selectedSession = allRows.find((s) => s.id === selectedSessionId);
   const hasSelection = selectedSessionId !== null;
+  // A selected row can sit on a page that is not loaded. Only claim it left
+  // the list once every page is loaded and it is still absent.
   const selectedSessionHidden =
     hasSelection &&
-    (selectedSession === undefined ||
-      !visibleRows.some((row) => row.id === selectedSession.id));
-  const desktopSession =
-    selectedSession ?? (hasSelection ? null : (visibleRows[0] ?? null));
+    pagesComplete &&
+    !loadedRows.some((row) => row.id === selectedSessionId);
+  const desktopSessionId = hasSelection
+    ? selectedSessionHidden
+      ? null
+      : selectedSessionId
+    : (loadedRows[0]?.id ?? null);
   const showMobileDetail = hasSelection;
-  const summary = query.data?.pages[0]?.summary;
+  const summary = query.data?.pages[0]?.summary ?? undefined;
+  const totalSessions = groups.reduce(
+    (total, group) => total + group.sessions,
+    0,
+  );
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) setSelectedSessionId(null);
@@ -646,11 +547,10 @@ export function CacheKeepaliveSessionsDrawer({
               </Button>
             </div>
           ) : !enabled &&
-            visibleRows.length === 0 &&
+            groups.length === 0 &&
             (summary?.unlisted_sessions ?? 0) === 0 ? (
             <EmptyState title="No sessions recorded" />
-          ) : visibleRows.length === 0 &&
-            (summary?.unlisted_sessions ?? 0) === 0 ? (
+          ) : groups.length === 0 && (summary?.unlisted_sessions ?? 0) === 0 ? (
             <EmptyState
               title="No sessions"
               description="No sessions recorded in this horizon."
@@ -665,11 +565,13 @@ export function CacheKeepaliveSessionsDrawer({
                 )}
               >
                 {groups.map((group) => {
-                  const isCollapsed = collapsedTriggers[group.trigger] ?? false;
+                  const loadedGroupRows =
+                    loadedRowsByGroup.get(group.key) ?? [];
+                  const isCollapsed = collapsedTriggers[group.key] ?? false;
                   return (
                     <div
-                      key={group.trigger}
-                      data-trigger-group={group.trigger}
+                      key={group.key}
+                      data-trigger-group={group.key}
                       className="py-1.5 first:pt-0 last:pb-0"
                     >
                       <button
@@ -678,7 +580,7 @@ export function CacheKeepaliveSessionsDrawer({
                         onClick={() =>
                           setCollapsedTriggers((prev) => ({
                             ...prev,
-                            [group.trigger]: !prev[group.trigger],
+                            [group.key]: !prev[group.key],
                           }))
                         }
                         className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1 text-left transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:outline-accent"
@@ -705,10 +607,10 @@ export function CacheKeepaliveSessionsDrawer({
                                 className="h-3.5 w-3.5 shrink-0 text-text-faint"
                               />
                               <span
-                                title={group.trigger}
+                                title={group.label}
                                 className="min-w-0 truncate rounded-sm bg-overlay-4 px-1.5 py-0.5 font-mono text-data text-text"
                               >
-                                {group.trigger}
+                                {group.label}
                               </span>
                             </>
                           ) : (
@@ -719,22 +621,22 @@ export function CacheKeepaliveSessionsDrawer({
                                 className="h-3.5 w-3.5 shrink-0 text-text-faint"
                               />
                               <span
-                                title={group.trigger}
+                                title={group.label}
                                 className="min-w-0 truncate text-label text-text-muted"
                               >
-                                {group.trigger}
+                                {group.label}
                               </span>
                             </>
                           )}
                           <span className="shrink-0 text-caption text-text-faint tabular-nums">
-                            ({group.sessions.length})
+                            ({group.sessions})
                           </span>
                         </span>
                         <DecimalAlignedUsd
-                          value={group.groupNet}
+                          value={group.net_pnl}
                           signed={
-                            group.groupNet !== null &&
-                            Math.abs(group.groupNet) >= 0.00005
+                            group.net_pnl !== null &&
+                            Math.abs(group.net_pnl) >= 0.00005
                           }
                           maxFracDigits={maxGroupFracDigits}
                           scope="group"
@@ -743,11 +645,11 @@ export function CacheKeepaliveSessionsDrawer({
 
                       {!isCollapsed ? (
                         <div className="mt-0.5 space-y-0.5">
-                          {group.sessions.map((row) => (
+                          {loadedGroupRows.map((row) => (
                             <SessionMasterRow
                               key={row.id}
                               row={row}
-                              selected={row.id === desktopSession?.id}
+                              selected={row.id === desktopSessionId}
                               maxItemFracDigits={maxItemFracDigits}
                               onSelect={() => setSelectedSessionId(row.id)}
                             />
@@ -762,6 +664,37 @@ export function CacheKeepaliveSessionsDrawer({
                     summary={summary}
                     maxFracDigits={maxGroupFracDigits}
                   />
+                ) : null}
+                {query.isFetchingNextPage ? (
+                  <p
+                    className="px-2 py-2 text-caption text-text-muted"
+                    data-testid="cache-keepalive-loading-sessions"
+                  >
+                    Loading sessions… ({loadedRows.length} loaded)
+                  </p>
+                ) : query.hasNextPage ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-2">
+                    <p
+                      className="text-caption text-text-muted"
+                      data-testid="cache-keepalive-session-count"
+                    >
+                      {loadedRows.length} of {totalSessions} sessions shown
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void query.fetchNextPage()}
+                    >
+                      Load more sessions
+                    </Button>
+                  </div>
+                ) : pagesComplete ? (
+                  <p
+                    className="px-2 py-2 text-caption text-text-muted"
+                    data-testid="cache-keepalive-all-sessions"
+                  >
+                    All {totalSessions} sessions shown
+                  </p>
                 ) : null}
               </div>
 
@@ -788,10 +721,10 @@ export function CacheKeepaliveSessionsDrawer({
                       Back to sessions
                     </Button>
                   </div>
-                ) : desktopSession ? (
+                ) : desktopSessionId ? (
                   <SessionDetailPane
                     principalId={principal.id}
-                    sessionId={desktopSession.id}
+                    sessionId={desktopSessionId}
                     horizon={horizon}
                     onClose={() => setSelectedSessionId(null)}
                   />
@@ -799,21 +732,6 @@ export function CacheKeepaliveSessionsDrawer({
               </div>
             </div>
           )}
-          {query.isFetchingNextPage ? (
-            <p
-              className="border-t border-subtle px-4 py-2 text-caption text-text-muted"
-              data-testid="cache-keepalive-loading-sessions"
-            >
-              Loading sessions… ({allRows.length} loaded)
-            </p>
-          ) : pagesComplete ? (
-            <p
-              className="border-t border-subtle px-4 py-2 text-caption text-text-muted"
-              data-testid="cache-keepalive-all-sessions"
-            >
-              All {visibleRows.length} sessions shown
-            </p>
-          ) : null}
         </div>
       </div>
     </Drawer>

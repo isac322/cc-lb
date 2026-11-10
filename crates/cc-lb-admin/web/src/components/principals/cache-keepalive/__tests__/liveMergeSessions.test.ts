@@ -23,6 +23,9 @@ describe('mergeLiveSessions', () => {
     total_avoided: null,
     evidence_status: 'none',
     session_key_hash: 'hash',
+    group_key: 'test',
+    group_label: 'test',
+    group_kind: 'state',
   });
 
   it('Given empty input, When merged, Then returns empty array', () => {
