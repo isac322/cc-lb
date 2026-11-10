@@ -153,12 +153,34 @@ pub(crate) async fn count_tokens(
     with_resolved_workspace(response, &policy, &headers)
 }
 
+pub(crate) async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    _body: Bytes,
+) -> Response {
+    if let Some(response) = auth_failure(&state, &headers) {
+        return response;
+    }
+    json_response(
+        StatusCode::OK,
+        json!({
+            "id": "chatcmpl_fake",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }),
+    )
+}
+
 pub(crate) async fn list_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(response) = auth_failure(&state, &headers) {
         return response;
+    }
+    if headers.get("authorization").is_some() {
+        return openai_models_page();
     }
     let Some(policy) = policy_for(&state, &headers) else {
         return models_page();
@@ -168,6 +190,10 @@ pub(crate) async fn list_models(
     }
     let response = serve(&policy.models, models_page).await;
     with_resolved_workspace(response, &policy, &headers)
+}
+
+fn openai_models_page() -> Response {
+    json_response(StatusCode::OK, json!({"data": [model_json("gpt-test")]}))
 }
 
 fn models_page() -> Response {

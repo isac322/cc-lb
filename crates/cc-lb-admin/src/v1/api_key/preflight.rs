@@ -857,10 +857,13 @@ impl KeyCheck {
             .collect()
     }
 
-    /// `checked_at` of a check that found usage reports readable; such a
-    /// check enqueues an immediate usage poll.
+    /// `checked_at` of a successful organization or provider-native check;
+    /// such a check enqueues an immediate usage poll.
     pub(crate) fn usage_reported_at(&self) -> Option<u64> {
-        (self.access.usage_report_state == Some(ApiKeyOrgCapability::Ok))
+        let successful = self.access.provider == Some(Provider::Openai)
+            && self.verdict == Some(PreflightVerdict::Ok)
+            || self.access.usage_report_state == Some(ApiKeyOrgCapability::Ok);
+        successful
             .then_some(self.access.checked_at_unix_secs)
             .flatten()
     }

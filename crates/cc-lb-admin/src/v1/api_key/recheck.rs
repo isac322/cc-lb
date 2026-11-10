@@ -19,8 +19,8 @@ use cc_lb_control::anthropic_api_key::{
     wire::PreflightVerdict,
 };
 use cc_lb_storage_api::{
-    ApiKeyClass, ApiKeyOrgCapability, RemediationCode, Storage, StorageError, UpstreamKind,
-    UpstreamRecord, UpstreamStore,
+    ApiKeyClass, ApiKeyOrgCapability, Provider, RemediationCode, Storage, StorageError,
+    UpstreamKind, UpstreamRecord, UpstreamStore,
 };
 use uuid::Uuid;
 
@@ -98,6 +98,11 @@ pub(crate) async fn recheck_upstream_api_key(
     let previous_usage_report = previous_details
         .as_ref()
         .and_then(|details| details.usage_report_state);
+    let previous_openai_success = previous_details.as_ref().is_some_and(|details| {
+        details.provider == Some(Provider::Openai)
+            && details.verified
+            && details.checked_at_unix_secs.is_some()
+    });
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let mut outcome = if matches!(
@@ -179,11 +184,14 @@ pub(crate) async fn recheck_upstream_api_key(
     // The snapshot write (or its discard) is settled: the poll enqueue and the
     // audit outlive a dropped request.
     complete_after_commit(async move {
-        // R2-4: a Re-check that turns usage reports back on polls at once.
+        let openai_success = outcome.access.provider == Some(Provider::Openai)
+            && outcome.wire.verdict == PreflightVerdict::Ok
+            && !previous_openai_success;
         if persisted
-            && outcome.access.key_class == ApiKeyClass::OrgScoped
-            && outcome.access.usage_report_state == Some(ApiKeyOrgCapability::Ok)
-            && previous_usage_report != Some(ApiKeyOrgCapability::Ok)
+            && (openai_success
+                || (outcome.access.key_class == ApiKeyClass::OrgScoped
+                    && outcome.access.usage_report_state == Some(ApiKeyOrgCapability::Ok)
+                    && previous_usage_report != Some(ApiKeyOrgCapability::Ok)))
             && let Some(checked_at_unix_secs) = outcome.access.checked_at_unix_secs
         {
             enqueue_usage_poll(&state, record.id, record.revision, checked_at_unix_secs).await;

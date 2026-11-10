@@ -166,6 +166,11 @@ impl CrashFixture {
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
         storage.initialize().await?;
+        // A fresh schema may spend its first rollup pass completing the
+        // pending Gemini model-reconciliation migration. Finish that pass
+        // before installing the checkpoint fault trigger so the crash tests
+        // exercise the intended checkpoint transaction.
+        storage.rollup_usage_once().await?;
         install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs).await?;
         seed_request_events(&storage).await?;
 
