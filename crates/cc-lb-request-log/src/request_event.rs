@@ -220,7 +220,8 @@ pub struct RequestEvent {
     pub upstream_error_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_error_message: Option<String>,
-    /// Upstream HTTP version (`HTTP/1.1`, `HTTP/2.0`) for streaming responses
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_code: Option<String>,
     /// whose upstream body ended abnormally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_http_version: Option<String>,

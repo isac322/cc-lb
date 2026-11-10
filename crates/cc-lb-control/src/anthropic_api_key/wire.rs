@@ -366,6 +366,38 @@ mod tests {
         assert!(parsed.is_ok_and(|request| request.api_key_value.as_deref() == Some("k")));
     }
 
+    #[test]
+    fn billing_stop_kinds_have_stable_wire_names() {
+        let kinds = [
+            BillingStopKind::BillingError,
+            BillingStopKind::CreditsExhausted,
+            BillingStopKind::SpendLimit,
+            BillingStopKind::TierSpendCap,
+            BillingStopKind::OpenaiCreditBalanceExhausted,
+            BillingStopKind::OpenaiOrganizationSpendLimitExceeded,
+            BillingStopKind::OpenaiProjectSpendLimitExceeded,
+            BillingStopKind::OpenaiOrganizationUsageLimitExceeded,
+            BillingStopKind::GeminiPaymentRequired,
+            BillingStopKind::GeminiFailedPrecondition,
+        ];
+        let serialized = serde_json::to_value(kinds).expect("billing kinds serialize");
+        assert_eq!(
+            serialized,
+            serde_json::json!([
+                "billing_error",
+                "credits_exhausted",
+                "spend_limit",
+                "tier_spend_cap",
+                "openai_credit_balance_exhausted",
+                "openai_organization_spend_limit_exceeded",
+                "openai_project_spend_limit_exceeded",
+                "openai_organization_usage_limit_exceeded",
+                "gemini_payment_required",
+                "gemini_failed_precondition",
+            ])
+        );
+    }
+
     /// SEC-09: Debug of `PreflightRequest` never prints the key.
     #[test]
     fn sec_09_debug_redacts_preflight_request() {

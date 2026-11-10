@@ -1172,6 +1172,7 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         error_code: event.error_code.clone(),
         upstream_error_type: event.upstream_error_type.clone(),
         upstream_error_message: event.upstream_error_message.clone(),
+        upstream_error_code: event.upstream_error_code.clone(),
         duration_ms: event.duration_ms,
         request_body_read_ms: event.request_body_read_ms,
         request_body_bytes: event.request_body_bytes,

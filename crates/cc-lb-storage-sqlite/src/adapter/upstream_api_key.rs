@@ -617,7 +617,7 @@ impl UpstreamApiKeyStore for SqliteStorage {
         since_unix_ms: u64,
     ) -> StorageResult<Option<UpstreamRequestOutcome>> {
         let row = sqlx::query(
-            "SELECT list_status, upstream_error_type, upstream_error_message, list_ts_ms \
+            "SELECT list_status, upstream_error_type, upstream_error_message, upstream_error_code, list_ts_ms \
              FROM request_events_v1 \
              WHERE upstream_id = ? AND list_ts_ms >= ? AND list_status IS NOT NULL \
              ORDER BY list_ts_ms DESC, list_event_key DESC \
@@ -642,6 +642,7 @@ impl UpstreamApiKeyStore for SqliteStorage {
             upstream_error_message: row
                 .try_get("upstream_error_message")
                 .map_err(map_sqlx_error)?,
+            upstream_error_code: row.try_get("upstream_error_code").map_err(map_sqlx_error)?,
             observed_at_unix_ms: i64_to_u64(
                 row.try_get("list_ts_ms").map_err(map_sqlx_error)?,
                 "request event list_ts_ms",

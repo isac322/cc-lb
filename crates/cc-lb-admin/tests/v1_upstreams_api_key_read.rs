@@ -386,6 +386,7 @@ fn outcome_event(
     request_id: &str,
     status: u16,
     error_type: Option<&str>,
+    error_code: Option<&str>,
     message: Option<&str>,
 ) -> RequestEvent {
     RequestEvent {
@@ -395,10 +396,11 @@ fn outcome_event(
         request_id: request_id.to_owned(),
         upstream_id: Some(upstream_id),
         upstream_name: Some("billing".to_owned()),
-        model: Some("claude-sonnet-4-5".to_owned()),
+        model: Some("provider-model".to_owned()),
         status,
         error_code: (status >= 400).then(|| "upstream_4xx".to_owned()),
         upstream_error_type: error_type.map(str::to_owned),
+        upstream_error_code: error_code.map(str::to_owned),
         upstream_error_message: message.map(str::to_owned),
         duration_ms: 10,
         ..RequestEvent::default()
@@ -1457,12 +1459,44 @@ async fn billing_stop_after(events: &[(u64, u16, Option<&str>, Option<&str>)]) -
                 &format!("req-{index}"),
                 *status,
                 *error_type,
+                None,
                 *message,
             )
         })
         .collect::<Vec<_>>();
     append(&h, &events).await;
     usage(&h, legacy.id, "range=24h&step=hour").await.body["month"]["billing_stop"].clone()
+}
+type ProviderBillingEvent<'a> = (u64, u16, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+async fn provider_billing_stop_after(
+    kind: UpstreamKind,
+    events: &[ProviderBillingEvent<'_>],
+) -> Value {
+    let h = spawn_api_key_harness().await;
+    let key = match kind {
+        UpstreamKind::OpenaiApiKey => "sk-openai-test",
+        UpstreamKind::GeminiApiKey => "AIzaSy-test",
+        _ => panic!("provider fixture requires a provider API-key kind"),
+    };
+    let upstream = h.seed_api_key_upstream("provider-billing", key, kind).await;
+    let events = events
+        .iter()
+        .enumerate()
+        .map(|(index, (ts, status, error_type, error_code, message))| {
+            outcome_event(
+                upstream.id,
+                *ts,
+                &format!("provider-req-{index}"),
+                *status,
+                *error_type,
+                *error_code,
+                *message,
+            )
+        })
+        .collect::<Vec<_>>();
+    append(&h, &events).await;
+    usage(&h, upstream.id, "range=24h&step=hour").await.body["month"]["billing_stop"].clone()
 }
 
 const CREDIT_BALANCE: &str = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
@@ -1570,9 +1604,10 @@ async fn bil_08_stops_are_per_upstream() {
                 "a-stop",
                 429,
                 Some("rate_limit_error"),
+                None,
                 Some(TIER_CAP),
             ),
-            outcome_event(b.id, NOW - 120, "b-ok", 200, None, None),
+            outcome_event(b.id, NOW - 120, "b-ok", 200, None, None, None),
         ],
     )
     .await;
@@ -1591,6 +1626,146 @@ async fn bil_10_relayed_tier_cap_with_a_bounded_message_is_observable() {
     let stop =
         billing_stop_after(&[(NOW - 30, 429, Some("rate_limit_error"), Some(bounded))]).await;
     assert_eq!(stop["kind"], "tier_spend_cap");
+}
+
+async fn bil_11_openai_documented_codes_are_exposed() {
+    let cases = [
+        (
+            "credit_balance_exhausted",
+            "openai_credit_balance_exhausted",
+        ),
+        (
+            "organization_spend_limit_exceeded",
+            "openai_organization_spend_limit_exceeded",
+        ),
+        (
+            "project_spend_limit_exceeded",
+            "openai_project_spend_limit_exceeded",
+        ),
+        (
+            "organization_usage_limit_exceeded",
+            "openai_organization_usage_limit_exceeded",
+        ),
+    ];
+    for (code, kind) in cases {
+        let stop = provider_billing_stop_after(
+            UpstreamKind::OpenaiApiKey,
+            &[(
+                NOW - 60,
+                429,
+                Some("insufficient_quota"),
+                Some(code),
+                Some("quota exhausted"),
+            )],
+        )
+        .await;
+        assert_eq!(
+            stop,
+            json!({"kind": kind, "observed_at_unix_secs": NOW - 60}),
+            "{code}"
+        );
+    }
+}
+
+async fn bil_12_openai_non_billing_and_latest_success_clear() {
+    let stop = provider_billing_stop_after(
+        UpstreamKind::OpenaiApiKey,
+        &[
+            (
+                NOW - 120,
+                429,
+                Some("insufficient_quota"),
+                Some("credit_balance_exhausted"),
+                Some("quota exhausted"),
+            ),
+            (
+                NOW - 60,
+                429,
+                Some("rate_limit_error"),
+                None,
+                Some("slow down"),
+            ),
+        ],
+    )
+    .await;
+    assert!(stop.is_null(), "{stop}");
+
+    let stop = provider_billing_stop_after(
+        UpstreamKind::OpenaiApiKey,
+        &[
+            (
+                NOW - 120,
+                429,
+                Some("insufficient_quota"),
+                Some("credit_balance_exhausted"),
+                Some("quota exhausted"),
+            ),
+            (NOW - 60, 200, None, None, None),
+        ],
+    )
+    .await;
+    assert!(stop.is_null(), "{stop}");
+}
+
+async fn bil_13_gemini_billing_tokens_are_exposed() {
+    let payment = provider_billing_stop_after(
+        UpstreamKind::GeminiApiKey,
+        &[(
+            NOW - 60,
+            402,
+            Some("PAYMENT_REQUIRED"),
+            None,
+            Some("payment required"),
+        )],
+    )
+    .await;
+    assert_eq!(
+        payment,
+        json!({"kind": "gemini_payment_required", "observed_at_unix_secs": NOW - 60})
+    );
+
+    let precondition = provider_billing_stop_after(
+        UpstreamKind::GeminiApiKey,
+        &[(
+            NOW - 60,
+            400,
+            Some("FAILED_PRECONDITION"),
+            None,
+            Some("billing disabled"),
+        )],
+    )
+    .await;
+    assert_eq!(
+        precondition,
+        json!({"kind": "gemini_failed_precondition", "observed_at_unix_secs": NOW - 60})
+    );
+
+    let cleared = provider_billing_stop_after(
+        UpstreamKind::GeminiApiKey,
+        &[
+            (
+                NOW - 120,
+                402,
+                Some("payment_required"),
+                None,
+                Some("payment required"),
+            ),
+            (NOW - 60, 200, None, None, None),
+        ],
+    )
+    .await;
+    assert!(cleared.is_null(), "{cleared}");
+}
+
+async fn bil_14_gemini_rate_and_quota_tokens_are_not_stops() {
+    for token in ["rate_limit_exceeded", "quota_exceeded", "too_many_requests"] {
+        let stop = provider_billing_stop_after(
+            UpstreamKind::GeminiApiKey,
+            &[(NOW - 60, 429, Some(token), None, Some("quota"))],
+        )
+        .await;
+        assert!(stop.is_null(), "{token}: {stop}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1826,6 +2001,10 @@ async fn v1_upstreams_api_key_read_suite_part_4() {
     bil_07_last_months_stop_is_out_of_scope().await;
     bil_08_stops_are_per_upstream().await;
     bil_10_relayed_tier_cap_with_a_bounded_message_is_observable().await;
+    bil_11_openai_documented_codes_are_exposed().await;
+    bil_12_openai_non_billing_and_latest_success_clear().await;
+    bil_13_gemini_billing_tokens_are_exposed().await;
+    bil_14_gemini_rate_and_quota_tokens_are_not_stops().await;
     conc_02_recheck_racing_a_key_replace_is_discarded().await;
     conc_03_recheck_racing_a_workspace_change_is_discarded().await;
 }

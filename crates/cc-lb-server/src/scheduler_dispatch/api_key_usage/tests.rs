@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{OriginalUri, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::get;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config, SchedulerConfig, StorageConfig};
@@ -38,8 +39,10 @@ use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamUpdate};
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
     ApiKeyResolution, ApiKeyType, ApiKeyWorkspace, ApiKeyWorkspaceMode, ApiUsageAttribution,
-    MetaStore, Storage, UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore,
-    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord, UpstreamRecord, UpstreamStore,
+    MetaStore, OPENAI_ORG_REPORTING_CREDENTIAL_AAD, OpenAiOrganizationReportingCredentialStatus,
+    OpenAiOrganizationReportingCredentialWrite, Provider, ProviderProjectSource, Storage,
+    UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore, UpstreamApiUsageBucketQuery,
+    UpstreamApiUsageBucketRecord, UpstreamRecord, UpstreamStore,
 };
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use fake_anthropic::{
@@ -123,6 +126,186 @@ impl Fake {
             .count()
     }
 }
+type OpenAiRequest = (String, BTreeMap<String, Vec<String>>, String);
+
+struct OpenAiFake {
+    url: Url,
+    requests: Arc<Mutex<Vec<OpenAiRequest>>>,
+}
+
+#[derive(Clone, Copy)]
+enum CursorMode {
+    Normal,
+    Overlap,
+    NoCursor,
+    Empty,
+    Repeat,
+    Bound,
+}
+
+impl OpenAiFake {
+    async fn spawn(paginated: bool) -> Self {
+        Self::spawn_with(if paginated {
+            CursorMode::Normal
+        } else {
+            CursorMode::NoCursor
+        })
+        .await
+    }
+
+    async fn spawn_with(mode: CursorMode) -> Self {
+        Self::spawn_with_modes(mode, mode).await
+    }
+
+    async fn spawn_with_modes(usage_mode: CursorMode, cost_mode: CursorMode) -> Self {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(OpenAiFakeState {
+            usage_mode,
+            cost_mode,
+            requests: requests.clone(),
+        });
+        let router = Router::new()
+            .route("/v1/organization/usage/completions", get(openai_usage))
+            .route("/v1/organization/costs", get(openai_costs))
+            .with_state(state);
+        let url = serve(router).await;
+        Self { url, requests }
+    }
+
+    fn requests(&self) -> Vec<OpenAiRequest> {
+        self.requests.lock().expect("OpenAI requests lock").clone()
+    }
+}
+
+struct OpenAiFakeState {
+    usage_mode: CursorMode,
+    cost_mode: CursorMode,
+    requests: Arc<Mutex<Vec<OpenAiRequest>>>,
+}
+
+async fn openai_usage(
+    State(state): State<Arc<OpenAiFakeState>>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let query = query_map(uri.query().unwrap_or_default());
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    state.requests.lock().expect("OpenAI requests lock").push((
+        "usage".to_owned(),
+        query.clone(),
+        authorization,
+    ));
+    let width = query
+        .get("bucket_width")
+        .and_then(|values| values.first())
+        .map(String::as_str)
+        .unwrap_or_default();
+    let page = query
+        .get("page")
+        .and_then(|values| values.first())
+        .map(String::as_str);
+    let start_time = match (width, page) {
+        ("1h", None) => HOUR_START,
+        ("1h", Some(_)) if matches!(state.usage_mode, CursorMode::Overlap) => HOUR_START,
+        ("1h", Some(_)) => HOUR_START - 3_600,
+        ("1d", None) => OCT_1,
+        ("1d", Some(_)) => OCT_1 - 86_400,
+        _ => 0,
+    };
+    let next_page = match state.usage_mode {
+        CursorMode::Normal if page.is_none() && width == "1h" => Some("hour/next==".to_owned()),
+        CursorMode::Normal if page.is_none() && width == "1d" => Some("day/next==".to_owned()),
+        CursorMode::Normal => None,
+        CursorMode::Overlap if page.is_none() && width == "1h" => Some("hour/next==".to_owned()),
+        CursorMode::Overlap if page.is_none() && width == "1d" => Some("day/next==".to_owned()),
+        CursorMode::Overlap => None,
+        CursorMode::NoCursor => None,
+        CursorMode::Empty if page.is_none() => Some(String::new()),
+        CursorMode::Empty => None,
+        CursorMode::Repeat => Some("repeat".to_owned()),
+        CursorMode::Bound => {
+            let next = page
+                .and_then(|value| value.strip_prefix("bound-"))
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            Some(format!("bound-{next}"))
+        }
+    };
+    let input_tokens = if page.is_none() { 10 } else { 20 };
+    axum::Json(json!({
+        "data": [{
+            "start_time": start_time,
+            "end_time": start_time + if width == "1h" { 3_600 } else { 86_400 },
+            "results": [{
+                "input_tokens": input_tokens,
+                "output_tokens": input_tokens + 1,
+                "input_cached_tokens": 2,
+                "project_id": "proj_openai",
+                "api_key_id": "key_openai",
+                "model": "gpt-test"
+            }]
+        }],
+        "next_page": next_page
+    }))
+}
+
+async fn openai_costs(
+    State(state): State<Arc<OpenAiFakeState>>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let query = query_map(uri.query().unwrap_or_default());
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    state.requests.lock().expect("OpenAI requests lock").push((
+        "costs".to_owned(),
+        query.clone(),
+        authorization,
+    ));
+    let page = query
+        .get("page")
+        .and_then(|values| values.first())
+        .map(String::as_str);
+    let (start_time, next_page, value) = match state.cost_mode {
+        CursorMode::Normal if page.is_none() => (OCT_1, Some("cost/next==".to_owned()), "1.25"),
+        CursorMode::Normal => (OCT_1 - 86_400, None, "2.75"),
+        CursorMode::Overlap if page.is_none() => (OCT_1, Some("cost/next==".to_owned()), "1.25"),
+        CursorMode::Overlap => (OCT_1, None, "2.75"),
+        CursorMode::NoCursor => (OCT_1, None, "1.25"),
+        CursorMode::Empty if page.is_none() => (OCT_1, Some(String::new()), "1.25"),
+        CursorMode::Empty => (OCT_1, None, "1.25"),
+        CursorMode::Repeat if page.is_none() => (OCT_1, Some("repeat".to_owned()), "1.25"),
+        CursorMode::Repeat => (OCT_1 - 86_400, Some("repeat".to_owned()), "2.75"),
+        CursorMode::Bound => {
+            let next = page
+                .and_then(|value| value.strip_prefix("bound-"))
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            (OCT_1, Some(format!("bound-{next}")), "1.25")
+        }
+    };
+    axum::Json(json!({
+        "data": [{
+            "start_time": start_time,
+            "end_time": start_time + 86_400,
+            "results": [{
+                "amount": {"value": value, "currency": "USD"},
+                "line_item": "gpt-test-cost",
+                "project_id": "proj_openai"
+            }]
+        }],
+        "next_page": next_page
+    }))
+}
 
 async fn serve(router: Router) -> Url {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -152,6 +335,7 @@ struct Fixture {
     clock: Arc<TestClock>,
     catalog: Arc<PriceCatalog>,
     org_api: AnthropicOrgApi,
+    openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi,
     config: Config,
     dynamic_view: Arc<DynamicViewHolder>,
     event_bus: Arc<cc_lb_control::InMemoryBus>,
@@ -160,6 +344,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new(org_origin: Url) -> Self {
+        let openai_origin =
+            Url::parse("http://127.0.0.1:9/").expect("default OpenAI origin parses");
+        Self::new_with_openai(org_origin, openai_origin).await
+    }
+
+    async fn new_with_openai(org_origin: Url, openai_origin: Url) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite_path = dir.path().join("cc-lb.sqlite");
         let clock = Arc::new(TestClock::new_at_secs(NOW));
@@ -197,8 +387,11 @@ impl Fixture {
             scheduler,
             aead: Arc::new(AeadService::from_master_key([5; 32])),
             clock,
-            catalog,
+            catalog: catalog.clone(),
             org_api: AnthropicOrgApi::with_origin(org_origin),
+            openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi::with_origin(
+                openai_origin.clone(),
+            ),
             config: Config::default(),
             dynamic_view,
             event_bus: Arc::new(cc_lb_control::InMemoryBus::new()),
@@ -250,6 +443,7 @@ impl Fixture {
             event_bus: self.event_bus.clone() as Arc<dyn RequestEventBus>,
             clock: self.clock.clone(),
             anthropic_org_api: self.org_api.clone(),
+            openai_org_api: self.openai_org_api.clone(),
         })
     }
 
@@ -326,6 +520,66 @@ impl Fixture {
         )
         .await
         .expect("store api key")
+    }
+    async fn openai_upstream(&self) -> UpstreamRecord {
+        let created = UpstreamStore::create(
+            self.storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "openai".to_owned(),
+                kind: UpstreamKind::OpenaiApiKey,
+                base_url: Some(self.openai_org_api.origin().clone()),
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("create OpenAI upstream");
+        let ciphertext = self
+            .aead
+            .encrypt(b"serving-key", created.id.as_bytes())
+            .expect("seal serving key");
+        let upstream = UpstreamStore::update(
+            self.storage.as_ref(),
+            created.id,
+            created.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("store OpenAI serving key");
+        self.storage
+            .write_api_key_access(
+                upstream.id,
+                upstream.revision,
+                &openai_access("proj_openai"),
+            )
+            .await
+            .expect("write OpenAI access");
+        upstream
+    }
+
+    async fn configure_openai_admin(&self) {
+        let ciphertext = self
+            .aead
+            .encrypt(b"organization-admin", OPENAI_ORG_REPORTING_CREDENTIAL_AAD)
+            .expect("seal OpenAI admin credential");
+        self.storage
+            .replace_openai_org_reporting_credential(&OpenAiOrganizationReportingCredentialWrite {
+                encrypted_secret_ciphertext: ciphertext,
+                redacted_hint: "org-admin-...".to_owned(),
+                status: OpenAiOrganizationReportingCredentialStatus::Configured,
+                expected_revision: None,
+                updated_at_unix_secs: NOW,
+            })
+            .await
+            .expect("store OpenAI admin credential");
     }
 
     /// An org-scoped key on the fixture origin whose usage report is `ok`.
@@ -427,6 +681,16 @@ fn org_access(
         checked_at_unix_secs: Some(checked_at),
         last_attempt_at_unix_secs: checked_at,
     }
+}
+fn openai_access(project_id: &str) -> ApiKeyAccessWrite {
+    let mut access = org_access(None, ApiKeyOrgCapability::NotApplicable, NOW - 100);
+    access.key_class = ApiKeyClass::Unknown;
+    access.key_hint = "sk-openai-...test".to_owned();
+    access.needs_workspace = false;
+    access.provider = Some(Provider::Openai);
+    access.project_id = Some(project_id.to_owned());
+    access.project_source = Some(ProviderProjectSource::Configured);
+    access
 }
 
 fn test_catalog() -> CatalogSnapshot {
@@ -556,6 +820,160 @@ impl KeepaliveDispatcher for UnusedKeepaliveDispatcher {
 /// rolling 7-day `1h` page and the month-to-date `1d` page for the resolved
 /// key id, with the credential decrypted under AAD = upstream id, and stores
 /// list-priced buckets.
+#[tokio::test]
+async fn openai_usage_and_costs_follow_opaque_cursors() {
+    let fake = OpenAiFake::spawn(true).await;
+    let fixture = Fixture::new_with_openai(fake.url.clone(), fake.url.clone()).await;
+    fixture.configure_openai_admin().await;
+    let upstream = fixture.openai_upstream().await;
+
+    fixture.tick().await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 6, "{requests:?}");
+    assert_eq!(requests[0].0, "usage");
+    assert_eq!(requests[1].1["page"], vec!["hour/next=="]);
+    assert_eq!(requests[2].1["bucket_width"], vec!["1d"]);
+    assert_eq!(requests[3].1["page"], vec!["day/next=="]);
+    assert_eq!(requests[4].0, "costs");
+    assert_eq!(requests[5].1["page"], vec!["cost/next=="]);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, _, authorization)| authorization == "Bearer organization-admin")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|(_, query, _)| query["limit"] == vec!["168"] || query["limit"] == vec!["31"])
+    );
+
+    let details = fixture.details(upstream.id).await;
+    assert_eq!(
+        details.provider_report_state,
+        Some(cc_lb_storage_api::ProviderReportState::Reported)
+    );
+    assert_eq!(details.usage_last_success_at_unix_secs, Some(NOW));
+    assert_eq!(
+        fixture
+            .buckets(
+                upstream.id,
+                ApiUsageAttribution::Workspace,
+                "proj_openai",
+                3_600,
+            )
+            .await
+            .len(),
+        2
+    );
+    let costs = fixture
+        .buckets(
+            upstream.id,
+            ApiUsageAttribution::Workspace,
+            "proj_openai",
+            86_400,
+        )
+        .await;
+    assert_eq!(costs.len(), 4);
+    assert_eq!(
+        costs
+            .iter()
+            .filter(|bucket| bucket.model == "gpt-test-cost")
+            .map(|bucket| bucket.list_cost_micros)
+            .sum::<u64>(),
+        4_000_000
+    );
+}
+#[tokio::test]
+async fn openai_workspace_usage_merges_rows_across_pages() {
+    let fake = OpenAiFake::spawn_with_modes(CursorMode::Overlap, CursorMode::NoCursor).await;
+    let fixture = Fixture::new_with_openai(fake.url.clone(), fake.url.clone()).await;
+    fixture.configure_openai_admin().await;
+    let upstream = fixture.openai_upstream().await;
+
+    fixture.tick().await;
+
+    let hourly = fixture
+        .buckets(
+            upstream.id,
+            ApiUsageAttribution::Workspace,
+            "proj_openai",
+            3_600,
+        )
+        .await;
+    assert_eq!(hourly.len(), 1, "{hourly:?}");
+    assert_eq!(hourly[0].uncached_input_tokens, 30);
+}
+
+#[tokio::test]
+async fn openai_no_cursor_windows_complete_in_one_cycle() {
+    let fake = OpenAiFake::spawn(false).await;
+    let fixture = Fixture::new_with_openai(fake.url.clone(), fake.url.clone()).await;
+    fixture.configure_openai_admin().await;
+    let upstream = fixture.openai_upstream().await;
+
+    fixture.tick().await;
+
+    assert_eq!(fake.requests().len(), 3);
+    let details = fixture.details(upstream.id).await;
+    assert_eq!(
+        details.provider_report_state,
+        Some(cc_lb_storage_api::ProviderReportState::Reported)
+    );
+    assert_eq!(details.usage_last_success_at_unix_secs, Some(NOW));
+}
+
+#[tokio::test]
+async fn openai_cursor_stops_on_empty_repeat_and_page_bound() {
+    for (mode, expected_requests) in [
+        (CursorMode::Empty, 1),
+        (CursorMode::Repeat, 2),
+        (CursorMode::Bound, 8),
+    ] {
+        let fake = OpenAiFake::spawn_with(mode).await;
+        let fixture = Fixture::new_with_openai(fake.url.clone(), fake.url.clone()).await;
+        fixture.configure_openai_admin().await;
+        let upstream = fixture.openai_upstream().await;
+
+        fixture.tick().await;
+
+        assert_eq!(fake.requests().len(), expected_requests);
+        let details = fixture.details(upstream.id).await;
+        assert_eq!(
+            details.provider_report_state,
+            Some(cc_lb_storage_api::ProviderReportState::Stale)
+        );
+        assert_eq!(details.usage_last_success_at_unix_secs, None);
+    }
+}
+
+#[tokio::test]
+async fn openai_cost_cursor_stops_after_usage_completes() {
+    for (mode, cost_requests) in [
+        (CursorMode::Empty, 1),
+        (CursorMode::Repeat, 2),
+        (CursorMode::Bound, 8),
+    ] {
+        let fake = OpenAiFake::spawn_with_modes(CursorMode::NoCursor, mode).await;
+        let fixture = Fixture::new_with_openai(fake.url.clone(), fake.url.clone()).await;
+        fixture.configure_openai_admin().await;
+        let upstream = fixture.openai_upstream().await;
+
+        fixture.tick().await;
+
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 2 + cost_requests);
+        assert!(requests[..2].iter().all(|(kind, _, _)| kind == "usage"));
+        assert!(requests[2..].iter().all(|(kind, _, _)| kind == "costs"));
+        let details = fixture.details(upstream.id).await;
+        assert_eq!(
+            details.provider_report_state,
+            Some(cc_lb_storage_api::ProviderReportState::Stale)
+        );
+        assert_eq!(details.usage_last_success_at_unix_secs, None);
+    }
+}
+
 #[tokio::test]
 async fn pol01_pol03_tick_reads_hourly_and_month_pages() {
     let fake = Fake::spawn().await;

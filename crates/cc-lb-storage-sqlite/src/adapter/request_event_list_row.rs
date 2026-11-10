@@ -58,6 +58,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         error_code: row.error_code,
         upstream_error_type: row.upstream_error_type,
         upstream_error_message: row.upstream_error_message,
+        upstream_error_code: row.upstream_error_code,
         duration_ms: row
             .duration_ms
             .map(|value| i64_to_u64(value, "request event list duration_ms"))

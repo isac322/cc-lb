@@ -109,9 +109,10 @@ describe('CacheKeepaliveCard', () => {
     expect(screen.getByText('Cache keepalive')).toBeDefined();
 
     expect(
-      screen.getByText('Renews the prompt-cache TTL during idle gaps.'),
+      screen.getByText(
+        'Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring.',
+      ),
     ).toBeDefined();
-
     expect(screen.getByText('Renewing now')).toBeDefined();
     expect(screen.getByText('current scheduled or mid-renewal')).toBeDefined();
     expect(screen.getByText('1,000')).toBeDefined();
@@ -136,7 +137,7 @@ describe('CacheKeepaliveCard', () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          'When supported by the provider, cache keepalive renews the prompt cache TTL — it fires a tiny synthetic request just before the cache expires so the next real request still hits a warm cache.',
+          'OpenAI Responses keepalive is for GPT-5.6+ models: 30m sessions may renew during idle gaps, while 12h retention is recorded without read re-anchoring.',
         ),
       ).toBeDefined();
     });
@@ -172,7 +173,7 @@ describe('CacheKeepaliveCard', () => {
     expect(toggle.closest('label')?.textContent).toBe('Disabled');
     expect(
       screen.getByText(
-        'Off. Turn on to renew the prompt-cache TTL for idle sessions.',
+        'Off. Turn on to renew supported prompt-cache sessions during idle gaps. OpenAI Responses 12h retention is recorded without read re-anchoring.',
       ),
     ).toBeDefined();
     expect(screen.queryByText('Renewing now')).toBeNull();
@@ -203,6 +204,9 @@ describe('CacheKeepaliveCard', () => {
         cache_keepalive: expect.objectContaining({
           snapshot_max_bytes: 8_388_608,
           min_cache_tokens: 10_000,
+          classifier: expect.objectContaining({
+            openai_responses_enabled: false,
+          }),
         }),
       }),
       expect.any(Object),

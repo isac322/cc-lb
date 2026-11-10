@@ -56,7 +56,7 @@ function CacheKeepaliveHelpHover() {
   return (
     <HelpIcon
       label="Cache keepalive help"
-      text="When supported by the provider, cache keepalive renews the prompt cache TTL — it fires a tiny synthetic request just before the cache expires so the next real request still hits a warm cache."
+      text="OpenAI Responses keepalive is for GPT-5.6+ models: 30m sessions may renew during idle gaps, while 12h retention is recorded without read re-anchoring."
     />
   );
 }
@@ -152,6 +152,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
             classifier: {
               extra_wait_for_user_tools: [],
               treat_end_turn_as_ambiguous: false,
+              openai_responses_enabled: false,
             },
           }),
           enabled: nextEnabled,
@@ -250,7 +251,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         span="full"
         data-testid="cache-keepalive-card"
         title={headerTitle}
-        description="Renews the prompt-cache TTL during idle gaps."
+        description="Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring."
         action={headerActions}
       >
         {!enabled ? (
@@ -258,7 +259,9 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
             className="text-body text-text-muted"
             data-testid="cache-keepalive-off"
           >
-            Off. Turn on to renew the prompt-cache TTL for idle sessions.
+            Off. Turn on to renew supported prompt-cache sessions during idle
+            gaps. OpenAI Responses 12h retention is recorded without read
+            re-anchoring.
           </p>
         ) : summaryQ.isError && !summary ? (
           <div

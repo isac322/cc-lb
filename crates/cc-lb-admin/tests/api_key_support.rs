@@ -12,6 +12,8 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_clock::TestClock;
 use cc_lb_config::Config;
 use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
+use cc_lb_scheduler::admin::SchedulerAdminHandle;
+use cc_lb_scheduler::worker::{CRON_QUEUE, SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyUsagePollOutcome, AuditEntry, AuditQueryScope, AuditStore,
     UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore, UpstreamCreate, UpstreamKind, UpstreamRecord,
@@ -21,6 +23,8 @@ use cc_lb_storage_sqlite::SqliteStorage;
 use fake_anthropic::{AppConfig, KeyPolicies, KeyPolicy, RecordedRequest, RequestRecorder, app};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::str::FromStr;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use url::Url;
@@ -45,9 +49,9 @@ pub struct ApiKeyHarness {
     pub recorder: RequestRecorder,
     pub clock: Arc<TestClock>,
     _dir: tempfile::TempDir,
+    _scheduler_pool: sqlx::SqlitePool,
     _server: tokio::task::JoinHandle<()>,
 }
-
 pub struct HarnessResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
@@ -92,6 +96,27 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
     let storage =
         admin_test_common::sqlite_storage_with_clock(dir.path(), "api_key.sqlite", clock.clone())
             .await;
+    let scheduler_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+    let scheduler_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::from_str(&scheduler_url)
+                .expect("scheduler sqlite url parses")
+                .create_if_missing(true),
+        )
+        .await
+        .expect("scheduler sqlite opens");
+    apalis_sqlite::SqliteStorage::setup(&scheduler_pool)
+        .await
+        .expect("scheduler apalis setup");
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&scheduler_pool)
+        .await
+        .expect("scheduler migrations");
+    let scheduler_backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        scheduler_pool.clone(),
+        clock.clone(),
+    ));
+    let scheduler = SchedulerAdminHandle::new(scheduler_backend);
     let config = Config::default();
     let state = AdminState {
         config_path: None,
@@ -105,7 +130,7 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         dynamic_view_rebinder: None,
         config: Arc::new(config),
-        scheduler: None,
+        scheduler: Some(scheduler),
         admin_auth: admin_test_common::static_token_auth(ADMIN_TOKEN),
         lazy_refresher: None,
         runtime: None,
@@ -126,6 +151,7 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
         recorder,
         clock,
         _dir: dir,
+        _scheduler_pool: scheduler_pool,
         _server: server,
     }
 }
@@ -256,12 +282,22 @@ impl ApiKeyHarness {
     /// A pre-migration API-key upstream: the key sealed with AAD = id,
     /// `base_url` at the fake, and no details row.
     pub async fn seed_legacy_api_key_upstream(&self, name: &str, key: &str) -> UpstreamRecord {
+        self.seed_api_key_upstream(name, key, UpstreamKind::AnthropicApiKey)
+            .await
+    }
+
+    pub async fn seed_api_key_upstream(
+        &self,
+        name: &str,
+        key: &str,
+        kind: UpstreamKind,
+    ) -> UpstreamRecord {
         let created = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
-                kind: UpstreamKind::AnthropicApiKey,
+                kind,
                 base_url: Some(self.fake_url.clone()),
                 api_key_ciphertext: None,
                 oauth_tokens: None,
@@ -348,6 +384,15 @@ impl ApiKeyHarness {
     /// Every request the fake received.
     pub fn outbound_count(&self) -> usize {
         self.recorder.snapshot().len()
+    }
+    pub async fn usage_poll_job_keys(&self) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT idempotency_key FROM Jobs WHERE job_type = ?1 ORDER BY idempotency_key",
+        )
+        .bind(CRON_QUEUE)
+        .fetch_all(&self._scheduler_pool)
+        .await
+        .expect("list usage poll jobs")
     }
 
     /// Directory holding the SQLite database files.

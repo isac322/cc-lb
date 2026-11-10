@@ -185,8 +185,10 @@ pub(crate) async fn get_upstream_usage(
         .await?
         .and_then(|outcome| {
             classify_billing_stop(
+                provider.unwrap_or(Provider::Anthropic),
                 outcome.status,
                 outcome.upstream_error_type.as_deref(),
+                outcome.upstream_error_code.as_deref(),
                 outcome.upstream_error_message.as_deref(),
             )
             .map(|kind| KeyBillingStop {

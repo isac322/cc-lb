@@ -134,8 +134,9 @@ export const PROVIDER_CAPABILITIES: Record<
     subscriptionQuota: true,
     quotaHistory: true,
     warmup: true,
+    cacheKeepalive: true,
   },
-  openai_api_key: NONE,
+  openai_api_key: { ...NONE, cacheKeepalive: true },
   gemini_oauth: {
     ...NONE,
     subscriptionQuota: true,

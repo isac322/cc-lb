@@ -616,7 +616,7 @@ async fn insert_request_event_in_tx(
         "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
         "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
         "cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, ",
-        "event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, ",
+        "event_id, error_code, upstream_error_type, upstream_error_message, upstream_error_code, thinking_tokens, ",
         "tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
         "cache_creation_input_tokens_1h, token_estimate_source, thinking_budget_tokens, ",
         "reasoning_effort, list_ts_ms, list_event_key, list_status, list_duration_ms, ",
@@ -646,7 +646,7 @@ async fn insert_request_event_in_tx(
         "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -700,6 +700,7 @@ async fn insert_request_event_in_tx(
     .bind(event.error_code.as_deref())
     .bind(event.upstream_error_type.as_deref())
     .bind(event.upstream_error_message.as_deref())
+    .bind(event.upstream_error_code.as_deref())
     .bind(option_u64_to_i64(
         event.thinking_tokens,
         "request event thinking_tokens",
@@ -927,8 +928,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts, display_reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT s.display_reason FROM cache_keepalive_sessions s WHERE s.principal_id = ? AND s.session_key_hash = ?), '')) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -960,6 +961,8 @@ async fn insert_keepalive_turn_in_tx(
     .bind(row.cost_micros.is_some())
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
+    .bind(&row.principal_id)
+    .bind(&row.session_key_hash)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;

@@ -459,7 +459,7 @@ Codes with a status are failure responses on create, update, and the workspace l
 
 Reported usage comes from the `api_key_usage_poll` scheduler job, which polls each eligible upstream every 300 seconds by default; see [docs/scheduler.md](./scheduler.md#api-key-usage-polling).
 
-`month` covers the current UTC calendar month. Its `billing_stop` is classified from the upstream's latest finished proxied request: `credits_exhausted` (400 credit balance), `spend_limit` (400 self-set usage limit), `tier_spend_cap` (429 tier monthly cap), or `billing_error` (402). Any other outcome, including a later success, clears it. Anthropic has no API for the credit balance, so cc-lb never shows one; check the Console Billing page.
+`month` covers the current UTC calendar month. Its `billing_stop` is classified from the upstream's latest finished proxied request. Anthropic uses `credits_exhausted` (400 credit balance), `spend_limit` (400 self-set usage limit), `tier_spend_cap` (429 tier monthly cap), or `billing_error` (402). OpenAI API-key upstreams use `openai_credit_balance_exhausted`, `openai_organization_spend_limit_exceeded`, `openai_project_spend_limit_exceeded`, or `openai_organization_usage_limit_exceeded` for documented 429 quota and spend-limit codes. Gemini API-key upstreams use `gemini_payment_required` for `payment_required` (402) and `gemini_failed_precondition` for `failed_precondition` (400). Any other outcome, including a later success, clears it. The admin usage card links each stop to the provider's remediation guidance; Anthropic billing remains in Console Billing.
 
 The proxy strips any client-supplied `anthropic-workspace-id` header from every upstream request. API-key upstreams send their configured workspace instead.
 

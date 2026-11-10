@@ -1167,18 +1167,23 @@ export interface UpstreamKeyUsageResponse extends DashboardUsageResponse {
 }
 
 /**
- * Why Anthropic stopped serving this upstream's requests for billing reasons,
- * classified from the latest terminal request event cc-lb logged for it:
- * `credits_exhausted` (400 "credit balance"), `billing_error` (402),
- * `tier_spend_cap` (429 tier monthly cap), `spend_limit` (400 self-set
- * org/workspace limit). Any later non-billing outcome replaces the event,
- * so it clears.
+ * Why an API-key provider stopped serving requests for billing reasons,
+ * classified from the latest terminal request event cc-lb logged for it.
+ * Anthropic values retain their historical vocabulary and matching semantics.
  */
-export type KeyBillingStopKind =
-  | 'credits_exhausted'
-  | 'billing_error'
-  | 'tier_spend_cap'
-  | 'spend_limit';
+export const KeyBillingStopKindSchema = z.enum([
+  'credits_exhausted',
+  'billing_error',
+  'tier_spend_cap',
+  'spend_limit',
+  'openai_credit_balance_exhausted',
+  'openai_organization_spend_limit_exceeded',
+  'openai_project_spend_limit_exceeded',
+  'openai_organization_usage_limit_exceeded',
+  'gemini_payment_required',
+  'gemini_failed_precondition',
+]);
+export type KeyBillingStopKind = z.infer<typeof KeyBillingStopKindSchema>;
 
 export interface KeyUsageMonth {
   /** 1st 00:00 UTC; later when request-log retention cuts in (estimated source). */

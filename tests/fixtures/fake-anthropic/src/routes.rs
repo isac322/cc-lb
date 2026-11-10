@@ -32,6 +32,7 @@ pub fn app(config: AppConfig) -> Router {
     let router = Router::new()
         .route("/v1/messages", post(handlers::messages))
         .route("/v1/messages/count_tokens", post(handlers::count_tokens))
+        .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/token", post(token))
         .route("/v1/oauth/token", post(token))

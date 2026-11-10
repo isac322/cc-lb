@@ -384,6 +384,7 @@ pub struct UpstreamRequestOutcome {
     pub status: u16,
     pub upstream_error_type: Option<String>,
     pub upstream_error_message: Option<String>,
+    pub upstream_error_code: Option<String>,
     pub observed_at_unix_ms: u64,
 }
 

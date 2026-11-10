@@ -194,6 +194,8 @@ pub enum LifecycleEvent {
         error_type: String,
         error_message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after: Option<String>,
     },
     /// Upstream body attribution for an abnormally ended streaming response.

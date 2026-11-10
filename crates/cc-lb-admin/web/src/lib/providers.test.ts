@@ -183,6 +183,23 @@ describe('provider capability and display truth', () => {
     expect(capabilitiesOf('openai_api_key').subscriptionQuota).toBe(false);
     expect(capabilitiesOf('gemini_api_key').subscriptionQuota).toBe(false);
   });
+  test('reports cache keepalive support by provider capability', () => {
+    expect(
+      (
+        [
+          'anthropic_oauth',
+          'anthropic_api_key',
+          'openai_oauth',
+          'openai_api_key',
+        ] as UpstreamKind[]
+      ).map((kind) => capabilitiesOf(kind).cacheKeepalive),
+    ).toEqual([true, true, true, true]);
+    expect(
+      (['gemini_oauth', 'gemini_api_key'] as UpstreamKind[]).map(
+        (kind) => capabilitiesOf(kind).cacheKeepalive,
+      ),
+    ).toEqual([false, false]);
+  });
   test('shows actual provider and credential-specific proxy default endpoints', () => {
     expect(defaultEndpointFor('openai_oauth')).toBe(
       'https://chatgpt.com/backend-api/codex',
