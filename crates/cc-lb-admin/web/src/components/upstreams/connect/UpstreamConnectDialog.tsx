@@ -16,11 +16,9 @@ import {
   PROVIDER_LABELS,
   type ProviderFamily,
   providerOf,
-  upstreamTypeLabel,
 } from '../../../lib/providers';
 import {
   useCreateFromOauthDraft,
-  useCreateUpstream,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
 } from '../../../lib/queries';
@@ -191,9 +189,6 @@ function ConnectDialogBody({
     upstream ? upstream.kind : 'anthropic_oauth',
   );
   const [step, setStep] = useState<StepId>(isCreate ? 'provider' : 'signin');
-  const [genericName, setGenericName] = useState('');
-  const [genericCredential, setGenericCredential] = useState('');
-  const [genericError, setGenericError] = useState<string | null>(null);
   const [sessionWanted, setSessionWanted] = useState(!isCreate);
 
   const session = useOAuthConnectSession(
@@ -207,7 +202,6 @@ function ConnectDialogBody({
     { previousAccount, enabled: sessionWanted },
   );
   const createFromDraft = useCreateFromOauthDraft();
-  const createUpstream = useCreateUpstream();
 
   const [oauthName, setOauthName] = useState('');
   // Base URL is a rare need: hidden behind "Use a custom endpoint", as in the
@@ -217,6 +211,7 @@ function ConnectDialogBody({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const apiKey = useApiKeyConnect({
     replace: null,
+    provider,
     onCancel: () => requestClose(),
     onBackToKind: () => setStep('kind'),
     onSignInInstead: () => {
@@ -230,7 +225,7 @@ function ConnectDialogBody({
       onClose();
     },
   });
-  const inApiKeyFlow = isCreate && kind === 'anthropic_api_key';
+  const inApiKeyFlow = isCreate && kind.endsWith('_api_key');
 
   const outcome = session.outcome;
   useEffect(() => {
@@ -243,24 +238,21 @@ function ConnectDialogBody({
     }
     if (step === 'signin') setStep('finish');
   }, [isCreate, outcome, provider, step]);
-  const saving = createFromDraft.isPending || createUpstream.isPending;
+  const saving = createFromDraft.isPending;
   const busy = session.completing || saving || apiKey.busy;
   const draftExpired =
     isCreate && step === 'finish' && session.phase === 'expired';
   const needsDiscardConfirm =
     isCreate && step === 'finish' && outcome !== null && !draftExpired;
 
-  const genericCreate = isCreate && kind.endsWith('_api_key');
   const steps: Exclude<StepId, 'apikey'>[] = isCreate
-    ? genericCreate
-      ? ['provider', 'kind', 'generic']
-      : provider === 'openai'
-        ? session.flow === 'paste_code'
-          ? ['provider', 'kind', 'signin', 'paste', 'finish']
-          : ['provider', 'kind', 'signin', 'finish']
-        : provider === 'gemini'
-          ? ['provider', 'kind', 'signin', 'paste', 'finish']
-          : ['provider', 'kind', 'signin', 'paste', 'finish']
+    ? provider === 'openai'
+      ? session.flow === 'paste_code'
+        ? ['provider', 'kind', 'signin', 'paste', 'finish']
+        : ['provider', 'kind', 'signin', 'finish']
+      : provider === 'gemini'
+        ? ['provider', 'kind', 'signin', 'paste', 'finish']
+        : ['provider', 'kind', 'signin', 'paste', 'finish']
     : provider === 'openai'
       ? session.flow === 'paste_code'
         ? ['signin', 'paste', 'finish']
@@ -302,10 +294,8 @@ function ConnectDialogBody({
     if (kind.endsWith('_oauth')) {
       setSessionWanted(true);
       setStep('signin');
-    } else if (kind === 'anthropic_api_key') {
-      setStep('apikey');
     } else {
-      setStep('generic');
+      setStep('apikey');
     }
   };
 
@@ -341,31 +331,6 @@ function ConnectDialogBody({
       // The shared MutationCache owns the error toast; stay on the step.
     }
   };
-  const saveGeneric = async () => {
-    setGenericError(null);
-    const name = genericName.trim();
-    const credential = genericCredential.trim();
-    if (!name || !credential) {
-      setGenericError('Enter a name and API key before adding the upstream.');
-      return;
-    }
-    try {
-      const created = await createUpstream.mutateAsync({
-        name,
-        kind,
-        api_key_value: credential,
-      });
-      toast.success(`${created.name} added`);
-      onCreated(created);
-      onClose();
-    } catch (error) {
-      setGenericError(
-        error instanceof Error
-          ? error.message
-          : 'The API key could not be added.',
-      );
-    }
-  };
 
   const title = isCreate
     ? 'New upstream'
@@ -375,7 +340,7 @@ function ConnectDialogBody({
       ? 'Choose which provider to add.'
       : step === 'kind'
         ? 'Choose how to connect this provider.'
-        : step === 'apikey' || step === 'generic'
+        : step === 'apikey'
           ? 'Nothing is saved until you add the upstream.'
           : isCreate
             ? 'Nothing is saved until you confirm the account.'
@@ -427,21 +392,6 @@ function ConnectDialogBody({
       <>
         {backButton('signin')}
         {cancelButton}
-      </>
-    );
-  } else if (step === 'generic') {
-    footer = (
-      <>
-        {backButton('kind')}
-        {cancelButton}
-        <Button
-          variant="primary"
-          loading={createUpstream.isPending}
-          disabled={!genericName.trim() || !genericCredential.trim()}
-          onClick={() => void saveGeneric()}
-        >
-          {createUpstream.isPending ? 'Adding…' : 'Add upstream'}
-        </Button>
       </>
     );
   } else if (step === 'apikey') {
@@ -519,19 +469,6 @@ function ConnectDialogBody({
               ) : null}
 
               {step === 'apikey' ? apiKey.body : null}
-              {step === 'generic' ? (
-                <GenericCredentialStep
-                  kind={kind}
-                  name={genericName}
-                  credential={genericCredential}
-                  error={genericError}
-                  onNameChange={setGenericName}
-                  onCredentialChange={(value) => {
-                    setGenericCredential(value);
-                    setGenericError(null);
-                  }}
-                />
-              ) : null}
 
               {step === 'signin' ? (
                 <div className="flex flex-col gap-4">
@@ -898,59 +835,6 @@ function KindStep({
           onActivate={onContinue}
         />
       </BaseRadioGroup>
-    </div>
-  );
-}
-
-function GenericCredentialStep({
-  kind,
-  name,
-  credential,
-  error,
-  onNameChange,
-  onCredentialChange,
-}: {
-  kind: UpstreamKind;
-  name: string;
-  credential: string;
-  error: string | null;
-  onNameChange: (value: string) => void;
-  onCredentialChange: (value: string) => void;
-}) {
-  const provider = providerOf(kind);
-  return (
-    <div className="flex flex-col gap-4">
-      <StepHeading
-        title={`${PROVIDER_LABELS[provider]} ${upstreamTypeLabel(kind)}`}
-        subtitle="Paste the provider API key. It is encrypted before storage."
-      />
-      <Field label="Upstream name">
-        <input
-          className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-          value={name}
-          autoFocus
-          onChange={(event) => onNameChange(event.target.value)}
-        />
-      </Field>
-      <Field label="API key">
-        <input
-          type="password"
-          className={cx(
-            INPUT_CLASS,
-            PENDING_INPUT_CLASS,
-            'font-mono text-data',
-          )}
-          value={credential}
-          onChange={(event) => onCredentialChange(event.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-        />
-      </Field>
-      {error ? (
-        <Notice tone="danger" role="alert">
-          {error}
-        </Notice>
-      ) : null}
     </div>
   );
 }

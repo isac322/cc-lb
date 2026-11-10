@@ -76,6 +76,19 @@ describe('parseApiKeyPaste', () => {
     );
   });
 
+  test('accepts printable provider keys without Anthropic prefixes', () => {
+    expect(parseApiKeyPaste('sk-proj-openai-key')).toEqual({
+      kind: 'key',
+      key: 'sk-proj-openai-key',
+      gate: null,
+    });
+    expect(parseApiKeyPaste('AIzaSy-provider-key_123')).toEqual({
+      kind: 'key',
+      key: 'AIzaSy-provider-key_123',
+      gate: null,
+    });
+  });
+
   test('empty and multi-token pastes', () => {
     expect(parseApiKeyPaste('   ')).toEqual({ kind: 'empty' });
     expect(parseApiKeyPaste('two words')).toEqual({

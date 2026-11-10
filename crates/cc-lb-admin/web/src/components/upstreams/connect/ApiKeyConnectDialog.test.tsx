@@ -279,7 +279,9 @@ function openApiKeyStep() {
 }
 
 function keyInput(dialog: HTMLElement): HTMLInputElement {
-  return within(dialog).getByPlaceholderText('sk-ant-…') as HTMLInputElement;
+  return within(dialog).getByPlaceholderText(
+    /sk-ant-…|Paste the provider key/,
+  ) as HTMLInputElement;
 }
 
 async function paste(dialog: HTMLElement, text: string) {
@@ -394,43 +396,233 @@ describe('provider selection and imported credentials', () => {
     ).toBe('true');
   });
 
-  test('creates an OpenAI API-key upstream through the real create endpoint', async () => {
-    const created = upstream({
-      id: 'created-openai-api-key',
-      name: 'OpenAI production',
-      kind: 'openai_api_key',
-    });
-    route = (call) =>
-      call.method === 'POST' && call.path === UPSTREAMS
-        ? { status: 200, body: created }
-        : { status: 404, body: {} };
-    const { dialog, onCreated } = renderDialog({ mode: 'create' });
+  test.each([
+    ['OpenAI', 'openai_api_key', 'openai-test-key'],
+    ['Gemini', 'gemini_api_key', 'AIza-test-key_123'],
+  ] as const)(
+    'creates a provider API-key upstream through provider preflight (%s)',
+    async (label, kind, key) => {
+      const created = upstream({
+        id: `created-${kind}`,
+        name: `${label} production`,
+        kind,
+      });
+      route = (call) => {
+        if (call.path === PREFLIGHT)
+          return {
+            status: 200,
+            body: wire({
+              verdict: 'ok',
+              keyClass: 'unknown',
+              inference: 'ok',
+            }),
+          };
+        if (call.path === UPSTREAMS) return { status: 200, body: created };
+        return { status: 404, body: {} };
+      };
+      const { dialog, onCreated } = renderDialog({ mode: 'create' });
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: new RegExp(label) }),
+      );
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+      fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+      await paste(dialog, key);
+      await within(dialog).findByText(`${label} key verified`);
+      expect(within(dialog).queryByText(/Workspace|Anthropic/)).toBeNull();
+      fireEvent.change(within(dialog).getByLabelText('Upstream name'), {
+        target: { value: `${label} production` },
+      });
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: 'Add upstream' }),
+      );
+      await act(async () => {});
+      expect(preflightCalls()[0]?.body).toEqual({
+        kind,
+        api_key_value: key,
+      });
+      expect(calls.find((call) => call.path === UPSTREAMS)?.body).toEqual({
+        name: `${label} production`,
+        kind,
+        api_key_value: key,
+      });
+      expect(onCreated).toHaveBeenCalledWith(created);
+      cleanup();
+    },
+  );
+});
 
-    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI/ }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    fireEvent.change(within(dialog).getByLabelText('Upstream name'), {
-      target: { value: 'OpenAI production' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('API key'), {
-      target: { value: 'openai-test-key' },
+describe('provider-native API-key checks', () => {
+  test('rejection stays inline and does not save', async () => {
+    route = (call) =>
+      call.path === PREFLIGHT
+        ? {
+            status: 200,
+            body: wire({
+              verdict: 'rejected',
+              inference: 'denied',
+              remediation: ['key_invalid'],
+            }),
+          }
+        : { status: 404, body: {} };
+    const rendered = renderDialog({ mode: 'create' });
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: /OpenAI/ }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('radio', { name: /API key/ }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+    );
+    await paste(rendered.dialog, 'openai-invalid-key');
+    const alert = await within(rendered.dialog).findByRole('alert');
+    expect(alert.textContent).toContain('OpenAI rejected this key');
+    expect(calls.filter((call) => call.path === UPSTREAMS)).toHaveLength(0);
+  });
+
+  test('unreachable check offers an explicit unverified save', async () => {
+    route = (call) =>
+      call.path === PREFLIGHT
+        ? {
+            status: 200,
+            body: wire({
+              verdict: 'unreachable',
+              inference: 'unverified',
+              remediation: ['probe_unreachable'],
+            }),
+          }
+        : { status: 200, body: upstream({ kind: 'gemini_api_key' }) };
+    const rendered = renderDialog({ mode: 'create' });
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: /Gemini/ }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('radio', { name: /API key/ }),
+    );
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+    );
+    await paste(rendered.dialog, 'AIza-unreachable-key');
+    fireEvent.click(
+      within(rendered.dialog).getByRole('button', {
+        name: 'Save without checking',
+      }),
+    );
+    expect(
+      within(rendered.dialog).getByRole('heading', {
+        name: 'Key not verified',
+      }),
+    ).toBeTruthy();
+    fireEvent.change(within(rendered.dialog).getByLabelText('Upstream name'), {
+      target: { value: 'Gemini unverified' },
     });
     fireEvent.click(
-      within(dialog).getByRole('button', { name: 'Add upstream' }),
+      within(rendered.dialog).getByRole('button', { name: 'Add upstream' }),
     );
-
     await act(async () => {});
-    const create = calls.find(
-      (call) => call.method === 'POST' && call.path === UPSTREAMS,
-    );
-    expect(create?.body).toEqual({
-      name: 'OpenAI production',
-      kind: 'openai_api_key',
-      api_key_value: 'openai-test-key',
+    expect(calls.find((call) => call.path === UPSTREAMS)?.body).toEqual({
+      name: 'Gemini unverified',
+      kind: 'gemini_api_key',
+      api_key_value: 'AIza-unreachable-key',
+      skip_preflight: true,
     });
-    expect(onCreated).toHaveBeenCalledWith(created);
   });
+});
+
+test('saves optional OpenAI project provenance without workspace fields', async () => {
+  const created = upstream({ kind: 'openai_api_key' });
+  route = (call) =>
+    call.path === PREFLIGHT
+      ? { status: 200, body: wire({ verdict: 'ok', inference: 'ok' }) }
+      : { status: 200, body: created };
+  const rendered = renderDialog({ mode: 'create' });
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: /OpenAI/ }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('radio', { name: /API key/ }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  await paste(rendered.dialog, 'sk-proj-with-provenance');
+  await within(rendered.dialog).findByRole('heading', {
+    name: 'OpenAI key verified',
+  });
+  fireEvent.change(within(rendered.dialog).getByLabelText('Project ID'), {
+    target: { value: 'proj-production' },
+  });
+  fireEvent.change(within(rendered.dialog).getByLabelText('Upstream name'), {
+    target: { value: 'OpenAI production' },
+  });
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Add upstream' }),
+  );
+  await act(async () => {});
+  const body = calls.find((call) => call.path === UPSTREAMS)?.body as Record<
+    string,
+    unknown
+  >;
+  expect(body).toMatchObject({
+    kind: 'openai_api_key',
+    project_id: 'proj-production',
+  });
+  expect(body).not.toHaveProperty('workspace_id');
+  expect(body).not.toHaveProperty('clear_workspace_id');
+});
+
+describe('provider-native replacement', () => {
+  test.each([
+    ['openai_api_key', 'OpenAI', 'openai-replacement-key'],
+    ['gemini_api_key', 'Gemini', 'AIza-replacement-key'],
+  ] as const)(
+    'replaces %s without Anthropic workspace fields',
+    async (kind, label, key) => {
+      const existing = upstream({
+        kind,
+        base_url: `https://${label.toLowerCase()}.example.com`,
+        spec_revision: 12,
+      });
+      route = (call) =>
+        call.path === PREFLIGHT
+          ? {
+              status: 200,
+              body: wire({ verdict: 'ok', inference: 'ok' }),
+            }
+          : { status: 200, body: upstream({ ...existing, spec_revision: 13 }) };
+      const { dialog, onClose } = renderDialog({
+        mode: 'replace',
+        upstream: existing,
+      });
+      await paste(dialog, key);
+      await within(dialog).findByRole('heading', {
+        name: `${label} key verified`,
+      });
+      expect(preflightCalls()[0]?.body).toEqual({
+        kind,
+        api_key_value: key,
+        base_url: existing.base_url,
+      });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save key' }));
+      await act(async () => {});
+      const put = calls.find((call) => call.method === 'PUT');
+      expect(put?.headers.get('if-match')).toBe('W/"12"');
+      expect(put?.body).toEqual({ api_key_value: key });
+      expect(put?.body).not.toHaveProperty('workspace_id');
+      expect(put?.body).not.toHaveProperty('clear_workspace_id');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 // ─── Kind step and rail ──────────────────────────────────────────────────────
@@ -739,7 +931,7 @@ describe('key step (UI-D-06…11, UI-D-22, UI-D-27, UI-D-29, UI-D-31, UI-D-32)',
     fireEvent.change(baseUrl, { target: { value: '' } });
     route = () => ({ status: 200, body: UNREACHABLE });
     await paste(dialog, KEY);
-    await within(dialog).findByText(/Couldn't reach Anthropic/);
+    await within(dialog).findByRole('alert');
     expect(helpPaths(dialog)).toEqual(["Don't have a key?"]);
     expect(preflightCalls()).toHaveLength(3);
   });
