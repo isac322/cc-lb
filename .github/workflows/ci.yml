@@ -386,6 +386,85 @@ jobs:
       - name: Validate Grafana dashboards
         run: scripts/validate-grafana-dashboard.sh
 
+  nextest-cov-runtime:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.9.0
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - name: Package coverage runtime
+        run: bash scripts/coverage-runtime.sh pack coverage-runtime.tar.gz
+      - name: Smoke test coverage runtime offline
+        run: bash scripts/test-coverage-runtime.sh coverage-runtime.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-runtime
+          path: coverage-runtime.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  nextest-cov-wasm:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - name: Install wasm target for pinned toolchain
+        run: rustup target add wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
+          cache-job-key: "nextest-cov-wasm"
+      - name: Build wasm fixtures
+        run: |
+          cargo build --locked \
+            --target wasm32-unknown-unknown \
+            --release \
+            -p wasmtime-shape-passthrough \
+            -p wasmtime-filter-service-tier \
+            -p cache-aware-wasmtime
+      - name: Verify canonical wasm fixtures
+        run: |
+          set -euo pipefail
+          for fixture in \
+            wasmtime_shape_passthrough.wasm \
+            wasmtime_filter_service_tier.wasm \
+            cache_aware_wasmtime.wasm; do
+            test -s "target/wasm32-unknown-unknown/release/$fixture"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-wasm-fixtures
+          path: target/wasm32-unknown-unknown/release/*.wasm
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   nextest-cov-build:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
@@ -422,14 +501,16 @@ jobs:
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
 
+
       - name: Build and archive instrumented test binaries
         run: |
-          cargo llvm-cov nextest-archive \
-            --workspace \
-            --exclude cc-lb-loadgen \
-            --exclude cc-lb-stress-suite \
-            --all-features \
-            --archive-file nextest-archive.tar.zst
+          CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
+            cargo llvm-cov nextest-archive \
+              --workspace \
+              --exclude cc-lb-loadgen \
+              --exclude cc-lb-stress-suite \
+              --all-features \
+              --archive-file nextest-archive.tar.zst
 
       - name: Run compile-fail contract tests
         run: |
@@ -439,20 +520,13 @@ jobs:
             -E 'test(authn_rail_typestate_contracts)' \
             --test-threads=2 \
             --no-report
-      - name: Package coverage runtime
-        run: bash scripts/coverage-runtime.sh pack coverage-runtime.tar.gz
-
-      - name: Smoke test coverage runtime offline
-        run: bash scripts/test-coverage-runtime.sh coverage-runtime.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-nextest-archive
           path: |
             nextest-archive.tar.zst
-            coverage-runtime.tar.gz
             crates/cc-lb-admin/web/dist/**
-            target/wasm32-unknown-unknown/release/*.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -472,10 +546,18 @@ jobs:
           elif command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
-
   nextest-cov-shard:
-    needs: nextest-cov-build
-    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' }}
+    needs:
+      - nextest-cov-build
+      - nextest-cov-runtime
+      - nextest-cov-wasm
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.nextest-cov-build.result == 'success' &&
+        needs.nextest-cov-runtime.result == 'success' &&
+        needs.nextest-cov-wasm.result == 'success'
+      }}
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -513,6 +595,23 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-runtime
+          path: .
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-wasm-fixtures
+          path: target/wasm32-unknown-unknown/release
+      - name: Verify restored wasm fixtures
+        run: |
+          set -euo pipefail
+          for fixture in \
+            wasmtime_shape_passthrough.wasm \
+            wasmtime_filter_service_tier.wasm \
+            cache_aware_wasmtime.wasm; do
+            test -s "target/wasm32-unknown-unknown/release/$fixture"
+          done
       - name: Restore coverage runtime
         run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
       - name: Verify test tools
@@ -563,14 +662,28 @@ jobs:
     needs:
       - changes
       - nextest-cov-build
+      - nextest-cov-runtime
+      - nextest-cov-wasm
       - nextest-cov-shard
-    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' && needs.nextest-cov-shard.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.nextest-cov-build.result == 'success' &&
+        needs.nextest-cov-runtime.result == 'success' &&
+        needs.nextest-cov-wasm.result == 'success' &&
+        needs.nextest-cov-shard.result == 'success' &&
+        (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
+      }}
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-runtime
+          path: .
       - name: Restore coverage runtime
         run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
 
@@ -647,6 +760,8 @@ jobs:
       - clippy
       - cargo-deny
       - promtool
+      - nextest-cov-runtime
+      - nextest-cov-wasm
       - nextest-cov-build
       - nextest-cov-shard
       - nextest-cov
@@ -675,7 +790,8 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
-            cargo-deny promtool nextest-cov-build nextest-cov-shard nextest-cov e2e)
+            cargo-deny promtool nextest-cov-runtime nextest-cov-wasm
+            nextest-cov-build nextest-cov-shard nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
             "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
