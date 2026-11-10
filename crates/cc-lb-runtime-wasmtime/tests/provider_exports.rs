@@ -25,6 +25,10 @@ fn section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
 }
 
 fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
+    shape_module_with_modes(hooks, metadata_version, &[])
+}
+
+fn shape_module_with_modes(hooks: &[&str], metadata_version: u8, noop_hooks: &[&str]) -> Vec<u8> {
     let response = ShapeResponse {
         url: Box::from("https://example.test/provider"),
         method: Box::from("POST"),
@@ -33,6 +37,9 @@ fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
     };
     let response_only = matches!(hooks, ["transform_response_openai"]);
     let sse_only = matches!(hooks, ["transform_sse_event_gemini"]);
+    let frame_only = hooks
+        .iter()
+        .all(|hook| hook.starts_with("transform_realtime_frame_"));
     let output = if hooks.iter().any(|hook| hook.starts_with("filter")) {
         rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::FilterResponse {
             results: Box::new([]),
@@ -44,6 +51,9 @@ fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
     } else if sse_only {
         rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::TransformSseEventResult::Unchanged)
             .expect("encode SSE transform")
+    } else if frame_only {
+        rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged)
+            .expect("encode realtime frame transform")
     } else {
         rkyv::to_bytes::<RkyvError>(&response).expect("encode response")
     };
@@ -66,28 +76,51 @@ fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
     for hook in hooks {
         let (kind, _) = HookKind::parse_entrypoint(hook).expect("known hook");
         kinds.insert(kind);
-        metadata.insert((*hook).to_owned(), serde_json::json!({
-            "wire_version": 1, "description": "provider hook", "usage": "provider hook",
-            "mode": if matches!(kind, HookKind::Shape | HookKind::Filter) || response_only || sse_only { "active" } else { "noop" }
-        }));
+        metadata.insert(
+            (*hook).to_owned(),
+            serde_json::json!({
+                "wire_version": if kind == HookKind::TransformRealtimeFrame { 2 } else { 1 },
+                "description": "provider hook", "usage": "provider hook",
+                "mode": if noop_hooks.contains(hook) {
+                    "noop"
+                } else if matches!(kind, HookKind::Shape | HookKind::Filter)
+                    || response_only
+                    || sse_only
+                    || frame_only
+                {
+                    "active"
+                } else {
+                    "noop"
+                }
+            }),
+        );
     }
     for kind in kinds {
-        let fingerprint = match kind {
-            HookKind::Shape => <ShapeRequest as WireSchema>::FINGERPRINT,
-            HookKind::TransformResponse => {
-                <cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT
-            }
-            HookKind::TransformSseEvent => {
-                <cc_lb_plugin_wire::TransformSseEventRequest as WireSchema>::FINGERPRINT
-            }
-            HookKind::Filter => <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT,
-            HookKind::TransformRealtimeFrame | HookKind::ShapeEnvelopeGemini => {
-                unreachable!("fixture uses wire v1 hooks")
+        let (fingerprint, wire_version) = match kind {
+            HookKind::Shape => (<ShapeRequest as WireSchema>::FINGERPRINT, 1),
+            HookKind::TransformResponse => (
+                <cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT,
+                1,
+            ),
+            HookKind::TransformSseEvent => (
+                <cc_lb_plugin_wire::TransformSseEventRequest as WireSchema>::FINGERPRINT,
+                1,
+            ),
+            HookKind::Filter => (
+                <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT,
+                1,
+            ),
+            HookKind::TransformRealtimeFrame => (
+                <cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
+                2,
+            ),
+            HookKind::ShapeEnvelopeGemini => {
+                unreachable!("fixture uses no Gemini envelope hook")
             }
         };
         section(
             &mut bytes,
-            &format!("{}.v1", kind.section_prefix()),
+            &format!("{}.v{wire_version}", kind.section_prefix()),
             &fingerprint,
         );
     }
@@ -102,6 +135,16 @@ fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
         &metadata,
     );
     bytes
+}
+
+fn decode_frame_result(bytes: &[u8]) -> cc_lb_plugin_wire::v2::TransformRealtimeFrameResult {
+    let archived = rkyv::access::<
+        cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameResult,
+        RkyvError,
+    >(bytes)
+    .expect("frame result archives");
+    rkyv::deserialize::<cc_lb_plugin_wire::v2::TransformRealtimeFrameResult, RkyvError>(archived)
+        .expect("frame result decodes")
 }
 
 fn dispatch(wasm: &[u8]) -> WasmPluginWireDispatch {
@@ -141,6 +184,63 @@ fn openai_only_shape_is_optional_for_other_families_and_calls_qualified_export()
     assert!(!output.is_empty());
     assert!(!openai.has_response_transform());
     assert!(!openai.has_sse_event_transform());
+}
+#[test]
+fn openai_frame_only_shape_selects_openai_and_is_provider_isolated() {
+    let dispatch = dispatch(&shape_module(&["transform_realtime_frame_openai"], 2));
+    assert!(dispatch.for_provider(ProviderFamily::Anthropic).is_none());
+    assert!(dispatch.for_provider(ProviderFamily::Gemini).is_none());
+    let openai = dispatch
+        .for_provider(ProviderFamily::Openai)
+        .expect("OpenAI realtime frame hook");
+    assert!(openai.shape_wire_version().is_none());
+    assert_eq!(
+        openai.realtime_frame_wire_version(),
+        Some(cc_lb_plugin_wire::schema::WireVersion::V2)
+    );
+    assert!(openai.has_realtime_frame_transform());
+    assert!(matches!(
+        decode_frame_result(
+            openai
+                .call_transform_realtime_frame(&[])
+                .expect("qualified frame export called")
+                .as_slice()
+        ),
+        cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged
+    ));
+}
+
+#[test]
+fn gemini_frame_only_shape_selects_gemini_and_is_provider_isolated() {
+    let dispatch = dispatch(&shape_module(&["transform_realtime_frame_gemini"], 2));
+    assert!(dispatch.for_provider(ProviderFamily::Anthropic).is_none());
+    assert!(dispatch.for_provider(ProviderFamily::Openai).is_none());
+    let gemini = dispatch
+        .for_provider(ProviderFamily::Gemini)
+        .expect("Gemini realtime frame hook");
+    assert!(gemini.shape_wire_version().is_none());
+    assert!(gemini.has_realtime_frame_transform());
+    assert!(matches!(
+        decode_frame_result(
+            gemini
+                .call_transform_realtime_frame(&[])
+                .expect("qualified frame export called")
+                .as_slice()
+        ),
+        cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged
+    ));
+}
+
+#[test]
+fn noop_frame_only_shape_is_not_selected() {
+    let dispatch = dispatch(&shape_module_with_modes(
+        &["transform_realtime_frame_openai"],
+        2,
+        &["transform_realtime_frame_openai"],
+    ));
+    assert!(dispatch.for_provider(ProviderFamily::Anthropic).is_none());
+    assert!(dispatch.for_provider(ProviderFamily::Openai).is_none());
+    assert!(dispatch.for_provider(ProviderFamily::Gemini).is_none());
 }
 
 #[test]

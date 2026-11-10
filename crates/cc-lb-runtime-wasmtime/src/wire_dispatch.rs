@@ -62,6 +62,7 @@ impl WasmPluginWireDispatch {
                 selected.shape.is_some()
                     || selected.response.is_some_and(|h| h.active)
                     || selected.sse.is_some_and(|h| h.active)
+                    || selected.realtime_frame.is_some_and(|h| h.active)
             }
         };
         applicable.then_some(selected)

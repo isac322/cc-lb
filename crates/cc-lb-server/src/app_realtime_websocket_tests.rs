@@ -1630,3 +1630,363 @@ async fn realtime_and_live_handshakes_propagate_child_trace_without_replacing_si
         tracer_provider.shutdown().unwrap();
     }
 }
+
+fn realtime_frame_only_fixture(gemini: bool, noop: bool) -> Vec<u8> {
+    use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, pack_ret};
+    use cc_lb_plugin_wire::v2::{self, TransformRealtimeFrameResult as Result};
+
+    fn store(data: &mut String, offset: &mut u32, bytes: &[u8]) -> (u32, usize) {
+        let start = *offset;
+        let escaped: String = bytes.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        data.push_str(&format!("(data (i32.const {start}) \"{escaped}\")\n"));
+        *offset += (bytes.len() as u32 + 15) & !15;
+        (start, bytes.len())
+    }
+
+    fn matches_box(offset: usize, needle: (u32, usize)) -> String {
+        format!(
+            "(call $eq_box (i32.add (local.get $root) (i32.const {offset})) (i32.const {}) (i32.const {}))",
+            needle.0, needle.1,
+        )
+    }
+
+    let provider = if gemini { ProviderFamily::Gemini } else { ProviderFamily::Openai };
+    let setup = if gemini {
+        r#"{"setup":{"model":"models/gemini-live"}}"#
+    } else {
+        r#"{"type":"session.update"}"#
+    };
+    let setup_replacement = if gemini {
+        r#"{"setup":{"model":"models/gemini-live"},"transformed":true}"#
+    } else {
+        r#"{"type":"session.update","transformed":true}"#
+    };
+    let mut data = String::new();
+    let mut offset = 16;
+    let mut identity_checks = String::new();
+    for (field, expected) in [
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, upstream_identity.provider), provider.as_str()),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, upstream_identity.credential_kind), if gemini { "gemini_api_key" } else { "openai_api_key" }),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, upstream_identity.upstream_id), "00000000-0000-0000-0000-000000000001"),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, upstream_identity.name), "frame-only-provider"),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, request_method), "GET"),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, request_path), if gemini { "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" } else { "/v1/realtime" }),
+        (std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, canonical_model_id), if gemini { "gemini-live" } else { "gpt-realtime" }),
+    ] {
+        let needle = store(&mut data, &mut offset, expected.as_bytes());
+        let check = matches_box(field, needle);
+        identity_checks.push_str(&format!("(if (i32.eqz {check}) (then unreachable))\n"));
+    }
+    let mut branches = String::new();
+    for (payload, direction, kind, result) in [
+        (setup.as_bytes(), "setup", "json", Result::Replace { kind: "json".into(), payload: setup_replacement.as_bytes().into() }),
+        (b"client-unchanged".as_slice(), "client_to_provider", "text", Result::Unchanged),
+        (b"\0client-binary\xff".as_slice(), "client_to_provider", "binary", Result::Unchanged),
+        (b"client-replace".as_slice(), "client_to_provider", "binary", Result::Replace { kind: "text".into(), payload: b"client-replaced".as_slice().into() }),
+        (b"client-drop".as_slice(), "client_to_provider", "text", Result::Drop),
+        (b"client-after-drop".as_slice(), "client_to_provider", "text", Result::Unchanged),
+        (b"provider-unchanged".as_slice(), "provider_to_client", "text", Result::Unchanged),
+        (b"\0provider-binary\xff".as_slice(), "provider_to_client", "binary", Result::Unchanged),
+        (b"provider-replace".as_slice(), "provider_to_client", "text", Result::Replace { kind: "binary".into(), payload: b"\0provider-replaced\xff".as_slice().into() }),
+        (b"provider-drop".as_slice(), "provider_to_client", "text", Result::Drop),
+        (b"provider-after-drop".as_slice(), "provider_to_client", "text", Result::Unchanged),
+    ] {
+        let payload = store(&mut data, &mut offset, payload);
+        let direction = store(&mut data, &mut offset, direction.as_bytes());
+        let kind = store(&mut data, &mut offset, kind.as_bytes());
+        let result = rkyv::to_bytes::<rkyv::rancor::Error>(&result).unwrap();
+        let result = store(&mut data, &mut offset, &result);
+        let payload_check = matches_box(std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, payload), payload);
+        let direction_check = matches_box(std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, direction), direction);
+        let kind_check = matches_box(std::mem::offset_of!(v2::ArchivedTransformRealtimeFrameRequest, kind), kind);
+        branches.push_str(&format!(
+            "(if {payload_check} (then {identity_checks}
+                (if (i32.eqz {direction_check}) (then unreachable))
+                (if (i32.eqz {kind_check}) (then unreachable))
+                (return (i64.const {}))))\n",
+            pack_ret(result.0, result.1 as u32),
+        ));
+    }
+    // Admission's probe is not one of the transport cases above.
+    let unchanged = rkyv::to_bytes::<rkyv::rancor::Error>(&Result::Unchanged).unwrap();
+    let unchanged = store(&mut data, &mut offset, &unchanged);
+    assert!(offset < 32768, "fixture output must not overlap guest input");
+    let fingerprint: String = <v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT
+        .iter().map(|byte| format!("\\{byte:02x}")).collect();
+    let export = HookKind::TransformRealtimeFrame.qualified_export_name(provider);
+    let metadata = serde_json::to_vec(&serde_json::json!({
+        "name": "frame-only-loopback", "version": "1.0.0",
+        "description": "provider-native relay frame transforms", "usage": "loopback tests",
+        "hooks": {
+            export.strip_prefix("cc_lb_").unwrap(): {
+                "wire_version": 2, "mode": if noop { "noop" } else { "active" },
+                "description": "transform native frames", "usage": "loopback tests"
+            }
+        }
+    })).unwrap();
+    let metadata: String = metadata.iter().map(|byte| format!("\\{byte:02x}")).collect();
+    let branches = if noop { "unreachable" } else { branches.as_str() };
+    wat::parse_str(format!(r#"
+        (module
+            (@custom "cc_lb.schema.transform_realtime_frame.v2" "{fingerprint}")
+            (@custom "cc_lb.plugin.v2" "{metadata}")
+            (memory (export "memory") 1)
+            {data}
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 32768)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            ;; ArchivedBox<str/[u8]> holds a relative pointer and a 32-bit length.
+            (func $eq_box (param $field i32) (param $needle i32) (param $len i32) (result i32)
+                (local $value i32) (local $index i32)
+                (if (i32.ne (i32.load offset=4 (local.get $field)) (local.get $len))
+                    (then (return (i32.const 0))))
+                (local.set $value (i32.add (local.get $field) (i32.load (local.get $field))))
+                (block $done
+                    (loop $bytes
+                        (br_if $done (i32.eq (local.get $index) (local.get $len)))
+                        (if (i32.ne
+                            (i32.load8_u (i32.add (local.get $value) (local.get $index)))
+                            (i32.load8_u (i32.add (local.get $needle) (local.get $index))))
+                            (then (return (i32.const 0))))
+                        (local.set $index (i32.add (local.get $index) (i32.const 1)))
+                        (br $bytes)))
+                i32.const 1)
+            (func (export "{export}") (param $ptr i32) (param $len i32) (result i64)
+                (local $root i32)
+                (local.set $root (i32.sub (i32.add (local.get $ptr) (local.get $len)) (i32.const {root_size})))
+                {branches}
+                i64.const {unchanged}))
+    "#,
+        root_size = std::mem::size_of::<v2::ArchivedTransformRealtimeFrameRequest>(),
+        unchanged = pack_ret(unchanged.0, unchanged.1 as u32),
+    )).expect("provider-qualified frame-only fixture")
+}
+
+#[tokio::test]
+async fn realtime_and_live_frame_only_shape_transforms_setup_and_both_relay_directions() {
+    use cc_lb_plugin_wire::schema::ProviderFamily;
+    use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch};
+
+    let runtime = WasmtimeRuntime::with_defaults().unwrap();
+    for gemini in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut provider = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let setup = provider.next().await.unwrap().unwrap();
+            assert_eq!(setup.to_text().unwrap(), if gemini {
+                r#"{"setup":{"model":"models/gemini-live"},"transformed":true}"#
+            } else {
+                r#"{"type":"session.update","transformed":true}"#
+            });
+            for expected in [
+                UpstreamMessage::Ping(Bytes::from_static(b"client-drop")),
+                UpstreamMessage::Pong(Bytes::from_static(b"client-drop")),
+                UpstreamMessage::Text("client-unchanged".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0client-binary\xff")),
+                UpstreamMessage::Text("client-replaced".into()),
+                UpstreamMessage::Text("client-after-drop".into()),
+            ] {
+                assert_eq!(provider.next().await.unwrap().unwrap(), expected);
+            }
+            for message in [
+                UpstreamMessage::Ping(Bytes::from_static(b"provider-drop")),
+                UpstreamMessage::Pong(Bytes::from_static(b"provider-drop")),
+                UpstreamMessage::Text("provider-unchanged".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0provider-binary\xff")),
+                UpstreamMessage::Text("provider-replace".into()),
+                UpstreamMessage::Text("provider-drop".into()),
+                UpstreamMessage::Text("provider-after-drop".into()),
+                UpstreamMessage::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+                    reason: "provider-drop".into(),
+                })),
+            ] {
+                provider.send(message).await.unwrap();
+            }
+        });
+        let mut upstream = websocket_upstream(1, "frame-only-provider", Url::parse(&format!("http://{address}/")).unwrap());
+        upstream.kind = if gemini { UpstreamKind::GeminiApiKey } else { UpstreamKind::OpenaiApiKey };
+        let provider = if gemini { ProviderFamily::Gemini } else { ProviderFamily::Openai };
+        let slot = runtime.register_shape(
+            RuntimeSlotKey::new(TEST_PRINCIPAL, provider.as_str()),
+            "frame-only-loopback",
+            &realtime_frame_only_fixture(gemini, false),
+        ).expect("frame-only Shape admission");
+        let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+            .for_provider(provider).expect("frame-only Shape must select the native provider");
+        assert!(dispatch.shape_wire_version().is_none(), "no request-shape hook");
+        let dialect: Arc<dyn cc_lb_upstream::UpstreamDialect> = Arc::new(
+            crate::wasm_host::WasmtimeUpstreamDialect::new(Arc::new(dispatch))
+                .with_upstream_identity(cc_lb_domain::UpstreamIdentity {
+                    provider: upstream.kind.provider(),
+                    credential_kind: upstream.kind.as_str().to_owned(),
+                    upstream_id: upstream.id.to_string(),
+                    name: upstream.name.clone(),
+                    base_url: upstream.base_url.as_ref().map(ToString::to_string),
+                    gemini_oauth_profile: None,
+                    code_assist_project_id: None,
+                })
+                .with_native_request(cc_lb_engine::lifecycle::native_route_dialect(&upstream)),
+        );
+        let drain = DrainController::new();
+        let state = websocket_test_state(
+            vec![upstream], TerminalStrategy::FirstPick, drain.clone(),
+            Arc::new(RealtimeKeySignerFactory), Arc::new(FixtureKeyStore), vec!["*".to_owned()],
+        ).await;
+        let view = state.dynamic_view.load();
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            TEST_PRINCIPAL, true, vec!["*".to_owned()], Vec::new(),
+            HashMap::from([(
+                TEST_PRINCIPAL.to_owned(),
+                (Some(Arc::new(RouterPipelineCache {
+                    user_filters: Vec::new(), terminal: TerminalStrategy::FirstPick,
+                    instantiation_error: None, provider_filters: None,
+                })), DialectCache::PerUpstream(HashMap::from([(Uuid::from_u128(1), dialect)]))),
+            )]),
+        ));
+        state.dynamic_view.store(cc_lb_control::DynamicViewBuilder::from_view(&view).principal_view(principal_view).build());
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut client, response) = connect_async(realtime_request(proxy, native_websocket_path(gemini))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+            for message in [
+                UpstreamMessage::Text(if gemini {
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into()
+                } else {
+                    r#"{"type":"session.update"}"#.into()
+                }),
+                UpstreamMessage::Ping(Bytes::from_static(b"client-drop")),
+                UpstreamMessage::Pong(Bytes::from_static(b"client-drop")),
+                UpstreamMessage::Text("client-unchanged".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0client-binary\xff")),
+                UpstreamMessage::Binary(Bytes::from_static(b"client-replace")),
+                UpstreamMessage::Text("client-drop".into()),
+                UpstreamMessage::Text("client-after-drop".into()),
+            ] {
+                client.send(message).await.unwrap();
+            }
+            let mut client_ping_replies = 0;
+            for expected in [
+                UpstreamMessage::Ping(Bytes::from_static(b"provider-drop")),
+                UpstreamMessage::Pong(Bytes::from_static(b"provider-drop")),
+                UpstreamMessage::Text("provider-unchanged".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0provider-binary\xff")),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0provider-replaced\xff")),
+                UpstreamMessage::Text("provider-after-drop".into()),
+            ] {
+                loop {
+                    let message = client.next().await.unwrap().unwrap();
+                    // Both WebSocket endpoints may acknowledge the relayed Ping.
+                    if message == UpstreamMessage::Pong(Bytes::from_static(b"client-drop")) {
+                        client_ping_replies += 1;
+                        continue;
+                    }
+                    assert_eq!(message, expected);
+                    break;
+                }
+            }
+            assert!(client_ping_replies > 0, "client Ping must retain its payload");
+            let UpstreamMessage::Close(Some(close)) = client.next().await.unwrap().unwrap() else {
+                panic!("provider close must bypass the frame hook");
+            };
+            assert_eq!(u16::from(close.code), 1001);
+            assert_eq!(close.reason.as_str(), "provider-drop");
+            provider_task.await.unwrap();
+        }).await.expect("bounded frame-transform exchange");
+        assert!(!drain.await_drained(Duration::from_secs(5)).await);
+        proxy_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn realtime_and_live_noop_frame_only_shape_preserves_native_frames() {
+    use cc_lb_plugin_wire::schema::ProviderFamily;
+    use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch};
+
+    let runtime = WasmtimeRuntime::with_defaults().unwrap();
+    for gemini in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut provider = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for expected in [
+                UpstreamMessage::Text(if gemini {
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into()
+                } else {
+                    r#"{"type":"session.update"}"#.into()
+                }),
+                UpstreamMessage::Text("client-drop".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"client-replace")),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0client-binary\xff")),
+            ] {
+                assert_eq!(provider.next().await.unwrap().unwrap(), expected);
+            }
+            for message in [
+                UpstreamMessage::Text("provider-drop".into()),
+                UpstreamMessage::Text("provider-replace".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0provider-binary\xff")),
+                UpstreamMessage::Close(None),
+            ] {
+                provider.send(message).await.unwrap();
+            }
+        });
+        let mut upstream = websocket_upstream(1, "frame-only-provider", Url::parse(&format!("http://{address}/")).unwrap());
+        upstream.kind = if gemini { UpstreamKind::GeminiApiKey } else { UpstreamKind::OpenaiApiKey };
+        let provider = if gemini { ProviderFamily::Gemini } else { ProviderFamily::Openai };
+        let slot = runtime.register_shape(
+            RuntimeSlotKey::new(TEST_PRINCIPAL, provider.as_str()),
+            "noop-frame-only-loopback",
+            &realtime_frame_only_fixture(gemini, true),
+        ).expect("noop frame-only Shape must admit without invoking its trapping export");
+        let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+        assert!(dispatch.for_provider(provider).is_none(), "noop frame-only Shape falls back to the native dialect");
+        let drain = DrainController::new();
+        let state = websocket_test_state(
+            vec![upstream], TerminalStrategy::FirstPick, drain.clone(),
+            Arc::new(RealtimeKeySignerFactory), Arc::new(FixtureKeyStore), vec!["*".to_owned()],
+        ).await;
+        let view = state.dynamic_view.load();
+        // A configured noop plugin resolves to no per-upstream dialect entries.
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            TEST_PRINCIPAL, true, vec!["*".to_owned()], Vec::new(),
+            HashMap::from([(
+                TEST_PRINCIPAL.to_owned(),
+                (Some(Arc::new(RouterPipelineCache {
+                    user_filters: Vec::new(), terminal: TerminalStrategy::FirstPick,
+                    instantiation_error: None, provider_filters: None,
+                })), DialectCache::PerUpstream(HashMap::new())),
+            )]),
+        ));
+        state.dynamic_view.store(cc_lb_control::DynamicViewBuilder::from_view(&view).principal_view(principal_view).build());
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut client, response) = connect_async(realtime_request(proxy, native_websocket_path(gemini))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+            for message in [
+                UpstreamMessage::Text(if gemini {
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into()
+                } else {
+                    r#"{"type":"session.update"}"#.into()
+                }),
+                UpstreamMessage::Text("client-drop".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"client-replace")),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0client-binary\xff")),
+            ] {
+                client.send(message).await.unwrap();
+            }
+            for expected in [
+                UpstreamMessage::Text("provider-drop".into()),
+                UpstreamMessage::Text("provider-replace".into()),
+                UpstreamMessage::Binary(Bytes::from_static(b"\0provider-binary\xff")),
+                UpstreamMessage::Close(None),
+            ] {
+                assert_eq!(client.next().await.unwrap().unwrap(), expected);
+            }
+            provider_task.await.unwrap();
+        }).await.expect("bounded noop frame passthrough exchange");
+        assert!(!drain.await_drained(Duration::from_secs(5)).await);
+        proxy_task.abort();
+    }
+}

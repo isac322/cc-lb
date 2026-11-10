@@ -507,6 +507,44 @@ pub fn sample_shape_request_v2(provider: ProviderFamily) -> v2::ShapeRequest {
     }
 }
 
+/// Provider-native V2 realtime-frame fixture.
+///
+/// Anthropic uses a synthetic boundary payload because cc-lb currently has no
+/// Anthropic realtime transport; this does not imply transport support.
+pub fn sample_transform_realtime_frame_request_v2(
+    provider: ProviderFamily,
+) -> v2::TransformRealtimeFrameRequest {
+    let (path, model, payload) = match provider {
+        ProviderFamily::Anthropic => (
+            "/v1/realtime",
+            "claude-3-haiku-20240307",
+            br#"{"type":"probe"}"#.as_slice(),
+        ),
+        ProviderFamily::Openai => (
+            "/v1/realtime",
+            "gpt-realtime",
+            br#"{"type":"response.created","response":{"id":"resp_probe"}}"#.as_slice(),
+        ),
+        ProviderFamily::Gemini => (
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+            "gemini-live",
+            br#"{"serverContent":{"turnComplete":true}}"#.as_slice(),
+        ),
+    };
+    v2::TransformRealtimeFrameRequest {
+        request_id: Box::from("conformance-req-1"),
+        principal: v2_principal(),
+        upstream: v2_upstream_for(provider),
+        upstream_identity: v2_identity_for(provider),
+        request_method: Box::from("GET"),
+        request_path: Box::from(path),
+        canonical_model_id: Box::from(model),
+        direction: Box::from("provider_to_client"),
+        kind: Box::from("json"),
+        payload: Box::from(payload),
+    }
+}
+
 pub fn sample_transform_response_request_v2(
     provider: ProviderFamily,
 ) -> v2::TransformResponseRequest {

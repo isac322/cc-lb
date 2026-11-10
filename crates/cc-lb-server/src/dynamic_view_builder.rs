@@ -1773,6 +1773,115 @@ mod tests {
         }"#);
         wasm
     }
+    fn frame_only_provider_fixture(
+        provider: cc_lb_plugin_wire::schema::ProviderFamily,
+        noop: bool,
+    ) -> Vec<u8> {
+        use cc_lb_plugin_wire::schema::{HookKind, WireSchema};
+
+        let output = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged,
+        )
+        .expect("realtime frame transform");
+        let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let packed = cc_lb_plugin_wire::schema::pack_ret(16, output.len() as u32);
+        let export = HookKind::TransformRealtimeFrame.qualified_export_name(provider);
+        let provider_name = match provider {
+            cc_lb_plugin_wire::schema::ProviderFamily::Openai => "openai",
+            cc_lb_plugin_wire::schema::ProviderFamily::Gemini => "gemini",
+            cc_lb_plugin_wire::schema::ProviderFamily::Anthropic => "anthropic",
+        };
+        let plugin_name = if noop {
+            format!("{provider_name}-frame-only-noop")
+        } else {
+            format!("{provider_name}-frame-only")
+        };
+        let mut wasm = wat::parse_str(format!(
+            "(module (memory (export \"memory\") 1) (data (i32.const 16) \"{data}\") (func (export \"cc_lb_alloc\") (param i32 i32) (result i32) i32.const 8192) (func (export \"cc_lb_free\") (param i32 i32 i32)) (func (export \"{export}\") (param i32 i32) (result i64) i64.const {packed}))",
+        ))
+        .expect("realtime frame module");
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.transform_realtime_frame.v2",
+            &<cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.plugin.v2",
+            format!(
+                r#"{{
+            "name":"{plugin_name}","version":"1.0.0","description":"{plugin_name}","usage":"test",
+            "hooks":{{"transform_realtime_frame_{provider_name}":{{"wire_version":2,"description":"frame","usage":"test","mode":"{}"}}}}
+        }}"#,
+                if noop { "noop" } else { "active" }
+            )
+            .as_bytes(),
+        );
+        wasm
+    }
+
+    async fn install_shape_plugin(
+        storage: &Storage,
+        principal_id: Uuid,
+        wasm: Vec<u8>,
+        sha256: [u8; 32],
+        filename: &str,
+    ) {
+        use cc_lb_storage_api::{PluginChainEntryInput, WasmBlob, WasmRegistryEntryInput};
+
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("frame inspection")
+            .metadata;
+        let (registry, _) = storage
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256,
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm,
+                },
+                WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: filename.to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Shape],
+                },
+            )
+            .await
+            .expect("frame registry");
+        storage
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id,
+                slot: PluginSlotKind::Shape,
+                order: 1000,
+                wasm_registry_id: registry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("frame chain entry");
+    }
+
+    async fn create_machine_principal(storage: &Storage, name: &str) -> PrincipalRecord {
+        PrincipalStore::create(
+            storage,
+            cc_lb_storage_api::PrincipalCreate {
+                name: name.to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await
+        .expect("principal")
+    }
 
     #[tokio::test]
     async fn real_principal_chains_select_provider_hooks_and_preserve_native_response_only_shaping()
@@ -2029,6 +2138,181 @@ mod tests {
             spec.resolved_dialect(anthropic.id).is_none(),
             "unsupported Shape provider selects no plugin dialect"
         );
+    }
+    #[tokio::test]
+    async fn frame_only_shape_builds_provider_dialects_with_native_request_fallback() {
+        let (dir, storage) = storage_fixture(41).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+        let openai_principal = create_machine_principal(&storage, "openai-frame-chain").await;
+        let gemini_principal = create_machine_principal(&storage, "gemini-frame-chain").await;
+        let noop_principal = create_machine_principal(&storage, "noop-frame-chain").await;
+
+        let anthropic = create_upstream(storage.as_ref(), "anthropic-frame-chain").await;
+        let openai = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "openai-frame-upstream".to_owned(),
+                kind: UpstreamKind::OpenaiOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("OpenAI upstream");
+        let openai = UpstreamStore::set_enabled(storage.as_ref(), openai.id, openai.revision, true)
+            .await
+            .expect("OpenAI enabled");
+        let gemini = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "gemini-frame-upstream".to_owned(),
+                kind: UpstreamKind::GeminiApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("Gemini upstream");
+        let gemini = UpstreamStore::set_enabled(storage.as_ref(), gemini.id, gemini.revision, true)
+            .await
+            .expect("Gemini enabled");
+        let anthropic =
+            UpstreamStore::set_enabled(storage.as_ref(), anthropic.id, anthropic.revision, true)
+                .await
+                .expect("Anthropic enabled");
+
+        install_shape_plugin(
+            &storage,
+            openai_principal.id,
+            frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Openai, false),
+            [242; 32],
+            "openai-frame-only.wasm",
+        )
+        .await;
+        install_shape_plugin(
+            &storage,
+            gemini_principal.id,
+            frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Gemini, false),
+            [243; 32],
+            "gemini-frame-only.wasm",
+        )
+        .await;
+        install_shape_plugin(
+            &storage,
+            noop_principal.id,
+            frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Openai, true),
+            [244; 32],
+            "openai-frame-only-noop.wasm",
+        )
+        .await;
+
+        let anthropic_id = anthropic.id;
+        let openai_id = openai.id;
+        let gemini_id = gemini.id;
+        let principals = vec![openai_principal, gemini_principal, noop_principal];
+        let upstreams = vec![anthropic, openai, gemini];
+        let (chains, _) = build_principal_chains(
+            &stores,
+            &runtime,
+            dir.path(),
+            &principals,
+            &upstreams,
+            &AeadService::from_master_key([19; 32]),
+        )
+        .await
+        .expect("frame principal chains");
+        let principal_view = PrincipalView::from_db(&principals, chains);
+
+        let identity = cc_lb_domain::Principal {
+            id: "frame-principal".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+        };
+        let openai_spec = principal_view
+            .get("openai-frame-chain")
+            .expect("OpenAI principal");
+        let openai_dialect = openai_spec
+            .resolved_dialect(openai_id)
+            .expect("frame-only OpenAI dialect");
+        assert!(openai_dialect.realtime_frame_transform_hook().is_some());
+        assert!(openai_dialect.response_transform_hook().is_none());
+        assert!(openai_dialect.sse_event_transform_hook().is_none());
+        assert!(openai_spec.resolved_dialect(gemini_id).is_none());
+        assert!(openai_spec.resolved_dialect(anthropic_id).is_none());
+        let openai_context = cc_lb_upstream::DialectShapeContext {
+            request_id: "openai-frame-only-request".to_owned(),
+            downstream_headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: Some("stream=false".to_owned()),
+            body_bytes: bytes::Bytes::from_static(br#"{"model":"gpt-test","input":"hi"}"#),
+        };
+        let openai_shaped = cc_lb_upstream::shape_request(
+            openai_dialect.as_ref(),
+            &openai_context,
+            &cc_lb_domain::Upstream::OpenaiDirect { base_url: None },
+            &identity,
+        )
+        .expect("OpenAI frame-only plugin uses native request shaping");
+        assert_eq!(
+            openai_shaped.url().as_str(),
+            "https://chatgpt.com/backend-api/codex/responses?stream=false"
+        );
+        assert_eq!(openai_shaped.body(), &openai_context.body_bytes);
+
+        let gemini_spec = principal_view
+            .get("gemini-frame-chain")
+            .expect("Gemini principal");
+        let gemini_dialect = gemini_spec
+            .resolved_dialect(gemini_id)
+            .expect("frame-only Gemini dialect");
+        assert!(gemini_dialect.realtime_frame_transform_hook().is_some());
+        assert!(gemini_dialect.response_transform_hook().is_none());
+        assert!(gemini_dialect.sse_event_transform_hook().is_none());
+        assert!(gemini_spec.resolved_dialect(openai_id).is_none());
+        assert!(gemini_spec.resolved_dialect(anthropic_id).is_none());
+        let gemini_context = cc_lb_upstream::DialectShapeContext {
+            request_id: "gemini-frame-only-request".to_owned(),
+            downstream_headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            path: "/v1beta/models/gemini-2.5-flash:generateContent".to_owned(),
+            query: None,
+            body_bytes: bytes::Bytes::from_static(br#"{"contents":[]}"#),
+        };
+        let gemini_shaped = cc_lb_upstream::shape_request(
+            gemini_dialect.as_ref(),
+            &gemini_context,
+            &cc_lb_domain::Upstream::GeminiDirect { base_url: None },
+            &identity,
+        )
+        .expect("Gemini frame-only plugin uses native request shaping");
+        assert_eq!(
+            gemini_shaped.url().as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(gemini_shaped.body(), &gemini_context.body_bytes);
+
+        let noop_spec = principal_view
+            .get("noop-frame-chain")
+            .expect("noop principal");
+        assert!(noop_spec.resolved_dialect(openai_id).is_none());
+        assert!(noop_spec.resolved_dialect(gemini_id).is_none());
+        assert!(noop_spec.resolved_dialect(anthropic_id).is_none());
     }
 
     #[tokio::test]
