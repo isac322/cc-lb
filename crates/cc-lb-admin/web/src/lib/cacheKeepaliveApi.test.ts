@@ -99,6 +99,35 @@ describe('CacheKeepaliveListResponseSchema', () => {
     expect(parsed.next_cursor).toBeNull();
     expect(parsed.summary).toEqual(cacheKeepaliveSummaryFixture);
   });
+  it('decodes nullable summary and groups keys on overview and cursor payloads', () => {
+    const limitZeroPayload = {
+      summary: cacheKeepaliveSummaryFixture,
+      groups: null,
+      rows: [],
+      next_cursor: null,
+    };
+    const cursorPayload = {
+      summary: null,
+      groups: null,
+      rows: [apiRowFromFixture(cacheKeepaliveRows[0], 0)],
+      next_cursor: 'cursor-page-2',
+    };
+
+    expect(
+      CacheKeepaliveListResponseSchema.parse(limitZeroPayload),
+    ).toMatchObject({
+      groups: null,
+      rows: [],
+      next_cursor: null,
+    });
+    expect(CacheKeepaliveListResponseSchema.parse(cursorPayload)).toMatchObject(
+      {
+        summary: null,
+        groups: null,
+        next_cursor: 'cursor-page-2',
+      },
+    );
+  });
 });
 
 describe('CacheKeepaliveRowSchema malformed input', () => {

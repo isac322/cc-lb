@@ -4,9 +4,7 @@ use crate::cache_keepalive_view::status::CacheKeepaliveViewState;
 
 #[derive(Serialize)]
 pub(crate) struct CacheKeepaliveListResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) summary: Option<CacheKeepaliveSummaryResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) groups: Option<Vec<CacheKeepaliveGroupResponse>>,
     pub(crate) rows: Vec<CacheKeepaliveRowResponse>,
     pub(crate) next_cursor: Option<String>,

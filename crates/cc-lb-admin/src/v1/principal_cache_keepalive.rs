@@ -134,35 +134,37 @@ async fn list_cache_keepalive(
             cursor = next_page.next_cursor;
         }
     }
-    let activity_batch = match load_activity_batch(storage, &principal_id, all_items.iter()).await {
-        Ok(batch) => batch,
-        Err(error) => return storage_error(error),
-    };
-    let upstream_names = match list_upstream_names(storage, &all_items).await {
-        Ok(upstream_names) => upstream_names,
-        Err(error) => return storage_error(error),
-    };
     let mut all_rows = Vec::with_capacity(all_items.len());
-    for item in &all_items {
-        let activity = match view::activity_for_item(
-            context.catalog,
-            context.now_ms,
-            item,
-            None,
-            &activity_batch,
-            context.horizon_start_ms,
-        ) {
-            Ok(activity) => activity,
+    for items in all_items.chunks(ACTIVITY_BATCH_SIZE) {
+        let activity_batch = match load_activity_batch(storage, &principal_id, items.iter()).await {
+            Ok(batch) => batch,
             Err(error) => return storage_error(error),
         };
-        match view::row_from_activity(
-            context.max_attempts,
-            item,
-            &activity,
-            upstream_names.get(&item.upstream_id).cloned(),
-        ) {
-            Ok(row) => all_rows.push(row),
+        let upstream_names = match list_upstream_names(storage, items).await {
+            Ok(upstream_names) => upstream_names,
             Err(error) => return storage_error(error),
+        };
+        for item in items {
+            let activity = match view::activity_for_item(
+                context.catalog,
+                context.now_ms,
+                item,
+                None,
+                &activity_batch,
+                context.horizon_start_ms,
+            ) {
+                Ok(activity) => activity,
+                Err(error) => return storage_error(error),
+            };
+            match view::row_from_activity(
+                context.max_attempts,
+                item,
+                &activity,
+                upstream_names.get(&item.upstream_id).cloned(),
+            ) {
+                Ok(row) => all_rows.push(row),
+                Err(error) => return storage_error(error),
+            }
         }
     }
     let groups = (!cursor_page).then(|| groups_from_rows(&all_rows));
@@ -229,6 +231,7 @@ fn summary_from_aggregate(
 }
 
 const TRIGGER_ORDER: [&str; 6] = ["Bash", "Write", "Edit", "Read", "_advise", "Agent in-turn"];
+const ACTIVITY_BATCH_SIZE: usize = 500;
 
 fn groups_from_rows(
     rows: &[view::CacheKeepaliveRowResponse],

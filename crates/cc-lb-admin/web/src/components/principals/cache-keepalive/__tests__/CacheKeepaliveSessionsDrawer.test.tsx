@@ -8,6 +8,7 @@ import {
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CacheKeepaliveRow } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
 import * as visibilityManager from '../../../../lib/visibilityManager';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
@@ -416,6 +417,98 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
   });
 
+  it('refreshes cached detail when the selected row reactivates', () => {
+    const rowForState = (is_active: boolean, generation: number) => ({
+      id: 'a1f39c2b7e04',
+      last_message_at_ms: 1_700_000_000_000,
+      state: 'renewed' as const,
+      is_active,
+      ttl: '5m' as const,
+      attempts: 3,
+      max_attempts: 12,
+      reason: 'agent-in-turn (tool_use: `bash`)',
+      display_reason: null,
+      generation,
+      upstream: 'anthropic',
+      error: null,
+      net_pnl: 0.102,
+      total_spent: 0.048,
+      total_avoided: 0.12,
+      evidence_status: 'observed' as const,
+      session_key_hash: 'a1f39c2b7e04',
+      retained_renewals: 3,
+      group_key: 'Bash',
+      group_label: 'Bash',
+      group_kind: 'tool' as const,
+    });
+    const listResult = (row: CacheKeepaliveRow) => ({
+      data: {
+        pages: [
+          {
+            summary: summaryBase,
+            groups: [
+              {
+                key: 'Bash',
+                label: 'Bash',
+                kind: 'tool' as const,
+                sessions: 1,
+                net_pnl: 0.102,
+                total_spent: 0.048,
+                total_avoided: 0.12,
+              },
+            ],
+            rows: [row],
+            next_cursor: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    });
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue(
+      listResult(rowForState(false, 1)) as never,
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const detailKey = queries.qk.cacheKeepaliveSessionDetail(
+      'p-123',
+      'a1f39c2b7e04',
+      '24h',
+    );
+    queryClient.setQueryData(detailKey, { generation: 1, is_active: false });
+    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries');
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />
+      </QueryClientProvider>,
+    );
+    expect(invalidateQueries).not.toHaveBeenCalled();
+
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue(
+      listResult(rowForState(true, 2)) as never,
+    );
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: detailKey });
+  });
+
   it('shows off-state banner when keepalive is disabled for the principal', () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
@@ -566,6 +659,11 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     );
     expect(screen.getByTitle('openai-12h')).toBeDefined();
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
+    expect(queries.useCacheKeepaliveSessions).toHaveBeenLastCalledWith(
+      'p-123',
+      { horizon: '24h', status: 'all' },
+      true,
+    );
   });
   it('loads the next page only after the explicit control is clicked', async () => {
     const user = userEvent.setup();

@@ -384,7 +384,7 @@ export function CacheKeepaliveSessionsDrawer({
     principal.id,
     {
       horizon,
-      status: 'visible',
+      status: enabled ? 'visible' : 'all',
     },
     open,
   );
@@ -460,6 +460,28 @@ export function CacheKeepaliveSessionsDrawer({
       ? null
       : selectedSessionId
     : (loadedRows[0]?.id ?? null);
+  const selectedDetailRow = loadedRows.find(
+    (row) => row.id === desktopSessionId,
+  );
+  useEffect(() => {
+    if (!desktopSessionId || !selectedDetailRow) return;
+    const queryKey = qk.cacheKeepaliveSessionDetail(
+      principal.id,
+      desktopSessionId,
+      horizon,
+    );
+    const cachedDetail = queryClient.getQueryData<{
+      generation: number;
+      is_active: boolean;
+    }>(queryKey);
+    if (
+      cachedDetail &&
+      (cachedDetail.generation !== selectedDetailRow.generation ||
+        cachedDetail.is_active !== selectedDetailRow.is_active)
+    ) {
+      void queryClient.invalidateQueries({ queryKey });
+    }
+  }, [desktopSessionId, horizon, principal.id, queryClient, selectedDetailRow]);
   const showMobileDetail = hasSelection;
   const summary = query.data?.pages[0]?.summary ?? undefined;
   const totalSessions = groups.reduce(
