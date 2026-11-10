@@ -364,7 +364,7 @@ pub(crate) fn row_from_activity(
         retained_renewals: activity.retained_renewals,
         net_pnl: activity
             .pnl
-            .filter(|_| activity.evidence_status == "observed")
+            .filter(|_| activity.evidence_status == "observed" || activity.total_spent_micros > 0)
             .map(|pnl| dollars_from_micros(pnl.net_micros))
             .transpose()?,
         total_spent: dollars_from_micros(activity.total_spent_micros)?,

@@ -2433,6 +2433,55 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle_case
     fixture.drop_schema().await
 }
 
+#[test]
+fn purged_session_reconstructs_display_reason_from_turn() {
+    run_postgres_case("purged session display reason", |url| async move {
+        purged_session_reconstructs_display_reason_from_turn_case(&url).await
+    });
+}
+
+async fn purged_session_reconstructs_display_reason_from_turn_case(url: &str) -> Result<()> {
+    let (fixture, storage) = initialized_storage(url).await?;
+    let display_reason = "agent-in-turn (tool_use: `Bash`) — first renewal in 4m 30s";
+    let session = storage
+        .replace_from_real_request(&request("purged-display-reason", 100, display_reason))
+        .await?;
+    let mut projection = economics_projection("purged-display-renewal", None, 200, "hit", 6_000);
+    projection
+        .turn
+        .as_mut()
+        .expect("renewal turn")
+        .session_key_hash = session.session_key_hash.clone();
+    projection.decision.session_key_hash = Some(session.session_key_hash.clone());
+    storage
+        .append_request_event_with_projections(&event("purged-display-renewal", 200), &projection)
+        .await?;
+
+    let persisted_reason: String = sqlx::query_scalar(
+        "SELECT display_reason FROM cache_keepalive_turns WHERE source_ref_id = $1",
+    )
+    .bind("purged-display-renewal")
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(persisted_reason, display_reason);
+
+    assert_eq!(storage.purge_cache_keepalive_expired(401).await?, 1);
+    let page = storage
+        .list_cache_keepalive_sessions(&query(PRINCIPAL_ID, 10))
+        .await?;
+    let reconstructed = page
+        .rows
+        .iter()
+        .find(|row| row.id == "purged-display-reason")
+        .expect("reconstructed purged session");
+    assert_eq!(
+        reconstructed.display_reason.as_deref(),
+        Some(display_reason)
+    );
+    assert_eq!(reconstructed.reason, "TTL expired before follow-up");
+    fixture.drop_schema().await
+}
+
 struct Fixture {
     schema: String,
     admin_pool: PgPool,

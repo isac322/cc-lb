@@ -104,7 +104,14 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = r#"
               AND d.config_snapshot IS NOT NULL
             LIMIT 1
         ), 12) THEN 'max_refreshes' ELSE 'expired' END AS terminal_reason,
-        'agent-in-turn'::TEXT AS display_reason,
+        COALESCE(
+            NULLIF(
+                (ARRAY_AGG(t.display_reason ORDER BY t.ts DESC, t.source_ref_id ASC)
+                    FILTER (WHERE t.display_reason <> ''))[1],
+                ''
+            ),
+            'agent-in-turn'
+        ) AS display_reason,
         NULL::TEXT AS error,
         (
             SELECT d.config_snapshot
