@@ -7,6 +7,7 @@ use cc_lb_storage_api::{
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use tokio::{runtime::Runtime, time};
+use url::Url;
 use uuid::Uuid;
 
 const TIMEOUT_ITERATIONS: usize = 50;
@@ -55,7 +56,7 @@ fn client_timeout_mid_commit() {
                 );
             }
 
-            fixture.drop_schema().await?;
+            fixture.drop_database().await?;
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -118,7 +119,7 @@ fn connection_drop_mid_commit() {
                 fixture = verifier;
             }
 
-            fixture.drop_schema().await?;
+            fixture.drop_database().await?;
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -128,6 +129,7 @@ fn connection_drop_mid_commit() {
 #[derive(Clone)]
 struct CrashFixture {
     url: String,
+    database: String,
     schema: String,
     app_name: String,
     checkpoint_lock_key: i32,
@@ -143,22 +145,41 @@ impl CrashFixture {
         scenario: &str,
         checkpoint_sleep_secs: f64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query("SELECT pg_advisory_lock(7283945182)")
-            .execute(&admin_pool)
+        // Advisory locks and xmin horizons are database-scoped; isolate this
+        // crash injection from other tests running in the same PostgreSQL service.
+        let database = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
+        let mut admin_url = Url::parse(url)?;
+        admin_url.set_path("/postgres");
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(admin_url.as_str())
+            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE DATABASE {}",
+            quote_ident(&database)
+        )))
+        .execute(&admin_pool)
+        .await?;
+
+        let mut database_url = Url::parse(url)?;
+        database_url.set_path(&format!("/{database}"));
+        let setup_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url.as_str())
             .await?;
         sqlx::query(AssertSqlSafe(format!(
             "CREATE SCHEMA {}",
             quote_ident(schema)
         )))
-        .execute(&admin_pool)
+        .execute(&setup_pool)
         .await?;
+        setup_pool.close().await;
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let checkpoint_lock_key = (u32::from_be_bytes(Uuid::new_v4().as_bytes()[..4].try_into()?)
             & 0x7fff_ffff)
             .max(1) as i32;
-        let pool = schema_pool(url, schema, &app_name, 1).await?;
+        let pool = schema_pool(database_url.as_str(), schema, &app_name, 1).await?;
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
         storage.initialize().await?;
@@ -166,7 +187,8 @@ impl CrashFixture {
         seed_request_events(&storage).await?;
 
         Ok(Self {
-            url: url.to_owned(),
+            url: database_url.to_string(),
+            database,
             schema: schema.to_owned(),
             app_name,
             checkpoint_lock_key,
@@ -182,6 +204,7 @@ impl CrashFixture {
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
         Ok(Self {
             url: self.url.clone(),
+            database: self.database.clone(),
             schema: self.schema.clone(),
             app_name: self.app_name.clone(),
             checkpoint_lock_key: self.checkpoint_lock_key,
@@ -280,11 +303,11 @@ impl CrashFixture {
         .into())
     }
 
-    async fn drop_schema(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn drop_database(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.pool.close().await;
         sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
+            "DROP DATABASE {}",
+            quote_ident(&self.database)
         )))
         .execute(&self.admin_pool)
         .await?;
