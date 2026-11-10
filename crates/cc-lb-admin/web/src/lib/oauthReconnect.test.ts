@@ -365,6 +365,36 @@ describe('classifyOAuthReconnect — provider-specific renewal', () => {
     });
     expect(nudge?.description).not.toMatch(/30 days|365-day|long-lived/i);
   });
+  it.each(['openai_oauth', 'gemini_oauth'] as const)(
+    'keeps terminal reconnect markers visible for %s',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({ kind }),
+          'status_401',
+          NOW,
+        ),
+      ).toMatchObject({
+        reason: 'renewal_rejected',
+        tone: 'danger',
+        actionLabel: 'Reconnect',
+      });
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({ kind }),
+          'refresh_token_expired',
+          NOW,
+        ),
+      ).toMatchObject({
+        reason: 'refresh_token_expired',
+        tone: 'danger',
+        actionLabel: 'Reconnect',
+      });
+      expect(
+        classifyOAuthReconnect(oauthStatus({ kind }), 'network', NOW),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('classifyOAuthReconnect — access-only provider imports', () => {

@@ -785,12 +785,14 @@ async fn set_split_status(
     .await
     .map_err(map_sqlx_error)?;
 
-    let is_oauth = row
+    let kind = row
         .as_ref()
         .map(|row| row.try_get::<&str, _>("kind"))
         .transpose()
-        .map_err(map_sqlx_error)?
-        == Some(UpstreamKind::AnthropicOauth.as_str());
+        .map_err(map_sqlx_error)?;
+    let is_oauth = kind == Some(UpstreamKind::AnthropicOauth.as_str())
+        || kind == Some(UpstreamKind::OpenaiOauth.as_str())
+        || kind == Some(UpstreamKind::GeminiOauth.as_str());
     let mut last_apply_error = row
         .as_ref()
         .map(|row| row.try_get::<Option<String>, _>("last_apply_error"))

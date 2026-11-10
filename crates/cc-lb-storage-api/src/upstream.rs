@@ -173,8 +173,8 @@ pub struct UpstreamUpdate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpstreamStatusUpdate {
-    /// For Anthropic OAuth records, terminal refresh failures cannot be
-    /// replaced by nonterminal errors or cleared through status updates.
+    /// For OAuth records, terminal refresh failures cannot be replaced by
+    /// nonterminal errors or cleared through status updates.
     /// Credential writes clear them.
     pub last_apply_error: Option<Option<String>>,
     pub last_apply_at_unix_secs: Option<Option<u64>>,

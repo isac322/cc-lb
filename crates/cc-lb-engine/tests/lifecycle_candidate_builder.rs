@@ -174,6 +174,36 @@ fn build_candidates_excludes_reconnect_required_oauth() {
     assert_eq!(candidate_ids(&candidates), expected_kept);
 }
 
+#[test]
+fn build_candidates_preserves_provider_specific_reconnect_latches() {
+    for (kind, request_kind) in [
+        (UpstreamKind::OpenaiOauth, RequestKind::OpenaiResponses),
+        (
+            UpstreamKind::GeminiOauth,
+            RequestKind::GeminiGenerateContent,
+        ),
+    ] {
+        let latched_id = Uuid::from_u128(0x40);
+        let transient_id = Uuid::from_u128(0x41);
+        let mut latched = upstream(latched_id, kind, true, None);
+        latched.last_apply_error = Some("status_401".to_owned());
+        let mut transient = upstream(transient_id, kind, true, None);
+        transient.last_apply_error = Some("network".to_owned());
+        let view = test_view(vec![principal("all", Vec::new())], vec![latched, transient]);
+
+        let candidates = build_candidates(
+            &view,
+            "all",
+            request_kind,
+            &[],
+            &HashMap::new(),
+            &cc_lb_clock::SystemClock,
+        );
+
+        assert_eq!(candidate_ids(&candidates), vec![transient_id], "{kind:?}");
+    }
+}
+
 // #851: an upstream whose last apply errored cannot sign a request, so the
 // candidate builder must drop it; `Active` entries and upstreams with no
 // snapshot entry stay eligible.
