@@ -26,6 +26,7 @@ import {
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from '../routes/-overviewPoolQuota';
 
@@ -130,9 +131,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
             latestSnapshotUnixSecs,
             normalizedHistory,
           )
-        : chartData.filter(
-            (row) => row.unix >= rangeStartUnix && row.unix <= rangeEndUnix,
-          );
+        : recordedPoolQuotaChartData(chartData, rangeStartUnix, rangeEndUnix);
     return rows.map((row) => {
       const sparseRow: PoolQuotaChartRow = { unix: row.unix };
       for (const window of visibleWindows) {

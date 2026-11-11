@@ -17,6 +17,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { useMemo, useRef } from 'react';
+import { POOL_QUOTA_HEARTBEAT_CARRY_SECS } from '../routes/-overviewPoolQuota';
 import {
   type AggregateResponse,
   type AnthropicWorkspace,
@@ -1072,6 +1073,13 @@ export function useSubscriptionQuotaPoolHistory(params: {
       queryFn: async ({ signal }) => {
         const nowUnixSecs = Math.floor(Date.now() / 1000);
         const quantumSecs = params.windowQuantumSecs ?? 0;
+        // Storage clamps older query anchors to `since`. Keep those synthetic
+        // points beyond the display's heartbeat bound, without hiding genuine
+        // persisted predecessors needed to draw healthy hourly history.
+        const predecessorLookbackSecs =
+          params.provider === 'openai' || params.provider === 'gemini'
+            ? POOL_QUOTA_HEARTBEAT_CARRY_SECS
+            : 0;
         const untilUnixSecs =
           quantumSecs > 0
             ? Math.ceil(nowUnixSecs / quantumSecs) * quantumSecs
@@ -1082,7 +1090,12 @@ export function useSubscriptionQuotaPoolHistory(params: {
         if (provider) searchParams.set('provider', provider);
         searchParams.set(
           'since_unix_secs',
-          String(untilUnixSecs - params.rangeSecs - quantumSecs),
+          String(
+            untilUnixSecs -
+              params.rangeSecs -
+              quantumSecs -
+              predecessorLookbackSecs,
+          ),
         );
         searchParams.set('until_unix_secs', String(untilUnixSecs));
         if (params.maxPointsPerSeries !== undefined)

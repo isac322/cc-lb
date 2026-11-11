@@ -35,6 +35,7 @@ import type {
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import * as queries from '../lib/queries';
+import { successQuery } from '../lib/test-utils/hook-results';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import { PrincipalProviderTable } from '../overview/PrincipalProviderTable';
@@ -936,8 +937,8 @@ describe('Provider pool observation freshness', () => {
   // Query subscriptions, not parent prop changes, refresh memoized pool cards.
   // Publish immutable snapshots so recovery exercises that same update path.
   const readingListeners = new Set<() => void>();
-  let aggregateReading: unknown;
-  let historyReading: unknown;
+  let aggregateReading = successQuery(aggregateResponse(POOL_HISTORY_NOW, 92));
+  let historyReading = successQuery(poolHistoryResponse(POOL_HISTORY_NOW, 40));
   const subscribeToReadings = (listener: () => void) => {
     readingListeners.add(listener);
     return () => readingListeners.delete(listener);
@@ -947,78 +948,70 @@ describe('Provider pool observation freshness', () => {
     window: string,
     value: number | null,
     series: Array<[number, number | null]>,
-    { age = 30, stale = 0 }: { age?: number; stale?: number } = {},
+    {
+      age = 30,
+      stale = 0,
+      now = POOL_HISTORY_NOW,
+      rangeSecs = 86400,
+    }: { age?: number; stale?: number; now?: number; rangeSecs?: number } = {},
   ) {
     // The live aggregate still has its existing weighting; it must not supply
     // the provider history's current fresh-only value.
-    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 92);
-    const nextAggregate = {
-      data: {
-        ...aggregate,
-        windows: aggregate.windows.slice(0, 1).map((entry) => ({
-          ...entry,
-          window,
-          provider_lots: [
-            {
-              ...entry.provider_lots[0],
-              window,
-              state: 'stale',
-              observed_at_unix_millis: (POOL_HISTORY_NOW - 86400) * 1000,
-            },
-            {
-              ...entry.provider_lots[0],
-              window,
-              observed_at_unix_millis: POOL_HISTORY_NOW * 1000,
-            },
-          ],
-        })),
-      },
-      isPending: false,
-    };
-    const nextHistory = {
-      data: {
-        now_unix_secs: POOL_HISTORY_NOW,
-        range_secs: 86400,
-        windows: [
+    const aggregate = aggregateResponse(now, 92);
+    const nextAggregate = successQuery<AggregateResponse>({
+      ...aggregate,
+      windows: aggregate.windows.slice(0, 1).map((entry) => ({
+        ...entry,
+        window,
+        provider_lots: [
           {
+            ...entry.provider_lots[0],
             window,
-            latest: {
-              snapshot_at_unix_secs: POOL_HISTORY_NOW,
-              utilization: value == null ? null : value / 100,
-              utilization_percent: value,
-              contributing_upstreams: value == null ? 0 : 1,
-              eligible_upstreams: 2,
-              stale_upstreams: stale,
-              missing_observation_upstreams: 0,
-              max_observed_at_unix_millis:
-                value == null ? null : POOL_HISTORY_NOW * 1000,
-              oldest_observed_at_unix_millis: (POOL_HISTORY_NOW - age) * 1000,
-              max_staleness_secs: 300,
-            },
-            series: series.map(
-              ([snapshot_at_unix_secs, utilization_percent]) => ({
-                snapshot_at_unix_secs,
-                utilization_percent,
-              }),
-            ),
+            state: 'stale',
+            observed_at_unix_millis: (now - 86400) * 1000,
+          },
+          {
+            ...entry.provider_lots[0],
+            window,
+            observed_at_unix_millis: now * 1000,
           },
         ],
-      },
-      isPending: false,
-    };
-    vi.mocked(queries.useSubscriptionQuotaAggregate).mockImplementation(
-      () =>
-        useSyncExternalStore(
-          subscribeToReadings,
-          () => aggregateReading,
-        ) as never,
+      })),
+    });
+    const nextHistory = successQuery<
+      PoolHistoryResponse & { readonly range_secs: number }
+    >({
+      now_unix_secs: now,
+      range_secs: rangeSecs,
+      windows: [
+        {
+          window,
+          latest: {
+            snapshot_at_unix_secs: now,
+            utilization: value == null ? null : value / 100,
+            utilization_percent: value,
+            contributing_upstreams: value == null ? 0 : 1,
+            eligible_upstreams: 2,
+            stale_upstreams: stale,
+            missing_observation_upstreams: 0,
+            max_observed_at_unix_millis: value == null ? null : now * 1000,
+            oldest_observed_at_unix_millis: (now - age) * 1000,
+            max_staleness_secs: 300,
+          },
+          series: series.map(
+            ([snapshot_at_unix_secs, utilization_percent]) => ({
+              snapshot_at_unix_secs,
+              utilization_percent,
+            }),
+          ),
+        },
+      ],
+    });
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockImplementation(() =>
+      useSyncExternalStore(subscribeToReadings, () => aggregateReading),
     );
-    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockImplementation(
-      () =>
-        useSyncExternalStore(
-          subscribeToReadings,
-          () => historyReading,
-        ) as never,
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockImplementation(() =>
+      useSyncExternalStore(subscribeToReadings, () => historyReading),
     );
     act(() => {
       aggregateReading = nextAggregate;
@@ -1026,6 +1019,135 @@ describe('Provider pool observation freshness', () => {
       for (const listener of readingListeners) listener();
     });
   }
+
+  describe.each(['compact', 'full'] as const)(
+    '%s bounded persisted history',
+    (surface) => {
+      beforeEach(() => {
+        routerMock.search = { range: '1h' };
+        if (surface === 'full') mockResolvedKpiQueries();
+      });
+
+      function renderHistory(provider: 'openai' | 'gemini') {
+        if (surface === 'compact') {
+          render(
+            <ProviderPoolCard
+              compact
+              hasSubscription
+              provider={provider}
+              rangeSecs={3600}
+            />,
+          );
+          return screen.getByTestId(`provider-pool-${provider}`);
+        }
+        render(
+          <QueryClientProvider client={queryClient}>
+            <ProviderOverviewPage provider={provider} />
+          </QueryClientProvider>,
+        );
+        return screen.getByTestId('pool-quota-card');
+      }
+
+      it.each(providers)(
+        'retains the $provider $window hourly predecessor at the one-hour left boundary',
+        ({ provider, window }) => {
+          // The 1800s query quantum fetches [0, 5400], while the display is
+          // [900, 4500]. Both persisted hourly samples describe healthy 40%.
+          mockProviderReading(
+            window,
+            40,
+            [
+              [0, 40],
+              [3600, 40],
+            ],
+            { now: 4500, rangeSecs: 3600 },
+          );
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('900:40|3600:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('40%');
+          if (surface === 'full') {
+            expect(card.textContent).toContain('1 snapshots ·');
+          }
+        },
+      );
+
+      it.each(providers)(
+        'preserves the $provider $window null predecessor instead of the live recovery',
+        ({ provider, window }) => {
+          mockProviderReading(
+            window,
+            64,
+            [
+              [0, null],
+              [3600, 40],
+            ],
+            { now: 4500, rangeSecs: 3600 },
+          );
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('900:|3600:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('64%');
+        },
+      );
+
+      it.each(providers)(
+        'keeps the $provider $window explicit boundary null and rejects an older-than-heartbeat predecessor',
+        ({ provider, window }) => {
+          const series: Array<[number, number | null]> = [
+            [0, 40],
+            [900, null],
+            [3600, 40],
+          ];
+          mockProviderReading(window, 64, series, {
+            now: 4500,
+            rangeSecs: 3600,
+          });
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('900:|3600:40');
+
+          mockProviderReading(
+            window,
+            64,
+            [
+              [-301, 40],
+              [3600, 40],
+            ],
+            { now: 4500, rangeSecs: 3600 },
+          );
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3600:40');
+
+          mockProviderReading(window, 64, [[0, 40]], {
+            now: 4500,
+            rangeSecs: 3600,
+          });
+          expect(
+            within(card).getByText('No timeline data yet for this range'),
+          ).toBeDefined();
+        },
+      );
+    },
+  );
 
   it.each(providers)(
     'keeps $provider $window current with empty or null history, ignoring historical lots',
@@ -1235,14 +1357,14 @@ describe('Provider pool observation freshness', () => {
   );
 
   it('preserves healthy Anthropic history headline and boundary carry', () => {
-    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
-      data: aggregateResponse(POOL_HISTORY_NOW, 92),
-      isPending: false,
-    } as never);
-    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
-      data: poolHistoryResponse(POOL_HISTORY_NOW, 18, POOL_HISTORY_NOW - 60),
-      isPending: false,
-    } as never);
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue(
+      successQuery(aggregateResponse(POOL_HISTORY_NOW, 92)),
+    );
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue(
+      successQuery(
+        poolHistoryResponse(POOL_HISTORY_NOW, 18, POOL_HISTORY_NOW - 60),
+      ),
+    );
     render(
       <ProviderPoolCard
         compact

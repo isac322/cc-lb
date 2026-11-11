@@ -132,6 +132,7 @@ import {
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from '../../routes/-overviewPoolQuota';
 
@@ -1838,20 +1839,18 @@ export function ProviderOverviewPage({
   );
   const recordedChartData = useMemo(
     () =>
-      chartData
-        .filter(
-          (row) =>
-            row.unix >=
-              poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs &&
-            row.unix <= poolHistoryNowUnixSecs,
-        )
-        .map((row) => {
-          const sparseRow: PoolQuotaChartRow = { unix: row.unix };
-          for (const window of visiblePoolWindows) {
-            if (window in row) sparseRow[window] = row[window];
-          }
-          return sparseRow;
-        }),
+      recordedPoolQuotaChartData(
+        chartData,
+        poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+        poolHistoryNowUnixSecs,
+        { anchorPredecessor: false },
+      ).map((row) => {
+        const sparseRow: PoolQuotaChartRow = { unix: row.unix };
+        for (const window of visiblePoolWindows) {
+          if (window in row) sparseRow[window] = row[window];
+        }
+        return sparseRow;
+      }),
     [
       chartData,
       displayedPoolHistoryRangeSecs,
@@ -1865,21 +1864,26 @@ export function ProviderOverviewPage({
   );
   const visibleChartData = useMemo(
     () =>
-      liveProviderHistory
-        ? recordedChartData
+      (liveProviderHistory
+        ? recordedPoolQuotaChartData(
+            chartData,
+            poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+            poolHistoryNowUnixSecs,
+          )
         : visiblePoolQuotaChartData(
             chartData,
             poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
             poolHistoryNowUnixSecs,
             latestPoolQuotaSnapshotUnixSecs,
             normalizedPoolHistoryWindows,
-          ).map((row) => {
-            const sparseRow: PoolQuotaChartRow = { unix: row.unix };
-            for (const window of visiblePoolWindows) {
-              if (window in row) sparseRow[window] = row[window];
-            }
-            return sparseRow;
-          }),
+          )
+      ).map((row) => {
+        const sparseRow: PoolQuotaChartRow = { unix: row.unix };
+        for (const window of visiblePoolWindows) {
+          if (window in row) sparseRow[window] = row[window];
+        }
+        return sparseRow;
+      }),
     [
       chartData,
       displayedPoolHistoryRangeSecs,
@@ -1887,7 +1891,6 @@ export function ProviderOverviewPage({
       liveProviderHistory,
       normalizedPoolHistoryWindows,
       poolHistoryNowUnixSecs,
-      recordedChartData,
       visiblePoolWindows,
     ],
   );

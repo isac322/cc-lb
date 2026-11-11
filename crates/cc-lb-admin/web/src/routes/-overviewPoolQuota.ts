@@ -140,6 +140,43 @@ export function buildPoolQuotaChartData(
  */
 export const POOL_QUOTA_HEARTBEAT_CARRY_SECS = 3_600 + 300;
 
+/**
+ * Clip persisted history without substituting current readings or extending
+ * the tail. A bounded predecessor anchors the left edge only when the next
+ * persisted point confirms collection continued within one heartbeat.
+ * Snapshot counts disable anchoring so a clipped point is not counted twice.
+ */
+export function recordedPoolQuotaChartData(
+  rows: readonly PoolQuotaChartRow[],
+  rangeStartUnix: number,
+  rangeEndUnix: number,
+  { anchorPredecessor = true }: { anchorPredecessor?: boolean } = {},
+): PoolQuotaChartRow[] {
+  if (rangeStartUnix > rangeEndUnix) return [];
+
+  let predecessor: PoolQuotaChartRow | undefined;
+  const visible: PoolQuotaChartRow[] = [];
+  for (const row of rows) {
+    if (row.unix < rangeStartUnix) {
+      predecessor = row;
+    } else if (row.unix <= rangeEndUnix) {
+      visible.push(row);
+    }
+  }
+
+  const first = visible[0];
+  if (
+    anchorPredecessor &&
+    predecessor &&
+    first &&
+    first.unix > rangeStartUnix &&
+    first.unix - predecessor.unix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS
+  ) {
+    visible.unshift({ ...predecessor, unix: rangeStartUnix });
+  }
+  return visible;
+}
+
 function hasPoolQuotaValue(row: PoolQuotaChartRow): boolean {
   return Object.entries(row).some(
     ([key, value]) =>

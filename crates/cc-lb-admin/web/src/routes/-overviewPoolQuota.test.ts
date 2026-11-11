@@ -17,6 +17,7 @@ import {
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
 
@@ -300,6 +301,72 @@ describe('Overview pooled quota history', () => {
       { unix: 180, '7d_fable': 40 },
       { unix: 300, '7d_fable': 20 },
     ]);
+  });
+});
+
+describe('recordedPoolQuotaChartData', () => {
+  it('anchors only persisted history and keeps snapshot counts unextended', () => {
+    const rows = [
+      { unix: 0, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+      { unix: 5400, '5h': 60 },
+    ];
+    expect(recordedPoolQuotaChartData(rows, 900, 4500)).toEqual([
+      { unix: 900, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+    ]);
+    expect(
+      recordedPoolQuotaChartData(rows, 900, 4500, {
+        anchorPredecessor: false,
+      }),
+    ).toEqual([{ unix: 3600, '5h': 40 }]);
+  });
+
+  it('preserves null predecessors and never overwrites an explicit boundary', () => {
+    expect(
+      recordedPoolQuotaChartData(
+        [
+          { unix: 0, '5h': null, '7d': 40 },
+          { unix: 3600, '5h': 64, '7d': 50 },
+        ],
+        900,
+        4500,
+      ),
+    ).toEqual([
+      { unix: 900, '5h': null, '7d': 40 },
+      { unix: 3600, '5h': 64, '7d': 50 },
+    ]);
+    const boundaryRows = [
+      { unix: 0, '5h': 40 },
+      { unix: 900, '5h': null },
+      { unix: 3600, '5h': 64 },
+    ];
+    expect(recordedPoolQuotaChartData(boundaryRows, 900, 4500)).toEqual(
+      boundaryRows.slice(1),
+    );
+  });
+
+  it('bounds the persisted gap by the heartbeat and does not invent a tail', () => {
+    const first = { unix: 3600, '5h': 40 };
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3600 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([{ unix: 900, '5h': 30 }, first]);
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3599 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([first]);
+    expect(
+      recordedPoolQuotaChartData([{ unix: 0, '5h': 30 }], 900, 4500),
+    ).toEqual([]);
+    expect(recordedPoolQuotaChartData([], 900, 4500)).toEqual([]);
+    expect(recordedPoolQuotaChartData([first], 4500, 900)).toEqual([]);
   });
 });
 
