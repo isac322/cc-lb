@@ -25,7 +25,7 @@ impl SchedulerDispatch {
         hit_miss: &str,
         authorized_after_dispatch: bool,
     ) -> SchedulerResult<()> {
-        let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
+        let source_ref_id = super::renewal_source_ref_id(job, record);
         let event_id = format!("renewal:{source_ref_id}");
         let upstream = UpstreamStore::get_by_id(self.storage.as_ref(), snapshot.upstream_id)
             .await
@@ -316,6 +316,7 @@ mod tests {
             error: None,
             config_snapshot: None,
             terminal_reason: None,
+            cancel_reason: None,
             expires_at_unix_secs: 3,
             created_at_unix_secs: 1,
             updated_at_unix_secs: 1,

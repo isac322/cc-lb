@@ -44,6 +44,27 @@ impl SchedulerDispatch {
         }
 
         let now = unix_secs(self.clock.now());
+        if record.refresh_count >= job.max_refreshes {
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxRefreshes,
+                None,
+            )
+            .await?;
+            return Ok(JobOutcome::Done);
+        }
+        let deadline = record
+            .first_scheduled_at_unix_secs
+            .saturating_add(job.max_total_duration_secs);
+        if record.run_at_unix_secs >= deadline || now >= deadline {
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxDuration,
+                None,
+            )
+            .await?;
+            return Ok(JobOutcome::Done);
+        }
         if now >= record.expires_at_unix_secs {
             self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Expired, None)
                 .await?;
@@ -142,7 +163,17 @@ impl SchedulerDispatch {
             record_dispatch_skipped("not_authorized");
             return Ok(JobOutcome::Done);
         }
-        let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
+        if unix_secs(self.clock.now()) >= deadline {
+            drop(reservation);
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxDuration,
+                None,
+            )
+            .await?;
+            return Ok(JobOutcome::Done);
+        }
+        let source_ref_id = renewal_source_ref_id(&job, &record);
 
         let outcome = self
             .keepalive_dispatcher
@@ -363,6 +394,19 @@ impl SchedulerDispatch {
         let run_at_unix_secs = cache_anchor_at_unix_secs
             .saturating_add(refresh_delay_secs)
             .max(now.saturating_add(1));
+        if run_at_unix_secs
+            >= record
+                .first_scheduled_at_unix_secs
+                .saturating_add(job.max_total_duration_secs)
+        {
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxDuration,
+                None,
+            )
+            .await?;
+            return Ok(JobOutcome::Done);
+        }
         let encrypted_payload = if needs_payload_rewrite {
             let payload_generation =
                 base_payload_generation(record.generation, record.refresh_count).map_err(
@@ -492,4 +536,14 @@ impl SchedulerDispatch {
         .await
         .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))
     }
+}
+
+/// A retained renewal must not collide with a recreated session's generation.
+fn renewal_source_ref_id(job: &CacheKeepaliveJob, record: &CacheKeepaliveSessionRecord) -> String {
+    format!(
+        "{}:{}:{}",
+        job.session_key_hash,
+        record.cycle_id.unwrap_or_default(),
+        job.generation
+    )
 }

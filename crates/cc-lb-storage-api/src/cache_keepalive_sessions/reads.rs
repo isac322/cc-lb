@@ -118,6 +118,8 @@ pub struct CacheKeepaliveSessionListItem {
     pub status: Option<CacheKeepaliveSessionStatus>,
     pub enqueue_state: Option<CacheKeepaliveEnqueueState>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
     pub decision: Option<String>,
     pub reason: String,
     #[serde(default)]

@@ -4,7 +4,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CacheKeepalivePnlRates {
-    pub avoided_create_micros_per_million: u64,
+    pub avoided_micros_per_million: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -36,7 +36,7 @@ pub fn rates_from_catalog(
     ttl: CacheTtl,
 ) -> Option<CacheKeepalivePnlRates> {
     let pricing = catalog.routing_cache_pricing(model, None)?;
-    let avoided_create_micros_per_million = match ttl {
+    let creation_micros_per_million = match ttl {
         CacheTtl::Ttl5m => pricing.cache_creation_5m_per_million_usd?,
         CacheTtl::Ttl1h => pricing.cache_creation_1h_per_million_usd?,
         // OpenAI-specific pricing is not represented by the Anthropic
@@ -44,8 +44,10 @@ pub fn rates_from_catalog(
         CacheTtl::Ttl30m | CacheTtl::Ttl12h => return None,
     }
     .as_micros_usd();
+    let read_micros_per_million = pricing.cache_read_per_million_usd?.as_micros_usd();
     Some(CacheKeepalivePnlRates {
-        avoided_create_micros_per_million,
+        avoided_micros_per_million: creation_micros_per_million
+            .checked_sub(read_micros_per_million)?,
     })
 }
 
@@ -66,12 +68,12 @@ pub fn derive_turn_pnl(
     }
 }
 
-/// Cache-creation cost one followed-up renewal avoided.
+/// Cache-creation cost minus the follow-up cache-read cost for one proven renewal.
 ///
 /// Rows and the summary header both price renewals one at a time through this
 /// function, so their totals round identically.
 pub fn renewal_avoided_micros(renewal_tokens: u64, rates: CacheKeepalivePnlRates) -> i64 {
-    token_cost_micros(renewal_tokens, rates.avoided_create_micros_per_million)
+    token_cost_micros(renewal_tokens, rates.avoided_micros_per_million)
 }
 
 pub fn sum_turn_pnl(turns: &[CacheKeepaliveTurnPnl]) -> CacheKeepaliveSessionPnl {

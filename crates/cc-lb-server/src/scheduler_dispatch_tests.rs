@@ -1050,13 +1050,13 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
     let projection_key_id: Option<String> = sqlx::query_scalar(
         "SELECT accounting_key_id FROM cache_keepalive_turns WHERE source_ref_id = ?",
     )
-    .bind("session-hash:1")
+    .bind("session-hash:00000000-0000-0000-0000-000000000000:1")
     .fetch_one(fixture.storage.pool())
     .await
     .expect("load observe-only turn projection key");
     let projection_cost_micros: i64 =
         sqlx::query_scalar("SELECT cost_micros FROM cache_keepalive_turns WHERE source_ref_id = ?")
-            .bind("session-hash:1")
+            .bind("session-hash:00000000-0000-0000-0000-000000000000:1")
             .fetch_one(fixture.storage.pool())
             .await
             .expect("load observe-only turn projection cost");
@@ -1372,9 +1372,15 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     let events = stored_request_events(&fixture).await;
     assert_eq!(events.len(), 1);
     let event = &events[0];
-    assert_eq!(event.event_id.as_deref(), Some("renewal:session-hash:1"));
+    assert_eq!(
+        event.event_id.as_deref(),
+        Some("renewal:session-hash:00000000-0000-0000-0000-000000000000:1")
+    );
     assert_eq!(event.source_kind.as_deref(), Some("renewal"));
-    assert_eq!(event.source_ref_id.as_deref(), Some("session-hash:1"));
+    assert_eq!(
+        event.source_ref_id.as_deref(),
+        Some("session-hash:00000000-0000-0000-0000-000000000000:1")
+    );
     assert_eq!(event.principal_id.as_deref(), Some("principal"));
     assert_eq!(event.key_id.as_deref(), Some(key_id.as_str()));
     assert_eq!(event.upstream_id, Some(fixture.upstream_id));
@@ -1566,7 +1572,7 @@ async fn assert_mid_cycle_accounting(clear: bool, result: MidCycleResult) {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].event_id.as_deref(),
-            Some("renewal:session-hash:1")
+            Some("renewal:session-hash:00000000-0000-0000-0000-000000000000:1")
         );
         assert_eq!(events[0].input_tokens, Some(100));
         let (hit_miss, cache_read, cost) = if matches!(result, MidCycleResult::Hit) {
@@ -1846,6 +1852,8 @@ async fn assert_renewal_cadence(
     request.snapshot.ttl = ttl;
     request.cache_anchor_age = Duration::from_secs(age_secs);
     request.params.delay = Duration::from_secs(initial_delay);
+    request.params.max_total_duration_secs = ttl.as_secs().saturating_mul(2);
+    request.config_snapshot.max_total_duration_secs = request.params.max_total_duration_secs;
     match ttl {
         cc_lb_storage_api::CacheTtl::Ttl5m => {
             request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
@@ -2907,7 +2915,7 @@ async fn cache_keepalive_hit_terminalizes_when_max_duration_reached() {
         Some(CacheKeepaliveTerminalReason::MaxDuration)
     );
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 0);
 }
 
 #[tokio::test]
@@ -3615,4 +3623,272 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
     );
     assert_eq!(record.refresh_count, 1);
     assert_eq!(http.requests.lock().expect("requests lock").len(), 1);
+}
+
+#[tokio::test]
+async fn keepalive_scheduled_deadline_and_refresh_caps_prevent_http_dispatch() {
+    let fixture = Fixture::new().await;
+    assert_keepalive_dispatch_caps(&fixture, fixture.storage.clone()).await;
+}
+
+async fn assert_keepalive_dispatch_caps(fixture: &Fixture, storage: Arc<dyn Storage>) {
+    for (deadline_offset, max_refreshes, expected_calls, reason) in [
+        (0, 12, 0, CacheKeepaliveTerminalReason::MaxDuration),
+        (-1, 12, 0, CacheKeepaliveTerminalReason::MaxDuration),
+        (1, 12, 1, CacheKeepaliveTerminalReason::MaxDuration),
+        (1, 0, 0, CacheKeepaliveTerminalReason::MaxRefreshes),
+    ] {
+        fixture.http.requests.lock().expect("requests").clear();
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+        let mut request = fixture.enqueue_request();
+        request.cycle_id = Uuid::new_v4();
+        request.params.delay = Duration::from_secs(120);
+        fixture
+            .enqueuer_with_storage(storage.clone(), Arc::clone(&pusher))
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue");
+        let record = storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load")
+            .expect("session");
+        let mut job = fixture.pending_keepalive_job(1).await;
+        job.max_total_duration_secs = record
+            .run_at_unix_secs
+            .saturating_sub(record.first_scheduled_at_unix_secs)
+            .saturating_add_signed(deadline_offset);
+        job.max_refreshes = max_refreshes;
+        let mut dispatch = fixture.dispatch(pusher);
+        dispatch.storage = storage.clone();
+        dispatch
+            .dispatch_cache_keepalive(job)
+            .await
+            .expect("dispatch");
+        assert_eq!(
+            fixture.http.requests.lock().expect("requests").len(),
+            expected_calls
+        );
+        let terminal = storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load")
+            .expect("session");
+        assert_eq!(terminal.terminal_reason, Some(reason));
+        storage
+            .purge_cache_keepalive_expired(i64::MAX as u64)
+            .await
+            .expect("purge terminal");
+    }
+}
+
+#[tokio::test]
+async fn recreated_keepalive_cycle_retains_every_paid_turn_event_and_evidence() {
+    let fixture = Fixture::new().await;
+    assert_recreated_keepalive_cycle(&fixture, fixture.storage.clone()).await;
+}
+
+async fn assert_recreated_keepalive_cycle(fixture: &Fixture, storage: Arc<dyn Storage>) {
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer_with_storage(storage.clone(), Arc::clone(&pusher));
+    let mut dispatch = fixture.dispatch(Arc::clone(&pusher));
+    dispatch.storage = storage.clone();
+    let mut sources = Vec::new();
+    for index in 1..=2 {
+        let mut request = fixture.enqueue_request();
+        request.cycle_id = Uuid::from_u128(index);
+        request.params.max_refreshes = 1;
+        enqueuer
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue");
+        let job = fixture.pending_keepalive_job(1).await;
+        assert_eq!(job.generation, 1, "recreated row restarts its generation");
+        dispatch.dispatch_cache_keepalive(job).await.expect("renew");
+        let mut rows: Vec<String> = storage
+            .list_cache_keepalive_turns("principal", "session-hash")
+            .await
+            .expect("turns")
+            .into_iter()
+            .map(|row| row.source_ref_id)
+            .collect();
+        rows.sort();
+        assert_eq!(rows.len(), index as usize, "no paid turn may be discarded");
+        sources = rows;
+        assert_eq!(
+            storage
+                .purge_cache_keepalive_expired(i64::MAX as u64)
+                .await
+                .expect("expire row but retain history"),
+            1
+        );
+    }
+    let cursor = storage
+        .current_request_event_cursor()
+        .await
+        .expect("cursor");
+    let mut events: Vec<String> = storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            100,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await
+        .expect("events")
+        .into_iter()
+        .map(|(_, event)| event.source_ref_id.expect("renewal source"))
+        .collect();
+    events.sort();
+    assert_eq!(events, sources);
+    let mut refs: Vec<String> = storage
+        .list_cache_keepalive_evidence_for_activity(
+            "principal",
+            &[Uuid::from_u128(1), Uuid::from_u128(2)],
+            &sources,
+            0,
+            i64::MAX as u64,
+        )
+        .await
+        .expect("evidence")
+        .into_iter()
+        .filter(|row| row.evidence_kind == "renewal")
+        .map(|row| row.event_ref.expect("renewal source"))
+        .collect();
+    refs.sort();
+    assert_eq!(refs, sources);
+    assert_eq!(fixture.http.requests.lock().expect("requests").len(), 2);
+}
+
+#[tokio::test]
+async fn partial_keepalive_preservation_stops_but_keeps_paid_usage() {
+    let fixture = Fixture::new().await;
+    assert_partial_keepalive_preservation(&fixture, fixture.storage.clone()).await;
+}
+
+async fn assert_partial_keepalive_preservation(fixture: &Fixture, storage: Arc<dyn Storage>) {
+    install_test_pricing();
+    fixture.http.requests.lock().expect("requests").clear();
+    fixture.http.return_status(
+        StatusCode::OK,
+        serde_json::json!({
+            "usage": {"cache_read_input_tokens": 10, "cache_creation_input_tokens": 200_000,
+                      "input_tokens": 1, "output_tokens": 0}
+        }),
+    );
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    let cycle_id = Uuid::new_v4();
+    request.cycle_id = cycle_id;
+    let expected_bytes = request
+        .snapshot
+        .build_keepalive_body()
+        .expect("renewal bytes");
+    fixture
+        .enqueuer_with_storage(storage.clone(), Arc::clone(&pusher))
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue");
+    let job = fixture.pending_keepalive_job(1).await;
+    let mut dispatch = fixture.dispatch(pusher);
+    dispatch.storage = storage.clone();
+    dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch");
+    let terminal = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load")
+        .expect("session");
+    assert_eq!(
+        terminal.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::CacheMiss)
+    );
+    let turns = storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("paid turns");
+    let turn = turns
+        .iter()
+        .find(|turn| turn.cycle_id == Some(cycle_id))
+        .expect("paid turn");
+    assert_eq!(
+        (
+            turn.hit_miss.as_str(),
+            turn.cache_read_input_tokens,
+            turn.cache_creation_input_tokens
+        ),
+        ("miss", 10, 200_000)
+    );
+    assert!(
+        turn.cost_micros.is_some_and(|cost| cost > 0),
+        "partial preservation spend is retained"
+    );
+    let requests = fixture.http.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body, expected_bytes);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_evidence() {
+    use cc_lb_storage_api::MetaStore;
+    use futures_util::FutureExt as _;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
+        eprintln!("SKIP: CI_POSTGRES_URL not set");
+        return;
+    };
+    let options: PgConnectOptions = url.parse().expect("postgres URL");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .expect("admin pool");
+    let schema = format!("ka_cycle_{}", Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&admin)
+        .await
+        .expect("isolated schema");
+    let schema_for_pool = schema.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(move |connection, _| {
+            let sql = format!("SET search_path TO \"{schema_for_pool}\"");
+            Box::pin(async move {
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await
+        .expect("test pool");
+    let result = std::panic::AssertUnwindSafe(async {
+        let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
+            pool.clone(),
+            Arc::new(SystemClock),
+        ));
+        storage.initialize().await.expect("migrations");
+        let fixture = Fixture::new().await;
+        fixture.seed_keepalive_storage(storage.as_ref()).await;
+        assert_recreated_keepalive_cycle(&fixture, storage.clone()).await;
+        assert_keepalive_dispatch_caps(&fixture, storage.clone()).await;
+        assert_partial_keepalive_preservation(&fixture, storage).await;
+    })
+    .catch_unwind()
+    .await;
+    pool.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(&admin)
+    .await
+    .expect("drop isolated schema");
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

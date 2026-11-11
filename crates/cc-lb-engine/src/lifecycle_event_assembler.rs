@@ -767,14 +767,19 @@ async fn write_finalized_rows(
     let evidence = follow_up_evidence(&row);
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
-        if let Some(cache_breakpoints) = route.cache_breakpoints.clone() {
-            diagnostics.cache_breakpoints = cache_breakpoints
-                .into_iter()
-                .map(|mut breakpoint| {
-                    breakpoint.lookback_prefixes.clear();
-                    breakpoint
-                })
-                .collect();
+        if let Some(mut cache_breakpoints) = route.cache_breakpoints.clone() {
+            // Keep bounded trailing-prefix candidates, including their block
+            // positions, solely in the off-path diagnostics sink.
+            let start = cache_breakpoints
+                .len()
+                .saturating_sub(MAX_FOLLOW_UP_PREFIX_HASHES);
+            cache_breakpoints.drain(..start);
+            let mut remaining = MAX_FOLLOW_UP_PREFIX_HASHES - cache_breakpoints.len();
+            for breakpoint in cache_breakpoints.iter_mut().rev() {
+                breakpoint.lookback_prefixes.truncate(remaining);
+                remaining -= breakpoint.lookback_prefixes.len();
+            }
+            diagnostics.cache_breakpoints = cache_breakpoints;
         }
         diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone();
         diagnostics.breakpoint_content_block_index =
@@ -5076,6 +5081,13 @@ mod tests {
         let mut serving_breakpoints = partial.cache_breakpoints.clone();
         for breakpoint in &mut serving_breakpoints {
             breakpoint.prefix_hash = "serving-deepest-prefix".to_owned();
+            breakpoint.lookback_prefixes.extend((0..64).map(|index| {
+                cc_lb_request_log::RequestCacheLookbackPrefix {
+                    prefix_hash: format!("extra-lookback-{index}"),
+                    content_block_index: index + 2,
+                    lookback_distance: index + 2,
+                }
+            }));
         }
         let mut route: RouteInfo = serde_json::from_value(serde_json::json!({
             "upstream_id": Uuid::from_u128(1004),
@@ -5115,7 +5127,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serving_cache_diagnostics_remain_off_row_and_strip_lookbacks()
+    async fn serving_cache_diagnostics_remain_off_row_and_keep_bounded_lookbacks()
     -> Result<(), Box<dyn std::error::Error>> {
         let (row, line) = serving_cache_diagnostics_case(None).await?;
         assert!(row.cache_breakpoints.is_empty());
@@ -5131,7 +5143,18 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("serving-deepest-prefix")
         );
-        assert!(breakpoint.get("lookback_prefixes").is_none());
+        assert_eq!(
+            breakpoint["lookback_prefixes"][0]["prefix_hash"],
+            "lookback-hash"
+        );
+        assert_eq!(breakpoint["lookback_prefixes"][0]["content_block_index"], 1);
+        assert_eq!(
+            breakpoint["lookback_prefixes"]
+                .as_array()
+                .ok_or("lookbacks")?
+                .len(),
+            31
+        );
         Ok(())
     }
 
@@ -5847,5 +5870,101 @@ mod tests {
                 .all(|item| item.prefix_fingerprint.as_deref()
                     == Some("2f17cbc300efb947b8e8e27d65053030b35d33ff4eae4841e6b9a7ba8f8f8cb2"))
         );
+    }
+}
+
+#[cfg(test)]
+mod keepalive_filter_diagnostics_tests {
+    use super::*;
+    use cc_lb_storage_api::MetaStore;
+    use uuid::Uuid;
+
+    #[test]
+    fn follow_up_storage_filter_reports_prefix_ttl_and_cycle_rejections() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let url = format!("sqlite://{}", dir.path().join("evidence.sqlite").display());
+                    let storage =
+                        cc_lb_storage_sqlite::open_sqlite(&url, Arc::new(cc_lb_clock::SystemClock))
+                            .await
+                            .expect("storage");
+                    storage.initialize().await.expect("migrations");
+                    let evidence = |id: &str, kind: &str, start: u64, prefix: &str| {
+                        CacheKeepaliveEvidenceRow {
+                            evidence_id: id.to_owned(),
+                            cycle_id: (kind == "renewal").then_some(Uuid::from_u128(1)),
+                            evidence_kind: kind.to_owned(),
+                            request_start_ms: start,
+                            prefix_fingerprint: Some("fingerprint".to_owned()),
+                            prefix_hash: Some(prefix.to_owned()),
+                            prefix_policy_version: Some("policy".to_owned()),
+                            prefix_schema_version: Some("schema".to_owned()),
+                            principal_id: "principal".to_owned(),
+                            upstream_id: Uuid::from_u128(1),
+                            model: "model".to_owned(),
+                            ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
+                            hit_miss: Some("hit".to_owned()),
+                            cache_read_input_tokens: Some(10),
+                            cost_micros: Some(1),
+                            request_ref: Some(id.to_owned()),
+                            event_ref: Some(id.to_owned()),
+                        }
+                    };
+                    storage
+                        .append_request_event_with_evidence(
+                            &RequestEvent {
+                                ts: 1,
+                                ts_ms: Some(1_000),
+                                event_id: Some("diagnostics".to_owned()),
+                                ..RequestEvent::default()
+                            },
+                            &[
+                                evidence("renewal", "renewal", 1_000, "prefix"),
+                                evidence("first", "follow_up", 1_100, "prefix"),
+                                evidence("later", "follow_up", 1_200, "prefix"),
+                                evidence("unmatched", "follow_up", 1_300, "different-prefix"),
+                                evidence("expired", "follow_up", 302_000, "prefix"),
+                            ],
+                        )
+                        .await
+                        .expect("persist evidence");
+                    use cc_lb_storage_api::CacheKeepaliveSessionReadStore;
+                    let kept = storage
+                        .list_cache_keepalive_evidence_for_activity(
+                            "principal",
+                            &[Uuid::from_u128(1)],
+                            &[],
+                            0,
+                            400_000,
+                        )
+                        .await
+                        .expect("read evidence");
+                    assert!(kept.iter().any(|row| row.evidence_id == "first"));
+                    assert!(!kept.iter().any(|row| matches!(
+                        row.evidence_id.as_str(),
+                        "later" | "unmatched" | "expired"
+                    )));
+                });
+        });
+        let rendered = handle.render();
+        for reason in [
+            "no_matching_renewal_prefix",
+            "outside_ttl",
+            "not_first_in_cycle",
+        ] {
+            assert!(
+                rendered.contains(&format!(
+                    "cc_lb_cache_keepalive_follow_up_rejected_total{{reason=\"{reason}\"}} 1"
+                )),
+                "missing rejection reason {reason}: {rendered}"
+            );
+        }
     }
 }

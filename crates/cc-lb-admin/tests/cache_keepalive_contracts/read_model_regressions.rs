@@ -451,8 +451,8 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     .await;
     assert_eq!(status, StatusCode::OK, "replacement list: {body:?}");
     assert_eq!(body["summary"]["total_spent"], json!(0.021));
-    assert_eq!(body["summary"]["total_avoided"], json!(0.075));
-    assert_eq!(body["summary"]["cost_saved"], json!(0.054));
+    assert_eq!(body["summary"]["total_avoided"], json!(0.069));
+    assert_eq!(body["summary"]["cost_saved"], json!(0.048));
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
     assert_eq!(body["summary"]["evidence_status"], "observed");
 
@@ -468,8 +468,8 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     );
     assert!(detail["is_active"].as_bool().expect("replacement active"));
     assert_eq!(detail["total_spent"], json!(0.021));
-    assert_eq!(detail["total_avoided"], json!(0.075));
-    assert_eq!(detail["net_pnl"], json!(0.054));
+    assert_eq!(detail["total_avoided"], json!(0.069));
+    assert_eq!(detail["net_pnl"], json!(0.048));
     assert_eq!(detail["total_renewals_current_cycle"], 0);
     assert_eq!(detail["is_last_pending"], false);
     assert_eq!(detail["turns"], json!([]));
@@ -523,8 +523,8 @@ async fn persisted_zero_cost_is_real_zero_spend_in_http_pnl_case() {
     .await;
     assert_eq!(status, StatusCode::OK, "zero-cost list: {body:?}");
     assert_eq!(body["summary"]["total_spent"], json!(0.0));
-    assert_eq!(body["summary"]["total_avoided"], json!(0.075));
-    assert_eq!(body["summary"]["cost_saved"], json!(0.075));
+    assert_eq!(body["summary"]["total_avoided"], json!(0.069));
+    assert_eq!(body["summary"]["cost_saved"], json!(0.069));
 
     let (detail_status, detail) = get_json(
         &state,
@@ -537,8 +537,8 @@ async fn persisted_zero_cost_is_real_zero_spend_in_http_pnl_case() {
         "zero-cost detail: {detail:?}"
     );
     assert_eq!(detail["total_spent"], json!(0.0));
-    assert_eq!(detail["net_pnl"], json!(0.075));
-    assert_eq!(detail["turns"][0]["pnl"], json!(0.075));
+    assert_eq!(detail["net_pnl"], json!(0.069));
+    assert_eq!(detail["turns"][0]["pnl"], json!(0.069));
 }
 
 #[test]
@@ -745,8 +745,8 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
     );
     assert_eq!(observed_body["summary"]["evidence_status"], "observed");
     assert_json_dollars(&observed_body["summary"]["total_spent"], 21_000);
-    assert_json_dollars(&observed_body["summary"]["total_avoided"], 75_000);
-    assert_json_dollars(&observed_body["summary"]["cost_saved"], 54_000);
+    assert_json_dollars(&observed_body["summary"]["total_avoided"], 69_000);
+    assert_json_dollars(&observed_body["summary"]["cost_saved"], 48_000);
     assert_eq!(observed_body["summary"]["retained_successful_hits"], 1);
     let (miss_detail_status, miss_detail) = get_json(
         &observed_state,
@@ -933,8 +933,8 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(status, StatusCode::OK, "two-follow-up list: {body:?}");
     assert_eq!(body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&body["summary"]["total_spent"], 21_000);
-    assert_json_dollars(&body["summary"]["total_avoided"], 75_000);
-    assert_json_dollars(&body["summary"]["cost_saved"], 54_000);
+    assert_json_dollars(&body["summary"]["total_avoided"], 69_000);
+    assert_json_dollars(&body["summary"]["cost_saved"], 48_000);
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
     let row = body["rows"]
         .as_array()
@@ -944,8 +944,8 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
         .expect("two-follow-up row");
     assert_eq!(row["evidence_status"], "pending");
     assert_json_dollars(&row["total_spent"], 21_000);
-    assert_json_dollars(&row["total_avoided"], 75_000);
-    assert_json_dollars(&row["net_pnl"], 54_000);
+    assert_json_dollars(&row["total_avoided"], 69_000);
+    assert_json_dollars(&row["net_pnl"], 48_000);
 
     let (detail_status, detail) = get_json(
         &state,
@@ -959,8 +959,8 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     );
     assert_eq!(detail["evidence_status"], "pending");
     assert_json_dollars(&detail["total_spent"], 21_000);
-    assert_json_dollars(&detail["total_avoided"], 75_000);
-    assert_json_dollars(&detail["net_pnl"], 54_000);
+    assert_json_dollars(&detail["total_avoided"], 69_000);
+    assert_json_dollars(&detail["net_pnl"], 48_000);
     assert_eq!(detail["is_last_pending"], true);
     let turns = detail["turns"]
         .as_array()
@@ -977,7 +977,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(turns[1]["followed_up"], true);
     assert_eq!(turns[1]["evidence_status"], "observed");
     assert_eq!(turns[1]["pending"], false);
-    assert_json_dollars(&turns[1]["pnl"], 69_000);
+    assert_json_dollars(&turns[1]["pnl"], 63_000);
 }
 
 #[test]
@@ -1204,8 +1204,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     assert_eq!(follow_ups_body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&follow_ups_body["summary"]["total_spent"], 12_000);
-    assert_json_dollars(&follow_ups_body["summary"]["cost_saved"], 63_000);
-    assert_json_dollars(&follow_ups_body["summary"]["total_avoided"], 75_000);
+    assert_json_dollars(&follow_ups_body["summary"]["cost_saved"], 57_000);
+    assert_json_dollars(&follow_ups_body["summary"]["total_avoided"], 69_000);
     let (follow_ups_detail_status, follow_ups_detail) = get_json(
         &follow_ups_state,
         &keepalive_detail_uri(&follow_ups_principal_id, "active-multiple-follow-ups"),
@@ -1346,8 +1346,8 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
     assert_eq!(body_24h["summary"]["retained_successful_hits"], 1);
     assert_eq!(body_24h["summary"]["evidence_status"], "observed");
     assert_json_dollars(&body_24h["summary"]["total_spent"], 6_000);
-    assert_json_dollars(&body_24h["summary"]["total_avoided"], 75_000);
-    assert_json_dollars(&body_24h["summary"]["cost_saved"], 69_000);
+    assert_json_dollars(&body_24h["summary"]["total_avoided"], 69_000);
+    assert_json_dollars(&body_24h["summary"]["cost_saved"], 63_000);
 
     let (status_7d, body_7d) = get_json(
         &state,
@@ -1360,7 +1360,7 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
     assert_json_dollars(&body_7d["summary"]["total_spent"], 21_000);
     // The legacy turn has no renewal evidence: it avoided $0 so far, so the
     // real-time net still counts its spend.
-    assert_json_dollars(&body_7d["summary"]["cost_saved"], 54_000);
+    assert_json_dollars(&body_7d["summary"]["cost_saved"], 48_000);
 }
 
 async fn delete_turn_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, source_ref_id: &str) {
@@ -2265,5 +2265,206 @@ async fn q6_terminal_states_and_status_filters_match_rows_case() {
         }
         assert!(!filtered_rows.is_empty());
         assert!(filtered_rows.iter().all(|row| row["state"] == expected));
+    }
+}
+
+#[tokio::test]
+async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let mut request = cache_keepalive_replace_request(
+        &principal_id,
+        "legacy-cancelled",
+        NOW_UNIX_SECS,
+        NOW_UNIX_SECS + 270,
+    );
+    request.display_reason =
+        "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
+    storage
+        .replace_from_real_request(&request)
+        .await
+        .expect("seed session");
+    storage
+        .mark_cache_keepalive_terminal(
+            "legacy-cancelled",
+            1,
+            CacheKeepaliveTerminalReason::Cancelled,
+            None,
+            NOW_UNIX_SECS + 1,
+        )
+        .await
+        .expect("cancel legacy session");
+    let (_, detail) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, "legacy-cancelled"),
+    )
+    .await;
+    assert_eq!(detail["reason"], json!("Cancelled"));
+    assert!(
+        !detail["reason"]
+            .as_str()
+            .unwrap()
+            .contains("first renewal in")
+    );
+}
+
+#[tokio::test]
+async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for (cause, reason) in [
+        ("new_request", "Cancelled: a new request arrived"),
+        (
+            "user_turn_detected",
+            "Cancelled: the agent is waiting for the user",
+        ),
+        (
+            "snapshot_too_large",
+            "Cancelled: the request snapshot is too large",
+        ),
+        (
+            "cached_prefix_too_small",
+            "Cancelled: the cached prefix is too small",
+        ),
+        (
+            "zero_token_renewal_unsupported",
+            "Cancelled: zero-token renewals are unsupported",
+        ),
+    ] {
+        let mut request = cache_keepalive_replace_request(
+            &principal_id,
+            cause,
+            NOW_UNIX_SECS,
+            NOW_UNIX_SECS + 270,
+        );
+        request.display_reason =
+            "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("seed session");
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    cause,
+                    None,
+                    NOW_UNIX_SECS,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some(cause),
+                    NOW_UNIX_SECS + 1,
+                )
+                .await
+                .expect("cancel with cause")
+        );
+        let (status, detail) = get_json(&state, &keepalive_detail_uri(&principal_id, cause)).await;
+        assert_eq!(status, StatusCode::OK, "{detail:?}");
+        assert_eq!(detail["cancel_reason"], cause);
+        assert_eq!(detail["reason"], reason);
+        assert!(
+            !detail["reason"]
+                .as_str()
+                .unwrap()
+                .contains("first renewal in")
+        );
+    }
+    let (status, list) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?status=all&horizon=all",),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list:?}");
+    assert_eq!(list["rows"].as_array().unwrap().len(), 5);
+    for row in list["rows"].as_array().unwrap() {
+        assert_eq!(row["cancel_reason"], row["id"]);
+        assert!(row["reason"].as_str().unwrap().starts_with("Cancelled: "));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for (index, (session, age)) in [("old-cancelled", 2 * 86_400), ("recent-cancelled", 60)]
+        .into_iter()
+        .enumerate()
+    {
+        let cycle = Uuid::from_u128(0xe100 + index as u128);
+        seed_session(&storage, &principal_id, session, cycle, false).await;
+        append_turn(
+            &storage,
+            AppendTurnParams {
+                principal_id: &principal_id,
+                session_key_hash: session,
+                cycle_id: cycle,
+                source_ref_id: session,
+                ts: NOW_UNIX_SECS - age,
+                cache_read_input_tokens: 20_000,
+                cost_micros: 6_000,
+                hit_miss: "hit",
+                with_follow_up: false,
+            },
+        )
+        .await;
+        storage
+            .mark_cache_keepalive_terminal(
+                session,
+                1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                None,
+                NOW_UNIX_SECS + 1,
+            )
+            .await
+            .expect("cancel session");
+    }
+    seed_session(&storage, &principal_id, "zero-cancelled", CYCLE_TWO, false).await;
+    storage
+        .mark_cache_keepalive_terminal(
+            "zero-cancelled",
+            1,
+            CacheKeepaliveTerminalReason::Cancelled,
+            None,
+            NOW_UNIX_SECS + 1,
+        )
+        .await
+        .expect("cancel zero-turn session");
+    sqlx::query("UPDATE cache_keepalive_sessions SET refresh_count = 1 WHERE session_key_hash <> 'zero-cancelled'")
+        .execute(storage.pool()).await.expect("set lifetime counters");
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "deleted-session",
+            cycle_id: Uuid::from_u128(0xe102),
+            source_ref_id: "deleted-turn",
+            ts: NOW_UNIX_SECS - 60,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 11_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "deleted-turn").await;
+    for (horizon, expected_rows, expected_spent) in [("24h", 1, 17_000), ("all", 2, 23_000)] {
+        let (summary, groups, rows) = fetch_visible_pages(&state, &principal_id, horizon, 1).await;
+        assert_eq!(rows.len(), expected_rows, "{horizon}: {rows:?}");
+        assert_eq!(summary["sessions_last_5m"], expected_rows as u64);
+        assert_eq!(summary["unlisted_sessions"], 1);
+        assert_json_dollars(&summary["total_spent"], expected_spent);
+        assert_json_dollars(&summary["unlisted_spent"], 11_000);
+        assert_json_dollars(
+            &summary["total_spent"],
+            sum_group_micros(&groups, "total_spent").unwrap() + 11_000,
+        );
+        assert_eq!(
+            groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group["sessions"].as_u64().unwrap())
+                .sum::<u64>(),
+            expected_rows as u64
+        );
+        assert!(rows.iter().all(|row| row["id"] != "zero-cancelled"));
+        if horizon == "24h" {
+            assert_eq!(rows[0]["id"], "recent-cancelled");
+        }
     }
 }

@@ -582,7 +582,12 @@ fn classify_success_body_with_surface(
                 request_start_ms,
                 accounting_guard,
             };
-            if finalization.usage.cache_read_input_tokens > 0 {
+            // Renewal appends no cache-controlled content. Any cache creation
+            // means a protected prefix was rebuilt rather than fully preserved.
+            // Keep its paid usage, but never perpetuate a partial cache hit.
+            if finalization.usage.cache_read_input_tokens > 0
+                && finalization.usage.cache_creation_input_tokens == 0
+            {
                 DispatchOutcome::CacheHit {
                     cache_anchor_age,
                     finalization,

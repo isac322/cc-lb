@@ -511,7 +511,7 @@ fn classifies_null_usage_as_zero_usage_miss() {
 }
 
 #[test]
-fn classifies_mixed_cache_read_and_creation_as_hit() {
+fn partial_cache_read_and_creation_is_terminal_miss_with_usage_preserved() {
     let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"input_tokens":11,"output_tokens":3,"cache_read_input_tokens":1234,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#;
     let outcome = classify_success_body(
         body,
@@ -520,17 +520,8 @@ fn classifies_mixed_cache_read_and_creation_as_hit() {
         0,
         accounting_guard(),
     );
-    let finalization = match outcome {
-        DispatchOutcome::CacheHit {
-            cache_anchor_age,
-            finalization,
-        } => {
-            assert_eq!(cache_anchor_age, Duration::from_secs(2));
-            finalization
-        }
-        DispatchOutcome::CacheMiss { .. }
-        | DispatchOutcome::UnsupportedProvider(_)
-        | DispatchOutcome::Error(_) => panic!("positive cache read should remain a hit"),
+    let DispatchOutcome::CacheMiss { finalization } = outcome else {
+        panic!("rebuilding any protected cached prefix must stop renewals");
     };
     let usage = &finalization.usage;
     assert_eq!(
@@ -1418,8 +1409,10 @@ async fn oauth_keepalive_nested_ttl_accounting_preserves_publication_evidence()
                 KeepaliveDispatchContext::new(None, name.to_owned()),
             )
             .await;
-        let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
-            panic!("{name}: positive reads must remain cache hits");
+        let finalization = match outcome {
+            DispatchOutcome::CacheHit { finalization, .. } if expected_split.0 == 0 => finalization,
+            DispatchOutcome::CacheMiss { finalization } if expected_split.0 > 0 => finalization,
+            _ => panic!("{name}: creation must stop partial preservation"),
         };
         assert_eq!(finalization.usage.cache_read_input_tokens, 1234, "{name}");
         assert_eq!(
@@ -1447,7 +1440,7 @@ async fn oauth_keepalive_ambiguous_usage_preserves_classification_without_public
         (
             "mixed read and creation",
             br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":48}}"#,
-            "hit",
+            "miss",
             1234,
             48,
         ),

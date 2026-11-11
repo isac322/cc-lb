@@ -29,6 +29,7 @@ fn item(
         status,
         enqueue_state: None,
         terminal_reason,
+        cancel_reason: None,
         decision: None,
         reason: "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned(),
         display_reason: None,

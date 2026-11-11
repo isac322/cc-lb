@@ -448,6 +448,8 @@ async fn b6_forced_tool_choice_cancels_active_session_and_fences_queued_renewal(
 async fn b5_one_hour_ttl_uses_one_hour_lead_and_renews() {
     let mut options = HarnessOptions::default();
     options.keepalive.refresh_lead_time_1h_secs = 300;
+    // The first 1h renewal is due at 3300s; the default 1800s cap forbids it.
+    options.keepalive.max_total_duration_secs = 7_200;
     let harness = Harness::with_options(options)
         .await
         .expect("SQLite harness setup");

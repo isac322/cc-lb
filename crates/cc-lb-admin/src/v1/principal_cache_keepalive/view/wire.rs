@@ -37,6 +37,7 @@ pub(crate) struct CacheKeepaliveRowResponse {
     pub(crate) attempts: Option<u32>,
     pub(crate) max_attempts: u32,
     pub(crate) reason: String,
+    pub(crate) cancel_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) display_reason: Option<String>,
     pub(crate) generation: u64,

@@ -367,6 +367,7 @@ async fn run_hit_cancellation_case(encrypted_payload: Option<Vec<u8>>) {
                     None,
                     anchor,
                     CacheKeepaliveTerminalReason::Cancelled,
+                    None,
                     152,
                 )
                 .await,

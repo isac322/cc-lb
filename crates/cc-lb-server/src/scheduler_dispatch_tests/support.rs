@@ -127,6 +127,43 @@ impl Fixture {
         }
     }
 
+    pub(super) fn enqueuer_with_storage(
+        &self,
+        storage: Arc<dyn Storage>,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+    ) -> ServerCacheKeepaliveEnqueuer {
+        ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage,
+            pusher,
+            aead: self.aead.clone(),
+            clock: Arc::new(SystemClock),
+        })
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(super) async fn seed_keepalive_storage(&self, storage: &dyn Storage) {
+        UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                id: self.upstream_id,
+                name: "fake-upstream".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(Url::parse("http://fake-upstream.local/").expect("url")),
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("seed upstream");
+        PrincipalStore::create(storage, principal_with_keepalive(), 1)
+            .await
+            .expect("seed principal");
+    }
+
     pub(super) async fn replace_encrypted_payload(&self, payload: Vec<u8>) {
         sqlx::query(
             "UPDATE cache_keepalive_sessions SET encrypted_payload = ? WHERE session_key_hash = ?",

@@ -32,13 +32,26 @@ SELECT
     status,
     enqueue_state,
     terminal_reason,
+    cancel_reason,
     NULL AS decision,
     CASE terminal_reason
+        WHEN 'cancelled' THEN CASE cancel_reason
+            WHEN 'new_request' THEN 'Cancelled: a new request arrived'
+            WHEN 'user_turn_detected' THEN 'Cancelled: the agent is waiting for the user'
+            WHEN 'snapshot_too_large' THEN 'Cancelled: the request snapshot is too large'
+            WHEN 'cached_prefix_too_small' THEN 'Cancelled: the cached prefix is too small'
+            WHEN 'zero_token_renewal_unsupported' THEN 'Cancelled: zero-token renewals are unsupported'
+            ELSE 'Cancelled'
+        END
         WHEN 'max_refreshes' THEN 'max renewals reached'
         WHEN 'max_duration' THEN 'max duration reached'
         WHEN 'expired' THEN 'TTL expired before follow-up'
         WHEN 'dispatch_error' THEN 'renewal dispatch unavailable'
-        ELSE display_reason
+        WHEN 'cache_miss' THEN 'protected cache prefix was not fully preserved'
+        WHEN 'decrypt_failed' THEN 'renewal snapshot could not be decrypted'
+        WHEN 'unsupported_provider' THEN 'renewals are unsupported for this provider'
+        WHEN 'stale' THEN 'renewal attempt became stale'
+        ELSE CASE WHEN status = 'terminal' THEN 'Renewal stopped' ELSE display_reason END
     END AS reason,
     display_reason,
     error,
@@ -58,6 +71,7 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
         status,
         enqueue_state,
         terminal_reason,
+        cancel_reason,
         display_reason,
         error,
         config_snapshot
@@ -192,6 +206,7 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
             ), 12) THEN 'max_refreshes'
             ELSE 'expired'
         END AS terminal_reason,
+        NULL AS cancel_reason,
         COALESCE(
             (
                 SELECT NULLIF(t2.display_reason, '')
@@ -236,7 +251,15 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
     GROUP BY t.principal_id, t.session_key_hash
 ) AS cache_keepalive_sessions";
 
-const ZERO_TURN_CANCELLED_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND refresh_count = 0 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash))";
+fn push_cancelled_without_turns(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
+    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash");
+    if let Some(start_ms) = horizon_start_ms {
+        builder
+            .push(" AND turn_row.ts * 1000 >= ")
+            .push_bind(start_ms);
+    }
+    builder.push("))");
+}
 
 const DECISION_ENTRY_SELECT: &str = "
 SELECT
@@ -253,6 +276,7 @@ SELECT
     NULL AS status,
     NULL AS enqueue_state,
     NULL AS terminal_reason,
+    NULL AS cancel_reason,
     decision,
     reason,
     reason AS display_reason,
@@ -815,7 +839,12 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             )
             SELECT
                 (SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND status = 'active') AS renewing_now,
-                ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?)
+                ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?
+                    AND (status <> 'terminal' OR COALESCE(terminal_reason, '') <> 'cancelled' OR EXISTS (
+                        SELECT 1 FROM cache_keepalive_turns t_recent
+                        WHERE t_recent.principal_id = cache_keepalive_sessions.principal_id
+                          AND t_recent.session_key_hash = cache_keepalive_sessions.session_key_hash
+                          AND (? IS NULL OR t_recent.ts * 1000 >= ?))))
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
                 (SELECT COALESCE(SUM(CASE WHEN cost_known = 1 THEN cost_micros ELSE 0 END), 0) FROM cache_keepalive_turns WHERE principal_id = ? AND (? IS NULL OR ts * 1000 >= ?)) AS total_spent_micros,
@@ -874,6 +903,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(principal_id)
         .bind(principal_id)
         .bind(cutoff_ms)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
         .bind(cutoff_ms)
         .bind(principal_id)
@@ -1237,13 +1268,12 @@ fn push_session_branch(
     match query.filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
         CacheKeepaliveSessionFilter::Visible => {
-            builder.push(" AND (NOT ");
-            builder.push(ZERO_TURN_CANCELLED_SQL);
-            builder.push(" OR error IS NOT NULL OR ttl = '12h')");
+            builder.push(" AND NOT ");
+            push_cancelled_without_turns(builder, horizon_start_ms);
         }
         CacheKeepaliveSessionFilter::Tracked => {
             builder.push(" AND NOT ");
-            builder.push(ZERO_TURN_CANCELLED_SQL);
+            push_cancelled_without_turns(builder, horizon_start_ms);
         }
         CacheKeepaliveSessionFilter::Renewed => {
             builder.push(" AND status = 'active' AND refresh_count > 0");
@@ -1258,7 +1288,7 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Cancelled => {
             builder.push(" AND status = 'terminal' AND terminal_reason = 'cancelled' AND NOT ");
-            builder.push(ZERO_TURN_CANCELLED_SQL);
+            push_cancelled_without_turns(builder, horizon_start_ms);
         }
         CacheKeepaliveSessionFilter::Failed => {
             builder.push(" AND status = 'terminal' AND terminal_reason IN ('dispatch_error', 'decrypt_failed', 'unsupported_provider', 'stale')");
@@ -1268,7 +1298,7 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::NotTracked => {
             builder.push(" AND ");
-            builder.push(ZERO_TURN_CANCELLED_SQL);
+            push_cancelled_without_turns(builder, horizon_start_ms);
         }
     }
     if matches!(query.filter, CacheKeepaliveSessionFilter::Error) {

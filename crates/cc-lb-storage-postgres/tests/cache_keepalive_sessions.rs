@@ -592,6 +592,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
     replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(&storage).await?;
+    cancellation_causes_roundtrip_and_replacement_clears_them(&storage).await?;
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
     append_evidence_deduplicates_follow_ups_across_sibling_renewals(&storage).await?;
@@ -1088,6 +1089,7 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
             None,
             410,
             CacheKeepaliveTerminalReason::Cancelled,
+            None,
             413,
         )
         .await?;
@@ -1865,6 +1867,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 Some(cancel_ticket),
                 369,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await?
@@ -1889,6 +1892,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 Some(cancel_ticket),
                 372,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await?
@@ -1969,6 +1973,7 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
                 Some(ticket),
                 370,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await?
@@ -1996,6 +2001,7 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
                 Some(ticket),
                 401,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 401,
             )
             .await?
@@ -2020,6 +2026,7 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
                 Some(cancelled_ticket),
                 100,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 103,
             )
             .await?
@@ -2092,6 +2099,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
                 None,
                 370,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await?
@@ -2116,6 +2124,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
                 None,
                 371,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await?
@@ -2244,4 +2253,71 @@ fn quote_ident(identifier: &str) -> String {
         "unsafe postgres identifier: {identifier}"
     );
     format!("\"{identifier}\"")
+}
+
+async fn cancellation_causes_roundtrip_and_replacement_clears_them(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "cancel-cause-roundtrip";
+    for (index, reason) in [
+        None,
+        Some("new_request"),
+        Some("user_turn_detected"),
+        Some("snapshot_too_large"),
+        Some("cached_prefix_too_small"),
+        Some("zero_token_renewal_unsupported"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let now = 100 + index as u64 * 10;
+        let active = storage
+            .replace_from_real_request(&replace_request(key, b"prefix", now))
+            .await?;
+        assert_eq!(active.cancel_reason, None);
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    None,
+                    now,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    reason,
+                    now + 1
+                )
+                .await?
+        );
+        let terminal = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("session");
+        assert_eq!(terminal.cancel_reason.as_deref(), reason);
+        assert_eq!(
+            terminal.terminal_reason,
+            Some(CacheKeepaliveTerminalReason::Cancelled)
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    None,
+                    now,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("new_request"),
+                    now + 2
+                )
+                .await?
+        );
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session(key)
+                .await?
+                .expect("session")
+                .cancel_reason
+                .as_deref(),
+            reason,
+            "a stale cancellation cannot change the cause"
+        );
+    }
+    Ok(())
 }

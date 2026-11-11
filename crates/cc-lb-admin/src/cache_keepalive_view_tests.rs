@@ -24,7 +24,7 @@ const CACHE_CREATE_1H_MICROS_PER_MILLION: u64 = 6_000_000;
 
 fn rates(cache_create_micros_per_million: u64) -> CacheKeepalivePnlRates {
     CacheKeepalivePnlRates {
-        avoided_create_micros_per_million: cache_create_micros_per_million,
+        avoided_micros_per_million: cache_create_micros_per_million - CACHE_READ_MICROS_PER_MILLION,
     }
 }
 
@@ -103,6 +103,7 @@ fn summary_item(
             .then_some(CacheKeepaliveSessionStatus::Active),
         enqueue_state: None,
         terminal_reason: None,
+        cancel_reason: None,
         decision: matches!(source, CacheKeepaliveSessionEntrySource::Decision)
             .then(|| "not_tracked".to_owned()),
         reason: "fixture".to_owned(),
@@ -139,6 +140,30 @@ fn summary_turn_with(
         cost_micros: Some(0),
         hit_miss: "hit".to_owned(),
         ts,
+    }
+}
+
+#[test]
+fn cache_keepalive_avoided_savings_subtract_follow_up_cache_read_cost() {
+    let catalog = priced_catalog();
+    for (ttl, creation_rate) in [
+        (CacheTtl::Ttl5m, CACHE_CREATE_5M_MICROS_PER_MILLION),
+        (CacheTtl::Ttl1h, CACHE_CREATE_1H_MICROS_PER_MILLION),
+    ] {
+        let pnl = derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 20_000,
+                spent_micros: 6_000,
+                followed_up: true,
+                pending: false,
+            },
+            rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", ttl)
+                .expect("complete cache pricing"),
+        );
+        let expected =
+            (20_000 * (creation_rate - CACHE_READ_MICROS_PER_MILLION) / 1_000_000) as i64;
+        assert_eq!(pnl.avoided_micros, expected, "{ttl:?}");
+        assert_eq!(pnl.net_micros, expected - 6_000, "{ttl:?}");
     }
 }
 
@@ -215,10 +240,10 @@ fn cache_keepalive_pnl_matches_the_frozen_multi_turn_examples() {
     );
 
     // Then: all frozen worked examples retain their exact microdollar values.
-    assert_eq!(renewed_net, 102_000);
-    assert_eq!(capped_net, 93_600);
-    assert_eq!(expired_net, 115_200);
-    assert_eq!(over_renewed.net_micros, -9_000);
+    assert_eq!(renewed_net, 90_000);
+    assert_eq!(capped_net, 79_200);
+    assert_eq!(expired_net, 105_600);
+    assert_eq!(over_renewed.net_micros, -15_000);
 }
 
 #[test]
@@ -311,7 +336,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         "partial-model".to_owned(),
         UsdPerMillion::from_micros_usd(CACHE_READ_MICROS_PER_MILLION),
     );
-    partial_catalog.install_snapshot(CatalogSnapshot {
+    let mut partial_snapshot = CatalogSnapshot {
         payload_hash: "partial".to_owned(),
         fetched_at_ms: 1,
         models: partial_models,
@@ -322,7 +347,8 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         cache_read_per_million_usd_by_tier: HashMap::new(),
         above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
-    });
+    };
+    partial_catalog.install_snapshot(partial_snapshot.clone());
     let partial_turns = vec![summary_turn_with("partial", 100, "partial-model", 20_000)];
     let partial_activity = derive_activity_view(
         CacheKeepaliveActivitySource {
@@ -337,6 +363,27 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
     );
     assert!(partial_activity.pnl.is_none());
     assert!(partial_activity.turns[0].pnl.is_none());
+
+    // A known write price alone cannot value the saving: the follow-up read is paid.
+    partial_snapshot.cache_creation_per_million_usd.insert(
+        "partial-model".to_owned(),
+        UsdPerMillion::from_micros_usd(CACHE_CREATE_5M_MICROS_PER_MILLION),
+    );
+    partial_snapshot.cache_read_per_million_usd.clear();
+    partial_catalog.install_snapshot(partial_snapshot);
+    assert!(
+        rates_from_catalog(partial_catalog.as_ref(), "partial-model", CacheTtl::Ttl5m).is_none()
+    );
+    let partial_batch = CacheKeepaliveActivityBatch::from_turns(partial_turns, Vec::new());
+    let partial_summary = summary_for_items(
+        partial_catalog.as_ref(),
+        NOW_MS,
+        std::slice::from_ref(&session),
+        &partial_batch,
+    )
+    .expect("incomplete read pricing is tolerated");
+    assert_eq!(partial_summary.total_avoided, None);
+    assert_eq!(partial_summary.cost_saved, None);
 
     let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
     let summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
@@ -447,7 +494,7 @@ fn pnl_format_rounding_does_not_change_micro_accounting() {
                 pending: false,
             },
             CacheKeepalivePnlRates {
-                avoided_create_micros_per_million: 0,
+                avoided_micros_per_million: 0,
             },
         ),
         derive_turn_pnl(
@@ -458,7 +505,7 @@ fn pnl_format_rounding_does_not_change_micro_accounting() {
                 pending: false,
             },
             CacheKeepalivePnlRates {
-                avoided_create_micros_per_million: 0,
+                avoided_micros_per_million: 0,
             },
         ),
     ];
@@ -473,7 +520,7 @@ fn pnl_format_rounding_does_not_change_micro_accounting() {
 fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
     const NOW_MS: u64 = 1_730_000_100_000;
     let rates = CacheKeepalivePnlRates {
-        avoided_create_micros_per_million: u64::MAX,
+        avoided_micros_per_million: u64::MAX,
     };
     let saturated_turn = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {

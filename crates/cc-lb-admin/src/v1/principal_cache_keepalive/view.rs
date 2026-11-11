@@ -355,6 +355,7 @@ pub(crate) fn row_from_activity(
             .as_ref()
             .map_or(max_attempts, |config| config.max_refreshes_per_session),
         reason: item.reason.clone(),
+        cancel_reason: item.cancel_reason.clone(),
         display_reason: item.display_reason.clone(),
         generation: item.generation,
         upstream,
