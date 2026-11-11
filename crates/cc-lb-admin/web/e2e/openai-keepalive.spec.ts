@@ -221,3 +221,46 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
     await page.keyboard.press('Escape');
   }
 });
+
+for (const key of ['Enter', 'Space']) {
+  test(`fresh request metric keeps keyboard focus through ${key} and Escape`, async ({ page }) => {
+    await installFixtures(page);
+    await page.route('**/admin/v1/events/recent**', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        events: [{
+          event_id: 'keyboard-metric',
+          request_id: 'keyboard-metric',
+          principal_id: PRINCIPAL_ID,
+          ts: Math.floor(Date.now() / 1000),
+          ts_ms: Date.now(),
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-5.6',
+          source_kind: 'messages',
+        }],
+        next_cursor: null,
+        count: 1,
+        limit: 50,
+        observed: true,
+      }),
+    }));
+    await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
+    const metric = page.getByRole('button', { name: /^Latency .* show breakdown$/ });
+    const breakdown = page.getByText('Latency by responsibility', { exact: true });
+    await expect(metric).toBeVisible();
+    await metric.focus();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Tab');
+    await expect(metric).toBeFocused();
+    await expect(breakdown).not.toBeVisible();
+    await page.keyboard.press(key);
+    await expect(breakdown).toBeVisible();
+    await expect(metric).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(breakdown).not.toBeVisible();
+    await expect(metric).toBeFocused();
+    await expect(page.getByRole('dialog', { name: 'Request detail' })).not.toBeVisible();
+  });
+}

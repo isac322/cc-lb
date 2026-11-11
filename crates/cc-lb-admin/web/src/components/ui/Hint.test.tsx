@@ -4,7 +4,9 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hint } from './primitives';
 
@@ -60,6 +62,37 @@ describe('Hint', () => {
     expect(screen.queryByTestId('hint-content')).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
   });
+
+  it.each(['{Enter}', ' '])(
+    'preserves first keyboard activation with openOnFocus=false using %s',
+    async (key) => {
+      vi.useRealTimers();
+      const user = userEvent.setup();
+      render(
+        <Hint
+          openOnFocus={false}
+          label={<span data-testid="hint-content">Tooltip Content</span>}
+        >
+          <button type="button" data-testid="hint-trigger">
+            Show breakdown
+          </button>
+        </Hint>,
+      );
+
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+      expect(screen.queryByTestId('hint-content')).toBeNull();
+      await user.keyboard(key);
+      expect(screen.getByTestId('hint-content')).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+
+      await user.keyboard('{Escape}');
+      await waitFor(() =>
+        expect(screen.queryByTestId('hint-content')).toBeNull(),
+      );
+      expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+    },
+  );
 
   it.each([true, false])(
     'preserves openOnFocus=%s after the hint has already been engaged',

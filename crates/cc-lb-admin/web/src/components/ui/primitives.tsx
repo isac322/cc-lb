@@ -641,6 +641,8 @@ export function Hint({
           if (stopClickPropagation) e.stopPropagation();
           childElement.props.onClick?.(e);
           if (!openOnFocus) {
+            transferFocusRef.current =
+              e.currentTarget === document.activeElement;
             setEngaged(true);
             setOpen(true);
           }
@@ -667,6 +669,8 @@ export function Hint({
         onClick={(e) => {
           if (stopClickPropagation) e.stopPropagation();
           if (!openOnFocus) {
+            transferFocusRef.current =
+              e.currentTarget === document.activeElement;
             setEngaged(true);
             setOpen(true);
           }
