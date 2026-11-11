@@ -8846,8 +8846,8 @@ impl Lifecycle {
                         if error_body_class != ErrorBodyClass::Sse {
                             error_body_class = classify_error_body(error_body_class, &buffer);
                         }
-                        // A held JSON candidate is decided after the loop.
-                        while error_body_class != ErrorBodyClass::JsonCandidate
+                        // A held body (JSON candidate or whitespace) is decided after the loop.
+                        while error_body_class == ErrorBodyClass::Sse
                             && let Some(end) = usage_parser::find_sse_event_end(&buffer)
                         {
                             let raw = split_sse_event(&mut buffer, end);
@@ -9453,7 +9453,14 @@ impl Lifecycle {
             // A held error body that is complete, valid JSON is the provider's
             // error response: relay it unchanged. A candidate that fails
             // validation stays in `buffer` and reaches the framing error below.
-            if error_body_class == ErrorBodyClass::JsonCandidate
+            // A body that never got past whitespace holds only blank lines;
+            // relay them as they arrived.
+            let held_body_relayable = match error_body_class {
+                ErrorBodyClass::JsonCandidate => held_error_body_is_json(&buffer),
+                ErrorBodyClass::Pending => !buffer.is_empty(),
+                ErrorBodyClass::Sse => false,
+            };
+            if held_body_relayable
                 && upstream_body_eof
                 && parse_sse_events_active
                 && sse_transform_active
@@ -9463,10 +9470,9 @@ impl Lifecycle {
                 && !stream_upstream_error_frame_emitted
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
-                && held_error_body_is_json(&buffer)
             {
                 raw_before_transform_output.clear();
-                stream_provider_error_forwarded = true;
+                stream_provider_error_forwarded |= error_body_class == ErrorBodyClass::JsonCandidate;
                 batch_index = batch_index.saturating_add(1);
                 yield Ok::<Bytes, Infallible>(buffer.split().freeze());
             }
@@ -13112,19 +13118,38 @@ fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
         return ErrorBodyClass::Sse;
     }
     // `serde_json` reports a truncated document as EOF at every boundary
-    // except inside a number, which could still continue; `sonic_rs` reports
-    // syntax errors for ordinary truncations, so it cannot drive this
-    // decision. Error bodies only, capped above, so off the request hot path.
-    match serde_json::from_slice::<serde::de::IgnoredAny>(buffer) {
-        Err(error)
-            if !error.is_eof()
-                && !buffer.last().is_some_and(|byte| {
-                    matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
-                }) =>
-        {
-            ErrorBodyClass::Sse
-        }
-        _ => ErrorBodyClass::JsonCandidate,
+    // except inside a number that could still continue (`-`, `2.`, `2.5e`);
+    // `sonic_rs` reports syntax errors for ordinary truncations, so it cannot
+    // drive this decision. Error bodies only, capped above, so off the
+    // request hot path.
+    if json_prefix_is_unfinished(buffer) {
+        return ErrorBodyClass::JsonCandidate;
+    }
+    let number_start = buffer
+        .iter()
+        .rposition(|byte| !matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'))
+        .map_or(0, |last| last + 1);
+    // Only an unfinished trailing number may excuse a syntax error: the
+    // bytes before it must still be an unfinished JSON document, so a
+    // complete document followed by digits is not held.
+    let before_number_unfinished = number_start < buffer.len()
+        && matches!(
+            serde_json::from_slice::<serde::de::IgnoredAny>(&buffer[..number_start]),
+            Err(error) if error.is_eof()
+        );
+    if before_number_unfinished {
+        ErrorBodyClass::JsonCandidate
+    } else {
+        ErrorBodyClass::Sse
+    }
+}
+
+/// Whether `bytes` is a valid JSON prefix: a complete document, or one that
+/// only ended early.
+fn json_prefix_is_unfinished(bytes: &[u8]) -> bool {
+    match serde_json::from_slice::<serde::de::IgnoredAny>(bytes) {
+        Ok(_) => true,
+        Err(error) => error.is_eof(),
     }
 }
 

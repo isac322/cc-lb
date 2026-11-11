@@ -750,6 +750,34 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
             assert_eq!(received, Bytes::from_static(complete));
         }
     }
+
+    // A body that broke JSON earlier is SSE even when its last byte could
+    // continue a number: completed events are relayed before the framing error.
+    for (body, relayed) in [
+        (
+            &b"{\n\nevent: update\n\nmessage"[..],
+            &b"{\n\nevent: update\n\n"[..],
+        ),
+        (
+            b"{\ndata: {\"code\":429}\n\n2",
+            b"{\ndata: {\"code\":429}\n\n",
+        ),
+    ] {
+        let (status, received) = gemini_oauth_stream_error(&[body]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(received.starts_with(relayed));
+        let text = std::str::from_utf8(&received).expect("relayed events are utf8");
+        assert!(text.contains(
+            "upstream SSE response ended with an incomplete event after transform output"
+        ));
+    }
+
+    // Blank-line-only error bodies reach the client as sent.
+    for body in [&b"\n\n"[..], b"\r\n\r\n"] {
+        let (status, received) = gemini_oauth_stream_error(&[body]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(received, Bytes::from_static(body));
+    }
 }
 
 async fn ingress_cap_does_not_limit_existing_response_paths() {
