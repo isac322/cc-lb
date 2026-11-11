@@ -7914,8 +7914,8 @@ impl Lifecycle {
                                     }
                                 }
                             }
-                            if error_body_class == ErrorBodyClass::Pending {
-                                error_body_class = classify_error_body_prefix(&buffer);
+                            if error_body_class != ErrorBodyClass::Sse {
+                                error_body_class = classify_error_body(error_body_class, &buffer);
                             }
                             let hold_unsolicited_chunk = unsolicited_hold_pending;
                             let mut unsolicited_event_completed = false;
@@ -8843,8 +8843,8 @@ impl Lifecycle {
                     }
                     if parse_sse_events_active {
                         buffer.extend_from_slice(&tail);
-                        if error_body_class == ErrorBodyClass::Pending {
-                            error_body_class = classify_error_body_prefix(&buffer);
+                        if error_body_class != ErrorBodyClass::Sse {
+                            error_body_class = classify_error_body(error_body_class, &buffer);
                         }
                         // A held JSON candidate is decided after the loop.
                         while error_body_class != ErrorBodyClass::JsonCandidate
@@ -9463,7 +9463,7 @@ impl Lifecycle {
                 && !stream_upstream_error_frame_emitted
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
-                && sonic_rs::from_slice::<serde::de::IgnoredAny>(&buffer).is_ok()
+                && held_error_body_is_json(&buffer)
             {
                 raw_before_transform_output.clear();
                 stream_provider_error_forwarded = true;
@@ -13074,43 +13074,63 @@ fn announce_attempt(
     }
 }
 
+/// Largest error body held as a JSON candidate. Provider JSON errors are a
+/// few hundred bytes; past this the body is parsed as SSE, which bounds the
+/// per-chunk revalidation of held bytes.
+const MAX_HELD_JSON_ERROR_BODY_BYTES: usize = 64 * 1024;
+
 /// How an error-status body on a transformed SSE stream is read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ErrorBodyClass {
-    /// Too few bytes to tell; SSE splitting waits for more.
+    /// Only whitespace so far; SSE splitting waits for the first real byte.
     Pending,
-    /// Starts like JSON; held whole and validated at end of stream.
+    /// Every byte so far is a valid JSON prefix; held unparsed.
     JsonCandidate,
     /// Parsed as SSE events.
     Sse,
 }
 
-/// Classifies an error body by its opening tokens. JSON opens with `{` then
-/// `"` or `}`, or with `[` then a value or `]`; no SSE field line does
-/// (`{extension: x` is SSE), so only a real JSON prefix is held.
-fn classify_error_body_prefix(buffer: &[u8]) -> ErrorBodyClass {
-    let mut tokens = buffer.iter().filter(|byte| !byte.is_ascii_whitespace());
-    let Some(open) = tokens.next() else {
-        return ErrorBodyClass::Pending;
+/// Advances the error-body class after more bytes reach `buffer`.
+///
+/// A body is held only while it remains a valid JSON prefix. The first byte
+/// that breaks JSON syntax (`[trace: x`, `{"extension:` followed by a raw
+/// newline) returns it to SSE parsing in the same chunk, before any event is
+/// lost, so genuine SSE keeps its normal handling.
+fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
+    let class = match class {
+        ErrorBodyClass::Pending => match buffer.iter().find(|byte| !byte.is_ascii_whitespace()) {
+            None => return ErrorBodyClass::Pending,
+            Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
+            Some(_) => return ErrorBodyClass::Sse,
+        },
+        class => class,
     };
-    if !matches!(open, b'{' | b'[') {
+    if class != ErrorBodyClass::JsonCandidate {
+        return class;
+    }
+    if buffer.len() > MAX_HELD_JSON_ERROR_BODY_BYTES {
         return ErrorBodyClass::Sse;
     }
-    let Some(next) = tokens.next() else {
-        return ErrorBodyClass::Pending;
-    };
-    let json = match open {
-        b'{' => matches!(next, b'"' | b'}'),
-        _ => matches!(
-            next,
-            b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n' | b']'
-        ),
-    };
-    if json {
-        ErrorBodyClass::JsonCandidate
-    } else {
-        ErrorBodyClass::Sse
+    // `serde_json` reports a truncated document as EOF at every boundary
+    // except inside a number, which could still continue; `sonic_rs` reports
+    // syntax errors for ordinary truncations, so it cannot drive this
+    // decision. Error bodies only, capped above, so off the request hot path.
+    match serde_json::from_slice::<serde::de::IgnoredAny>(buffer) {
+        Err(error)
+            if !error.is_eof()
+                && !buffer.last().is_some_and(|byte| {
+                    matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                }) =>
+        {
+            ErrorBodyClass::Sse
+        }
+        _ => ErrorBodyClass::JsonCandidate,
     }
+}
+
+/// Whether a held error body is one complete JSON document.
+fn held_error_body_is_json(buffer: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(buffer).is_ok()
 }
 
 fn is_sse_response(

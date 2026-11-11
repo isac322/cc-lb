@@ -701,12 +701,19 @@ async fn gemini_oauth_stream_error(chunks: &[&'static [u8]]) -> (StatusCode, Byt
 /// when the JSON carries blank lines that SSE splitting would consume.
 async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
     let compact: &[u8] = br#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#;
-    let cases: [&[&'static [u8]]; 4] = [
+    let cases: [&[&'static [u8]]; 5] = [
         &[compact],
         &[b"\n\n", compact],
         &[
             b"{\n  \"error\": {\n\n    \"code\": 429,\n",
             b"    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+        ],
+        // A chunk boundary inside a number still reads as an unfinished document.
+        &[
+            b"{\"error\":{\"code\":4",
+            b"29,\"ratio\":-",
+            b"2.5e",
+            b"3}}",
         ],
         &[b"[{\"error\":{\"code\":429}}]\n\n"],
     ];
@@ -717,21 +724,32 @@ async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
     }
 }
 
-/// A body that merely starts with `{` but is SSE keeps SSE semantics: an
-/// unterminated event is a framing error, and complete events are relayed.
+/// SSE whose first field happens to read like JSON keeps SSE semantics: an
+/// unterminated event is a framing error, and complete events are relayed
+/// byte-for-byte, as on a body that never looked like JSON.
 async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
-    let (status, received) = gemini_oauth_stream_error(&[
-        b"{extension: ignored\nevent: error\ndata: {\"error\":{\"code\":429}}\n",
-    ])
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    let text = std::str::from_utf8(&received).expect("error frame is utf8");
-    assert!(text.contains("incomplete event before transform output"));
+    const EVENT: &[u8] =
+        b"event: error\ndata: {\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}\n";
+    for prefix in [
+        &b"{extension: ignored\n"[..],
+        b"[trace: ignored\n",
+        b"{\"extension:\n",
+    ] {
+        let unterminated = [prefix, EVENT].concat().leak() as &'static [u8];
+        let (status, received) = gemini_oauth_stream_error(&[unterminated]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let text = std::str::from_utf8(&received).expect("error frame is utf8");
+        assert!(text.contains("incomplete event before transform output"));
 
-    let complete: &[u8] = b"{extension: ignored\nevent: error\ndata: {\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n";
-    let (status, received) = gemini_oauth_stream_error(&[complete]).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(received, Bytes::from_static(complete));
+        let complete = [prefix, EVENT, b"\n"].concat().leak() as &'static [u8];
+        // The byte that breaks JSON syntax may arrive in a later chunk.
+        let (head, tail) = complete.split_at(2);
+        for chunks in [&[complete][..], &[head, tail]] {
+            let (status, received) = gemini_oauth_stream_error(chunks).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(received, Bytes::from_static(complete));
+        }
+    }
 }
 
 async fn ingress_cap_does_not_limit_existing_response_paths() {
