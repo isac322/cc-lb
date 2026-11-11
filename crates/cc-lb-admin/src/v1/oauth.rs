@@ -18,7 +18,8 @@ use cc_lb_control::anthropic_compat::{
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
 use cc_lb_control::{AuditPayload, MetadataRefreshRecords, fetch_metadata_only};
 use cc_lb_oauth_protocol::{
-    OAuthAccountIdentity, gemini_identity_from_responses, openai_identity_from_token,
+    OAuthAccountIdentity, gemini_identity_from_responses, gemini_identity_is_bound,
+    oauth_account_from_bootstrap, openai_identity_from_token,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
@@ -1804,17 +1805,6 @@ fn provider_metadata_records(
     }
 }
 
-pub(super) fn account_identity_from_metadata(
-    metadata: Option<&UpstreamSubscriptionMetadataRecord>,
-) -> OAuthAccountIdentity {
-    metadata
-        .and_then(|metadata| metadata.raw_bootstrap.as_deref())
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.get("oauth_account").cloned())
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
-}
-
 pub(super) async fn provider_account_identity(
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
@@ -1825,7 +1815,11 @@ pub(super) async fn provider_account_identity(
         .await
         .ok()
         .flatten();
-    let mut identity = account_identity_from_metadata(metadata.as_ref());
+    let (mut identity, metadata_generation) = oauth_account_from_bootstrap(
+        metadata
+            .as_ref()
+            .and_then(|record| record.raw_bootstrap.as_deref()),
+    );
     match upstream.kind {
         UpstreamKind::OpenaiOauth => {
             let claims = openai_identity_from_token(&bundle.access_token);
@@ -1844,16 +1838,23 @@ pub(super) async fn provider_account_identity(
             identity.account_id = account_id;
         }
         UpstreamKind::GeminiOauth => {
-            if !identity
-                .account_email
-                .as_deref()
-                .zip(bundle.account_id.as_deref())
-                .is_some_and(|(stored, current)| stored.eq_ignore_ascii_case(current))
-                || identity.project_id != bundle.project_id
-            {
+            if !gemini_identity_is_bound(
+                &identity,
+                bundle.account_id.as_deref(),
+                bundle.project_id.as_deref(),
+                metadata_generation,
+                upstream.oauth_token_generation,
+            ) {
                 identity = OAuthAccountIdentity::default();
             }
-            identity.account_email = identity.account_email.or(bundle.account_id.clone());
+            identity.account_email = identity.account_email.or_else(|| {
+                bundle
+                    .account_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|email| !email.is_empty())
+                    .map(str::to_owned)
+            });
             identity.project_id = bundle.project_id.clone();
         }
         _ => {}

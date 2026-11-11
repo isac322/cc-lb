@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_storage_api::{UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore};
+use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_storage_api::{
+    OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+};
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
@@ -14,6 +18,7 @@ where
     put_then_get(Arc::clone(&backend)).await?;
     update_overwrites(Arc::clone(&backend)).await?;
     list_returns_all_sorted(Arc::clone(&backend)).await?;
+    conditional_oauth_write_rejects_replaced_and_deleted_credentials(Arc::clone(&backend)).await?;
     missing_returns_none(backend).await
 }
 
@@ -74,6 +79,124 @@ scenario!(missing_returns_none, |storage| async move {
     );
     Ok(())
 });
+
+scenario!(
+    conditional_oauth_write_rejects_replaced_and_deleted_credentials,
+    |storage| async move {
+        let id = upstream_id(101);
+        let aead = AeadService::from_master_key([7; 32]);
+        let token_bundle = |access_token: &str| OAuthTokenBundle {
+            access_token: access_token.to_owned(),
+            refresh_token: "synthetic-refresh".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("synthetic-metadata-account".to_owned()),
+            project_id: None,
+            oauth_profile: Default::default(),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        let tokens =
+            EncryptedOAuthTokens::encrypt(&aead, &token_bundle("initial-access"), id.as_bytes())?;
+        let original = storage
+            .create(UpstreamCreate {
+                id,
+                name: "conditional-metadata".to_owned(),
+                kind: UpstreamKind::OpenaiOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: Some(OAuthTokensCreate {
+                    tokens,
+                    never_refresh: false,
+                }),
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            })
+            .await?;
+        let mut old = record(id, None);
+        old.raw_bootstrap =
+            Some(r#"{"oauth_account":{"account_name":"Old Poll Name"}}"#.to_owned());
+        ensure!(
+            storage
+                .put_upstream_subscription_metadata_if_oauth_generation(
+                    &old,
+                    original.oauth_token_generation,
+                )
+                .await?,
+            "the active generation must accept metadata"
+        );
+        let replacement = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("same-account-reconnect-access"),
+            id.as_bytes(),
+        )?;
+        let current = storage
+            .store_oauth_tokens(id, original.revision, replacement, false)
+            .await?;
+        ensure!(
+            current.oauth_token_generation > original.oauth_token_generation,
+            "reconnect must rotate generation"
+        );
+        let mut fresh = record(id, None);
+        fresh.raw_bootstrap =
+            Some(r#"{"oauth_account":{"account_name":"Fresh Reconnect Name"}}"#.to_owned());
+        fresh.observed_at_unix_millis = 200;
+        storage.put_upstream_subscription_metadata(&fresh).await?;
+        old.observed_at_unix_millis = 300;
+        ensure!(
+            !storage
+                .put_upstream_subscription_metadata_if_oauth_generation(
+                    &old,
+                    original.oauth_token_generation,
+                )
+                .await?,
+            "old generation must decline even if its response arrives later"
+        );
+        ensure!(
+            storage.get_upstream_subscription_metadata(id).await? == Some(fresh.clone()),
+            "fresh reconnect metadata must survive the stale write"
+        );
+        ensure!(
+            storage
+                .put_upstream_subscription_metadata_if_oauth_generation(
+                    &fresh,
+                    current.oauth_token_generation,
+                )
+                .await?,
+            "current generation must still succeed"
+        );
+        storage.soft_delete(id, current.revision).await?;
+        ensure!(
+            !storage
+                .put_upstream_subscription_metadata_if_oauth_generation(
+                    &old,
+                    current.oauth_token_generation,
+                )
+                .await?,
+            "a deleted upstream must decline even when its generation matches"
+        );
+        ensure!(
+            storage.get_upstream_subscription_metadata(id).await? == Some(fresh),
+            "declining a deleted upstream must not alter metadata"
+        );
+        let absent = record(upstream_id(102), None);
+        ensure!(
+            !storage
+                .put_upstream_subscription_metadata_if_oauth_generation(&absent, 0)
+                .await?,
+            "a missing upstream must decline without inserting a row"
+        );
+        ensure!(
+            storage
+                .get_upstream_subscription_metadata(absent.upstream_id)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+);
 
 fn record(
     upstream_id: Uuid,

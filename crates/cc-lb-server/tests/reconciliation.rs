@@ -668,6 +668,14 @@ impl UpstreamSubscriptionMetadataStore for EmptyUpstreamSubscriptionMetadataStor
         Ok(())
     }
 
+    async fn put_upstream_subscription_metadata_if_oauth_generation(
+        &self,
+        _record: &UpstreamSubscriptionMetadataRecord,
+        _expected_oauth_token_generation: u64,
+    ) -> StorageResult<bool> {
+        Ok(false)
+    }
+
     async fn get_upstream_subscription_metadata(
         &self,
         _upstream_id: Uuid,

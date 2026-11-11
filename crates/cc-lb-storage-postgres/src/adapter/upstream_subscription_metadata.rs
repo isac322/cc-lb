@@ -41,6 +41,67 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         Ok(())
     }
 
+    async fn put_upstream_subscription_metadata_if_oauth_generation(
+        &self,
+        record: &UpstreamSubscriptionMetadataRecord,
+        expected_oauth_token_generation: u64,
+    ) -> StorageResult<bool> {
+        let Ok(expected_generation) = i64::try_from(expected_oauth_token_generation) else {
+            return Ok(false);
+        };
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        // Follow credential replacement's lock order: spec, token, metadata.
+        // Locks begin only after provider I/O and remain in this transaction.
+        let active: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(record.upstream_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if active.is_none() {
+            return Ok(false);
+        }
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT oauth_token_generation FROM upstream_oauth_token_v1 \
+             WHERE upstream_id = $1 AND oauth_credentials_ciphertext IS NOT NULL FOR UPDATE",
+        )
+        .bind(record.upstream_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if generation != Some(expected_generation) {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO upstream_subscription_metadata_v1 \
+             (upstream_id, organization_uuid, organization_role, workspace_role, observed_at_unix_millis, \
+              last_error, raw_roles, raw_bootstrap) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
+             ON CONFLICT (upstream_id) DO UPDATE SET \
+              organization_uuid = EXCLUDED.organization_uuid, \
+              organization_role = EXCLUDED.organization_role, \
+              workspace_role = EXCLUDED.workspace_role, \
+              observed_at_unix_millis = EXCLUDED.observed_at_unix_millis, \
+              last_error = EXCLUDED.last_error, \
+              raw_roles = EXCLUDED.raw_roles, \
+              raw_bootstrap = EXCLUDED.raw_bootstrap",
+        )
+        .bind(record.upstream_id)
+        .bind(&record.organization_uuid)
+        .bind(&record.organization_role)
+        .bind(&record.workspace_role)
+        .bind(record.observed_at_unix_millis)
+        .bind(&record.last_error)
+        .bind(&record.raw_roles)
+        .bind(&record.raw_bootstrap)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(true)
+    }
+
     async fn get_upstream_subscription_metadata(
         &self,
         upstream_id: Uuid,

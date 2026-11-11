@@ -99,12 +99,12 @@ fn stored_display_identity_is_invalidated_on_account_or_project_switch() {
     let mut bundle = bundle(UpstreamKind::OpenaiOauth);
     let record = metadata(Uuid::nil(), &openai_identity());
     assert_eq!(
-        bound_provider_identity(UpstreamKind::OpenaiOauth, &bundle, Some(&record)),
+        bound_provider_identity(UpstreamKind::OpenaiOauth, &bundle, Some(&record), 1),
         openai_identity()
     );
     bundle.account_id = Some("new-workspace".to_owned());
     assert_eq!(
-        bound_provider_identity(UpstreamKind::OpenaiOauth, &bundle, Some(&record)),
+        bound_provider_identity(UpstreamKind::OpenaiOauth, &bundle, Some(&record), 1),
         OAuthAccountIdentity::default()
     );
     let mut bundle = self::bundle(UpstreamKind::GeminiOauth);
@@ -118,18 +118,18 @@ fn stored_display_identity_is_invalidated_on_account_or_project_switch() {
     let record = metadata(Uuid::nil(), &identity);
     bundle.account_id = Some("MEMBER@example.test".to_owned());
     assert_eq!(
-        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record)),
+        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record), 1),
         identity
     );
     bundle.project_id = Some("new-project".to_owned());
     assert_eq!(
-        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record)),
+        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record), 1),
         OAuthAccountIdentity::default()
     );
     bundle.project_id = identity.project_id;
     bundle.account_id = Some("another@example.test".to_owned());
     assert_eq!(
-        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record)),
+        bound_provider_identity(UpstreamKind::GeminiOauth, &bundle, Some(&record), 1),
         OAuthAccountIdentity::default()
     );
 }
@@ -337,8 +337,12 @@ async fn openai_existing_poll_backfills_real_plan_and_preserves_name_and_quota()
     server.abort();
 }
 
-async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile) {
-    let metadata_status = Arc::new(AtomicUsize::new(200));
+async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile, project_only_import: bool) {
+    let metadata_status = Arc::new(AtomicUsize::new(if project_only_import {
+        503
+    } else {
+        200
+    }));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let request_log = requests.clone();
     let status = metadata_status.clone();
@@ -381,7 +385,8 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile) {
                 }
                 (status, load)
             } else if path == "/metadata/userinfo" {
-                (status, json!({"id": "private-user", "email": "MEMBER@example.test", "name": "Synthetic Member", "picture": "private-picture"}))
+                let userinfo_status = if project_only_import && status == 503 { 200 } else { status };
+                (userinfo_status, json!({"id": "private-user", "email": "MEMBER@example.test", "name": "Synthetic Member", "picture": "private-picture"}))
             } else {
                 (500, json!({"error": "unexpected endpoint"}))
             };
@@ -426,7 +431,51 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile) {
         profile,
     )
     .await;
+    let upstream = if project_only_import {
+        let mut imported = bundle(UpstreamKind::GeminiOauth);
+        imported.oauth_profile = profile;
+        imported.account_id = None;
+        let tokens =
+            EncryptedOAuthTokens::encrypt(fixture.aead.as_ref(), &imported, upstream.id.as_bytes())
+                .expect("encrypt documented project-only import");
+        UpstreamStore::store_oauth_tokens(
+            fixture.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            tokens,
+            true,
+        )
+        .await
+        .expect("store project-only import")
+    } else {
+        upstream
+    };
+    let initial_requests = if project_only_import {
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .expect("poll with failed load");
+        assert!(matches!(
+            observation,
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        assert!(
+            fixture
+                .storage
+                .get_upstream_subscription_metadata(upstream.id)
+                .await
+                .expect("read unconfirmed metadata")
+                .is_none(),
+            "successful userinfo must not bind a project when load returns HTTP 503"
+        );
+        metadata_status.store(200, Ordering::SeqCst);
+        3
+    } else {
+        0
+    };
     for expected_requests in [3, 4] {
+        let expected_requests = expected_requests + initial_requests;
         let observation = fixture
             .dispatch
             .poll_usage(upstream.id, None)
@@ -447,11 +496,83 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile) {
         );
     }
     let good = read_identity(&fixture, upstream.id).await;
+    if project_only_import {
+        let persisted = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+            .await
+            .expect("read imported credential")
+            .expect("import exists");
+        let stored_bundle = persisted
+            .oauth_credentials
+            .as_ref()
+            .expect("credential")
+            .decrypt(fixture.aead.as_ref(), upstream.id.as_bytes())
+            .expect("decrypt import");
+        assert_eq!(
+            stored_bundle.account_id, None,
+            "display enrichment must not rewrite credential identity"
+        );
+        let record = fixture
+            .storage
+            .get_upstream_subscription_metadata(upstream.id)
+            .await
+            .expect("read binding")
+            .expect("metadata");
+        let raw: Value = serde_json::from_str(record.raw_bootstrap.as_deref().expect("bootstrap"))
+            .expect("allowlisted bootstrap");
+        assert_eq!(
+            raw["oauth_account_generation"],
+            upstream.oauth_token_generation
+        );
+    }
+    if !project_only_import {
+        let mut refreshed = bundle(UpstreamKind::GeminiOauth);
+        refreshed.oauth_profile = profile;
+        refreshed.access_token = "same-account-refreshed-synthetic-token".to_owned();
+        let encrypted = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &refreshed,
+            upstream.id.as_bytes(),
+        )
+        .expect("encrypt refreshed credential");
+        let rotated = UpstreamStore::store_oauth_tokens(
+            fixture.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            encrypted,
+            true,
+        )
+        .await
+        .expect("simulate completed same-account refresh");
+        assert!(rotated.oauth_token_generation > upstream.oauth_token_generation);
+        let before = requests.lock().expect("log").len();
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .expect("poll after refresh");
+        assert!(matches!(
+            observation,
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        assert_eq!(read_identity(&fixture, upstream.id).await, good);
+        assert_eq!(
+            requests.lock().expect("log").len(),
+            before + 1,
+            "email-bound same-account refresh must retain metadata cadence"
+        );
+    }
     for failure_status in [401, 403, 500] {
         metadata_status.store(failure_status, Ordering::SeqCst);
+        let mut aged = fixture
+            .storage
+            .get_upstream_subscription_metadata(upstream.id)
+            .await
+            .expect("load metadata to age")
+            .expect("persisted metadata");
+        aged.observed_at_unix_millis = 1;
         fixture
             .storage
-            .put_upstream_subscription_metadata(&metadata(upstream.id, &good))
+            .put_upstream_subscription_metadata(&aged)
             .await
             .expect("age metadata");
         let observation = fixture
@@ -489,10 +610,158 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile) {
 
 #[tokio::test]
 async fn gemini_existing_poll_enriches_on_configured_hosts_and_failure_keeps_quota() {
-    assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity).await;
+    assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity, false).await;
 }
 
 #[tokio::test]
 async fn gemini_cli_existing_poll_uses_its_own_config_and_core_metadata() {
-    assert_gemini_poll_metadata(GeminiOAuthProfile::GeminiCli).await;
+    assert_gemini_poll_metadata(GeminiOAuthProfile::GeminiCli, false).await;
+}
+
+#[tokio::test]
+async fn gemini_project_only_import_backfills_metadata_and_respects_cadence() {
+    assert_gemini_poll_metadata(GeminiOAuthProfile::GeminiCli, true).await;
+    assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity, true).await;
+}
+
+#[tokio::test]
+async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
+    let usage = json!({
+        "account_id": "synthetic-workspace", "plan_type": "prolite", "email": "member@example.test",
+        "rate_limit": {"primary_window": {
+            "used_percent": 25, "limit_window_seconds": 18000, "reset_at": 1_700_010_000
+        }}
+    });
+    let app = axum::Router::new().fallback(move || {
+        let body = usage.clone();
+        async move { axum::Json(body) }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!(
+        "http://{}/backend-api/codex",
+        listener.local_addr().expect("address")
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let fixture = DispatchFixture::new().await;
+    let upstream = create_provider(
+        &fixture,
+        UpstreamKind::OpenaiOauth,
+        Url::parse(&base).expect("URL"),
+        GeminiOAuthProfile::GeminiCli,
+    )
+    .await;
+    fixture
+        .storage
+        .put_upstream_subscription_metadata(&metadata(upstream.id, &openai_identity()))
+        .await
+        .expect("seed old name");
+    let storage = fixture.storage.clone();
+    let aead = fixture.aead.clone();
+    let original = upstream.clone();
+    let hook: super::ProviderMetadataWriteHook = Arc::new(move || {
+        let storage = storage.clone();
+        let aead = aead.clone();
+        let original = original.clone();
+        Box::pin(async move {
+            let mut current_bundle = bundle(UpstreamKind::OpenaiOauth);
+            current_bundle.access_token = "same-account-reconnect-token".to_owned();
+            let tokens = EncryptedOAuthTokens::encrypt(
+                aead.as_ref(),
+                &current_bundle,
+                original.id.as_bytes(),
+            )
+            .expect("encrypt reconnect");
+            let reconnected = UpstreamStore::store_oauth_tokens(
+                storage.as_ref(),
+                original.id,
+                original.revision,
+                tokens,
+                true,
+            )
+            .await
+            .expect("same-account reconnect");
+            assert!(reconnected.oauth_token_generation > original.oauth_token_generation);
+            let mut fresh = openai_identity();
+            fresh.account_name = Some("Fresh Reconnect Name".to_owned());
+            fresh.plan = Some("business".to_owned());
+            storage
+                .put_upstream_subscription_metadata(&metadata(original.id, &fresh))
+                .await
+                .expect("fresh reconnect metadata");
+        })
+    });
+    let observation = super::BEFORE_PROVIDER_METADATA_WRITE
+        .scope(hook, fixture.dispatch.poll_usage(upstream.id, None))
+        .await
+        .expect("poll with declined stale metadata");
+    assert!(matches!(
+        observation,
+        OAuthUsagePollObservation::Success { .. }
+    ));
+    let identity = read_identity(&fixture, upstream.id).await;
+    assert_eq!(
+        identity.account_name.as_deref(),
+        Some("Fresh Reconnect Name")
+    );
+    assert_eq!(identity.plan.as_deref(), Some("business"));
+    assert!(
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .snapshot_for_upstream(upstream.id, 1_700_000_000_000, 60)
+            .iter()
+            .any(|snapshot| snapshot.window == "5h" && snapshot.utilization == Some(0.25))
+    );
+    server.abort();
+}
+
+#[test]
+fn project_only_gemini_merge_requires_successful_project_scoped_load() {
+    let load = json!({
+        "cloudaicompanionProject": "synthetic-project",
+        "paidTier": {"id": "g1-ultra-tier", "name": "Google AI Ultra"}
+    });
+    let userinfo = json!({"email": "member@example.test", "name": "Synthetic Imported Member"});
+    for empty_email in [None, Some("  ".to_owned())] {
+        let mut imported = bundle(UpstreamKind::GeminiOauth);
+        imported.account_id = empty_email;
+        let mut identity = OAuthAccountIdentity::default();
+        assert!(
+            !merge_gemini_account_metadata(&mut identity, &imported, None, Some(&userinfo)),
+            "userinfo alone cannot bind an unconfirmed project"
+        );
+        assert_eq!(identity, OAuthAccountIdentity::default());
+        let mut mismatch = load.clone();
+        mismatch["cloudaicompanionProject"] = json!("different-project");
+        assert!(!merge_gemini_account_metadata(
+            &mut identity,
+            &imported,
+            Some(&mismatch),
+            Some(&userinfo)
+        ));
+        assert_eq!(identity, OAuthAccountIdentity::default());
+        assert!(merge_gemini_account_metadata(
+            &mut identity,
+            &imported,
+            Some(&load),
+            Some(&userinfo)
+        ));
+        assert_eq!(
+            identity.account_name.as_deref(),
+            Some("Synthetic Imported Member")
+        );
+        assert_eq!(identity.plan.as_deref(), Some("g1-ultra-tier"));
+        assert_eq!(identity.plan_name.as_deref(), Some("Google AI Ultra"));
+    }
+    let mut imported = bundle(UpstreamKind::GeminiOauth);
+    imported.account_id = None;
+    imported.project_id = Some("  ".to_owned());
+    assert!(!merge_gemini_account_metadata(
+        &mut OAuthAccountIdentity::default(),
+        &imported,
+        Some(&load),
+        Some(&userinfo),
+    ));
 }

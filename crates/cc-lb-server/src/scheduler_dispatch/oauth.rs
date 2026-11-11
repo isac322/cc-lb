@@ -3,8 +3,9 @@ use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::unix_secs;
 use cc_lb_oauth_protocol::{
     ANTIGRAVITY_OAUTH_USER_AGENT, ExistingTokenParts, GeminiOAuthProfile, OAuthAccountIdentity,
-    gemini_identity_from_responses, is_terminal_refresh_failure, openai_identity_from_token,
-    refresh_requires_reconnect, refreshed_token_parts,
+    gemini_identity_from_responses, gemini_identity_is_bound, is_terminal_refresh_failure,
+    oauth_account_from_bootstrap, openai_identity_from_token, refresh_requires_reconnect,
+    refreshed_token_parts,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -378,6 +379,7 @@ impl SchedulerDispatch {
         usage_body: &[u8],
         observed_at_unix_millis: u64,
     ) {
+        let expected_generation = upstream.oauth_token_generation;
         let metadata = match self
             .storage
             .get_upstream_subscription_metadata(upstream.id)
@@ -386,7 +388,12 @@ impl SchedulerDispatch {
             Ok(metadata) => metadata,
             Err(_) => return,
         };
-        let mut identity = bound_provider_identity(upstream.kind, bundle, metadata.as_ref());
+        let mut identity = bound_provider_identity(
+            upstream.kind,
+            bundle,
+            metadata.as_ref(),
+            expected_generation,
+        );
         let changed = match upstream.kind {
             UpstreamKind::OpenaiOauth => {
                 let Ok(usage) = serde_json::from_slice::<serde_json::Value>(usage_body) else {
@@ -420,16 +427,14 @@ impl SchedulerDispatch {
         if !changed {
             return;
         }
-        // Do not publish a response collected with a credential that was
-        // replaced while the provider request was in flight.
-        let current = match UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id).await {
-            Ok(Some(current)) => current,
-            _ => return,
-        };
-        if current.oauth_credential_fingerprint() != upstream.oauth_credential_fingerprint()
-            || current.deleted_at_unix_secs.is_some()
+        let mut bootstrap = serde_json::json!({"oauth_account": identity});
+        if upstream.kind == UpstreamKind::GeminiOauth
+            && bundle
+                .account_id
+                .as_deref()
+                .is_none_or(|email| email.trim().is_empty())
         {
-            return;
+            bootstrap["oauth_account_generation"] = serde_json::json!(expected_generation);
         }
         let record = cc_lb_storage_api::UpstreamSubscriptionMetadataRecord {
             upstream_id: upstream.id,
@@ -439,11 +444,13 @@ impl SchedulerDispatch {
             observed_at_unix_millis: i64::try_from(observed_at_unix_millis).unwrap_or(i64::MAX),
             last_error: None,
             raw_roles: None,
-            raw_bootstrap: Some(serde_json::json!({"oauth_account": identity}).to_string()),
+            raw_bootstrap: Some(bootstrap.to_string()),
         };
+        #[cfg(test)]
+        tests::before_provider_metadata_write().await;
         if let Err(error) = self
             .storage
-            .put_upstream_subscription_metadata(&record)
+            .put_upstream_subscription_metadata_if_oauth_generation(&record, expected_generation)
             .await
         {
             tracing::warn!(upstream_id = %upstream.id, %error, "provider display metadata write failed");
@@ -860,26 +867,23 @@ fn bound_provider_identity(
     kind: UpstreamKind,
     bundle: &OAuthTokenBundle,
     metadata: Option<&cc_lb_storage_api::UpstreamSubscriptionMetadataRecord>,
+    credential_generation: u64,
 ) -> OAuthAccountIdentity {
-    let identity = metadata
-        .and_then(|metadata| metadata.raw_bootstrap.as_deref())
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.get("oauth_account").cloned())
-        .and_then(|value| serde_json::from_value::<OAuthAccountIdentity>(value).ok())
-        .unwrap_or_default();
+    let (identity, metadata_generation) = oauth_account_from_bootstrap(
+        metadata.and_then(|metadata| metadata.raw_bootstrap.as_deref()),
+    );
     let bound = match kind {
         UpstreamKind::OpenaiOauth => bundle
             .account_id
             .as_ref()
             .is_some_and(|account| identity.account_id.as_ref() == Some(account)),
-        UpstreamKind::GeminiOauth => {
-            identity
-                .account_email
-                .as_deref()
-                .zip(bundle.account_id.as_deref())
-                .is_some_and(|(stored, current)| stored.eq_ignore_ascii_case(current))
-                && identity.project_id == bundle.project_id
-        }
+        UpstreamKind::GeminiOauth => gemini_identity_is_bound(
+            &identity,
+            bundle.account_id.as_deref(),
+            bundle.project_id.as_deref(),
+            metadata_generation,
+            credential_generation,
+        ),
         _ => false,
     };
     if bound {
@@ -936,10 +940,16 @@ fn merge_gemini_account_metadata(
     load: Option<&serde_json::Value>,
     userinfo: Option<&serde_json::Value>,
 ) -> bool {
-    let Some(email) = bundle
+    let email = bundle
         .account_id
         .as_deref()
-        .filter(|email| !email.is_empty())
+        .map(str::trim)
+        .filter(|email| !email.is_empty());
+    let Some(project) = bundle
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
     else {
         return false;
     };
@@ -950,12 +960,20 @@ fn merge_gemini_account_metadata(
     if update
         .account_email
         .as_deref()
-        .is_some_and(|value| !value.eq_ignore_ascii_case(email))
+        .zip(email)
+        .is_some_and(|(provided, expected)| !provided.eq_ignore_ascii_case(expected))
         || update
             .project_id
-            .as_ref()
-            .is_some_and(|project| bundle.project_id.as_ref() != Some(project))
+            .as_deref()
+            .is_some_and(|provided| provided != project)
     {
+        return false;
+    }
+    let project_matches = update.project_id.as_deref() == Some(project);
+    let requested_cli_project = bundle.oauth_profile == GeminiOAuthProfile::GeminiCli
+        && update.project_id.is_none()
+        && load.is_some_and(serde_json::Value::is_object);
+    if email.is_none() && !project_matches && !requested_cli_project {
         return false;
     }
     let mut changed = false;
@@ -968,26 +986,21 @@ fn merge_gemini_account_metadata(
     }
     // CLI requests explicitly carry the stored project. Code Assist may omit
     // that project in a standard-tier response, as Gemini CLI setup.ts allows.
-    let project_matches = update.project_id.is_some() && update.project_id == bundle.project_id;
-    let requested_cli_project = bundle.oauth_profile == GeminiOAuthProfile::GeminiCli
-        && bundle.project_id.is_some()
-        && update.project_id.is_none()
-        && load.is_some();
-    if project_matches || requested_cli_project {
-        if let Some(plan) = update.plan {
-            if identity.plan.as_ref() != Some(&plan) || update.plan_name.is_some() {
-                identity.plan_name = update.plan_name;
-            }
-            identity.plan = Some(plan);
-            changed = true;
+    if (project_matches || requested_cli_project)
+        && let Some(plan) = update.plan
+    {
+        if identity.plan.as_ref() != Some(&plan) || update.plan_name.is_some() {
+            identity.plan_name = update.plan_name;
         }
+        identity.plan = Some(plan);
+        changed = true;
     }
     if changed {
         identity.account_email = identity
             .account_email
             .take()
-            .or_else(|| Some(email.to_owned()));
-        identity.project_id = bundle.project_id.clone();
+            .or_else(|| email.map(str::to_owned));
+        identity.project_id = Some(project.to_owned());
     }
     changed
 }

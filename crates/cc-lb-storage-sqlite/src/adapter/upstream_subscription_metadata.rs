@@ -29,6 +29,40 @@ impl UpstreamSubscriptionMetadataStore for SqliteStorage {
         Ok(())
     }
 
+    async fn put_upstream_subscription_metadata_if_oauth_generation(
+        &self,
+        record: &UpstreamSubscriptionMetadataRecord,
+        expected_oauth_token_generation: u64,
+    ) -> StorageResult<bool> {
+        let Ok(expected_generation) = i64::try_from(expected_oauth_token_generation) else {
+            return Ok(false);
+        };
+        let payload = serde_json::to_string(record)?;
+        // A single SQLite write statement holds the writer lock across the
+        // generation predicate and the upsert; no check-then-write gap.
+        let written = sqlx::query(
+            "INSERT INTO upstream_subscription_metadata_v1 (upstream_id, payload, updated_at) \
+             SELECT ?, ?, ? WHERE EXISTS ( \
+                 SELECT 1 FROM upstream_spec_v1 spec \
+                 JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id \
+                 WHERE spec.id = ? AND spec.deleted_at IS NULL \
+                   AND token.oauth_token_generation = ? \
+                   AND token.oauth_credentials_ciphertext IS NOT NULL \
+             ) \
+             ON CONFLICT(upstream_id) DO UPDATE SET \
+             payload = excluded.payload, updated_at = excluded.updated_at",
+        )
+        .bind(record.upstream_id.to_string())
+        .bind(payload)
+        .bind(record.observed_at_unix_millis)
+        .bind(record.upstream_id.to_string())
+        .bind(expected_generation)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(written.rows_affected() != 0)
+    }
+
     async fn get_upstream_subscription_metadata(
         &self,
         upstream_id: Uuid,

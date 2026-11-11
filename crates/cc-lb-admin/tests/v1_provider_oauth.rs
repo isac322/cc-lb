@@ -1581,3 +1581,86 @@ async fn background_identity_reads_remain_bound_to_current_credentials()
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn documented_project_only_gemini_import_reads_credential_bound_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mock = MockServer::start().await;
+    let fixture = Fixture::new(&mock).await;
+    let (status, created) = fixture
+        .post(
+            "/admin/v1/upstreams",
+            json!({
+                "name": "project-only-import",
+                "kind": "gemini_oauth",
+                "project_id": "synthetic-project",
+                "oauth_tokens": {
+                    "access_token": "project-only-synthetic-access",
+                    "refresh_token": "project-only-synthetic-refresh",
+                    "expires_at_unix_secs": 1_900_000_000u64,
+                    "scopes": ["openid", "profile", "email"]
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"]
+        .as_str()
+        .ok_or("missing upstream id")?
+        .parse::<Uuid>()?;
+    let upstream = fixture
+        .storage
+        .get_by_id(id)
+        .await?
+        .ok_or("missing imported upstream")?;
+    let mut bundle = fixture.bundle(&upstream);
+    assert_eq!(
+        bundle.account_id, None,
+        "documented import does not invent an email"
+    );
+    assert_eq!(bundle.project_id.as_deref(), Some("synthetic-project"));
+    fixture.storage.put_upstream_subscription_metadata(
+        &cc_lb_storage_api::UpstreamSubscriptionMetadataRecord {
+            upstream_id: id, organization_uuid: None, organization_role: None, workspace_role: None,
+            observed_at_unix_millis: i64::try_from(NOW * 1_000)?,
+            last_error: None, raw_roles: None,
+            raw_bootstrap: Some(json!({
+                "oauth_account_generation": upstream.oauth_token_generation,
+                "oauth_account": {
+                    "account_email": "member@example.test", "account_name": "Synthetic Imported Member",
+                    "project_id": "synthetic-project", "plan": "g1-ultra-tier", "plan_name": "Google AI Ultra"
+                }
+            }).to_string()),
+        },
+    ).await?;
+    let mut current = upstream;
+    for replacement in [None, Some("synthetic-project"), Some("different-project")] {
+        if let Some(project) = replacement {
+            bundle.access_token = "replacement-project-only-synthetic-access".to_owned();
+            bundle.project_id = Some(project.to_owned());
+            let encrypted = AeadEncryptedField::encrypt(&fixture.aead, &bundle, id.as_bytes())?;
+            current = fixture
+                .storage
+                .store_oauth_tokens(id, current.revision, encrypted, false)
+                .await?;
+        }
+        for surface in ["subscription-metadata", "oauth/status"] {
+            let (status, body) = fixture
+                .get(&format!("/admin/v1/upstreams/{id}/{surface}"))
+                .await?;
+            assert_eq!(status, StatusCode::OK);
+            if replacement.is_some() {
+                assert_eq!(body["account_name"], Value::Null);
+                assert_eq!(body["account_email"], Value::Null);
+                assert_eq!(body["plan"], Value::Null);
+                assert_eq!(body["plan_name"], Value::Null);
+            } else {
+                assert_eq!(body["account_name"], "Synthetic Imported Member");
+                assert_eq!(body["account_email"], "member@example.test");
+                assert_eq!(body["plan"], "g1-ultra-tier");
+                assert_eq!(body["plan_name"], "Google AI Ultra");
+            }
+        }
+    }
+    Ok(())
+}

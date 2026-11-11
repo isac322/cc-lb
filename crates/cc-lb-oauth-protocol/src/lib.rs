@@ -146,6 +146,50 @@ pub fn gemini_identity_from_responses(
     }
 }
 
+/// Decode only the display identity and its optional credential binding.
+/// The generation is storage metadata, never a flattened admin identity field.
+pub fn oauth_account_from_bootstrap(
+    raw_bootstrap: Option<&str>,
+) -> (OAuthAccountIdentity, Option<u64>) {
+    #[derive(Default, Deserialize)]
+    struct AccountMetadata {
+        #[serde(default)]
+        oauth_account: OAuthAccountIdentity,
+        #[serde(default)]
+        oauth_account_generation: Option<u64>,
+    }
+    let metadata = raw_bootstrap
+        .and_then(|raw| serde_json::from_str::<AccountMetadata>(raw).ok())
+        .unwrap_or_default();
+    (metadata.oauth_account, metadata.oauth_account_generation)
+}
+
+/// Email-known credentials retain account/project binding across refreshes.
+/// Project-only imports require the generation captured before enrichment.
+pub fn gemini_identity_is_bound(
+    identity: &OAuthAccountIdentity,
+    credential_email: Option<&str>,
+    credential_project: Option<&str>,
+    metadata_generation: Option<u64>,
+    credential_generation: u64,
+) -> bool {
+    fn nonempty(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let Some(project) = nonempty(credential_project) else {
+        return false;
+    };
+    if nonempty(identity.project_id.as_deref()) != Some(project) {
+        return false;
+    }
+    if let Some(email) = nonempty(credential_email) {
+        nonempty(identity.account_email.as_deref())
+            .is_some_and(|stored| stored.eq_ignore_ascii_case(email))
+    } else {
+        metadata_generation == Some(credential_generation)
+    }
+}
+
 pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
     let payload = id_token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -565,6 +609,91 @@ mod tests {
         .expect("token response parses");
 
         assert_eq!(response.account_id.as_deref(), Some("response-account"));
+    }
+
+    #[test]
+    fn gemini_binding_preserves_email_known_refreshes_and_fences_project_only_imports() {
+        let identity = OAuthAccountIdentity {
+            account_email: Some("member@example.test".to_owned()),
+            project_id: Some("synthetic-project".to_owned()),
+            account_name: Some("Synthetic Member".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            gemini_identity_is_bound(
+                &identity,
+                Some("MEMBER@example.test"),
+                Some("synthetic-project"),
+                Some(1),
+                2,
+            ),
+            "email-bound metadata survives a same-account token refresh"
+        );
+        assert!(!gemini_identity_is_bound(
+            &identity,
+            Some("other@example.test"),
+            Some("synthetic-project"),
+            Some(1),
+            1,
+        ));
+        for absent_email in [None, Some("  ")] {
+            assert!(gemini_identity_is_bound(
+                &identity,
+                absent_email,
+                Some("synthetic-project"),
+                Some(1),
+                1,
+            ));
+            assert!(!gemini_identity_is_bound(
+                &identity,
+                absent_email,
+                Some("synthetic-project"),
+                Some(1),
+                2,
+            ));
+            assert!(
+                !gemini_identity_is_bound(
+                    &identity,
+                    absent_email,
+                    Some("synthetic-project"),
+                    None,
+                    1,
+                ),
+                "legacy rows without a generation cannot bind a project-only import"
+            );
+            assert!(!gemini_identity_is_bound(
+                &identity,
+                absent_email,
+                Some("other-project"),
+                Some(1),
+                1,
+            ));
+            assert!(!gemini_identity_is_bound(
+                &identity,
+                absent_email,
+                Some("  "),
+                Some(1),
+                1,
+            ));
+        }
+        let raw = serde_json::json!({
+            "oauth_account": identity,
+            "oauth_account_generation": 1,
+        })
+        .to_string();
+        let (decoded, generation) = oauth_account_from_bootstrap(Some(&raw));
+        assert_eq!(generation, Some(1));
+        assert_eq!(decoded.account_name.as_deref(), Some("Synthetic Member"));
+        assert!(
+            serde_json::to_value(decoded)
+                .expect("identity serialization")
+                .get("oauth_account_generation")
+                .is_none()
+        );
+        let (_, generation) = oauth_account_from_bootstrap(Some(
+            r#"{"oauth_account":{"account_email":"member@example.test"}}"#,
+        ));
+        assert_eq!(generation, None);
     }
 
     fn jwt_access_token(claims: serde_json::Value) -> String {

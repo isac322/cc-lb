@@ -707,6 +707,13 @@ always come from the same tier. Background metadata collection fills older
 records using the configured endpoints for the credential's OAuth profile.
 Metadata failures preserve previously collected fields and do not invalidate
 successful quota observations.
+Project-only Gemini imports do not need an account email in the token bundle.
+Their collected display identity is bound to the stored project and credential
+generation. Replacing that credential invalidates the old identity until the
+next successful collection. Background metadata writes check the captured
+credential generation atomically, so a delayed poll cannot overwrite account
+details saved by a newer reconnect.
+
 
 The admin web uses the same plan labels in upstream lists, detail headers,
 search, and OAuth account cards. Gemini's reported tier name takes precedence;

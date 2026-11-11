@@ -52,6 +52,19 @@ mod provider_metadata;
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 
+type ProviderMetadataWriteHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+tokio::task_local! {
+    static BEFORE_PROVIDER_METADATA_WRITE: ProviderMetadataWriteHook;
+}
+
+pub(super) async fn before_provider_metadata_write() {
+    if let Ok(hook) = BEFORE_PROVIDER_METADATA_WRITE.try_with(Arc::clone) {
+        hook().await;
+    }
+}
+
 #[test]
 fn usage_poll_includes_disabled_registered_oauth_upstream() {
     let mut upstream = registered_oauth_upstream();
