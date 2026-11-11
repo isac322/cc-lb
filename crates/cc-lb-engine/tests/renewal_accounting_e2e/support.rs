@@ -133,18 +133,24 @@ impl RenewalAccountingScenario {
         reserve: bool,
     ) -> RenewalFinalization {
         let reservation = reserve.then(|| self.reserve());
-        let source_ref_id = format!("{}:{}", session.session_key_hash, session.generation);
+        let source_ref_id = format!(
+            "keepalive-v2:{}:{}:{}",
+            session.session_key_hash,
+            session.cycle_id.unwrap_or_default(),
+            session.generation
+        );
         let outcome = self
             .fixture
             .dispatcher
             .dispatch(
                 &self.fixture.snapshot,
-                KeepaliveDispatchContext::new(reservation, source_ref_id),
+                KeepaliveDispatchContext::new(reservation, source_ref_id, u64::MAX),
             )
             .await;
         match outcome {
             DispatchOutcome::CacheHit { finalization, .. } => finalization,
             DispatchOutcome::CacheMiss { .. }
+            | DispatchOutcome::MaxDuration
             | DispatchOutcome::UnsupportedProvider(_)
             | DispatchOutcome::Error(_) => panic!("renewal fixture must produce a cache hit"),
         }

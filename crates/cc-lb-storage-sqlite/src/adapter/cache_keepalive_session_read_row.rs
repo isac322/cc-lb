@@ -73,6 +73,7 @@ pub(crate) fn list_item_from_row(row: SqliteRow) -> StorageResult<CacheKeepalive
             .as_deref()
             .map(terminal_reason_from_db)
             .transpose()?,
+        cancel_reason: row.try_get("cancel_reason").map_err(map_sqlx_error)?,
         decision: row.try_get("decision").map_err(map_sqlx_error)?,
         reason: row.try_get("reason").map_err(map_sqlx_error)?,
         display_reason: row.try_get("display_reason").map_err(map_sqlx_error)?,

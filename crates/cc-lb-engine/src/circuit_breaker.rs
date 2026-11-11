@@ -10,6 +10,7 @@ use http::Response;
 use metrics::Unit;
 use thiserror::Error;
 
+use crate::attempt_rail::{DispatchBeforeError, DispatchDeadline};
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 
@@ -397,6 +398,39 @@ impl UpstreamDispatch for CircuitBreakerDispatch {
             Err(source) => {
                 permit.record_failure();
                 Err(source)
+            }
+        }
+    }
+
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        deadline.check()?;
+        let upstream_name = (self.upstream_name)(&request);
+        let breaker = self
+            .registry
+            .breaker(upstream_name, self.config, self.clock.clone());
+        let permit = breaker
+            .permit()
+            .map_err(dispatch_error_from_breaker)
+            .map_err(DispatchBeforeError::Dispatch)?;
+        match self.inner.dispatch_before(request, deadline).await {
+            Ok(response) => {
+                if response.status().is_server_error() {
+                    permit.record_failure();
+                } else {
+                    permit.record_success();
+                }
+                Ok(response)
+            }
+            // No provider request occurred: dropping a half-open permit releases
+            // the probe slot without recording a success or failure.
+            Err(DispatchBeforeError::DeadlineElapsed) => Err(DispatchBeforeError::DeadlineElapsed),
+            Err(DispatchBeforeError::Dispatch(source)) => {
+                permit.record_failure();
+                Err(DispatchBeforeError::Dispatch(source))
             }
         }
     }

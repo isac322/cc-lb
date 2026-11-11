@@ -31,7 +31,7 @@ The line carries these deep diagnostic fields:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `cache_breakpoints` | array | Prompt-cache breakpoints; `lookback_prefixes` is omitted from the line. |
+| `cache_breakpoints` | array | Serving-bundle breakpoints and bounded `lookback_prefixes`; at most 32 prefix candidates in total, with breakpoint/content-block positions. |
 | `cache_control_message_indices` | array | Message indices that carry `cache_control`; may be empty. |
 | `routing_trace` | object or null | All-candidate routing trace. |
 | `iterations` | any JSON or null | Recorded routing iterations. |

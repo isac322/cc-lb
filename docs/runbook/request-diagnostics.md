@@ -8,7 +8,7 @@ The six deep diagnostic fields (`cache_breakpoints`, `cache_control_message_indi
 
 The line carries these six deep diagnostic fields:
 
-- `cache_breakpoints` (with `lookback_prefixes` omitted)
+- `cache_breakpoints` (serving-bundle breakpoints and bounded `lookback_prefixes`: at most 32 prefix candidates in total, with breakpoint/content-block positions)
 - `cache_control_message_indices`
 - `native_cache` (when native analysis is available)
 - `routing_trace`

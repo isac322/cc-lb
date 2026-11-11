@@ -2473,3 +2473,138 @@ async fn status_filters_match_capped_cancelled_and_failed_terminal_reasons() {
         );
     }
 }
+
+#[tokio::test]
+async fn cancelled_sessions_require_a_renewal_inside_the_selected_horizon() {
+    let (_directory, storage) = storage().await;
+    for (id, ts) in [("old-renewal", 100), ("recent-renewal", 200)] {
+        storage
+            .replace_from_real_request(&request(id, 210, "first renewal in 4m 30s"))
+            .await
+            .expect("seed recent session");
+        let mut projection = economics_projection(id, None, ts, "hit", 6_000);
+        projection.turn.as_mut().expect("turn").session_key_hash = id.to_owned();
+        projection.decision.session_key_hash = Some(id.to_owned());
+        storage
+            .append_request_event_with_projections(&event(id, ts), &projection)
+            .await
+            .expect("append renewal");
+        storage
+            .mark_cache_keepalive_terminal(
+                id,
+                1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                None,
+                211,
+            )
+            .await
+            .expect("cancel session");
+    }
+    // A nonzero lifetime refresh counter must not override the selected horizon.
+    sqlx::query("UPDATE cache_keepalive_sessions SET refresh_count = 1")
+        .execute(storage.pool())
+        .await
+        .expect("set lifetime renewal count");
+    for filter in [
+        CacheKeepaliveSessionFilter::Visible,
+        CacheKeepaliveSessionFilter::Tracked,
+        CacheKeepaliveSessionFilter::Cancelled,
+    ] {
+        let query = CacheKeepaliveSessionListQuery {
+            principal_id: PRINCIPAL_ID.to_owned(),
+            horizon_start_ms: Some(150_000),
+            filter,
+            cursor: None,
+            limit: 10,
+        };
+        let page = storage
+            .list_cache_keepalive_sessions(&query)
+            .await
+            .expect("24h list");
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["recent-renewal"],
+            "{filter:?}"
+        );
+        let all = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                horizon_start_ms: None,
+                ..query
+            })
+            .await
+            .expect("all retained history");
+        assert_eq!(all.rows.len(), 2, "{filter:?}");
+    }
+    let summary = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 200_000, Some(150_000))
+        .await
+        .expect("selected-horizon summary");
+    assert_eq!(summary.sessions_last_5m, 1);
+    assert_eq!(summary.total_spent_micros, 6_000);
+    let all = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 200_000, None)
+        .await
+        .expect("all-history summary");
+    assert_eq!(all.sessions_last_5m, 2);
+    assert_eq!(all.total_spent_micros, 12_000);
+}
+
+#[tokio::test]
+async fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
+    let (_directory, storage) = storage().await;
+    for (cause, expected) in [
+        (Some("new_request"), "Cancelled: a new request arrived"),
+        (
+            Some("user_turn_detected"),
+            "Cancelled: the agent is waiting for the user",
+        ),
+        (
+            Some("snapshot_too_large"),
+            "Cancelled: the request snapshot is too large",
+        ),
+        (
+            Some("cached_prefix_too_small"),
+            "Cancelled: the cached prefix is too small",
+        ),
+        (
+            Some("zero_token_renewal_unsupported"),
+            "Cancelled: zero-token renewals are unsupported",
+        ),
+        (None, "Cancelled"),
+    ] {
+        let id = cause.unwrap_or("legacy");
+        storage
+            .replace_from_real_request(&request(id, 210, "agent-in-turn — first renewal in 4m 30s"))
+            .await
+            .expect("seed session");
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    id,
+                    None,
+                    210,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    cause,
+                    211,
+                )
+                .await
+                .expect("cancel session")
+        );
+        let item = storage
+            .get_cache_keepalive_list_item(PRINCIPAL_ID, id)
+            .await
+            .expect("read cancelled item")
+            .expect("cancelled item");
+        assert_eq!(item.cancel_reason.as_deref(), cause);
+        assert_eq!(item.reason, expected);
+        let session = storage
+            .get_cache_keepalive_session(id)
+            .await
+            .expect("read durable cancellation")
+            .expect("durable session");
+        assert_eq!(session.cancel_reason.as_deref(), cause);
+    }
+}

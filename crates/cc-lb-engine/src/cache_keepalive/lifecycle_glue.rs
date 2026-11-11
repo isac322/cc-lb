@@ -446,8 +446,9 @@ impl LifecycleKeepalive {
         let ttl = cache_metadata.cache_keepalive_ttl.unwrap_or_else(|| {
             cache_metadata
                 .cache_breakpoints
-                .first()
+                .iter()
                 .map(|breakpoint| CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()))
+                .min_by_key(|ttl| ttl.as_secs())
                 .unwrap_or(CacheTtl::Ttl5m)
         });
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
@@ -2539,8 +2540,8 @@ mod tests {
         let request_json = serde_json::json!({
             "model": "claude-test",
             "max_tokens": 32,
-            "system": [{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
-            "messages": [{"role": "user", "content": "hello"}]
+            "system": [{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]}]
         });
         let request_body = Bytes::from(serde_json::to_vec(&request_json).expect("request JSON"));
         let mut metadata = RequestCacheMetadata::default();
@@ -2551,12 +2552,18 @@ mod tests {
             source: cc_lb_request_log::RequestCacheBreakpointSource::System,
             path: "system[0]".to_owned(),
             message_index: None,
-            ttl: Some("5m".to_owned()),
+            ttl: Some("1h".to_owned()),
             prefix_hash: "stale-prefix".to_owned(),
             prefix_token_count: 12_000,
             lookback_prefixes: Vec::new(),
             token_estimate_source: None,
         }];
+        let mut message_breakpoint = metadata.cache_breakpoints[0].clone();
+        message_breakpoint.source = cc_lb_request_log::RequestCacheBreakpointSource::Message;
+        message_breakpoint.path = "messages[0].content[0]".to_owned();
+        message_breakpoint.message_index = Some(0);
+        message_breakpoint.ttl = Some("5m".to_owned());
+        metadata.cache_breakpoints.push(message_breakpoint);
         let response_compaction = serde_json::json!({
             "type": "message",
             "content": [{"type": "compaction", "content": "summary"}],
@@ -2606,6 +2613,15 @@ mod tests {
         );
         assert!(journal.cancelled.lock().expect("cancelled lock").is_empty());
         assert_eq!(journal.enqueued.lock().expect("enqueued lock").len(), 1);
+        {
+            let enqueued = journal.enqueued.lock().expect("enqueued lock");
+            assert_eq!(enqueued[0].snapshot.ttl, CacheTtl::Ttl5m);
+            assert_eq!(enqueued[0].params.delay, Duration::from_secs(269));
+            assert_eq!(
+                enqueued[0].snapshot.body, request_body,
+                "mixed TTL scheduling must not rewrite client bytes"
+            );
+        }
 
         journal.enqueued.lock().expect("enqueued lock").clear();
         journal.cancelled.lock().expect("cancelled lock").clear();

@@ -1064,6 +1064,11 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         })
         .collect::<StorageResult<Vec<_>>>()?;
     if running_pairs.is_empty() && cycle_ids.is_empty() {
+        metrics::counter!(
+            "cc_lb_cache_keepalive_follow_up_rejected_total",
+            "reason" => "no_matching_renewal_prefix"
+        )
+        .increment(candidates.len() as u64);
         return Ok(());
     }
     let mut existing = Vec::new();
@@ -1124,6 +1129,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let running =
             running_pairs.contains(&(candidate.principal_id.clone(), candidate.upstream_id));
         let mut qualifying_cycles = std::collections::HashSet::new();
+        let mut matching_prefix = false;
         if !running {
             for renewal in &existing {
                 if renewal
@@ -1167,6 +1173,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
                 {
                     continue;
                 }
+                matching_prefix = true;
                 let renewal_start = renewal
                     .try_get::<i64, _>("request_start_ms")
                     .map_err(map_sqlx_error)?;
@@ -1281,6 +1288,19 @@ async fn insert_filtered_keepalive_evidence_in_tx(
             if !running {
                 accepted_cycles.extend(qualifying_cycles);
             }
+        } else {
+            let reason = if !qualifying_cycles.is_empty() {
+                "not_first_in_cycle"
+            } else if matching_prefix {
+                "outside_ttl"
+            } else {
+                "no_matching_renewal_prefix"
+            };
+            metrics::counter!(
+                "cc_lb_cache_keepalive_follow_up_rejected_total",
+                "reason" => reason
+            )
+            .increment(1);
         }
     }
     Ok(())

@@ -145,8 +145,8 @@ credentials). Content:
   larger than `snapshot_max_bytes`, default 8 MiB),
 - `upstream_id: Uuid` — so the scheduler can re-fetch a fresh signer at
   fire time,
-- `ttl: CacheTtl` — `Ttl5m` or `Ttl1h`, extracted from the request's
-  `cache_control` breakpoint.
+- `ttl: CacheTtl` — the shortest protected Anthropic breakpoint lifetime,
+  `Ttl5m` or `Ttl1h`; mixed 1h system and 5m message prefixes use the 5m cadence.
 
 When top-level automatic `cache_control` is absent, snapshot shaping trims
 uncached trailing messages and content blocks after the last explicit
@@ -223,6 +223,13 @@ Existing timing behavior anchors each refresh window to response start.
 configured refresh delay rather than starting a full new window after body
 collection.
 
+The durable dispatcher checks refresh and wall-clock caps before sending.
+A job whose scheduled time or actual dispatch time reaches
+`first_scheduled_at + max_total_duration_secs` terminates as `max_duration`
+without an HTTP request. Post-dispatch cap checks remain as a second guard.
+Retained turns, request events, and evidence use a cycle-scoped source identity
+`keepalive-v2:<session_key_hash>:<cycle_id>:<generation>`, independent of session-row retention and disjoint from legacy identities, including NULL-cycle sessions.
+
 `cancel(key, reason)` removes the entry, closes the channel, records the
 cancellation reason, and updates the `active_sessions` gauge.
 
@@ -246,10 +253,12 @@ pub trait KeepaliveDispatcher: Send + Sync + 'static {
 pub enum DispatchOutcome { CacheHit, CacheMiss, Error(String) }
 ```
 
-A cache hit is recognised via `usage.cache_read_input_tokens > 0` in the
-response body (documented Anthropic behavior). Empty `content: []`,
-`stop_reason: "max_tokens"`, and `usage.cache_read_input_tokens > 0` is
-the expected happy path.
+An Anthropic renewal is a clean hit only when `cache_read_input_tokens > 0`
+and canonical `cache_creation_input_tokens == 0`. A positive read alongside
+creation means only part of the protected prefix survived; it terminates as
+`cache_miss` and retains all paid usage. Explicit minimal continuations add no
+cache-controlled content, while automatic-cache snapshots replay unchanged
+input, so the rule needs no token tolerance or deployment-specific threshold.
 
 ### Storage schema
 
@@ -308,6 +317,14 @@ Prometheus metrics:
 - `cc_lb_cache_keepalive_cancel_errors_total`
 - `cc_lb_cache_keepalive_dispatch_skipped_total{reason}`
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}`
+- `cc_lb_cache_keepalive_follow_up_rejected_total{reason}` — evidence-writer
+  rejections: `no_matching_renewal_prefix`, `outside_ttl`, `not_first_in_cycle`.
+
+The existing off-path request diagnostics retain up to 32 candidate prefix
+hashes and their block positions. Rejection instrumentation reuses fetched
+evidence; it adds no request-path parsing, query, lock, or await.
+Real-request cancellation persists its specific nullable `cancel_reason`;
+legacy rows retain no inferred cause.
 
 Existing per-request `cache_read_input_tokens` telemetry naturally
 reflects success without new event schema.

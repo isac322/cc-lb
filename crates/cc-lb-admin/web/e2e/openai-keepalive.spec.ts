@@ -156,6 +156,46 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
     await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
 
     await expect(page.getByTestId('cache-keepalive-card')).toBeVisible();
+    const description = page.getByText(
+      'Keeps prompt caches warm during idle gaps.',
+      { exact: true },
+    );
+    await expect(description).toBeVisible();
+    expect(
+      await description.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return range.getClientRects().length;
+      }),
+    ).toBe(1);
+
+    const helpText = page.getByText(
+      'OpenAI Responses keepalive is for GPT-5.6+ models: 30m sessions may renew during idle gaps, while 12h retention is recorded without read re-anchoring.',
+      { exact: true },
+    );
+    await expect(helpText).not.toBeVisible();
+    const help = page.getByRole('button', { name: 'Cache keepalive help' });
+    await page.getByRole('button', { name: 'Sessions', exact: true }).focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(helpText).toBeVisible();
+    await expect(help).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(helpText).not.toBeVisible();
+    await expect(help).toBeFocused();
+    await help.hover();
+    await expect(helpText).toBeVisible();
+    await page.mouse.move(0, 0);
+    await page.keyboard.press('Escape');
+    await expect(helpText).not.toBeVisible();
+    await help.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(help).toBeFocused();
+    await expect(helpText).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(helpText).not.toBeVisible();
+    await expect(help).toBeFocused();
+
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sessions' })).toBeVisible();
     await expect(page.locator('html')).toHaveJSProperty(
@@ -181,3 +221,47 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
     await page.keyboard.press('Escape');
   }
 });
+
+for (const key of ['Enter', 'Space', 'hover']) {
+  test(`focused request metric keeps focus through ${key} and Escape`, async ({ page }) => {
+    await installFixtures(page);
+    await page.route('**/admin/v1/events/recent**', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        events: [{
+          event_id: 'keyboard-metric',
+          request_id: 'keyboard-metric',
+          principal_id: PRINCIPAL_ID,
+          ts: Math.floor(Date.now() / 1000),
+          ts_ms: Date.now(),
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-5.6',
+          source_kind: 'messages',
+        }],
+        next_cursor: null,
+        count: 1,
+        limit: 50,
+        observed: true,
+      }),
+    }));
+    await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
+    const metric = page.getByRole('button', { name: /^Latency .* show breakdown$/ });
+    const breakdown = page.getByText('Latency by responsibility', { exact: true });
+    await expect(metric).toBeVisible();
+    await metric.focus();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Tab');
+    await expect(metric).toBeFocused();
+    await expect(breakdown).not.toBeVisible();
+    if (key === 'hover') await metric.hover();
+    else await page.keyboard.press(key);
+    await expect(breakdown).toBeVisible();
+    await expect(metric).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(breakdown).not.toBeVisible();
+    await expect(metric).toBeFocused();
+    await expect(page.getByRole('dialog', { name: 'Request detail' })).not.toBeVisible();
+  });
+}

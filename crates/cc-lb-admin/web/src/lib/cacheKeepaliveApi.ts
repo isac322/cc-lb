@@ -23,6 +23,13 @@ export const CacheKeepaliveStateSchema = z.enum(CACHE_KEEPALIVE_STATES);
 export type CacheKeepaliveState = z.infer<typeof CacheKeepaliveStateSchema>;
 
 export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h', '30m', '12h']);
+export const CacheKeepaliveCancelReasonSchema = z.enum([
+  'new_request',
+  'user_turn_detected',
+  'snapshot_too_large',
+  'cached_prefix_too_small',
+  'zero_token_renewal_unsupported',
+]);
 export type CacheKeepaliveTtl = z.infer<typeof CacheKeepaliveTtlSchema>;
 
 export const CacheKeepaliveHorizonSchema = z.enum([
@@ -106,6 +113,7 @@ export const CacheKeepaliveRowSchema = z.object({
   max_attempts: z.number(),
   reason: z.string(),
   display_reason: z.string().nullable().optional(),
+  cancel_reason: CacheKeepaliveCancelReasonSchema.nullable().optional(),
   generation: z.number(),
   upstream: z.string().nullable(),
   error: z.string().nullable(),

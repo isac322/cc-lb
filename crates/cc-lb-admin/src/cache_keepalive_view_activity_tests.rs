@@ -32,6 +32,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         status: None,
         enqueue_state: None,
         terminal_reason: None,
+        cancel_reason: None,
         decision: Some("not_tracked".to_owned()),
         reason: "user turn (stop_reason=end_turn)".to_owned(),
         display_reason: None,
@@ -83,6 +84,7 @@ fn session() -> CacheKeepaliveSessionRecord {
         error: None,
         config_snapshot: None,
         terminal_reason: None,
+        cancel_reason: None,
         expires_at_unix_secs: 1_730_000_300,
         created_at_unix_secs: 1_730_000_000,
         updated_at_unix_secs: 1_730_000_000,
@@ -739,10 +741,10 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
 
     let pnl = activity.pnl.expect("retained c1 activity");
     assert_eq!(pnl.spent_micros, 21_000);
-    assert_eq!(pnl.avoided_micros, 75_000);
-    assert_eq!(pnl.net_micros, 54_000);
+    assert_eq!(pnl.avoided_micros, 69_000);
+    assert_eq!(pnl.net_micros, 48_000);
     assert_eq!(activity.total_spent_micros, 21_000);
-    assert_eq!(activity.total_avoided_micros, Some(75_000));
+    assert_eq!(activity.total_avoided_micros, Some(69_000));
     assert!(activity.turns.is_empty());
     assert_eq!(activity.total_renewals, 0);
     assert!(!activity.is_last_pending);
@@ -792,8 +794,8 @@ fn persisted_zero_cost_is_real_zero_spend() {
 
     let pnl = activity.pnl.expect("priced zero-cost activity");
     assert_eq!(pnl.spent_micros, 0);
-    assert_eq!(pnl.avoided_micros, 75_000);
-    assert_eq!(pnl.net_micros, 75_000);
+    assert_eq!(pnl.avoided_micros, 69_000);
+    assert_eq!(pnl.net_micros, 69_000);
     assert_eq!(activity.total_spent_micros, 0);
 }
 
@@ -999,9 +1001,9 @@ fn historical_turn_uses_its_persisted_ttl_for_avoided_cost() {
     );
 
     let pnl = activity.pnl.expect("priced historical activity");
-    assert_eq!(pnl.avoided_micros, 75_000);
+    assert_eq!(pnl.avoided_micros, 69_000);
     assert_eq!(pnl.spent_micros, 21_000);
-    assert_eq!(pnl.net_micros, 54_000);
+    assert_eq!(pnl.net_micros, 48_000);
 }
 
 #[test]
@@ -1096,8 +1098,8 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
     assert!(activity.is_last_pending);
     let pnl = activity.pnl.expect("retained cycle pnl");
     assert_eq!(pnl.spent_micros, 9_000);
-    assert_eq!(pnl.avoided_micros, 112_500);
-    assert_eq!(pnl.net_micros, 103_500);
+    assert_eq!(pnl.avoided_micros, 103_500);
+    assert_eq!(pnl.net_micros, 94_500);
     let row = row_from_activity(12, &item, &activity, None).expect("row");
     assert_eq!(row.retained_renewals, 2);
 
@@ -1111,8 +1113,8 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
     assert_eq!(previous.total_duration_sec, 276);
     assert_eq!(previous.since_last_renewal_sec, Some(1));
     assert_eq!(previous.spent_micros, 5_000);
-    assert_eq!(previous.avoided_micros, Some(112_500));
-    assert_eq!(previous.net_pnl_micros, Some(107_500));
+    assert_eq!(previous.avoided_micros, Some(103_500));
+    assert_eq!(previous.net_pnl_micros, Some(98_500));
     assert_eq!(previous.pulses.len(), 2);
     assert_eq!(previous.pulses[0].pulse_number, 1);
     assert_eq!(previous.pulses[0].time_ms, 1_000_000);

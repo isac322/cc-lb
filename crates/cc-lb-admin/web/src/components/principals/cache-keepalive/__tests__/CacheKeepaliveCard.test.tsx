@@ -107,9 +107,7 @@ describe('CacheKeepaliveCard', () => {
     expect(screen.getByText('Cache keepalive')).toBeDefined();
 
     expect(
-      screen.getByText(
-        'Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring.',
-      ),
+      screen.getByText('Keeps prompt caches warm during idle gaps.'),
     ).toBeDefined();
     expect(screen.getByText('Renewing now')).toBeDefined();
     expect(screen.getByText('current scheduled or mid-renewal')).toBeDefined();
@@ -130,6 +128,7 @@ describe('CacheKeepaliveCard', () => {
 
     const help = screen.getByLabelText('Cache keepalive help');
     expect(help).toBeDefined();
+    expect(screen.queryByText(/OpenAI Responses keepalive is for/)).toBeNull();
     fireEvent.focus(help);
 
     await waitFor(() => {
@@ -170,9 +169,7 @@ describe('CacheKeepaliveCard', () => {
     expect(toggle.checked).toBe(false);
     expect(toggle.closest('label')?.textContent).toBe('Disabled');
     expect(
-      screen.getByText(
-        'Off. Turn on to renew supported prompt-cache sessions during idle gaps. OpenAI Responses 12h retention is recorded without read re-anchoring.',
-      ),
+      screen.getByText('Off. Turn on to keep prompt caches warm.'),
     ).toBeDefined();
     expect(screen.queryByText('Renewing now')).toBeNull();
     expect(screen.queryByText('$4.56')).toBeNull();

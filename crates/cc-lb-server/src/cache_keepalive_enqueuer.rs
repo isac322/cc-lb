@@ -203,6 +203,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             request.expected_generation,
             cancel_anchor_at_unix_secs,
             terminal_reason_from_cancel(request.reason),
+            Some(request.reason.as_str()),
             now_unix_secs,
         )
         .await

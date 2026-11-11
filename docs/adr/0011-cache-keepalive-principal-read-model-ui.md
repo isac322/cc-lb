@@ -33,7 +33,7 @@ Rather than reparse request bodies on read, the missing UI display fields are pe
 
 The Principal-detail surfaces stay live through the existing admin-web React Query polling pattern (visibility-gated `refetchInterval`), not Server-Sent Events. We deliberately did not use the admin event stream: its subscription filters (`crates/cc-lb-admin/src/events.rs` `StreamFilters`) carry principal/model/upstream/status/source-kind but no session or cache identity, and renewal completion is the only keep-alive mutation that emits an event, so it cannot replace polling. Polling is limited to data that can still change:
 
-- The session sheet polls only the first page. Later loaded pages refresh once when the summary or groups change, when the first-page boundary changes (the last row's id or message timestamp, or whether another page exists), or when the sheet reopens. Cursor tokens are opaque: a rolling horizon changes their embedded horizon start without necessarily moving the page boundary. A state change on a later page can remain stale until one of those refresh conditions occurs; this is the accepted trade-off for one-request polling. Polling and "Load more sessions" share a serialization queue, and queued page loads are dropped if the selected query key changes.
+- The session sheet polls only the first page. Later loaded pages refresh once when row/session state-bearing summary fields or groups change, when the first-page boundary changes (the last row's id or message timestamp, or whether another page exists), or when the sheet reopens. The clock-driven `sessions_last_5m` field does not trigger a tail refresh. Cursor tokens are opaque: a rolling horizon changes their embedded horizon start without necessarily moving the page boundary. A state change on a later page can remain stale until one of those refresh conditions occurs; this is the accepted trade-off for one-request polling. Polling and "Load more sessions" share a serialization queue, and queued page loads are dropped if the selected query key changes.
 - While the sheet is open the card pauses its own summary poll; when the sheet shows the 24h horizon it writes its overview summary into the card's query.
 - The open session detail polls only while the session is active or its follow-up evidence is pending, and refetches when the selected row's generation or active state changes in the list.
 
@@ -70,6 +70,13 @@ so net is avoided minus spent. Avoided and net are null only when catalog
 pricing or a turn's cost is unknown. A valid
 renewal without a proven follow-up has spend but no avoided credit.
 
+For a renewal with a proven follow-up, avoided cost is its cache-read token
+count multiplied by the applicable TTL's cache-creation price minus the
+cache-read price. The follow-up still pays to read the preserved cache; that
+read cost is not a saving. Each renewal is priced and rounded to microdollars
+before summing, identically for rows, groups, and the header. Both rates must
+be known; incomplete pricing leaves avoided cost and net null.
+
 Summary-only requests use SQL aggregates over retained turns and evidence,
 including grouped model/TTL avoided-token totals. They do not materialize all
 sessions, turns, or snapshots in Rust.
@@ -90,6 +97,18 @@ aggregates. Rows carry their server-computed trigger group. Detail loads only
 the requested session. Current-cycle detail renewal counts use cycle-linked evidence;
 retained history remains available independently. The Admin Web card disables
 summary polling while keep-alive is disabled.
+
+Cancelled sessions are tracked and visible only when they have a retained
+renewal turn inside the selected horizon. Lifetime refresh counts and turns
+outside that horizon do not keep them in the groups or recent-session count.
+The All horizon includes their retained historical renewals and spend.
+
+Cancellation stores its nullable `cancel_reason` independently of the
+schedule-time trigger in `display_reason`. List and detail responses expose
+that cause and render a human-readable cancellation reason. Legacy rows with
+no cause say `Cancelled`; they never infer why the session stopped. Terminal
+rows do not advertise a scheduled first or next renewal. Trigger grouping
+continues to use the original schedule-time descriptor.
 
 
 ### Stable ordering and cursor pagination

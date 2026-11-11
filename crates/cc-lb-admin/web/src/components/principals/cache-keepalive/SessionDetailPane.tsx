@@ -755,6 +755,11 @@ export function SessionDetailPane({
       </div>
 
       <div className="space-y-3 p-4">
+        {session.state === 'cancelled' ? (
+          <p className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
+            {session.cancel_reason ? session.reason : 'Cancelled'}
+          </p>
+        ) : null}
         {session.ttl === '12h' ? (
           <p
             className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted"
@@ -795,11 +800,11 @@ export function SessionDetailPane({
               />
             ))}
           </div>
-        ) : (
+        ) : session.state !== 'cancelled' ? (
           <div className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
             {session.reason}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
