@@ -156,7 +156,7 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
     )))
     .await?;
     migrator
-        .run_direct(Some(118), &mut connection, false)
+        .run_direct(Some(119), &mut connection, false)
         .await?;
     sqlx::query(
         "INSERT INTO pool_subscription_quota_history_v1 (

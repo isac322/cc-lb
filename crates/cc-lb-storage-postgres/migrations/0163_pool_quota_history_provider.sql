@@ -1,7 +1,7 @@
 -- ADD COLUMN with a constant default preserves legacy Anthropic rows through
 -- PostgreSQL's metadata-only missing-value mechanism, without a data backfill.
--- The history table is retention-bounded; its two replacement indexes must be
--- rehearsed within the normal startup migration timeout before release.
+-- The replacement indexes are built during startup; rehearse their full lock
+-- hold against retained-history row and byte volume, including disabled retention.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE pool_subscription_quota_history_v1

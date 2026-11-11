@@ -414,7 +414,7 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
     let result: Result<()> = async {
         let mut connection = fixture.pool.acquire().await?;
         sqlx::migrate!("./migrations")
-            .run_direct(Some(161), &mut *connection, false)
+            .run_direct(Some(162), &mut *connection, false)
             .await?;
         sqlx::query(
             "INSERT INTO pool_subscription_quota_history_v1 (
