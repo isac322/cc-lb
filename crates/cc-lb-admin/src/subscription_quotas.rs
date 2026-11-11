@@ -267,6 +267,8 @@ pub struct AggregateWindowResponse {
     window: String,
     cc_window_start_unix_secs: u64,
     cc_window_reset_unix_secs: u64,
+    pool_pace_fraction: Option<f64>,
+    next_reset_unix_secs: Option<u64>,
     used_tokens: u64,
     utilization: Option<f64>,
     utilization_percent: Option<f64>,
@@ -292,6 +294,9 @@ pub struct AggregateProviderLotResponse {
     state: String,
     provider_start_unix_secs: Option<u64>,
     provider_reset_unix_secs: Option<u64>,
+    /// Distinguish provider resets from legacy calendar-window fallbacks internally.
+    #[serde(skip)]
+    provider_reset_observed: bool,
     observed_at_unix_millis: Option<u64>,
     utilization: Option<f64>,
     capacity_estimate_tokens: Option<f64>,
@@ -1743,6 +1748,34 @@ fn build_aggregate_window_response(
     weighting: &str,
 ) -> AggregateWindowResponse {
     let latest_lots = latest_lot_per_upstream(lots);
+    let mut weighted_elapsed_sum = 0.0;
+    let mut pace_weight_sum = 0.0;
+    let mut next_reset_unix_secs = None;
+    for lot in &latest_lots {
+        if lot.utilization.is_none() || lot.state == "absent" || !lot.provider_reset_observed {
+            continue;
+        }
+        let (Some(start), Some(reset)) =
+            (lot.provider_start_unix_secs, lot.provider_reset_unix_secs)
+        else {
+            continue;
+        };
+        if start >= reset || now_unix_secs < start || now_unix_secs >= reset {
+            continue;
+        }
+        next_reset_unix_secs =
+            Some(next_reset_unix_secs.map_or(reset, |next: u64| next.min(reset)));
+        let elapsed = ((now_unix_secs - start) as f64 / (reset - start) as f64).clamp(0.0, 1.0);
+        let weight = if weighting == "plan" {
+            lot.capacity_ratio
+        } else {
+            1.0
+        };
+        weighted_elapsed_sum += weight * elapsed;
+        pace_weight_sum += weight;
+    }
+    let pool_pace_fraction =
+        (pace_weight_sum > 0.0).then(|| weighted_elapsed_sum / pace_weight_sum);
     let (cc_start, cc_reset) = window_secs(window)
         .map(|secs| cc_window_bounds(now_unix_secs, secs))
         .unwrap_or((0, 0));
@@ -1863,6 +1896,8 @@ fn build_aggregate_window_response(
         window: window.as_str().to_owned(),
         cc_window_start_unix_secs: cc_start,
         cc_window_reset_unix_secs: cc_reset,
+        pool_pace_fraction,
+        next_reset_unix_secs,
         used_tokens,
         utilization,
         utilization_percent: utilization.map(|value| value * 100.0),
@@ -1920,6 +1955,7 @@ struct AggregateProviderLotInput<'a> {
     state: SubscriptionQuotaDataState,
     provider_start: Option<u64>,
     provider_reset: Option<u64>,
+    provider_reset_observed: bool,
     observed_at_unix_millis: Option<u64>,
     evaluation_unix_secs: u64,
     utilization: Option<f64>,
@@ -1942,6 +1978,7 @@ fn provider_lot_input_from_snapshot<'a>(
         state: snapshot.state,
         provider_start: provider_window_start_unix_secs(window, snapshot, now_unix_secs),
         provider_reset: snapshot.resets_at_unix_secs.or(cc_reset),
+        provider_reset_observed: snapshot.resets_at_unix_secs.is_some(),
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
         evaluation_unix_secs: now_unix_secs,
         utilization: snapshot.utilization,
@@ -1973,6 +2010,7 @@ fn provider_lot_input_from_sample<'a>(
             .resets_at_unix_secs
             .and_then(|reset| window_secs(sample.window).map(|secs| reset.saturating_sub(secs))),
         provider_reset: sample.resets_at_unix_secs,
+        provider_reset_observed: sample.resets_at_unix_secs.is_some(),
         observed_at_unix_millis: Some(sample.observed_at_unix_millis),
         evaluation_unix_secs: now_unix_millis / 1_000,
         utilization: sample.utilization,
@@ -1992,6 +2030,7 @@ fn provider_lot_input_from_storage<'a>(
         state: SubscriptionQuotaDataState::Fresh,
         provider_start: lot.provider_start_unix_secs,
         provider_reset: lot.provider_reset_unix_secs,
+        provider_reset_observed: lot.provider_reset_unix_secs.is_some(),
         observed_at_unix_millis: Some(lot.observed_at_unix_millis),
         evaluation_unix_secs: lot.evaluation_unix_secs,
         utilization: Some(lot.utilization),
@@ -2119,6 +2158,7 @@ fn build_provider_lot_response(
         state: data_state_str(input.state).to_owned(),
         provider_start_unix_secs: provider_start,
         provider_reset_unix_secs: provider_reset,
+        provider_reset_observed: input.provider_reset_observed,
         observed_at_unix_millis: input.observed_at_unix_millis,
         utilization: input.utilization,
         capacity_estimate_tokens: capacity_estimate,
@@ -3086,6 +3126,7 @@ mod tests {
                 state: SubscriptionQuotaDataState::Fresh,
                 provider_start: Some(27_000),
                 provider_reset: Some(45_000),
+                provider_reset_observed: true,
                 observed_at_unix_millis: Some(44_000_000),
                 evaluation_unix_secs: 44_000,
                 utilization: Some(0.5),
@@ -3099,6 +3140,7 @@ mod tests {
                 state: SubscriptionQuotaDataState::Fresh,
                 provider_start: Some(45_000),
                 provider_reset: Some(63_000),
+                provider_reset_observed: true,
                 observed_at_unix_millis: Some(50_000_000),
                 evaluation_unix_secs: 50_000,
                 utilization: Some(0.5),
@@ -3181,6 +3223,255 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_pool_pace_uses_plan_weighted_latest_provider_windows() {
+        let mut standard = lot_with_ratio("standard", Some(0.50), Some(1_000), None, None, 1.25);
+        standard.provider_reset_unix_secs = Some(200);
+        let mut historical = standard.clone();
+        historical.observed_at_unix_millis = Some(500);
+        historical.provider_reset_unix_secs = Some(1_000);
+        let mut premium = lot_with_ratio("premium", Some(0.10), Some(1_000), None, None, 6.25);
+        premium.provider_start_unix_secs = Some(80);
+        premium.provider_reset_unix_secs = Some(180);
+        let lots = [historical, standard, premium];
+
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+
+        // (1.25 * 0.5 + 6.25 * 0.2) / (1.25 + 6.25)
+        assert_eq!(response.pool_pace_fraction, Some(0.25));
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["pool_pace_fraction"], 0.25);
+        assert_eq!(value["next_reset_unix_secs"], 180);
+    }
+
+    #[test]
+    fn aggregate_pool_pace_excludes_missing_invalid_and_inactive_provider_windows() {
+        let mut lots = [
+            (None, Some(200)),
+            (Some(0), None),
+            (Some(100), Some(100)),
+            (Some(200), Some(100)),
+            (Some(101), Some(200)),
+            (Some(0), Some(100)),
+            (Some(0), Some(99)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start, reset))| {
+            let mut lot = lot(
+                &format!("excluded-{index}"),
+                Some(0.5),
+                Some(1_000),
+                None,
+                None,
+            );
+            lot.provider_start_unix_secs = start;
+            lot.provider_reset_unix_secs = reset;
+            lot
+        })
+        .collect::<Vec<_>>();
+        let mut unobserved = lot("unobserved", None, Some(1_000), None, None);
+        unobserved.provider_reset_unix_secs = Some(200);
+        lots.push(unobserved);
+        let excluded = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(excluded.pool_pace_fraction, None);
+
+        let mut active = lot("active", Some(0.5), Some(1_000), None, None);
+        active.provider_reset_unix_secs = Some(200);
+        let mut just_started = active.clone();
+        just_started.upstream_id = "just-started".to_owned();
+        just_started.provider_start_unix_secs = Some(100);
+        lots.extend([active, just_started]);
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(response.pool_pace_fraction, Some(0.25));
+    }
+
+    #[test]
+    fn aggregate_pool_pace_equal_weighting_ignores_plan_ratios() {
+        let mut standard = lot_with_ratio("standard", Some(0.50), Some(1_000), None, None, 1.25);
+        standard.provider_reset_unix_secs = Some(200);
+        let mut premium = lot_with_ratio("premium", Some(0.10), Some(1_000), None, None, 6.25);
+        premium.provider_start_unix_secs = Some(80);
+        premium.provider_reset_unix_secs = Some(180);
+
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &[standard, premium],
+            0,
+            100,
+            "equal",
+        );
+
+        assert_eq!(response.pool_pace_fraction, Some(0.35));
+    }
+
+    #[test]
+    fn aggregate_pool_pace_requires_positive_total_weight() {
+        let mut zero_weight =
+            lot_with_ratio("zero-weight", Some(0.5), Some(1_000), None, None, 0.0);
+        zero_weight.provider_reset_unix_secs = Some(200);
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &[zero_weight],
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(response.pool_pace_fraction, None);
+    }
+
+    #[test]
+    fn aggregate_next_reset_uses_soonest_future_non_absent_latest_lot() {
+        let mut later = lot("later", Some(0.5), Some(1_000), None, None);
+        later.provider_reset_unix_secs = Some(300);
+        let mut earlier = lot("earlier", Some(0.5), Some(1_000), None, None);
+        earlier.provider_reset_unix_secs = Some(200);
+        let mut unobserved = lot("unobserved", None, Some(1_000), None, None);
+        unobserved.state = "unobserved".to_owned();
+        unobserved.provider_reset_unix_secs = Some(120);
+        let mut historical = earlier.clone();
+        historical.observed_at_unix_millis = Some(500);
+        historical.provider_reset_unix_secs = Some(110);
+        let mut absent = lot("absent", Some(0.5), Some(1_000), None, None);
+        absent.state = "absent".to_owned();
+        absent.provider_reset_unix_secs = Some(150);
+        let mut expired = lot("expired", Some(0.5), Some(1_000), None, None);
+        expired.provider_reset_unix_secs = Some(99);
+        let mut at_reset = lot("at-reset", Some(0.5), Some(1_000), None, None);
+        at_reset.provider_reset_unix_secs = Some(100);
+        let mut missing = lot("missing", Some(0.5), Some(1_000), None, None);
+        missing.provider_reset_unix_secs = None;
+        let mut lots = vec![absent, expired, at_reset, missing, unobserved];
+        let excluded = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(excluded.next_reset_unix_secs, None);
+
+        lots.extend([later, earlier, historical]);
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(response.next_reset_unix_secs, Some(200));
+    }
+
+    #[test]
+    fn aggregate_pool_timing_ignores_snapshot_calendar_window_fallbacks() {
+        let upstream = upstream_record(Uuid::new_v4());
+        for (state, utilization, observed_at) in [
+            ("unobserved", None, None),
+            ("fresh", Some(0.5), Some(100_000)),
+        ] {
+            let mut snapshot: SubscriptionQuotaCandidateSnapshot = serde_json::from_value(json!({
+                "window": "5h",
+                "state": state,
+                "utilization": utilization,
+                "observed_at_unix_millis": observed_at,
+                "max_staleness_secs": 300,
+            }))
+            .unwrap();
+            let input = provider_lot_input_from_snapshot(
+                &upstream,
+                SubscriptionQuotaWindow::FiveHour,
+                &snapshot,
+                PRO_CAPACITY_RATIO,
+                100,
+            );
+            let fallback = build_provider_lot_response(
+                &input,
+                ProviderLotTokenSums {
+                    provider_tokens: 0,
+                    used_before_cc_window: 0,
+                },
+                100,
+            );
+            assert_eq!(fallback.provider_start_unix_secs, Some(0));
+            assert_eq!(fallback.provider_reset_unix_secs, Some(18_000));
+            let serialized = serde_json::to_value(&fallback).unwrap();
+            assert!(serialized.get("provider_reset_observed").is_none());
+            let response = build_aggregate_window_response(
+                SubscriptionQuotaWindow::FiveHour,
+                &[fallback],
+                0,
+                100,
+                "plan",
+            );
+            assert_eq!(response.pool_pace_fraction, None);
+            assert_eq!(response.next_reset_unix_secs, None);
+
+            snapshot.state = SubscriptionQuotaDataState::Fresh;
+            snapshot.utilization = Some(0.5);
+            snapshot.resets_at_unix_secs = Some(200);
+            let input = provider_lot_input_from_snapshot(
+                &upstream,
+                SubscriptionQuotaWindow::FiveHour,
+                &snapshot,
+                PRO_CAPACITY_RATIO,
+                100,
+            );
+            let observed = build_provider_lot_response(
+                &input,
+                ProviderLotTokenSums {
+                    provider_tokens: 0,
+                    used_before_cc_window: 0,
+                },
+                100,
+            );
+            let response = build_aggregate_window_response(
+                SubscriptionQuotaWindow::FiveHour,
+                &[observed],
+                0,
+                100,
+                "plan",
+            );
+            assert_eq!(response.pool_pace_fraction, Some(0.5));
+            assert_eq!(response.next_reset_unix_secs, Some(200));
+        }
+    }
+
+    #[test]
+    fn aggregate_window_serializes_unknown_pool_pace_and_reset_as_null() {
+        let value = serde_json::to_value(aggregate_window("5h", 1_800, 25.0)).unwrap();
+        assert_eq!(
+            value.get("pool_pace_fraction"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            value.get("next_reset_unix_secs"),
+            Some(&serde_json::Value::Null)
+        );
+
+        let empty =
+            build_aggregate_window_response(SubscriptionQuotaWindow::FiveHour, &[], 0, 100, "plan");
+        assert_eq!(empty.pool_pace_fraction, None);
+        assert_eq!(empty.next_reset_unix_secs, None);
+    }
+
+    #[test]
     fn pool_quota_snapshots_from_aggregate_includes_fable() {
         let aggregate = AggregateResponse {
             now_unix_secs: 1_800_000_000,
@@ -3256,6 +3547,8 @@ mod tests {
             window: window.to_owned(),
             cc_window_start_unix_secs: 0,
             cc_window_reset_unix_secs: reset_unix_secs,
+            pool_pace_fraction: None,
+            next_reset_unix_secs: None,
             used_tokens: 10,
             utilization: Some(utilization_percent / 100.0),
             utilization_percent: Some(utilization_percent),
@@ -3319,6 +3612,7 @@ mod tests {
             state: "fresh".to_owned(),
             provider_start_unix_secs: Some(0),
             provider_reset_unix_secs: Some(18_000),
+            provider_reset_observed: true,
             observed_at_unix_millis,
             utilization,
             capacity_estimate_tokens,

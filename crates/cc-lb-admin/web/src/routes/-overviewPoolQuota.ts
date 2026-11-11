@@ -63,7 +63,7 @@ export function poolQuotaWindowsPresent(
     return (
       aggregateWindow?.utilization_percent != null ||
       (historyWindow?.latest?.eligible_upstreams ?? 0) > 0 ||
-      (aggregateWindow?.cc_window_reset_unix_secs ?? 0) > 0 ||
+      (aggregateWindow?.next_reset_unix_secs ?? 0) > 0 ||
       (historyWindow?.series.length ?? 0) > 0
     );
   });
@@ -399,8 +399,8 @@ export function poolQuotaResponseObservation(
 }
 
 /**
- * When each pool window next refills (`cc_window_reset_unix_secs`), or
- * `null` for a window without a reading or a reset time.
+ * Soonest account reset in each pool window (`next_reset_unix_secs`), or
+ * `null` when no account has an upcoming reset.
  */
 export function poolWindowResets(
   aggregate: AggregateResponse | undefined,
@@ -410,12 +410,24 @@ export function poolWindowResets(
     const entry = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
-    resets[window] =
-      entry && entry.cc_window_reset_unix_secs > 0
-        ? entry.cc_window_reset_unix_secs
-        : null;
+    resets[window] = entry?.next_reset_unix_secs ?? null;
   }
   return resets;
+}
+
+/** Server-weighted elapsed account-window fractions as even pace (0-100). */
+export function poolWindowPace(
+  aggregate: AggregateResponse | undefined,
+): Record<PoolQuotaWindow, number | null> {
+  const paces: Record<PoolQuotaWindow, number | null> = {};
+  for (const window of aggregateWindowKeys(aggregate?.windows)) {
+    const fraction = aggregate?.windows.find(
+      (candidate) => candidate.window === window,
+    )?.pool_pace_fraction;
+    paces[window] =
+      fraction != null && Number.isFinite(fraction) ? fraction * 100 : null;
+  }
+  return paces;
 }
 
 /**

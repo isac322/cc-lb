@@ -14,6 +14,7 @@ import {
   FirstRunChecklist,
   useFirstRunIncomplete,
 } from '../../components/onboarding/FirstRunChecklist';
+import { OnboardingLink } from '../../components/onboarding/OnboardingLink';
 import {
   BreakdownPopover,
   fmtTokens,
@@ -93,6 +94,7 @@ import {
 } from '../../lib/providers';
 import {
   usePrincipalNameMap,
+  usePrincipals,
   useSubscriptionQuotaAggregate,
   useSubscriptionQuotaPoolHistory,
   useSummary,
@@ -102,7 +104,6 @@ import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
   type QuotaSeverity,
-  quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import {
@@ -132,6 +133,7 @@ import {
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolTooltipRows,
+  poolWindowPace,
   poolWindowResets,
   recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
@@ -1268,6 +1270,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
+  const paces = poolWindowPace(aggregate);
   const provider = chart.observation ?? oldestProviderObservation(aggregate);
   const missingCapacity = missingCapacityUpstreams(aggregate);
   const serverNow = chart.observation
@@ -1292,6 +1295,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
         <PoolQuotaLegend
           latest={chart.latest}
           resets={resets}
+          paces={paces}
           nowUnixSecs={serverNow}
           timeZone={timeZone}
           loading={loading}
@@ -1520,6 +1524,7 @@ const POOL_QUOTA_LEGEND_ROW_CLASS =
 export function PoolQuotaLegend({
   latest,
   resets,
+  paces,
   nowUnixSecs = null,
   timeZone = 'UTC',
   windows,
@@ -1528,6 +1533,7 @@ export function PoolQuotaLegend({
 }: {
   latest?: PoolQuotaLatest;
   resets?: Record<string, number | null>;
+  paces?: Record<string, number | null>;
   nowUnixSecs?: number | null;
   timeZone?: string;
   loading?: boolean;
@@ -1561,10 +1567,7 @@ export function PoolQuotaLegend({
             reset != null && nowUnixSecs != null
               ? formatResetIn(reset, nowUnixSecs, { compact: true })
               : null;
-          const pace =
-            nowUnixSecs != null
-              ? quotaPacePct(window, reset, nowUnixSecs)
-              : null;
+          const pace = paces?.[window] ?? null;
           const shortLabel = windowLabels?.[window] ?? windowLabel(window);
           const longLabel = `${windowLabel(window, { long: true })
             .replace(/\b5h\b/g, '5-hour')
@@ -1703,6 +1706,7 @@ export function ProviderOverviewPage({
     live: true,
   });
   const principalNameMap = usePrincipalNameMap();
+  const principalCount = usePrincipals().data?.principals.length;
   const poolWindows = providerPoolWindows(scopedProvider);
   const poolWindowLabels =
     scopedProvider === 'gemini' ? GEMINI_POOL_WINDOW_LABELS : undefined;
@@ -1755,10 +1759,15 @@ export function ProviderOverviewPage({
   const requestSeen =
     feed.rows.length > 0 || (totals?.request_count ?? 0) > 0
       ? true
-      : feed.loading
+      : feed.loading || summary.isPending
         ? undefined
         : false;
-  const firstRunIncomplete = useFirstRunIncomplete(requestSeen);
+  const firstRunIncomplete = useFirstRunIncomplete(scopedProvider);
+  const showPrincipalSetup =
+    firstRunIncomplete === false &&
+    principalCount !== undefined &&
+    requestSeen !== undefined &&
+    (principalCount === 0 || !requestSeen);
 
   const cacheMissAvg = totals ? cacheMissRatio(totals) : null;
 
@@ -1995,9 +2004,11 @@ export function ProviderOverviewPage({
       <OAuthReconnectSummary provider={scopedProvider} />
       <UpstreamApplyFailureSummary provider={scopedProvider} />
 
-      {/* The checklist is the whole first-run state: it says what fills in
-      once traffic flows, so nothing else renders until it lifts. */}
-      <FirstRunChecklist requestSeen={requestSeen} />
+      {/* Only a scope without upstreams needs the full setup checklist. */}
+      <FirstRunChecklist
+        requestSeen={requestSeen}
+        scopedProvider={scopedProvider}
+      />
 
       {firstRunIncomplete ? null : (
         <>
@@ -2152,14 +2163,37 @@ export function ProviderOverviewPage({
                 </div>
               </UsageBlock>
 
-              <TopPrincipalsSection
-                idleCount={principalRanking.idleCount}
-                loading={
-                  principalUsage.data === undefined && principalUsage.isPending
-                }
-                principals={principalRanking.principals}
-                rangeWords={rangeWords}
-              />
+              <div data-testid="overview-principal-area">
+                <TopPrincipalsSection
+                  idleCount={principalRanking.idleCount}
+                  loading={
+                    principalUsage.data === undefined &&
+                    principalUsage.isPending
+                  }
+                  principals={principalRanking.principals}
+                  rangeWords={rangeWords}
+                />
+                {showPrincipalSetup ? (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-5 text-body-sm text-text-muted md:px-6 md:pb-6">
+                    <p>
+                      {principalCount === 0
+                        ? 'Create a principal to start sending requests.'
+                        : scopedProvider
+                          ? `No requests through ${PROVIDER_LABELS[scopedProvider]} upstreams yet.`
+                          : 'No requests through the pool yet.'}
+                    </p>
+                    <OnboardingLink
+                      target={
+                        principalCount === 0 ? 'new-principal' : 'principals'
+                      }
+                    >
+                      {principalCount === 0
+                        ? 'Create a principal'
+                        : 'Issue a proxy key and send a request'}
+                    </OnboardingLink>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </section>
 

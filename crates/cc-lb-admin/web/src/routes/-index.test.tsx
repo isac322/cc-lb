@@ -46,6 +46,7 @@ vi.mock('../lib/queries', async () => {
   return {
     ...actual,
     usePrincipalNameMap: vi.fn(),
+    usePrincipals: vi.fn(),
     useRecentEventsPage: vi.fn(),
     recentEventsPageQueryOptions: vi.fn(),
     useSubscriptionQuotaAggregate: vi.fn(),
@@ -478,6 +479,8 @@ function aggregateResponse(
       window,
       cc_window_start_unix_secs: nowUnixSecs - 3600,
       cc_window_reset_unix_secs: nowUnixSecs + 3600,
+      pool_pace_fraction: null,
+      next_reset_unix_secs: nowUnixSecs + 3600,
       used_tokens: 100,
       utilization: utilizationPercent / 100,
       utilization_percent: utilizationPercent,
@@ -718,6 +721,24 @@ function mockManyPrincipals() {
   );
 }
 
+const OVERVIEW_UPSTREAMS: Upstream[] = (
+  ['anthropic_api_key', 'openai_api_key', 'gemini_api_key'] as const
+).map((kind) => ({
+  id: kind,
+  name: kind,
+  kind,
+  enabled: true,
+  spec_revision: 1,
+  base_url: null,
+  warmup_enabled: false,
+  warmup_dialect_plugin: null,
+  status: {
+    last_apply_error: null,
+    last_apply_at_unix_secs: null,
+    last_warmup_at_unix_secs: null,
+  },
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   // The shared range persists in storage; start every test from its default.
@@ -726,11 +747,14 @@ beforeEach(() => {
   rechartsMock.areaChartRenderCount = 0;
   rechartsMock.tooltip = null;
   observerMock.callback = null;
-  // OAuthReconnectSummary polls upstreams itself; default to a resolved
-  // empty list so no OAuth status queries spin up. Tests that need an
-  // OAuth upstream override this.
+  // Configured API-key upstreams keep overview tests outside the first-run gate
+  // without starting the reconnect summary's OAuth queries.
+  vi.mocked(queries.usePrincipals).mockReturnValue({
+    data: { principals: [{ id: 'principal-alpha' }] },
+    isPending: false,
+  } as never);
   vi.mocked(queries.useUpstreams).mockReturnValue({
-    data: { upstreams: [] },
+    data: { upstreams: OVERVIEW_UPSTREAMS },
     isPending: false,
     isPlaceholderData: false,
   } as never);
@@ -738,6 +762,173 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe('Overview upstream gate', () => {
+  function mockNoRequests() {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: {
+        ...SUMMARY_FIXTURE,
+        totals: { ...SUMMARY_FIXTURE.totals, request_count: 0 },
+        sparkline: { buckets: [] },
+      },
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: { ...PRINCIPAL_USAGE_FIXTURE, series: [] },
+      isPending: false,
+    } as never);
+    mockRequestEventsFeed();
+  }
+
+  it.each([
+    { provider: 'openai', label: 'OpenAI' },
+    { provider: 'gemini', label: 'Gemini' },
+    { provider: 'anthropic', label: 'Anthropic' },
+  ] as const)(
+    'shows the $label pool without requests and keeps setup in the principal area',
+    ({ provider, label }) => {
+      mockNoRequests();
+      vi.mocked(queries.useUpstreams).mockReturnValue({
+        data: {
+          upstreams: OVERVIEW_UPSTREAMS.filter(
+            (upstream) => upstream.kind === `${provider}_api_key`,
+          ),
+        },
+        isPending: false,
+      } as never);
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+
+      expect(screen.getByTestId('pool-quota-card')).toBeDefined();
+      expect(screen.getByTestId('overview-traffic')).toBeDefined();
+      expect(
+        screen.queryByRole('heading', { name: 'Set up the pool' }),
+      ).toBeNull();
+      const principals = screen.getByTestId('overview-principal-area');
+      expect(
+        within(principals).getByText(
+          `No requests through ${label} upstreams yet.`,
+        ),
+      ).toBeDefined();
+      expect(
+        within(principals)
+          .getByRole('link', { name: 'Issue a proxy key and send a request' })
+          .getAttribute('href'),
+      ).toBe('/principals');
+    },
+  );
+
+  it.each([undefined, 'anthropic', 'openai', 'gemini'] as const)(
+    'shows the checklist only when the %s scope has no upstream',
+    (provider) => {
+      mockNoRequests();
+      vi.mocked(queries.useUpstreams).mockReturnValue({
+        data: {
+          upstreams:
+            provider === undefined
+              ? []
+              : OVERVIEW_UPSTREAMS.filter(
+                  (upstream) => upstream.kind !== `${provider}_api_key`,
+                ),
+        },
+        isPending: false,
+      } as never);
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+
+      expect(
+        screen.getByRole('heading', { name: 'Set up the pool' }),
+      ).toBeDefined();
+      expect(screen.queryByTestId('overview-usage-group')).toBeNull();
+      expect(screen.queryByTestId('overview-top-principals')).toBeNull();
+    },
+  );
+
+  it('keeps the main overview visible without a principal and links to creation', () => {
+    mockNoRequests();
+    vi.mocked(queries.usePrincipals).mockReturnValue({
+      data: { principals: [] },
+      isPending: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    expect(screen.getByTestId('pool-quota-card')).toBeDefined();
+    expect(screen.getByTestId('overview-traffic')).toBeDefined();
+    expect(
+      screen.queryByRole('heading', { name: 'Set up the pool' }),
+    ).toBeNull();
+    const principals = screen.getByTestId('overview-principal-area');
+    expect(
+      within(principals)
+        .getByRole('link', { name: 'Create a principal' })
+        .getAttribute('href'),
+    ).toBe('/principals?action=new');
+  });
+
+  it.each(['upstreams', 'principals', 'requests'])(
+    'shows neither checklist nor setup nudge while %s are loading',
+    (source) => {
+      mockNoRequests();
+      if (source === 'upstreams') {
+        vi.mocked(queries.useUpstreams).mockReturnValue({
+          data: undefined,
+          isPending: true,
+        } as never);
+      } else if (source === 'principals') {
+        vi.mocked(queries.usePrincipals).mockReturnValue({
+          data: undefined,
+          isPending: true,
+        } as never);
+      } else {
+        vi.mocked(queries.useSummary).mockReturnValue({
+          data: undefined,
+          isPending: true,
+        } as never);
+      }
+
+      render(<OverviewPage />);
+
+      expect(
+        screen.queryByRole('heading', { name: 'Set up the pool' }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole('link', { name: 'Create a principal' }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole('link', {
+          name: 'Issue a proxy key and send a request',
+        }),
+      ).toBeNull();
+      expect(screen.getByTestId('overview-traffic')).toBeDefined();
+    },
+  );
+
+  it('shows the usual principal ranking after a request is seen', () => {
+    mockResolvedKpiQueries();
+
+    render(<OverviewPage />);
+
+    expect(screen.getByTestId('overview-top-principals')).toBeDefined();
+    expect(
+      screen.queryByRole('link', {
+        name: 'Issue a proxy key and send a request',
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('heading', { name: 'Set up the pool' }),
+    ).toBeNull();
+  });
 });
 
 describe('Pool quota aligned readout', () => {

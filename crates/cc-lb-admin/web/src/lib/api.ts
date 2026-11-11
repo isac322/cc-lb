@@ -1635,6 +1635,8 @@ export interface AggregateWindowResponse {
   window: string;
   cc_window_start_unix_secs: number;
   cc_window_reset_unix_secs: number;
+  pool_pace_fraction: number | null;
+  next_reset_unix_secs: number | null;
   used_tokens: number;
   utilization: number | null;
   utilization_percent: number | null;
