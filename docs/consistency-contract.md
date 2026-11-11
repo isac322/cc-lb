@@ -239,9 +239,10 @@ or the eight-hour metadata cadence is due. This work runs after successful
 quota observation, outside the proxy path. Metadata errors leave the quota
 outcome and previous valid fields intact. Admin metadata reads see the
 committed record; a proxy response does not guarantee that enrichment has run.
-The metadata write and its credential-generation check share one storage
-transaction. A delayed observation for a replaced credential, or a deleted
-upstream, is discarded without changing the successful quota outcome.
+The metadata write compares both the captured credential generation and the
+metadata record read before collection within one storage transaction.
+A delayed observation for a replaced credential, a newer metadata publication,
+or a deleted upstream is discarded without changing the successful quota outcome.
 Gemini imports without an account email bind the collected display identity to
 the project and credential generation; email-bound accounts retain their
 case-insensitive account/project binding across ordinary token refreshes.

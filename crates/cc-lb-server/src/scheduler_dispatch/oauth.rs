@@ -450,7 +450,11 @@ impl SchedulerDispatch {
         tests::before_provider_metadata_write().await;
         if let Err(error) = self
             .storage
-            .put_upstream_subscription_metadata_if_oauth_generation(&record, expected_generation)
+            .compare_and_put_upstream_subscription_metadata(
+                &record,
+                expected_generation,
+                metadata.as_ref(),
+            )
             .await
         {
             tracing::warn!(upstream_id = %upstream.id, %error, "provider display metadata write failed");

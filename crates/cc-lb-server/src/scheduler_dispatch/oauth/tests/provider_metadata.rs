@@ -624,8 +624,10 @@ async fn gemini_project_only_import_backfills_metadata_and_respects_cadence() {
     assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity, true).await;
 }
 
-#[tokio::test]
-async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
+async fn assert_reconnect_metadata_publication(
+    generation_changes_after_snapshot: bool,
+    initial_metadata_present: bool,
+) {
     let usage = json!({
         "account_id": "synthetic-workspace", "plan_type": "prolite", "email": "member@example.test",
         "rate_limit": {"primary_window": {
@@ -652,11 +654,36 @@ async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
         GeminiOAuthProfile::GeminiCli,
     )
     .await;
-    fixture
-        .storage
-        .put_upstream_subscription_metadata(&metadata(upstream.id, &openai_identity()))
+    if initial_metadata_present {
+        fixture
+            .storage
+            .put_upstream_subscription_metadata(&metadata(upstream.id, &openai_identity()))
+            .await
+            .expect("seed old name");
+    }
+    // Second publication window: reconnect's token commit precedes the poll,
+    // but its metadata publication still happens in the pre-write hook.
+    let upstream = if generation_changes_after_snapshot {
+        upstream
+    } else {
+        let mut current_bundle = bundle(UpstreamKind::OpenaiOauth);
+        current_bundle.access_token = "same-account-reconnect-token".to_owned();
+        let tokens = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &current_bundle,
+            upstream.id.as_bytes(),
+        )
+        .expect("encrypt reconnect before poll");
+        UpstreamStore::store_oauth_tokens(
+            fixture.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            tokens,
+            true,
+        )
         .await
-        .expect("seed old name");
+        .expect("commit reconnect tokens before metadata")
+    };
     let storage = fixture.storage.clone();
     let aead = fixture.aead.clone();
     let original = upstream.clone();
@@ -665,24 +692,26 @@ async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
         let aead = aead.clone();
         let original = original.clone();
         Box::pin(async move {
-            let mut current_bundle = bundle(UpstreamKind::OpenaiOauth);
-            current_bundle.access_token = "same-account-reconnect-token".to_owned();
-            let tokens = EncryptedOAuthTokens::encrypt(
-                aead.as_ref(),
-                &current_bundle,
-                original.id.as_bytes(),
-            )
-            .expect("encrypt reconnect");
-            let reconnected = UpstreamStore::store_oauth_tokens(
-                storage.as_ref(),
-                original.id,
-                original.revision,
-                tokens,
-                true,
-            )
-            .await
-            .expect("same-account reconnect");
-            assert!(reconnected.oauth_token_generation > original.oauth_token_generation);
+            if generation_changes_after_snapshot {
+                let mut current_bundle = bundle(UpstreamKind::OpenaiOauth);
+                current_bundle.access_token = "same-account-reconnect-token".to_owned();
+                let tokens = EncryptedOAuthTokens::encrypt(
+                    aead.as_ref(),
+                    &current_bundle,
+                    original.id.as_bytes(),
+                )
+                .expect("encrypt reconnect");
+                let reconnected = UpstreamStore::store_oauth_tokens(
+                    storage.as_ref(),
+                    original.id,
+                    original.revision,
+                    tokens,
+                    true,
+                )
+                .await
+                .expect("same-account reconnect");
+                assert!(reconnected.oauth_token_generation > original.oauth_token_generation);
+            }
             let mut fresh = openai_identity();
             fresh.account_name = Some("Fresh Reconnect Name".to_owned());
             fresh.plan = Some("business".to_owned());
@@ -714,7 +743,36 @@ async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
             .iter()
             .any(|snapshot| snapshot.window == "5h" && snapshot.utilization == Some(0.25))
     );
+    let later = fixture
+        .dispatch
+        .poll_usage(upstream.id, None)
+        .await
+        .expect("later poll");
+    assert!(matches!(later, OAuthUsagePollObservation::Success { .. }));
+    assert_eq!(
+        read_identity(&fixture, upstream.id)
+            .await
+            .account_name
+            .as_deref(),
+        Some("Fresh Reconnect Name"),
+        "a later poll must not restore the obsolete name"
+    );
     server.abort();
+}
+
+#[tokio::test]
+async fn stale_poll_cannot_overwrite_same_account_reconnect_metadata() {
+    assert_reconnect_metadata_publication(true, true).await;
+}
+
+#[tokio::test]
+async fn same_generation_poll_cannot_overwrite_reconnect_metadata_publication() {
+    assert_reconnect_metadata_publication(false, true).await;
+}
+
+#[tokio::test]
+async fn initially_missing_metadata_cannot_overwrite_reconnect_publication() {
+    assert_reconnect_metadata_publication(false, false).await;
 }
 
 #[test]

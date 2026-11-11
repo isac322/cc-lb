@@ -41,10 +41,11 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         Ok(())
     }
 
-    async fn put_upstream_subscription_metadata_if_oauth_generation(
+    async fn compare_and_put_upstream_subscription_metadata(
         &self,
         record: &UpstreamSubscriptionMetadataRecord,
         expected_oauth_token_generation: u64,
+        expected_metadata: Option<&UpstreamSubscriptionMetadataRecord>,
     ) -> StorageResult<bool> {
         let Ok(expected_generation) = i64::try_from(expected_oauth_token_generation) else {
             return Ok(false);
@@ -73,7 +74,21 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         if generation != Some(expected_generation) {
             return Ok(false);
         }
-        sqlx::query(
+        let current = sqlx::query(
+            "SELECT upstream_id, organization_uuid, organization_role, workspace_role, observed_at_unix_millis, \
+             last_error, raw_roles, raw_bootstrap \
+             FROM upstream_subscription_metadata_v1 WHERE upstream_id = $1 FOR UPDATE",
+        )
+        .bind(record.upstream_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .map(row_to_record)
+        .transpose()?;
+        if current.as_ref() != expected_metadata {
+            return Ok(false);
+        }
+        let query = if expected_metadata.is_some() {
             "INSERT INTO upstream_subscription_metadata_v1 \
              (upstream_id, organization_uuid, organization_role, workspace_role, observed_at_unix_millis, \
               last_error, raw_roles, raw_bootstrap) \
@@ -85,21 +100,30 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
               observed_at_unix_millis = EXCLUDED.observed_at_unix_millis, \
               last_error = EXCLUDED.last_error, \
               raw_roles = EXCLUDED.raw_roles, \
-              raw_bootstrap = EXCLUDED.raw_bootstrap",
-        )
-        .bind(record.upstream_id)
-        .bind(&record.organization_uuid)
-        .bind(&record.organization_role)
-        .bind(&record.workspace_role)
-        .bind(record.observed_at_unix_millis)
-        .bind(&record.last_error)
-        .bind(&record.raw_roles)
-        .bind(&record.raw_bootstrap)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+              raw_bootstrap = EXCLUDED.raw_bootstrap"
+        } else {
+            // FOR UPDATE cannot lock a missing row. A publisher may insert
+            // after the read; never overwrite that publication on conflict.
+            "INSERT INTO upstream_subscription_metadata_v1 \
+             (upstream_id, organization_uuid, organization_role, workspace_role, observed_at_unix_millis, \
+              last_error, raw_roles, raw_bootstrap) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
+             ON CONFLICT (upstream_id) DO NOTHING"
+        };
+        let written = sqlx::query(query)
+            .bind(record.upstream_id)
+            .bind(&record.organization_uuid)
+            .bind(&record.organization_role)
+            .bind(&record.workspace_role)
+            .bind(record.observed_at_unix_millis)
+            .bind(&record.last_error)
+            .bind(&record.raw_roles)
+            .bind(&record.raw_bootstrap)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(true)
+        Ok(written.rows_affected() != 0)
     }
 
     async fn get_upstream_subscription_metadata(
