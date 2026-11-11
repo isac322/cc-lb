@@ -7723,6 +7723,17 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
+            // Cloud Code Assist answers a rejected `streamGenerateContent`
+            // with a plain JSON error under `text/event-stream`. An error
+            // status body on a transformed stream is therefore held unparsed
+            // until its first non-whitespace byte shows whether it can be
+            // JSON; SSE splitting would otherwise consume blank lines inside
+            // the JSON and replace the provider error with a framing error.
+            let mut error_body_class = if upstream_error_status && sse_transform_active {
+                ErrorBodyClass::Pending
+            } else {
+                ErrorBodyClass::Sse
+            };
             // Observation precedes affinity inspection and transformation; only
             // a validated terminal sent downstream or committed to the deferred
             // Content-Length flush takes precedence over local errors.
@@ -7750,11 +7761,63 @@ impl Lifecycle {
             // frame. A decoder finish failure after cc-lb aborted the loop
             // locally is not upstream evidence.
             let mut upstream_body_eof = false;
+            // A held JSON candidate finishes a compressed decoder at EOF so its
+            // decision sees the whole body. Only a complete JSON document
+            // absorbs the tail there; otherwise the result (tail or failure)
+            // goes to the normal post-loop handling, exactly as without a hold.
+            let mut early_decoder_finish: Option<std::io::Result<Vec<u8>>> = None;
             'upstream: loop {
-                let Some(frame) = timed_body_frame(&mut body, &stream_body_io_timing).await
-                else {
-                    upstream_body_eof = true;
+                if upstream_body_eof {
+                    // Only the held-body replay chunk below runs after EOF.
                     break;
+                }
+                let frame = match timed_body_frame(&mut body, &stream_body_io_timing).await {
+                    Some(frame) => frame,
+                    None => {
+                        upstream_body_eof = true;
+                        let mut held_json = error_body_class == ErrorBodyClass::JsonCandidate;
+                        if held_json && !matches!(usage_decoder, UsageDecoder::Identity) {
+                            let finished =
+                                std::mem::replace(&mut usage_decoder, UsageDecoder::Identity)
+                                    .finish();
+                            held_json = match &finished {
+                                Ok(tail) => {
+                                    let mut whole = Vec::with_capacity(buffer.len() + tail.len());
+                                    whole.extend_from_slice(&buffer);
+                                    whole.extend_from_slice(tail);
+                                    held_error_body_is_json(&whole)
+                                }
+                                Err(_) => false,
+                            };
+                            early_decoder_finish = Some(match finished {
+                                Ok(tail) if held_json => {
+                                    if upstream_error_status {
+                                        append_bounded_upstream_error_body(
+                                            &mut upstream_error_body,
+                                            &tail,
+                                            &mut upstream_error_body_truncated,
+                                        );
+                                    }
+                                    buffer.extend_from_slice(&tail);
+                                    Ok(Vec::new())
+                                }
+                                other => other,
+                            });
+                        } else if held_json {
+                            held_json = held_error_body_is_json(&buffer);
+                        }
+                        // EOF ends JSON candidacy. A held body that is not one
+                        // complete document is parsed as SSE through this chunk
+                        // path, exactly where it would have been without the
+                        // hold; only a real remainder reaches the
+                        // incomplete-event check.
+                        if error_body_class == ErrorBodyClass::JsonCandidate && !held_json {
+                            error_body_class = ErrorBodyClass::Sse;
+                            Ok(http_body::Frame::data(Bytes::new()))
+                        } else {
+                            break;
+                        }
+                    }
                 };
                 match frame {
                     Ok(frame) => {
@@ -8017,6 +8080,13 @@ impl Lifecycle {
                             let hold_unsolicited_chunk = unsolicited_hold_pending;
                             let mut unsolicited_event_completed = false;
                                 while !raw_passthrough_current_chunk {
+                                    if error_body_class != ErrorBodyClass::Sse {
+                                        error_body_class =
+                                            classify_error_body(error_body_class, &buffer);
+                                        if error_body_class == ErrorBodyClass::JsonCandidate {
+                                            break;
+                                        }
+                                    }
                                     let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
                                         break;
                                     };
@@ -8423,6 +8493,9 @@ impl Lifecycle {
                                                     _ => unreachable!("matched emit outcome"),
                                                 };
                                                 if transformed {
+                                                    // Rewritten output is committed: raw JSON
+                                                    // must not follow it (ADR 0007).
+                                                    error_body_class = ErrorBodyClass::Sse;
                                                     let output = responses_error_context
                                                         .observe_transformed_output(
                                                             &bytes,
@@ -8444,6 +8517,7 @@ impl Lifecycle {
                                                 bytes
                                             }
                                             SseTransformOutcome::Drop => {
+                                                error_body_class = ErrorBodyClass::Sse;
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 continue;
@@ -8938,7 +9012,7 @@ impl Lifecycle {
                 }
             }
             let mut keepalive_decode_complete = false;
-            match usage_decoder.finish() {
+            match early_decoder_finish.unwrap_or_else(|| usage_decoder.finish()) {
                 Ok(tail) if !tail.is_empty() => {
                     keepalive_decode_complete = true;
                     if upstream_error_status {
@@ -8950,7 +9024,16 @@ impl Lifecycle {
                     }
                     if parse_sse_events_active {
                         buffer.extend_from_slice(&tail);
-                        while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
+                        loop {
+                            if error_body_class != ErrorBodyClass::Sse {
+                                error_body_class = classify_error_body(error_body_class, &buffer);
+                                if error_body_class == ErrorBodyClass::JsonCandidate {
+                                    break;
+                                }
+                            }
+                            let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
+                                break;
+                            };
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             if matches!(
@@ -9557,6 +9640,28 @@ impl Lifecycle {
                         }
                     }
                 }
+            }
+            // A held error body that is complete, valid JSON is the provider's
+            // error response: relay it unchanged. A candidate that fails
+            // validation stays in `buffer` and reaches the framing error below.
+            // Any blank events before it already passed through unchanged.
+            // The body is the response's last bytes, so it joins the final
+            // flush after the terminal proof below, like other final frames.
+            if error_body_class == ErrorBodyClass::JsonCandidate
+                && upstream_body_eof
+                && parse_sse_events_active
+                && sse_transform_active
+                && stream_upstream_error.is_none()
+                && !stream_provider_error_forwarded
+                && !stream_upstream_error_frame_emitted
+                && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
+                && held_error_body_is_json(&buffer)
+            {
+                raw_before_transform_output.clear();
+                stream_provider_error_forwarded = true;
+                batch_index = batch_index.saturating_add(1);
+                deferred_terminal_chunks.push(buffer.split().freeze());
             }
             let mut keepalive_framing_complete = true;
             if upstream_is_sse
@@ -13180,6 +13285,121 @@ fn announce_attempt(
             upstream_id,
         });
     }
+}
+
+/// Largest error body held as a JSON candidate. Provider JSON errors are a
+/// few hundred bytes; past this the body is parsed as SSE, which bounds the
+/// per-chunk revalidation of held bytes.
+const MAX_HELD_JSON_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// How an error-status body on a transformed SSE stream is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorBodyClass {
+    /// Only blank events so far; they take the normal SSE path while the
+    /// next unconsumed bytes decide between JSON and SSE.
+    Pending,
+    /// Every byte so far is a valid JSON prefix; held unparsed.
+    JsonCandidate,
+    /// Parsed as SSE events.
+    Sse,
+}
+
+/// Advances the error-body class before the next SSE event is split.
+///
+/// While `Pending`, completed blank events are parsed normally. After them,
+/// unconsumed bytes whose first non-whitespace byte is `{` or `[` become a
+/// JSON candidate (leading whitespace included); any other byte makes the
+/// body SSE. A rewritten or dropped event also makes it SSE, so raw JSON
+/// never follows transformed output. A candidate is
+/// held only while it remains a valid JSON prefix: the first byte that breaks
+/// JSON syntax (`[trace: x`, `{"extension:` followed by a raw newline)
+/// returns it to SSE parsing before any event is split, so genuine SSE keeps
+/// its normal handling.
+fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
+    let class = match class {
+        ErrorBodyClass::Pending => match buffer.first() {
+            None => return ErrorBodyClass::Pending,
+            Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
+            Some(byte) if !byte.is_ascii_whitespace() => return ErrorBodyClass::Sse,
+            Some(_) => match usage_parser::find_sse_event_end(buffer) {
+                // A completed blank event is split and passed through normally.
+                Some(end) if buffer[..end].iter().all(u8::is_ascii_whitespace) => {
+                    return ErrorBodyClass::Pending;
+                }
+                // Otherwise the first non-whitespace byte decides (` {`,
+                // `\n{`, ` {\n\n`). A held candidate keeps its leading
+                // whitespace and goes back to SSE parsing untouched if it
+                // breaks JSON.
+                _ => match buffer.iter().find(|byte| !byte.is_ascii_whitespace()) {
+                    None => return ErrorBodyClass::Pending,
+                    Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
+                    Some(_) => return ErrorBodyClass::Sse,
+                },
+            },
+        },
+        class => class,
+    };
+    if class != ErrorBodyClass::JsonCandidate {
+        return class;
+    }
+    if buffer.len() > MAX_HELD_JSON_ERROR_BODY_BYTES {
+        return ErrorBodyClass::Sse;
+    }
+    if is_json_prefix(buffer) {
+        ErrorBodyClass::JsonCandidate
+    } else {
+        ErrorBodyClass::Sse
+    }
+}
+
+/// Whether `buffer` is a prefix of some valid JSON document.
+///
+/// `serde_json` reports a truncated document as EOF, with two exceptions
+/// that are probed by completing them. A document cut inside a number
+/// (`-`, `2.`, `2.5e+`) is a syntax error, and every unfinished number
+/// accepts one more digit. A `\u` escape with fewer than four following
+/// bytes is EOF even when those bytes cannot be hex (`"\u\n\n`), so the
+/// escape is padded with `0`s, which is always legal (lone surrogates are
+/// accepted here). `sonic_rs` reports syntax errors for ordinary
+/// truncations, so it cannot drive this decision. Held error bodies only,
+/// capped by `MAX_HELD_JSON_ERROR_BODY_BYTES`, so off the request hot path.
+fn is_json_prefix(buffer: &[u8]) -> bool {
+    let unfinished = |bytes: &[u8]| match serde_json::from_slice::<serde::de::IgnoredAny>(bytes) {
+        Ok(_) => true,
+        Err(error) => error.is_eof(),
+    };
+    let padded = |padding: usize| {
+        let mut probe = Vec::with_capacity(buffer.len() + padding);
+        probe.extend_from_slice(buffer);
+        probe.resize(buffer.len() + padding, b'0');
+        unfinished(&probe)
+    };
+    if let Some(missing) = short_unicode_escape_missing_bytes(buffer) {
+        return padded(missing);
+    }
+    unfinished(buffer) || padded(1)
+}
+
+/// Hex digits still missing when `buffer` ends inside a `\u` escape.
+fn short_unicode_escape_missing_bytes(buffer: &[u8]) -> Option<usize> {
+    (0..4).find_map(|present| {
+        let u = buffer.len().checked_sub(present + 1)?;
+        if buffer[u] != b'u' {
+            return None;
+        }
+        // The `u` follows an escaping backslash only after an odd run of them.
+        let backslashes = buffer[..u]
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b'\\')
+            .count();
+        (backslashes % 2 == 1).then_some(4 - present)
+    })
+}
+
+/// Whether a held error body is one complete JSON document.
+fn held_error_body_is_json(buffer: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(buffer).is_ok()
 }
 
 fn is_sse_response(
