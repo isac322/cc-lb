@@ -765,6 +765,10 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         // A number cannot stand where an object key is required.
         (b"{\n\n2", b"{\n\n"),
         (b"{\n\n+2", b"{\n\n"),
+        // Where a value fits, the trailing bytes must still be a legal number.
+        (b"{\"a\":\n\n01", b"{\"a\":\n\n"),
+        (b"{\"a\":\n\n+2", b"{\"a\":\n\n"),
+        (b"{\"a\":\n\ne", b"{\"a\":\n\n"),
     ] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
