@@ -9,7 +9,12 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { ApiError, type OAuthProvider, type Upstream } from '../../../lib/api';
+import {
+  ApiError,
+  type OAuthProvider,
+  type OrganizationMetadataInner,
+  type Upstream,
+} from '../../../lib/api';
 import {
   AccountCard,
   DeviceCodePanel,
@@ -918,21 +923,38 @@ describe('provider account cards', () => {
   ] as const)(
     'uses the shared %s plan in connect cards',
     (provider, plan, planName, label) => {
+      const organizationMetadata: OrganizationMetadataInner | null =
+        provider === 'anthropic'
+          ? {
+              organization_uuid: 'example-organization',
+              organization_name: null,
+              organization_type: 'claude_max',
+              rate_limit_tier: plan,
+              has_extra_usage_enabled: null,
+              billing_type: null,
+              subscription_created_at_unix_secs: null,
+              account_email: null,
+              account_display_name: null,
+              account_uuid: null,
+              overage_credit_amount_minor_units: null,
+              overage_credit_currency: null,
+              overage_credit_granted: null,
+              overage_credit_eligible: null,
+              observed_at_unix_millis: 0,
+              last_error: null,
+              raw_profile: null,
+              raw_overage_grant: null,
+            }
+          : null;
       const account = identityOfResult({
-        organization_metadata:
-          provider === 'anthropic'
-            ? ({
-                organization_type: 'claude_max',
-                rate_limit_tier: plan,
-              } as never)
-            : null,
+        organization_metadata: organizationMetadata,
         account_email: 'operator@example.com',
         account_name: 'Example Operator',
         account_id: null,
         project_id: provider === 'gemini' ? 'example-project' : null,
         plan: provider === 'anthropic' ? null : plan,
         plan_name: planName,
-      } as Parameters<typeof identityOfResult>[0]);
+      });
       render(<AccountCard provider={provider} account={account} />);
       expect(screen.getByText(new RegExp(label))).toBeDefined();
       expect(screen.getAllByText('operator@example.com')).toHaveLength(1);

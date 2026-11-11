@@ -135,6 +135,8 @@ describe('provider plan captions', () => {
       'Future Plan',
     ],
     ['openai_oauth', { plan: 'future_plan' }, 'ChatGPT Future Plan'],
+    ['openai_oauth', { plan: 'constructor' }, 'ChatGPT Constructor'],
+    ['openai_oauth', { plan: '__proto__' }, 'ChatGPT Proto'],
     ['gemini_oauth', { plan: 'future-tier' }, 'Future Tier'],
     ['openai_oauth', { plan: null }, 'Subscription'],
     ['gemini_oauth', { plan: null }, 'Subscription'],

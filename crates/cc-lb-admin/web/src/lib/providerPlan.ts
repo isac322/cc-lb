@@ -62,5 +62,9 @@ export function providerPlanLabel(
     return metadata?.plan_name?.trim() || (plan ? readablePlan(plan) : null);
   }
   if (!plan) return null;
-  return `ChatGPT ${CHATGPT_PLANS[plan.toLowerCase()] ?? readablePlan(plan)}`;
+  const key = plan.toLowerCase();
+  const label = Object.hasOwn(CHATGPT_PLANS, key)
+    ? CHATGPT_PLANS[key]
+    : readablePlan(plan);
+  return `ChatGPT ${label}`;
 }
