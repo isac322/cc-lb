@@ -10,5 +10,5 @@
   "backend": "Real SQLite admin API; provider traffic is not exercised",
   "captureScript": "qa/capture-subscription-preference.mjs",
   "browser": "Chromium",
-  "checks": ["Router heading and description not occluded", "No horizontal overflow", "Expected visible switch enabled before capture"]
+  "checks": ["Router heading and description not occluded", "No horizontal overflow", "Saved visible switch checked before capture"]
 }

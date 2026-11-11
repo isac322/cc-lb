@@ -32,7 +32,7 @@ try {
       await expect(page.getByRole('switch', {
         name: label === 'before' ? 'Keep prompt cache warm by reusing upstreams' : 'Prefer subscription upstreams',
         exact: true,
-      })).toBeEnabled();
+      })).toBeChecked();
     }
     for (const width of [390, 768, 1440]) {
       await page.setViewportSize({ width, height: 900 });
