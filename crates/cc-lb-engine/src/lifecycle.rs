@@ -9507,7 +9507,11 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
                         usage: to_usage_snapshot(&usage),
-                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                        source: if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                            cc_lb_lifecycle::UsageSource::Final
+                        } else {
+                            cc_lb_lifecycle::UsageSource::MessageDelta
+                        },
                     });
                 }
                 let incomplete_message = if matches!(

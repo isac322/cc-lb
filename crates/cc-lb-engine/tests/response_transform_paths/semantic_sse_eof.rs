@@ -3359,20 +3359,47 @@ async fn chat_terminal_provider_error_then_done_preserves_single_error() -> Test
 
 #[tokio::test]
 async fn chat_terminal_provider_error_retains_final_cumulative_usage() -> TestResult {
+    assert_chat_failed_end_usage(true).await
+}
+
+#[tokio::test]
+async fn chat_terminal_premature_eof_retains_final_cumulative_usage() -> TestResult {
+    assert_chat_failed_end_usage(false).await
+}
+
+async fn assert_chat_failed_end_usage(provider_error: bool) -> TestResult {
     // All events share one upstream chunk, so the second usage snapshot is
     // throttled until finalization. A failed completion must still publish it.
-    let body = Bytes::from(format!(
-        "{CHAT_PARTIAL}data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":1}}}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":2}}}}\n\ndata: {{\"error\":{{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"provider failure\"}}}}\n\n"
-    ));
+    let mut prefix = format!(
+        "{CHAT_PARTIAL}data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":1}}}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":2}}}}\n\n"
+    );
+    if provider_error {
+        prefix.push_str("data: {\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"provider failure\"}}\n\n");
+    }
+    let body = Bytes::from(prefix);
     let observed = observe_chat_terminal(
         ScriptedDispatch::identity_sse(vec![body.clone()], None),
         false,
     )
     .await?;
-    assert_eq!(observed.body, body);
+    assert!(observed.body.starts_with(&body));
+    if provider_error {
+        assert_eq!(observed.body, body);
+    } else {
+        let errors = chat_json_events(&observed.body)
+            .into_iter()
+            .filter(|event| event.get("error").is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["error"]["type"], "api_error");
+    }
     assert_eq!(
         observed.completion().as_ref().unwrap_err().error_type,
-        "server_error"
+        if provider_error {
+            "server_error"
+        } else {
+            "upstream_response_incomplete"
+        }
     );
     observed.assert_terminal(Some("upstream_stream_error"));
     assert_eq!(
