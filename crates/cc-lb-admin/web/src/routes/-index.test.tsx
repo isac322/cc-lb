@@ -1067,11 +1067,138 @@ describe('Provider pool observation freshness', () => {
             within(card)
               .getByTestId(`pool-quota-area-${window}`)
               .getAttribute('d'),
-          ).toBe('900:40|3600:40');
+          ).toBe('900:40|3600:40|4500:40');
           expect(
             card.querySelector('[data-slot="pool-quota-legend-used"]')
               ?.textContent,
           ).toBe('40%');
+          if (surface === 'full') {
+            expect(card.textContent).toContain('1 snapshots ·');
+          }
+        },
+      );
+
+      it.each(providers)(
+        'advances the $provider $window fresh unchanged tail on query refresh without adding snapshots',
+        ({ provider, window }) => {
+          const series: Array<[number, number | null]> = [
+            [900, 40],
+            [4500, 40],
+          ];
+          mockProviderReading(window, 40, series, {
+            now: 7200,
+            age: 120,
+            rangeSecs: 3600,
+          });
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3600:40|4500:40|7200:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('40%');
+          expect(within(card).getByText('Provider data 2m ago')).toBeDefined();
+          if (surface === 'compact') {
+            expect(
+              card.querySelector('[data-slot="provider-pool-headline"]')
+                ?.textContent,
+            ).toBe('40%used');
+          } else {
+            expect(card.textContent).toContain('1 snapshots ·');
+          }
+
+          mockProviderReading(window, 40, series, {
+            now: 7260,
+            age: 180,
+            rangeSecs: 3600,
+          });
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3660:40|4500:40|7260:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('40%');
+          expect(within(card).getByText('Provider data 3m ago')).toBeDefined();
+          expect(within(card).queryByText('Stale reading')).toBeNull();
+          if (surface === 'compact') {
+            expect(
+              card.querySelector('[data-slot="provider-pool-headline"]')
+                ?.textContent,
+            ).toBe('40%used');
+          } else {
+            expect(card.textContent).toContain('1 snapshots ·');
+          }
+        },
+      );
+
+      it.each(providers)(
+        'extends the $provider $window numeric recovery without filling the interior null',
+        ({ provider, window }) => {
+          const series: Array<[number, number | null]> = [
+            [900, 40],
+            [3900, null],
+            [4500, 40],
+          ];
+          mockProviderReading(window, null, series, {
+            now: 7200,
+            age: 600,
+            stale: 2,
+            rangeSecs: 3600,
+          });
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3600:40|3900:|4500:40');
+
+          mockProviderReading(window, 40, series, {
+            now: 7200,
+            rangeSecs: 3600,
+          });
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3600:40|3900:|4500:40|7200:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('40%');
+          expect(within(card).queryByText('Stale reading')).toBeNull();
+        },
+      );
+
+      it.each(providers)(
+        'does not extend the $provider $window matching numeric tail with a stale observation',
+        ({ provider, window }) => {
+          mockProviderReading(
+            window,
+            40,
+            [
+              [900, 40],
+              [4500, 40],
+            ],
+            { now: 7200, age: 600, stale: 1, rangeSecs: 3600 },
+          );
+          const card = renderHistory(provider);
+          expect(
+            within(card)
+              .getByTestId(`pool-quota-area-${window}`)
+              .getAttribute('d'),
+          ).toBe('3600:40|4500:40');
+          expect(
+            card.querySelector('[data-slot="pool-quota-legend-used"]')
+              ?.textContent,
+          ).toBe('40%');
+          expect(within(card).getByText('Provider data 10m ago')).toBeDefined();
+          expect(within(card).getByText('Stale reading')).toBeDefined();
           if (surface === 'full') {
             expect(card.textContent).toContain('1 snapshots ·');
           }
