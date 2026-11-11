@@ -2,7 +2,9 @@
 import { cleanup, render, renderHook, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { usePrincipals, useUpstreams } from '../../lib/queries';
+import type { Upstream } from '../../lib/api';
+import { type Principal, usePrincipals, useUpstreams } from '../../lib/queries';
+import { pendingQuery, successQuery } from '../../lib/test-utils/hook-results';
 import { FirstRunChecklist, useFirstRunIncomplete } from './FirstRunChecklist';
 
 vi.mock('@tanstack/react-router', () => ({
@@ -30,6 +32,43 @@ vi.mock('../../lib/queries', () => ({
   useUpstreams: vi.fn(),
 }));
 
+type UpstreamsData = { upstreams: Upstream[] };
+type PrincipalsData = { principals: Principal[] };
+
+function upstream(overrides: Partial<Upstream> = {}): Upstream {
+  return {
+    id: 'upstream-1',
+    name: 'Upstream',
+    kind: 'anthropic_api_key',
+    enabled: true,
+    base_url: null,
+    api_key_access: null,
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    spec_revision: 1,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      last_warmup_at_unix_secs: null,
+    },
+    ...overrides,
+  };
+}
+
+function principal(overrides: Partial<Principal> = {}): Principal {
+  return {
+    id: 'principal-1',
+    name: 'Principal',
+    kind: 'machine',
+    enabled: true,
+    revision: 1,
+    allowed_models: [],
+    allowed_upstreams: [],
+    default_limits: [],
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -56,7 +95,7 @@ describe('FirstRunChecklist', () => {
     ).toBe('/upstreams?action=new');
   });
 
-  it.each([
+  it.each<Upstream['kind']>([
     'anthropic_api_key',
     'anthropic_oauth',
     'openai_api_key',
@@ -66,12 +105,12 @@ describe('FirstRunChecklist', () => {
   ])(
     'does not show setup when a %s upstream exists in the overview',
     (kind) => {
-      vi.mocked(useUpstreams).mockReturnValue({
-        data: { upstreams: [{ kind }] },
-      } as never);
-      vi.mocked(usePrincipals).mockReturnValue({
-        data: { principals: [] },
-      } as never);
+      vi.mocked(useUpstreams).mockReturnValue(
+        successQuery<UpstreamsData>({ upstreams: [upstream({ kind })] }),
+      );
+      vi.mocked(usePrincipals).mockReturnValue(
+        successQuery<PrincipalsData>({ principals: [] }),
+      );
 
       const { container } = render(<FirstRunChecklist requestSeen={false} />);
 
@@ -80,12 +119,14 @@ describe('FirstRunChecklist', () => {
   );
 
   it('shows all three steps when only other providers have upstreams', () => {
-    vi.mocked(useUpstreams).mockReturnValue({
-      data: { upstreams: [{ kind: 'anthropic_oauth' }] },
-    } as never);
-    vi.mocked(usePrincipals).mockReturnValue({
-      data: { principals: [{ id: 'principal-1' }] },
-    } as never);
+    vi.mocked(useUpstreams).mockReturnValue(
+      successQuery<UpstreamsData>({
+        upstreams: [upstream({ kind: 'anthropic_oauth' })],
+      }),
+    );
+    vi.mocked(usePrincipals).mockReturnValue(
+      successQuery<PrincipalsData>({ principals: [principal()] }),
+    );
 
     render(<FirstRunChecklist requestSeen={false} scopedProvider="openai" />);
 
@@ -102,12 +143,16 @@ describe('FirstRunChecklist', () => {
   it.each(['upstreams', 'principals', 'requests'])(
     'renders nothing while %s are loading',
     (source) => {
-      vi.mocked(useUpstreams).mockReturnValue({
-        data: source === 'upstreams' ? undefined : { upstreams: [] },
-      } as never);
-      vi.mocked(usePrincipals).mockReturnValue({
-        data: source === 'principals' ? undefined : { principals: [] },
-      } as never);
+      vi.mocked(useUpstreams).mockReturnValue(
+        source === 'upstreams'
+          ? pendingQuery<UpstreamsData>()
+          : successQuery<UpstreamsData>({ upstreams: [] }),
+      );
+      vi.mocked(usePrincipals).mockReturnValue(
+        source === 'principals'
+          ? pendingQuery<PrincipalsData>()
+          : successQuery<PrincipalsData>({ principals: [] }),
+      );
 
       const { container } = render(
         <FirstRunChecklist
@@ -122,13 +167,15 @@ describe('FirstRunChecklist', () => {
 
 describe('useFirstRunIncomplete', () => {
   it('waits for upstream inventory without depending on principal or request data', () => {
-    vi.mocked(useUpstreams).mockReturnValue({ data: undefined } as never);
+    vi.mocked(useUpstreams).mockReturnValue(pendingQuery<UpstreamsData>());
     const { result, rerender } = renderHook(() => useFirstRunIncomplete());
 
     expect(result.current).toBeUndefined();
-    vi.mocked(useUpstreams).mockReturnValue({
-      data: { upstreams: [{ kind: 'openai_api_key' }] },
-    } as never);
+    vi.mocked(useUpstreams).mockReturnValue(
+      successQuery<UpstreamsData>({
+        upstreams: [upstream({ kind: 'openai_api_key' })],
+      }),
+    );
     rerender();
 
     expect(result.current).toBe(false);
@@ -145,9 +192,9 @@ describe('useFirstRunIncomplete', () => {
   ] as const)(
     'gates $scope with $kind: $incomplete',
     ({ scope, kind, incomplete }) => {
-      vi.mocked(useUpstreams).mockReturnValue({
-        data: { upstreams: [{ kind }] },
-      } as never);
+      vi.mocked(useUpstreams).mockReturnValue(
+        successQuery<UpstreamsData>({ upstreams: [upstream({ kind })] }),
+      );
 
       const { result } = renderHook(() => useFirstRunIncomplete(scope));
 
@@ -156,9 +203,9 @@ describe('useFirstRunIncomplete', () => {
   );
 
   it('gates an empty inventory', () => {
-    vi.mocked(useUpstreams).mockReturnValue({
-      data: { upstreams: [] },
-    } as never);
+    vi.mocked(useUpstreams).mockReturnValue(
+      successQuery<UpstreamsData>({ upstreams: [] }),
+    );
 
     const { result } = renderHook(() => useFirstRunIncomplete());
 

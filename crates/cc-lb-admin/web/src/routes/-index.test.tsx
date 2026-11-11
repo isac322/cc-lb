@@ -35,7 +35,7 @@ import type {
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import * as queries from '../lib/queries';
-import { successQuery } from '../lib/test-utils/hook-results';
+import { pendingQuery, successQuery } from '../lib/test-utils/hook-results';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import { PrincipalProviderTable } from '../overview/PrincipalProviderTable';
@@ -721,6 +721,25 @@ function mockManyPrincipals() {
   );
 }
 
+type UpstreamsData = { upstreams: Upstream[] };
+type PrincipalsData = { principals: queries.Principal[] };
+
+function principal(
+  overrides: Partial<queries.Principal> = {},
+): queries.Principal {
+  return {
+    id: 'principal-alpha',
+    name: 'Principal Alpha',
+    kind: 'machine',
+    enabled: true,
+    revision: 1,
+    allowed_models: [],
+    allowed_upstreams: [],
+    default_limits: [],
+    ...overrides,
+  };
+}
+
 const OVERVIEW_UPSTREAMS: Upstream[] = (
   ['anthropic_api_key', 'openai_api_key', 'gemini_api_key'] as const
 ).map((kind) => ({
@@ -749,10 +768,9 @@ beforeEach(() => {
   observerMock.callback = null;
   // Configured API-key upstreams keep overview tests outside the first-run gate
   // without starting the reconnect summary's OAuth queries.
-  vi.mocked(queries.usePrincipals).mockReturnValue({
-    data: { principals: [{ id: 'principal-alpha' }] },
-    isPending: false,
-  } as never);
+  vi.mocked(queries.usePrincipals).mockReturnValue(
+    successQuery<PrincipalsData>({ principals: [principal()] }),
+  );
   vi.mocked(queries.useUpstreams).mockReturnValue({
     data: { upstreams: OVERVIEW_UPSTREAMS },
     isPending: false,
@@ -767,18 +785,19 @@ afterEach(() => {
 describe('Overview upstream gate', () => {
   function mockNoRequests() {
     mockResolvedKpiQueries();
-    vi.mocked(queries.useSummary).mockReturnValue({
-      data: {
+    vi.mocked(queries.useSummary).mockReturnValue(
+      successQuery<DashboardSummaryResponse>({
         ...SUMMARY_FIXTURE,
         totals: { ...SUMMARY_FIXTURE.totals, request_count: 0 },
         sparkline: { buckets: [] },
-      },
-      isPending: false,
-    } as never);
-    vi.mocked(queries.useUsage).mockReturnValue({
-      data: { ...PRINCIPAL_USAGE_FIXTURE, series: [] },
-      isPending: false,
-    } as never);
+      }),
+    );
+    vi.mocked(queries.useUsage).mockReturnValue(
+      successQuery<DashboardUsageResponse>({
+        ...PRINCIPAL_USAGE_FIXTURE,
+        series: [],
+      }),
+    );
     mockRequestEventsFeed();
   }
 
@@ -790,14 +809,13 @@ describe('Overview upstream gate', () => {
     'shows the $label pool without requests and keeps setup in the principal area',
     ({ provider, label }) => {
       mockNoRequests();
-      vi.mocked(queries.useUpstreams).mockReturnValue({
-        data: {
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        successQuery<UpstreamsData>({
           upstreams: OVERVIEW_UPSTREAMS.filter(
             (upstream) => upstream.kind === `${provider}_api_key`,
           ),
-        },
-        isPending: false,
-      } as never);
+        }),
+      );
 
       render(
         <QueryClientProvider client={queryClient}>
@@ -828,17 +846,16 @@ describe('Overview upstream gate', () => {
     'shows the checklist only when the %s scope has no upstream',
     (provider) => {
       mockNoRequests();
-      vi.mocked(queries.useUpstreams).mockReturnValue({
-        data: {
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        successQuery<UpstreamsData>({
           upstreams:
             provider === undefined
               ? []
               : OVERVIEW_UPSTREAMS.filter(
                   (upstream) => upstream.kind !== `${provider}_api_key`,
                 ),
-        },
-        isPending: false,
-      } as never);
+        }),
+      );
 
       render(
         <QueryClientProvider client={queryClient}>
@@ -856,10 +873,9 @@ describe('Overview upstream gate', () => {
 
   it('keeps the main overview visible without a principal and links to creation', () => {
     mockNoRequests();
-    vi.mocked(queries.usePrincipals).mockReturnValue({
-      data: { principals: [] },
-      isPending: false,
-    } as never);
+    vi.mocked(queries.usePrincipals).mockReturnValue(
+      successQuery<PrincipalsData>({ principals: [] }),
+    );
 
     render(<OverviewPage />);
 
@@ -881,20 +897,17 @@ describe('Overview upstream gate', () => {
     (source) => {
       mockNoRequests();
       if (source === 'upstreams') {
-        vi.mocked(queries.useUpstreams).mockReturnValue({
-          data: undefined,
-          isPending: true,
-        } as never);
+        vi.mocked(queries.useUpstreams).mockReturnValue(
+          pendingQuery<UpstreamsData>(),
+        );
       } else if (source === 'principals') {
-        vi.mocked(queries.usePrincipals).mockReturnValue({
-          data: undefined,
-          isPending: true,
-        } as never);
+        vi.mocked(queries.usePrincipals).mockReturnValue(
+          pendingQuery<PrincipalsData>(),
+        );
       } else {
-        vi.mocked(queries.useSummary).mockReturnValue({
-          data: undefined,
-          isPending: true,
-        } as never);
+        vi.mocked(queries.useSummary).mockReturnValue(
+          pendingQuery<DashboardSummaryResponse>(),
+        );
       }
 
       render(<OverviewPage />);
