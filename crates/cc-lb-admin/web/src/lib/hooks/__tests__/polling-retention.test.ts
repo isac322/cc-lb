@@ -293,15 +293,30 @@ describe('quota polling retention', () => {
 });
 
 describe('pool history persisted predecessor lookback', () => {
+  const base = 1_800_000_000;
+  const serverNow = base + 4500;
   const providers = [
     { provider: 'openai', window: '5h' },
     { provider: 'gemini', window: 'gemini_5h' },
   ] as const;
 
+  function serverRequestBounds(request: PendingRequest) {
+    const params = request.url.searchParams;
+    const range = params.get('relative_range_secs');
+    if (range === null) return requestBounds(request);
+    const quantum = Number(params.get('window_quantum_secs') ?? 0);
+    const until =
+      quantum > 0 ? Math.ceil(serverNow / quantum) * quantum : serverNow;
+    return {
+      since: until - Number(range) - quantum - POOL_QUOTA_HEARTBEAT_CARRY_SECS,
+      until,
+    };
+  }
+
   test.each(['anthropic', 'openai', 'gemini'] as const)(
-    'keeps %s query anchors outside the heartbeat or preserves Anthropic bounds',
+    'anchors %s relative queries on the server or preserves Anthropic absolute bounds',
     async (provider) => {
-      vi.setSystemTime(new Date(4500 * 1000));
+      vi.setSystemTime(new Date((serverNow + 901) * 1000));
       const requests = installDeferredFetch();
       const client = makeClient();
       const { result, unmount } = renderHook(
@@ -317,18 +332,26 @@ describe('pool history persisted predecessor lookback', () => {
         { wrapper: makeWrapper(client) },
       );
       await waitFor(() => expect(requests).toHaveLength(1));
-      const bounds = requestBounds(requests[0]);
-      expect(bounds.until).toBe(5400);
+      const params = requests[0].url.searchParams;
       if (provider === 'anthropic') {
-        expect(bounds.since).toBe(0);
+        expect(requestBounds(requests[0])).toEqual({
+          since: base + 1800,
+          until: base + 7200,
+        });
+        expect(params.has('relative_range_secs')).toBe(false);
+        expect(params.has('window_quantum_secs')).toBe(false);
       } else {
-        expect(900 - bounds.since).toBeGreaterThan(
-          POOL_QUOTA_HEARTBEAT_CARRY_SECS,
-        );
+        expect(params.get('relative_range_secs')).toBe('3600');
+        expect(params.get('window_quantum_secs')).toBe('1800');
+        expect(params.has('since_unix_secs')).toBe(false);
+        expect(params.has('until_unix_secs')).toBe(false);
+        expect(
+          base + 900 - serverRequestBounds(requests[0]).since,
+        ).toBeGreaterThan(POOL_QUOTA_HEARTBEAT_CARRY_SECS);
       }
       await resolveRequest(
         requests[0],
-        jsonResponse({ now_unix_secs: 4500, windows: [] }),
+        jsonResponse({ now_unix_secs: serverNow, windows: [] }),
       );
       await waitFor(() => expect(result.current.data?.range_secs).toBe(3600));
       unmount();
@@ -337,82 +360,123 @@ describe('pool history persisted predecessor lookback', () => {
   );
 
   describe.each(providers)('$provider $window', ({ provider, window }) => {
-    test.each(['ancient', 'healthy', 'null'] as const)(
-      'clips the real query response with a %s predecessor without live substitution',
-      async (predecessor) => {
-        vi.setSystemTime(new Date(4500 * 1000));
-        const requests = installDeferredFetch();
-        const client = makeClient();
-        const { result, unmount } = renderHook(
-          () => {
-            const query = useSubscriptionQuotaPoolHistory({
-              provider,
-              windows: window,
-              rangeSecs: 3600,
-              windowQuantumSecs: 1800,
-              maxPointsPerSeries: 1000,
-            });
-            return {
-              data: query.data,
-              rows: recordedPoolQuotaChartData(
-                buildPoolQuotaChartData(query.data?.windows),
-                900,
-                4500,
-              ),
-            };
-          },
-          { wrapper: makeWrapper(client) },
-        );
-        await waitFor(() => expect(requests).toHaveLength(1));
-        const bounds = requestBounds(requests[0]);
-        // Both storage adapters replace a pre-query snapshot (here -86400)
-        // with `since`, then floor chart points to the server-selected bucket.
-        const bucketSecs = Math.ceil((bounds.until - bounds.since) / 999);
-        const persistedUnix = predecessor === 'ancient' ? -86400 : 0;
-        const anchorUnix =
-          Math.floor(Math.max(persistedUnix, bounds.since) / bucketSecs) *
-          bucketSecs;
-        const recoveryUnix = Math.floor(3600 / bucketSecs) * bucketSecs;
-        const payload: PoolHistoryResponse = {
-          now_unix_secs: 4500,
-          windows: [
-            {
-              window,
-              latest: {
-                snapshot_at_unix_secs: 4500,
-                utilization: 0.64,
-                utilization_percent: 64,
-                contributing_upstreams: 1,
-                eligible_upstreams: 1,
-                stale_upstreams: 0,
-                max_observed_at_unix_millis: 4500 * 1000,
-              },
-              series: [
-                {
-                  snapshot_at_unix_secs: anchorUnix,
-                  utilization_percent: predecessor === 'null' ? null : 40,
-                },
-                {
-                  snapshot_at_unix_secs: recoveryUnix,
-                  utilization_percent: 40,
-                },
-              ],
+    describe.each([
+      { clock: 'aligned clocks', browserOffset: 0 },
+      { clock: 'browser ahead 901 seconds', browserOffset: 901 },
+      { clock: 'server ahead one hour', browserOffset: -3600 },
+    ])('$clock', ({ browserOffset }) => {
+      test.each(['ancient', 'healthy', 'null'] as const)(
+        'clips the real query response with a %s predecessor without live substitution',
+        async (predecessor) => {
+          vi.setSystemTime(new Date((serverNow + browserOffset) * 1000));
+          const requests = installDeferredFetch();
+          const client = makeClient();
+          const { result, unmount } = renderHook(
+            () => {
+              const query = useSubscriptionQuotaPoolHistory({
+                provider,
+                windows: window,
+                rangeSecs: 3600,
+                windowQuantumSecs: 1800,
+                maxPointsPerSeries: 1000,
+              });
+              const now = query.data?.now_unix_secs ?? serverNow;
+              const range = query.data?.range_secs ?? 3600;
+              return {
+                data: query.data,
+                domain: [now - range, now],
+                rows: recordedPoolQuotaChartData(
+                  buildPoolQuotaChartData(query.data?.windows),
+                  now - range,
+                  now,
+                ),
+              };
             },
-          ],
-        };
-        await resolveRequest(requests[0], jsonResponse(payload));
-        await waitFor(() => expect(result.current.data?.range_secs).toBe(3600));
-        expect(result.current.rows).toEqual(
-          predecessor === 'ancient'
-            ? [{ unix: 3600, [window]: 40 }]
-            : [
-                { unix: 900, [window]: predecessor === 'null' ? null : 40 },
-                { unix: 3600, [window]: 40 },
-              ],
-        );
-        unmount();
-        client.clear();
-      },
-    );
+            { wrapper: makeWrapper(client) },
+          );
+          await waitFor(() => expect(requests).toHaveLength(1));
+          const bounds = serverRequestBounds(requests[0]);
+          const persisted = [
+            {
+              snapshot_at_unix_secs:
+                base + (predecessor === 'ancient' ? -86400 : 0),
+              utilization_percent: predecessor === 'null' ? null : 40,
+            },
+            ...(predecessor === 'ancient'
+              ? [
+                  {
+                    snapshot_at_unix_secs: base + 1800,
+                    utilization_percent: 40,
+                  },
+                ]
+              : []),
+            { snapshot_at_unix_secs: base + 3600, utilization_percent: 40 },
+          ];
+          // Mirror storage: select the requested range, clamp the nearest
+          // older sample to `since`, then floor timestamps to chart buckets.
+          const series = persisted.filter(
+            (point) =>
+              point.snapshot_at_unix_secs >= bounds.since &&
+              point.snapshot_at_unix_secs <= bounds.until,
+          );
+          let anchor: (typeof persisted)[number] | undefined;
+          for (let index = persisted.length - 1; index >= 0; index -= 1) {
+            const point = persisted[index];
+            if (point && point.snapshot_at_unix_secs < bounds.since) {
+              anchor = point;
+              break;
+            }
+          }
+          if (anchor) {
+            series.unshift({ ...anchor, snapshot_at_unix_secs: bounds.since });
+          }
+          const bucketSecs = Math.ceil((bounds.until - bounds.since) / 999);
+          const payload: PoolHistoryResponse = {
+            now_unix_secs: serverNow,
+            windows: [
+              {
+                window,
+                latest: {
+                  snapshot_at_unix_secs: serverNow,
+                  utilization: 0.64,
+                  utilization_percent: 64,
+                  contributing_upstreams: 1,
+                  eligible_upstreams: 1,
+                  stale_upstreams: 0,
+                  max_observed_at_unix_millis: serverNow * 1000,
+                },
+                series: series.map((point) => ({
+                  ...point,
+                  snapshot_at_unix_secs:
+                    Math.floor(point.snapshot_at_unix_secs / bucketSecs) *
+                    bucketSecs,
+                })),
+              },
+            ],
+          };
+          await resolveRequest(requests[0], jsonResponse(payload));
+          await waitFor(() =>
+            expect(result.current.data?.range_secs).toBe(3600),
+          );
+          expect(result.current.domain).toEqual([base + 900, base + 4500]);
+          expect(result.current.rows).toEqual(
+            predecessor === 'ancient'
+              ? [
+                  { unix: base + 1800, [window]: 40 },
+                  { unix: base + 3600, [window]: 40 },
+                ]
+              : [
+                  {
+                    unix: base + 900,
+                    [window]: predecessor === 'null' ? null : 40,
+                  },
+                  { unix: base + 3600, [window]: 40 },
+                ],
+          );
+          unmount();
+          client.clear();
+        },
+      );
+    });
   });
 });

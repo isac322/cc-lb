@@ -2106,6 +2106,140 @@ async fn provider_pool_history_unchanged_successes_outlive_checkpoint_deadband()
     }
 }
 
+async fn provider_pool_history_relative_range_uses_server_clock() {
+    let base = CHECKPOINT_TEST_NOW_UNIX_SECS as i64;
+    let server = admin_test_common::spawn_admin_server_with_clock(Arc::new(
+        TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 4_500),
+    ))
+    .await;
+    for (provider, name, window) in [
+        (
+            Provider::Openai,
+            "openai",
+            SubscriptionQuotaWindow::FiveHour,
+        ),
+        (
+            Provider::Gemini,
+            "gemini",
+            SubscriptionQuotaWindow::GeminiFiveHour,
+        ),
+    ] {
+        let records = [
+            (-86_400, 0.10),
+            (-5_400, 0.20),
+            (1_800, 0.30),
+            (3_600, 0.40),
+        ]
+        .into_iter()
+        .map(|(offset, utilization)| {
+            let mut record = pool_history_record(base + offset, utilization);
+            record.provider = provider;
+            record.window = window;
+            record
+        })
+        .collect::<Vec<_>>();
+        server
+            .storage
+            .record_pool_quota_snapshots(&records)
+            .await
+            .unwrap();
+        let root = format!(
+            "/admin/v1/subscription-quotas/pool-history?provider={name}&windows={}",
+            window.as_str(),
+        );
+        // Browser time deliberately does not enter the request. Query padding
+        // and the response clock must share the server's captured instant.
+        for projection in ["full", "chart"] {
+            let (status, _, body) = server.client.get(&format!(
+                "{root}&relative_range_secs=3600&window_quantum_secs=1800&series_projection={projection}",
+            )).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["now_unix_secs"], base + 4_500);
+            let series = body["windows"][0]["series"].as_array().unwrap();
+            assert_eq!(
+                series
+                    .iter()
+                    .map(|point| { point["snapshot_at_unix_secs"].as_i64().unwrap() })
+                    .collect::<Vec<_>>(),
+                vec![base - 3_900, base + 1_800, base + 3_600],
+                "relative range must resolve from server clock: {body}"
+            );
+            assert_eq!(series[0]["utilization_percent"], 20.0);
+        }
+        for quantum in ["", "&window_quantum_secs=0"] {
+            let (status, _, body) = server
+                .client
+                .get(&format!(
+                    "{root}&relative_range_secs=3600{quantum}&series_projection=chart",
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["now_unix_secs"], base + 4_500);
+            assert_eq!(
+                body["windows"][0]["series"][0]["snapshot_at_unix_secs"],
+                base - 3_000
+            );
+        }
+        // Existing absolute and omitted-range queries preserve their contract.
+        let (status, _, absolute) = server
+            .client
+            .get(&format!(
+                "{root}&since_unix_secs={}&until_unix_secs={}&series_projection=chart",
+                base - 2_100,
+                base + 7_200,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            absolute["windows"][0]["series"][0]["snapshot_at_unix_secs"],
+            base - 2_100
+        );
+        let (status, _, default) = server
+            .client
+            .get(&format!("{root}&series_projection=chart"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            default["windows"][0]["series"][0]["snapshot_at_unix_secs"],
+            base - 17_100
+        );
+    }
+}
+
+async fn pool_history_relative_range_rejects_invalid_or_ambiguous_bounds() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    for provider in ["anthropic", "openai", "gemini"] {
+        for suffix in [
+            "relative_range_secs=0",
+            "relative_range_secs=-1",
+            "relative_range_secs=9223372036854775808",
+            "relative_range_secs=3600&window_quantum_secs=-1",
+            "relative_range_secs=3600&window_quantum_secs=9223372036854775808",
+            "relative_range_secs=9223372036854775807&window_quantum_secs=9223372036854775807",
+            "relative_range_secs=3600&since_unix_secs=0",
+            "relative_range_secs=3600&until_unix_secs=1800000000",
+        ] {
+            let (status, _, body) = server
+                .client
+                .get(&format!(
+                    "/admin/v1/subscription-quotas/pool-history?provider={provider}&{suffix}",
+                ))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{provider}: {suffix}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn subscription_quotas_relative_history_range_suite() {
+    provider_pool_history_relative_range_uses_server_clock().await;
+    pool_history_relative_range_rejects_invalid_or_ambiguous_bounds().await;
+}
+
 #[tokio::test]
 async fn subscription_quotas_provider_freshness_suite() {
     provider_pool_history_freshness_boundary_recovery_and_projection().await;

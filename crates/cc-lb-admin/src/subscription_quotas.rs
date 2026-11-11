@@ -40,6 +40,8 @@ const MAX_SERIES_MAX_POINTS: u32 = 10_000;
 const MAX_SERIES_UPSTREAMS: usize = 50;
 const RESET_DROP_THRESHOLD: f64 = 0.5;
 const GAP_MARKER_MULTIPLIER: u64 = 2;
+const POOL_SNAPSHOT_HEARTBEAT_SECS: i64 = 3_600;
+const POOL_HISTORY_GAP_SLACK_SECS: i64 = 300;
 const CAPACITY_CAVEAT: &str = "capacity is inferred from proxy tokens and quota utilization; Anthropic quota units are not directly exposed";
 const HEADER_FALLBACK_CAVEAT: &str = "utilization is the arithmetic mean of header observations; capacity-weighted estimate is unavailable because cc-lb has not proxied enough traffic to back-solve provider capacity";
 const PLAN_RATIO_CAVEAT: &str = "utilization is weighted by subscription plan ratios from Anthropic metadata; 5h and 7d use the same documented plan ratios";
@@ -355,6 +357,8 @@ struct PoolHistoryQuery {
     windows: Option<String>,
     since_unix_secs: Option<i64>,
     until_unix_secs: Option<i64>,
+    relative_range_secs: Option<i64>,
+    window_quantum_secs: Option<i64>,
     series_projection: Option<String>,
     max_points_per_series: Option<usize>,
     provider: Option<String>,
@@ -423,10 +427,60 @@ async fn build_pool_history_response(
     };
     let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
-    let since_unix_secs = query
-        .since_unix_secs
-        .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
-    let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
+    let (since_unix_secs, until_unix_secs) = if let Some(range_secs) = query.relative_range_secs {
+        if range_secs <= 0 {
+            return Err(bad_request(
+                "invalid_relative_range",
+                "pool history relative_range_secs must be positive",
+            ));
+        }
+        if query.since_unix_secs.is_some() || query.until_unix_secs.is_some() {
+            return Err(bad_request(
+                "ambiguous_history_range",
+                "pool history relative_range_secs cannot be combined with absolute bounds",
+            ));
+        }
+        let quantum_secs = query.window_quantum_secs.unwrap_or(0);
+        if quantum_secs < 0 {
+            return Err(bad_request(
+                "invalid_window_quantum",
+                "pool history window_quantum_secs must be nonnegative",
+            ));
+        }
+        let invalid_range = || {
+            bad_request(
+                "invalid_relative_range",
+                "pool history relative range exceeds supported timestamp bounds",
+            )
+        };
+        let until = if quantum_secs == 0 {
+            now_unix_secs
+        } else {
+            let remainder = now_unix_secs.rem_euclid(quantum_secs);
+            now_unix_secs
+                .checked_add(if remainder == 0 {
+                    0
+                } else {
+                    quantum_secs - remainder
+                })
+                .ok_or_else(invalid_range)?
+        };
+        let since = until
+            .checked_sub(range_secs)
+            .and_then(|value| value.checked_sub(quantum_secs))
+            .and_then(|value| {
+                value.checked_sub(POOL_SNAPSHOT_HEARTBEAT_SECS + POOL_HISTORY_GAP_SLACK_SECS)
+            })
+            .ok_or_else(invalid_range)?;
+        (since, until)
+    } else {
+        (
+            query
+                .since_unix_secs
+                .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs)),
+            query.until_unix_secs.unwrap_or(now_unix_secs),
+        )
+    };
     let bucket_secs = match query.max_points_per_series {
         None => None,
         Some(_) if !compact_series => {
@@ -1669,7 +1723,7 @@ fn should_record_pool_quota_snapshot(
     !(record
         .snapshot_at_unix_secs
         .saturating_sub(latest.snapshot_at_unix_secs)
-        < 3_600
+        < POOL_SNAPSHOT_HEARTBEAT_SECS
         && utilization_unchanged
         && record.eligible_upstreams == latest.eligible_upstreams
         && record.contributing_upstreams == latest.contributing_upstreams

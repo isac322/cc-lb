@@ -17,7 +17,6 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { useMemo, useRef } from 'react';
-import { POOL_QUOTA_HEARTBEAT_CARRY_SECS } from '../routes/-overviewPoolQuota';
 import {
   type AggregateResponse,
   type AnthropicWorkspace,
@@ -1071,33 +1070,28 @@ export function useSubscriptionQuotaPoolHistory(params: {
       queryKey: qk.subscriptionQuotaPoolHistory(scopedParams),
       enabled,
       queryFn: async ({ signal }) => {
-        const nowUnixSecs = Math.floor(Date.now() / 1000);
         const quantumSecs = params.windowQuantumSecs ?? 0;
-        // Storage clamps older query anchors to `since`. Keep those synthetic
-        // points beyond the display's heartbeat bound, without hiding genuine
-        // persisted predecessors needed to draw healthy hourly history.
-        const predecessorLookbackSecs =
-          params.provider === 'openai' || params.provider === 'gemini'
-            ? POOL_QUOTA_HEARTBEAT_CARRY_SECS
-            : 0;
-        const untilUnixSecs =
-          quantumSecs > 0
-            ? Math.ceil(nowUnixSecs / quantumSecs) * quantumSecs
-            : nowUnixSecs;
         const searchParams = new URLSearchParams();
         searchParams.set('series_projection', 'chart');
         if (params.windows) searchParams.set('windows', params.windows);
         if (provider) searchParams.set('provider', provider);
-        searchParams.set(
-          'since_unix_secs',
-          String(
-            untilUnixSecs -
-              params.rangeSecs -
-              quantumSecs -
-              predecessorLookbackSecs,
-          ),
-        );
-        searchParams.set('until_unix_secs', String(untilUnixSecs));
+        if (provider === 'openai' || provider === 'gemini') {
+          // Query and display bounds must share the server's clock so skew
+          // cannot make a clamped ancient anchor look like recent history.
+          searchParams.set('relative_range_secs', String(params.rangeSecs));
+          searchParams.set('window_quantum_secs', String(quantumSecs));
+        } else {
+          const nowUnixSecs = Math.floor(Date.now() / 1000);
+          const untilUnixSecs =
+            quantumSecs > 0
+              ? Math.ceil(nowUnixSecs / quantumSecs) * quantumSecs
+              : nowUnixSecs;
+          searchParams.set(
+            'since_unix_secs',
+            String(untilUnixSecs - params.rangeSecs - quantumSecs),
+          );
+          searchParams.set('until_unix_secs', String(untilUnixSecs));
+        }
         if (params.maxPointsPerSeries !== undefined)
           searchParams.set(
             'max_points_per_series',
