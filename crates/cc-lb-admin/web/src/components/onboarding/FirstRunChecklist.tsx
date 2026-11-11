@@ -1,4 +1,5 @@
 import { CheckCircle2, Circle } from 'lucide-react';
+import { type ProviderFamily, providerOf } from '../../lib/providers';
 import { usePrincipals, useUpstreams } from '../../lib/queries';
 import { cx, Section } from '../ui/primitives';
 import { OnboardingLink, type OnboardingTarget } from './OnboardingLink';
@@ -13,42 +14,40 @@ interface Step {
 }
 
 /**
- * Whether the first-run checklist is still showing: `true` while any step is
- * open, `false` once all are done, `undefined` until every source answers.
- * Shares its queries with FirstRunChecklist, so both always agree.
+ * Only an empty upstream scope needs the first-run gate. Principal and request
+ * setup must not hide a pool that already has credentials.
  */
 export function useFirstRunIncomplete(
-  requestSeen: boolean | undefined,
+  scopedProvider?: ProviderFamily,
 ): boolean | undefined {
-  const upstreams = useUpstreams();
-  const principals = usePrincipals();
-  const upstreamCount = upstreams.data?.upstreams.length;
-  const principalCount = principals.data?.principals.length;
-  if (
-    upstreamCount === undefined ||
-    principalCount === undefined ||
-    requestSeen === undefined
-  ) {
-    return undefined;
-  }
-  return !(upstreamCount > 0 && principalCount > 0 && requestSeen);
+  const upstreams = useUpstreams().data?.upstreams;
+  if (upstreams === undefined) return undefined;
+  return !upstreams.some(
+    (upstream) =>
+      scopedProvider === undefined ||
+      providerOf(upstream.kind) === scopedProvider,
+  );
 }
 
 /**
- * First-run setup steps on the Overview, derived from live data: an upstream
- * exists, a principal exists, and at least one request has been seen. It
- * renders nothing until every source has answered and disappears once all
- * three steps are satisfied, so it never flashes for a configured pool.
+ * Keep the three setup steps together while the current scope has no upstream.
+ * Wait for all step data before rendering to avoid a loading-state flash.
  */
 export function FirstRunChecklist({
   requestSeen,
+  scopedProvider,
 }: {
   /** `undefined` while request data is still loading. */
   readonly requestSeen: boolean | undefined;
+  readonly scopedProvider?: ProviderFamily;
 }) {
   const upstreams = useUpstreams();
   const principals = usePrincipals();
-  const upstreamCount = upstreams.data?.upstreams.length;
+  const upstreamCount = upstreams.data?.upstreams.filter(
+    (upstream) =>
+      scopedProvider === undefined ||
+      providerOf(upstream.kind) === scopedProvider,
+  ).length;
   const principalCount = principals.data?.principals.length;
   if (
     upstreamCount === undefined ||
@@ -57,6 +56,7 @@ export function FirstRunChecklist({
   ) {
     return null;
   }
+  if (upstreamCount > 0) return null;
 
   const steps: readonly Step[] = [
     {
@@ -87,13 +87,12 @@ export function FirstRunChecklist({
     },
   ];
   const doneCount = steps.filter((step) => step.done).length;
-  if (doneCount === steps.length) return null;
   const nextId = steps.find((step) => !step.done)?.id;
 
   return (
     <Section
       title="Set up the pool"
-      subtitle={`${doneCount} of ${steps.length} done. Quota, traffic and the latest requests show up here once the first request goes through.`}
+      subtitle={`${doneCount} of ${steps.length} done. Add an upstream to see pool quota and usage here.`}
     >
       <ol className="flex max-w-3xl flex-col">
         {steps.map((step) => {

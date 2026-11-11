@@ -17,6 +17,7 @@ import {
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolTooltipRows,
+  poolWindowPace,
   poolWindowResets,
   recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
@@ -565,6 +566,8 @@ function aggregate(
       window,
       cc_window_start_unix_secs: 0,
       cc_window_reset_unix_secs: 0,
+      pool_pace_fraction: null,
+      next_reset_unix_secs: null,
       used_tokens: 0,
       utilization: null,
       utilization_percent: poolUtilization[window] ?? null,
@@ -597,16 +600,43 @@ describe('poolQuotaWindowsPresent', () => {
     ]);
     expect(poolQuotaWindowsPresent([])).toEqual([]);
   });
+
+  it('requires a real account reset rather than calendar bounds as data evidence', () => {
+    const base = aggregate({ '5h': [] });
+    const calendarOnly = {
+      ...base,
+      windows: base.windows.map((entry) => ({
+        ...entry,
+        cc_window_reset_unix_secs: 9_000,
+      })),
+    };
+    expect(poolQuotaWindowsPresent([], calendarOnly, ['5h'], true)).toEqual([]);
+    expect(
+      poolQuotaWindowsPresent(
+        [],
+        {
+          ...calendarOnly,
+          windows: calendarOnly.windows.map((entry) => ({
+            ...entry,
+            next_reset_unix_secs: 5_000,
+          })),
+        },
+        ['5h'],
+        true,
+      ),
+    ).toEqual(['5h']);
+  });
 });
 
 describe('poolWindowResets', () => {
-  it('reads each window reset and treats an unset reset as none', () => {
+  it('uses the next account reset instead of the calendar window reset', () => {
     const base = aggregate({ '5h': [], '7d': [], '7d_fable': [] });
     const resets = poolWindowResets({
       ...base,
       windows: base.windows.map((entry) => ({
         ...entry,
-        cc_window_reset_unix_secs: entry.window === '7d' ? 5_000 : 0,
+        cc_window_reset_unix_secs: 9_000,
+        next_reset_unix_secs: entry.window === '7d' ? 5_000 : null,
       })),
     });
     expect(resets).toEqual({ '5h': null, '7d': 5_000, '7d_fable': null });
@@ -629,7 +659,8 @@ describe('poolWindowResets', () => {
         ...base,
         windows: base.windows.map((entry, index) => ({
           ...entry,
-          cc_window_reset_unix_secs: 5_000 + index,
+          cc_window_reset_unix_secs: 9_000,
+          next_reset_unix_secs: 5_000 + index,
         })),
       }),
     ).toEqual({
@@ -637,6 +668,54 @@ describe('poolWindowResets', () => {
       gemini_7d: 5_001,
       third_party_5h: 5_002,
       third_party_7d: 5_003,
+    });
+  });
+});
+
+describe('poolWindowPace', () => {
+  it('converts server-weighted account pace independently of calendar bounds', () => {
+    const base = aggregate({ '5h': [], '7d': [], '7d_fable': [] });
+    const paces = poolWindowPace({
+      ...base,
+      windows: base.windows.map((entry) => ({
+        ...entry,
+        cc_window_start_unix_secs: 0,
+        cc_window_reset_unix_secs: 9_000,
+        pool_pace_fraction:
+          entry.window === '5h' ? 0.538 : entry.window === '7d' ? 0 : 1,
+      })),
+    });
+    expect(paces['5h']).toBeCloseTo(53.8);
+    expect(paces['7d']).toBe(0);
+    expect(paces['7d_fable']).toBe(100);
+  });
+
+  it('returns no pace for null, missing, or non-finite fractions', () => {
+    const base = aggregate({
+      '5h': [],
+      '7d': [],
+      '7d_fable': [],
+      gemini_5h: [],
+    });
+    expect(
+      poolWindowPace({
+        ...base,
+        windows: base.windows.map((entry, index) => ({
+          ...entry,
+          pool_pace_fraction:
+            [null, Number.NaN, Infinity, -Infinity][index] ?? null,
+        })),
+      }),
+    ).toEqual({
+      '5h': null,
+      '7d': null,
+      '7d_fable': null,
+      gemini_5h: null,
+    });
+    expect(poolWindowPace(undefined)).toEqual({
+      '5h': null,
+      '7d': null,
+      '7d_fable': null,
     });
   });
 });
