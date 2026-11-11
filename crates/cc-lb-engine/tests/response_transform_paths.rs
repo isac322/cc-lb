@@ -669,6 +669,40 @@ async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
     );
 }
 
+/// Cloud Code Assist answers a rejected `streamGenerateContent` with a plain
+/// JSON error under `text/event-stream`. The client must receive Google's
+/// error, not a local SSE framing error that replaces 429 with 502.
+async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
+    let error = Bytes::from_static(
+        br#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#,
+    );
+    let lifecycle = with_test_limit_subject(lifecycle_with_record(
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            headers: sse_headers(),
+            body: error.clone(),
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    ));
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[]}"#))
+        .expect("Gemini OAuth streaming request builds");
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles Gemini OAuth stream error");
+    let (status, _headers, received) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(received, error);
+}
+
 async fn ingress_cap_does_not_limit_existing_response_paths() {
     for (stream, transform_response) in [(false, false), (false, true), (true, false)] {
         let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -4624,6 +4658,7 @@ async fn response_transform_paths_suite_part_1() {
     non_sse_stream_transform_never_receives_a_capped_prefix().await;
     gemini_json_array_stream_is_transformed_once_as_a_whole().await;
     gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
+    gemini_oauth_stream_json_error_reaches_client_unchanged().await;
     ingress_cap_does_not_limit_existing_response_paths().await;
     audio_json_response_preserves_the_ordinary_buffered_path().await;
     non_json_response_relays_first_chunk_before_upstream_eof().await;

@@ -9428,6 +9428,33 @@ impl Lifecycle {
                     }
                 }
             }
+            // An error status whose body is JSON rather than SSE is the
+            // provider's error response, not a truncated stream: Cloud Code
+            // Assist answers a rejected `streamGenerateContent` with plain JSON
+            // under `text/event-stream`. No SSE field line starts with `{` or
+            // `[`, so an unterminated real SSE event still fails as framing.
+            // The transform had nothing to rewrite; relay the decoded body
+            // unchanged instead of a framing error that would replace the
+            // provider's status and message.
+            if upstream_error_status
+                && sse_transform_active
+                && !transformed_output_started
+                && sse_event_count == 0
+                && buffer
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .is_some_and(|byte| matches!(byte, b'{' | b'['))
+                && stream_upstream_error.is_none()
+                && !stream_provider_error_forwarded
+                && !stream_upstream_error_frame_emitted
+                && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
+            {
+                raw_before_transform_output.clear();
+                stream_provider_error_forwarded = true;
+                batch_index = batch_index.saturating_add(1);
+                yield Ok::<Bytes, Infallible>(buffer.split().freeze());
+            }
             if upstream_is_sse
                 && (!upstream_error_status || sse_transform_active)
                 && parse_sse_events_active
