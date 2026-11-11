@@ -32,6 +32,15 @@ jobs:
         working-directory: crates/cc-lb-admin/web
     steps:
       - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          # The mounted workspace belongs to the host runner, not container root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # runner.temp in action inputs is the host path; publish the actual
+          # container path used by the capture commands instead.
+          echo "visual-root=$RUNNER_TEMP/codex-credit-visuals" >> "$GITHUB_OUTPUT"
       - name: Install bun 1.4.4
         working-directory: .
         run: |
@@ -201,11 +210,11 @@ jobs:
         with:
           name: codex-credit-visuals-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/codex-credit-visuals/after/**/overview.png
-            ${{ runner.temp }}/codex-credit-visuals/after/**/detail.png
-            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
-            ${{ runner.temp }}/codex-credit-visuals/before/*.png
-            ${{ runner.temp }}/codex-credit-visuals/before/capture.json
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/detail.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
+            ${{ steps.container-setup.outputs.visual-root }}/before/*.png
+            ${{ steps.container-setup.outputs.visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
       - name: Publish provider pool visual evidence
@@ -214,7 +223,7 @@ jobs:
         with:
           name: provider-pool-visuals-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/codex-credit-visuals/after/**/provider-pool.png
-            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/provider-pool.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
           retention-days: 14
           if-no-files-found: error
