@@ -13,6 +13,14 @@ use uuid::Uuid;
 const PRINCIPAL_ID: &str = "principal-a";
 const UPSTREAM_ID: Uuid = Uuid::from_u128(7);
 
+fn live_evidence_base_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs()
+        - 10
+}
+
 async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
@@ -1623,10 +1631,11 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
 #[tokio::test]
 async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending() {
     let (_temp_dir, storage) = storage().await;
+    let now = live_evidence_base_secs();
     for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
         let session_key_hash = format!("active-{outcome}");
         let cycle_id = Uuid::from_u128(1_074 + index);
-        let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
+        let mut replace = request(&session_key_hash, now, "agent-in-turn");
         replace.cycle_id = cycle_id;
         let session = storage
             .replace_from_real_request(&replace)
@@ -1636,7 +1645,7 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending()
         let mut projection = economics_projection(
             &source_ref_id,
             Some(cycle_id),
-            1_001 + index as u64,
+            now + 1 + index as u64,
             outcome,
             cost,
         );
@@ -1648,7 +1657,7 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending()
         projection.decision.session_key_hash = Some(session.session_key_hash.clone());
         storage
             .append_request_event_with_projections(
-                &event(&source_ref_id, 1_001 + index as u64),
+                &event(&source_ref_id, now + 1 + index as u64),
                 &projection,
             )
             .await
@@ -1834,8 +1843,9 @@ async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_cred
 #[tokio::test]
 async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending() {
     let (_temp_dir, storage) = storage().await;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_077);
-    let mut replace = request("active-multi-turn", 1_000, "agent-in-turn");
+    let mut replace = request("active-multi-turn", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
         .replace_from_real_request(&replace)
@@ -1847,7 +1857,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
             session_key_hash: "active-multi-turn",
             cycle_id,
             source_ref_id: "active-multi-turn-old",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -1861,7 +1871,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
             session_key_hash: "active-multi-turn",
             cycle_id,
             source_ref_id: "active-multi-turn-latest",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "miss",
             cost_micros: 15_000,
             renewal_tokens: 20_000,
@@ -1890,8 +1900,9 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
 #[tokio::test]
 async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_up() {
     let (_temp_dir, storage) = storage().await;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_078);
-    let mut replace = request("active-multiple-follow-ups", 1_000, "agent-in-turn");
+    let mut replace = request("active-multiple-follow-ups", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
         .replace_from_real_request(&replace)
@@ -1905,7 +1916,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
             session_key_hash: "active-multiple-follow-ups",
             cycle_id,
             source_ref_id: "active-multiple-follow-ups-first",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 10_000,
@@ -1919,7 +1930,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
             session_key_hash: "active-multiple-follow-ups",
             cycle_id,
             source_ref_id: "active-multiple-follow-ups-latest",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 30_000,
@@ -1944,9 +1955,10 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
 #[tokio::test]
 async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_renewal() {
     let (_temp_dir, storage) = storage().await;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_082);
     let session_key_hash = "active-two-follow-ups";
-    let mut replace = request(session_key_hash, 1_000, "agent-in-turn");
+    let mut replace = request(session_key_hash, now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
         .replace_from_real_request(&replace)
@@ -1961,7 +1973,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
             session_key_hash,
             cycle_id,
             source_ref_id: "active-two-follow-ups-r1",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -1975,7 +1987,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
             session_key_hash,
             cycle_id,
             source_ref_id: "active-two-follow-ups-r2",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "miss",
             cost_micros: 15_000,
             renewal_tokens: 20_000,
@@ -2000,9 +2012,10 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
 #[tokio::test]
 async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pending() {
     let (_temp_dir, storage) = storage().await;
+    let now = live_evidence_base_secs();
     let historical_cycle_id = Uuid::from_u128(1_079);
     let current_cycle_id = Uuid::from_u128(1_080);
-    let mut historical = request("historical-active-pending", 1_000, "agent-in-turn");
+    let mut historical = request("historical-active-pending", now, "agent-in-turn");
     historical.cycle_id = historical_cycle_id;
     storage
         .replace_from_real_request(&historical)
@@ -2014,7 +2027,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
             session_key_hash: "historical-active-pending",
             cycle_id: historical_cycle_id,
             source_ref_id: "historical-active-pending-old",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -2022,7 +2035,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
         },
     )
     .await;
-    let mut current = request("historical-active-pending", 1_005, "agent-in-turn");
+    let mut current = request("historical-active-pending", now + 5, "agent-in-turn");
     current.cycle_id = current_cycle_id;
     storage
         .replace_from_real_request(&current)
@@ -2034,7 +2047,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
             session_key_hash: "historical-active-pending",
             cycle_id: current_cycle_id,
             source_ref_id: "historical-active-pending-current",
-            ts: 1_006,
+            ts: now + 6,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,

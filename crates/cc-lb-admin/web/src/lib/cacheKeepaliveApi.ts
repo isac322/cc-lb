@@ -205,6 +205,7 @@ export const CacheKeepaliveGapSchema = z.object({
     'followup_hit',
     'followup_unknown',
     'scheduled_waiting',
+    'followup_pending',
     'capped_no_followup',
     'ttl_expired_no_followup',
   ]),

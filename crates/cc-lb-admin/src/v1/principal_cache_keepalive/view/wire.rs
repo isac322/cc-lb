@@ -94,7 +94,7 @@ impl CacheKeepaliveFollowUpOutcomesResponse {
         for ending in endings {
             let count = match ending {
                 "followup_hit" => &mut counts.observed,
-                "scheduled_waiting" => &mut counts.pending,
+                "scheduled_waiting" | "followup_pending" => &mut counts.pending,
                 "capped_no_followup" | "ttl_expired_no_followup" => &mut counts.no_follow_up,
                 _ => &mut counts.unknown,
             };
@@ -111,6 +111,7 @@ fn gap_outcome_counts_preserve_every_ending_and_unknown() {
         CacheKeepaliveFollowUpOutcomesResponse::from_endings([
             "followup_hit",
             "scheduled_waiting",
+            "followup_pending",
             "capped_no_followup",
             "ttl_expired_no_followup",
             "followup_unknown",
@@ -118,7 +119,7 @@ fn gap_outcome_counts_preserve_every_ending_and_unknown() {
         ]),
         CacheKeepaliveFollowUpOutcomesResponse {
             observed: 1,
-            pending: 1,
+            pending: 2,
             no_follow_up: 2,
             unknown: 2,
         }

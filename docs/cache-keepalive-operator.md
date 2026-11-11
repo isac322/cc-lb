@@ -93,8 +93,9 @@ This state remains tracked and visible even without retained renewal history,
 but does not count toward **Renewing now** or match Scheduled/Renewed filters.
 
 The request marker expires at the deadline derived from the server's configured
-request timeout. Without a recorded completion by then, the read model shows
-Expired with the neutral reason “Request did not complete before its deadline”.
+request timeout. Without a recorded terminal upstream response by then, the
+read model shows Expired with the neutral reason “Request did not complete
+before its deadline”.
 This does not claim a known abort or error. Legacy `new_request` cancellations
 without a request-start marker remain Cancelled.
 
@@ -153,9 +154,26 @@ Neither retirement re-observes or replaces a newer owner.
 Completed requests that cannot produce a safe renewal snapshot finalize their
 captured primary and sibling owners with `completed_not_renewable`: “Cancelled:
 request completed, renewal not possible”. This includes configuration changes,
-missing or invalid snapshot metadata, undecodable completed responses, and
-responses rejected by affinity binding. Genuine transport failures, incomplete
-streams, and aborts before completion still use the neutral deadline fallback.
+missing or invalid snapshot metadata, raw-passthrough shaping fallbacks,
+undecodable completed responses, and responses rejected by affinity binding.
+Captured ownership survives even when no safe snapshot was captured. Fully
+collected HTTP error responses and protocol-terminal provider errors, refusals,
+or context-window stops also finalize as `completed_not_renewable`.
+A streamed stop hint alone is not terminal proof. Transport failures, incomplete
+streams, and aborts before a terminal response still use the neutral deadline
+fallback. Dropping an unconsumed completion context only logs at debug level;
+that diagnostic Drop never invents completion or writes a final state.
+
+For stream EOF to establish completion, decoding must finish and no partial
+event may remain. An already received native terminal or error event is
+independent proof, even if a later proxy step fails. Fully received buffered
+responses rejected by body limits or response transformation also finalize
+their captured owners without renewal.
+
+If SSE response transformation fails open before emitting output, keep-alive
+continues observing the original raw events, including terminal events split
+across chunks. Eligible responses retain their renewal snapshot. Transformed
+output alone never establishes upstream terminal proof.
 
 The proxy waits for the request-start fence before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
@@ -333,6 +351,16 @@ pending gaps, closed gaps with no follow-up, and unknown gaps separately.
 Each rail gap contributes exactly once, including an empty waiting gap as
 pending. These counts preserve mixed historical outcomes; the existing
 `evidence_status` keeps its conservative semantics for list and filter consumers.
+
+Renewal scheduling and pending follow-up evidence are separate. An In request
+cycle remains inactive and has no Next renewal, but a paid renewal can still
+be waiting for follow-up while its TTL window is open. That window ends at
+the last renewal's anchor plus its TTL, not the request marker's deadline or
+the first renewal's timestamp. Matching follow-up evidence resolves the cycle
+as observed. Pausing renewals, or reaching an incomplete-request deadline,
+does not by itself turn the cycle into a closed no-follow-up loss.
+An active scheduling row does not extend an expired paid renewal's follow-up
+window either; an overdue scheduled job is not evidence of a live cache.
 
 Errors are orthogonal: a terminal dispatch/decrypt/provider error does not
 become a live Scheduled or Renewed row, and `error` is displayed alongside the

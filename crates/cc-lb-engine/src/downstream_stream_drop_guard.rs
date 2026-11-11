@@ -61,7 +61,7 @@ pub(crate) fn record_stream_termination_metric(
 
 struct StreamCompletionOwner {
     keepalive: LifecycleKeepalive,
-    context: LifecycleKeepaliveContext,
+    context: Option<LifecycleKeepaliveContext>,
     response: Option<StreamingKeepaliveResponse>,
     cache_anchor_at: Instant,
     runtime: tokio::runtime::Handle,
@@ -70,12 +70,13 @@ struct StreamCompletionOwner {
 
 impl StreamCompletionOwner {
     fn new(keepalive: LifecycleKeepalive, context: LifecycleKeepaliveContext) -> Self {
+        let response = context.response_observer();
         Self {
             cache_anchor_at: context.request_dispatched_at,
             runtime: tokio::runtime::Handle::current(),
             keepalive,
-            context,
-            response: Some(StreamingKeepaliveResponse::default()),
+            context: Some(context),
+            response,
             cached_tokens: 0,
         }
     }
@@ -88,7 +89,7 @@ impl StreamCompletionOwner {
 
     fn observe_emitted(&mut self, bytes: &Bytes, max_pending_sse_bytes: usize) {
         if let Some(response) = self.response.as_mut() {
-            response.observe_emitted(bytes, max_pending_sse_bytes);
+            response.observe_emitted(bytes, max_pending_sse_bytes, |_| {});
         }
     }
 
@@ -100,43 +101,27 @@ impl StreamCompletionOwner {
         self.cached_tokens = cached_tokens;
     }
 
-    fn complete(&mut self) {
-        let Some(response) = self.response.take() else {
+    fn complete(&mut self, renewable: bool) {
+        let Some(context) = self.context.take() else {
             return;
         };
-        let response = response.into_value();
-        let runtime = self.runtime.clone();
-        if tokio::runtime::Handle::try_current().is_err() {
-            let _entered = runtime.enter();
-            self.dispatch_completion(response.as_ref());
+        let response = self.response.take();
+        let response = if renewable {
+            response.and_then(StreamingKeepaliveResponse::into_value)
         } else {
-            self.dispatch_completion(response.as_ref());
-        }
-    }
-
-    fn dispatch_completion(&mut self, response: Option<&serde_json::Value>) {
-        let context = &mut self.context;
-        if let Some(response) = response {
-            self.keepalive.on_response_completed(
-                response,
-                &context.principal,
-                std::mem::take(&mut context.accounting_key_id),
-                &context.cache_metadata,
-                context.upstream_id,
-                std::mem::take(&mut context.shaped_body),
-                std::mem::take(&mut context.original_body),
-                &context.downstream_headers,
-                self.cache_anchor_at.elapsed(),
-                self.cached_tokens,
-                context.request_start_order.take(),
-            );
-        } else if let Some(order) = context.request_start_order.take() {
-            self.keepalive.on_completed_not_renewable(
-                context.principal.clone(),
-                order,
-                self.cache_anchor_at.elapsed(),
-            );
-        }
+            None
+        };
+        let runtime = self.runtime.clone();
+        // A proven terminal downstream drop can run outside its originating runtime.
+        let _entered = tokio::runtime::Handle::try_current()
+            .is_err()
+            .then(|| runtime.enter());
+        context.complete(
+            &self.keepalive,
+            response.as_ref(),
+            self.cache_anchor_at.elapsed(),
+            if renewable { self.cached_tokens } else { 0 },
+        );
     }
 }
 
@@ -149,6 +134,7 @@ pub(crate) struct DownstreamStreamDropGuard {
     initial_upstream_status: StatusCode,
     pending_terminal: Option<(StreamTerminationOutcome, StreamTerminationCause)>,
     semantic_completed: bool,
+    upstream_terminal: bool,
     response_accounting_guard: Option<ResponseAccountingGuard>,
     abnormal_stop: Option<(String, String)>,
     abnormal_stop_recorded: bool,
@@ -177,6 +163,7 @@ impl DownstreamStreamDropGuard {
             pending_terminal: initial_upstream_error
                 .map(|cause| (StreamTerminationOutcome::UpstreamError, cause)),
             semantic_completed: false,
+            upstream_terminal: false,
             response_accounting_guard: None,
             abnormal_stop: None,
             abnormal_stop_recorded: false,
@@ -198,8 +185,10 @@ impl DownstreamStreamDropGuard {
         self
     }
 
-    pub(crate) fn has_keepalive_completion(&self) -> bool {
-        self.keepalive_completion.is_some()
+    pub(crate) fn observes_keepalive_response(&self) -> bool {
+        self.keepalive_completion
+            .as_ref()
+            .is_some_and(|owner| owner.response.is_some())
     }
 
     pub(crate) fn observe_keepalive(&mut self, event: &ParsedSseEvent<'_>) {
@@ -218,6 +207,53 @@ impl DownstreamStreamDropGuard {
         }
     }
 
+    /// Raw fail-open bytes are still upstream evidence. Transformed output
+    /// uses the snapshot-only observer above and must not manufacture proof.
+    pub(crate) fn observe_keepalive_raw(
+        &mut self,
+        bytes: &Bytes,
+        max_pending_sse_bytes: usize,
+        capability: crate::provider_capability::ProviderCapability,
+    ) {
+        let Some(owner) = self.keepalive_completion.as_mut() else {
+            return;
+        };
+        let mut terminal = false;
+        let mut provider_failure = false;
+        let mut abnormal_stop = None;
+        owner
+            .response
+            .get_or_insert_with(StreamingKeepaliveResponse::control_only)
+            .observe_emitted(bytes, max_pending_sse_bytes, |event| {
+                let event_terminal =
+                    crate::lifecycle::keepalive_event_reaches_upstream_terminal(capability, event);
+                terminal |= event_terminal;
+                provider_failure |= event_terminal
+                    && event.value().ok().flatten().is_some_and(|value| {
+                        matches!(
+                            value.get("type").and_then(serde_json::Value::as_str),
+                            Some("error" | "response.failed")
+                        ) || (value.get("object").and_then(serde_json::Value::as_str)
+                            == Some("response")
+                            && value.get("status").and_then(serde_json::Value::as_str)
+                                == Some("failed"))
+                    });
+                if abnormal_stop.is_none() {
+                    abnormal_stop = crate::usage_parser::detect_abnormal_stop(event);
+                }
+            });
+        if let Some(stop) = abnormal_stop {
+            let message = crate::lifecycle::abnormal_stop_error_message(&stop);
+            self.mark_abnormal_stop(stop.stop_reason, message);
+        }
+        if provider_failure {
+            self.mark_upstream_error(StreamTerminationCause::ProviderError, None);
+        }
+        if terminal {
+            self.mark_upstream_terminal();
+        }
+    }
+
     pub(crate) fn set_keepalive_anchor_at(&mut self, at: Instant) {
         if let Some(owner) = self.keepalive_completion.as_mut() {
             owner.set_cache_anchor_at(at);
@@ -230,15 +266,35 @@ impl DownstreamStreamDropGuard {
         }
     }
 
+    /// Finalize only a proven terminal upstream response. The normal finalizer
+    /// has already settled the relay outcome, so it may retain renewal evidence.
     pub(crate) fn complete_keepalive(&mut self) {
+        self.complete_keepalive_with_renewal(true);
+    }
+
+    fn complete_keepalive_with_renewal(&mut self, allow_renewal: bool) {
+        if !self.upstream_terminal {
+            return;
+        }
+        let renewable = allow_renewal
+            && self.initial_upstream_status.is_success()
+            && self.pending_terminal.is_none()
+            && self.abnormal_stop.is_none()
+            && !self.abnormal_stop_recorded;
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.complete(renewable);
+        }
+    }
+
+    fn complete_terminal_failure(&mut self) {
         if self.pending_terminal.is_some()
             || self.abnormal_stop.is_some()
             || self.abnormal_stop_recorded
+            || !self.initial_upstream_status.is_success()
         {
-            return;
-        }
-        if let Some(owner) = self.keepalive_completion.as_mut() {
-            owner.complete();
+            // Do not wait for EOF when a terminal provider failure leaves its
+            // transport open. Success still waits for the response snapshot.
+            self.complete_keepalive_with_renewal(false);
         }
     }
 
@@ -263,6 +319,7 @@ impl DownstreamStreamDropGuard {
     pub(crate) fn mark_abnormal_stop(&mut self, error_type: String, error_message: String) {
         self.abnormal_stop
             .get_or_insert((error_type, error_message));
+        self.complete_terminal_failure();
     }
 
     /// Apply only after the terminal outcome is known, so provider/proxy
@@ -308,9 +365,19 @@ impl DownstreamStreamDropGuard {
     pub(crate) fn mark_proxy_error(&mut self, cause: StreamTerminationCause) {
         self.mark_error(StreamTerminationOutcome::ProxyError, cause, None);
     }
+
+    /// Record protocol terminal evidence, independently of successful downstream
+    /// emission. Neither an error classification nor an ordinary Drop proves it.
+    pub(crate) fn mark_upstream_terminal(&mut self) {
+        self.upstream_terminal = true;
+        self.complete_terminal_failure();
+    }
+
     /// Record that the downstream has received the provider's semantic terminal
     /// event. A later downstream close is a successful completion, not a
     /// client cancellation, unless an upstream/proxy error is recorded first.
+    /// This accounting signal alone is not strong upstream-terminal proof:
+    /// Chat finish_reason may precede [DONE] and a later transport failure.
     pub(crate) fn mark_semantic_completion(&mut self) {
         self.semantic_completed = true;
     }
@@ -341,6 +408,7 @@ impl DownstreamStreamDropGuard {
                 self.span.record("error.h2.reason", h2_reason);
             }
         }
+        self.complete_terminal_failure();
     }
 
     fn record_body_io_timings(&self) {
@@ -413,6 +481,9 @@ impl DownstreamStreamDropGuard {
 
 impl Drop for DownstreamStreamDropGuard {
     fn drop(&mut self) {
+        // A terminal provider outcome may have been rejected by a later relay
+        // step. Finalize its captured owners without inferring success from Drop.
+        self.complete_keepalive_with_renewal(self.semantic_completed);
         if self.finalized {
             return;
         }
@@ -437,7 +508,6 @@ impl Drop for DownstreamStreamDropGuard {
             // Leave the reservation alive before RequestTerminated is
             // published; the subscriber reconciles success or refunds an
             // abnormal stop. Pre-terminal cancellation retains RAII refund.
-            let complete_keepalive = self.abnormal_stop.is_none() && !self.abnormal_stop_recorded;
             self.handoff_response_accounting();
             let finalize_ms = duration_to_ms(cancellation_at.elapsed());
             if let Some(observer) = self.observer.take() {
@@ -445,9 +515,6 @@ impl Drop for DownstreamStreamDropGuard {
                 observer.set_upstream_body_ms_if_absent(response_body_ms);
                 observer.set_finalize_ms(finalize_ms);
                 observer.finish();
-            }
-            if complete_keepalive {
-                self.complete_keepalive();
             }
             self.record_response_timings(response_body_ms, finalize_ms);
             self.record_terminal(
@@ -503,6 +570,374 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use super::*;
+
+    struct UnusedSignerFactory;
+
+    impl cc_lb_upstream::ApiKeyAwareSignerFactory for UnusedSignerFactory {
+        fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cc_lb_upstream::SignerFactory for UnusedSignerFactory {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+            panic!("stream completion must not build a signer")
+        }
+    }
+
+    fn keepalive_guard() -> DownstreamStreamDropGuard {
+        use cc_lb_control::api_keys::principal_view::PrincipalView;
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(UnusedSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
+            .build();
+        let keepalive = LifecycleKeepalive::new(None, Arc::new(DynamicViewHolder::new(view)));
+        let context = LifecycleKeepaliveContext::new(
+            cc_lb_domain::Principal {
+                id: "stream-completion-owner".to_owned(),
+                kind: cc_lb_domain::PrincipalKind::InternalKey,
+            },
+            Instant::now(),
+            None,
+        );
+        DownstreamStreamDropGuard::armed(
+            None,
+            Span::none(),
+            StatusCode::OK,
+            None,
+            Instant::now(),
+            BodyIoTiming::default(),
+            test_attribution(),
+        )
+        .with_keepalive_completion(keepalive, Some(context))
+    }
+
+    fn has_completion_context(guard: &DownstreamStreamDropGuard) -> bool {
+        guard
+            .keepalive_completion
+            .as_ref()
+            .expect("completion owner")
+            .context
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn raw_split_terminal_is_observed_before_budgeting_the_trailing_chunk() {
+        for terminal in [
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".as_slice(),
+            b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+            b"event: error\ndata: {\"type\":\"error\",\"error\":null}\n\n",
+        ] {
+            for split in 1..terminal.len() {
+                let mut guard = keepalive_guard();
+                let mut completing_chunk = terminal[split..].to_vec();
+                completing_chunk.extend_from_slice(&b": heartbeat\n\n".repeat(32));
+                // The complete event fits; only the transport chunk is large.
+                let budget = terminal.len();
+                guard.observe_keepalive_raw(
+                    &Bytes::copy_from_slice(&terminal[..split]),
+                    budget,
+                    crate::provider_capability::ProviderCapability::AnthropicMessages,
+                );
+                guard.observe_keepalive_raw(
+                    &Bytes::from(completing_chunk),
+                    budget,
+                    crate::provider_capability::ProviderCapability::AnthropicMessages,
+                );
+                assert!(guard.upstream_terminal, "lost terminal at split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_fail_open_terminal_reassembles_without_a_renewal_snapshot() {
+        use crate::provider_capability::ProviderCapability;
+
+        let terminal = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        for split in 1..terminal.len() {
+            let mut guard = keepalive_guard();
+            assert!(!guard.observes_keepalive_response());
+            guard.observe_keepalive_raw(
+                &Bytes::copy_from_slice(&terminal[..split]),
+                1024,
+                ProviderCapability::AnthropicMessages,
+            );
+            assert!(!guard.upstream_terminal, "partial event at {split}");
+            guard.observe_keepalive_raw(
+                &Bytes::copy_from_slice(&terminal[split..]),
+                1024,
+                ProviderCapability::AnthropicMessages,
+            );
+            assert!(guard.upstream_terminal, "native terminal at {split}");
+            assert!(has_completion_context(&guard), "no eager renewal");
+            let owner = guard.keepalive_completion.as_mut().unwrap();
+            assert!(owner.response.take().unwrap().into_value().is_none());
+            guard.complete_keepalive();
+            assert!(!has_completion_context(&guard));
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_fail_open_lookalikes_and_partial_events_do_not_prove_terminal() {
+        use crate::provider_capability::ProviderCapability;
+
+        for (raw, capability) in [
+            (
+                b"event: message_stop\ndata: {\"type\":\"message_delta\"}\n\n".as_slice(),
+                ProviderCapability::AnthropicMessages,
+            ),
+            (
+                b"event: error\ndata: {\"type\":\"message_delta\"}\n\n",
+                ProviderCapability::AnthropicMessages,
+            ),
+            (
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n",
+                ProviderCapability::AnthropicMessages,
+            ),
+            (
+                b"event: error\ndata: {\"type\":\"error\"}\n\n",
+                ProviderCapability::OpenaiResponses,
+            ),
+        ] {
+            let mut guard = keepalive_guard();
+            guard.observe_keepalive_raw(&Bytes::copy_from_slice(raw), 1024, capability);
+            guard.complete_keepalive();
+            assert!(!guard.upstream_terminal);
+            assert!(has_completion_context(&guard));
+        }
+    }
+
+    #[tokio::test]
+    async fn transformed_output_does_not_manufacture_upstream_terminal_proof() {
+        let mut guard = keepalive_guard();
+        guard.keepalive_completion.as_mut().unwrap().response =
+            Some(StreamingKeepaliveResponse::control_only());
+        guard.observe_keepalive_emitted(
+            &Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            1024,
+        );
+        guard.complete_keepalive();
+        assert!(!guard.upstream_terminal);
+        assert!(has_completion_context(&guard));
+    }
+
+    #[tokio::test]
+    async fn raw_fail_open_native_error_finalizes_without_renewal() {
+        let mut guard = keepalive_guard();
+        guard.observe_keepalive_raw(
+            &Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":null}\n\n"),
+            1024,
+            crate::provider_capability::ProviderCapability::AnthropicMessages,
+        );
+        assert!(guard.upstream_terminal);
+        assert!(!has_completion_context(&guard));
+        assert!(matches!(
+            guard.pending_terminal,
+            Some((
+                StreamTerminationOutcome::UpstreamError,
+                StreamTerminationCause::ProviderError
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_fail_open_abnormal_hint_waits_for_native_terminal() {
+        let mut guard = keepalive_guard();
+        guard.observe_keepalive_raw(
+            &Bytes::from_static(
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n",
+            ),
+            1024,
+            crate::provider_capability::ProviderCapability::AnthropicMessages,
+        );
+        guard.complete_keepalive();
+        assert!(!guard.upstream_terminal);
+        assert!(has_completion_context(&guard));
+        guard.observe_keepalive_raw(
+            &Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            1024,
+            crate::provider_capability::ProviderCapability::AnthropicMessages,
+        );
+        assert!(guard.upstream_terminal);
+        assert!(!has_completion_context(&guard));
+    }
+
+    #[tokio::test]
+    async fn terminal_abnormal_stop_consumes_completion_owner() {
+        for stop in ["refusal", "model_context_window_exceeded"] {
+            let mut guard = keepalive_guard();
+            guard.mark_abnormal_stop(stop.to_owned(), "provider stopped".to_owned());
+            guard.mark_semantic_completion();
+            guard.mark_upstream_terminal();
+
+            assert!(
+                !has_completion_context(&guard),
+                "terminal {stop} must finalize the captured owner without renewal"
+            );
+            guard.complete_keepalive();
+            assert!(!has_completion_context(&guard));
+        }
+    }
+
+    #[tokio::test]
+    async fn recorded_terminal_abnormal_stop_consumes_completion_owner() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "recorded-terminal-refusal".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        let mut guard = keepalive_guard();
+        guard.mark_abnormal_stop("refusal".to_owned(), "provider stopped".to_owned());
+        guard.mark_semantic_completion();
+        guard.mark_upstream_terminal();
+        assert!(guard.record_abnormal_stop(&observer));
+        assert!(!guard.has_abnormal_stop());
+        assert!(guard.abnormal_stop_recorded);
+
+        guard.complete_keepalive();
+
+        assert!(!has_completion_context(&guard));
+        guard.complete_keepalive();
+        assert!(!has_completion_context(&guard));
+    }
+
+    #[tokio::test]
+    async fn error_classification_requires_independent_terminal_proof() {
+        for cause in [
+            StreamTerminationCause::ProviderError,
+            StreamTerminationCause::TransportError,
+            StreamTerminationCause::H2Cancel,
+            StreamTerminationCause::H2Reset,
+            StreamTerminationCause::IoReset,
+            StreamTerminationCause::IoTimeout,
+            StreamTerminationCause::UnexpectedEof,
+            StreamTerminationCause::DecodeError,
+            StreamTerminationCause::FramingError,
+            StreamTerminationCause::Unknown,
+        ] {
+            let mut guard = keepalive_guard();
+            guard.mark_upstream_error(cause, None);
+            guard.complete_keepalive();
+            assert!(
+                has_completion_context(&guard),
+                "{cause:?} is not terminal proof"
+            );
+
+            guard.mark_upstream_terminal();
+            assert!(!has_completion_context(&guard), "{cause:?} terminal owner");
+            guard.complete_keepalive();
+            assert!(!has_completion_context(&guard));
+        }
+        for cause in [
+            StreamTerminationCause::TransformError,
+            StreamTerminationCause::AffinityError,
+        ] {
+            let mut guard = keepalive_guard();
+            guard.mark_proxy_error(cause);
+            guard.complete_keepalive();
+            assert!(
+                has_completion_context(&guard),
+                "{cause:?} is not terminal proof"
+            );
+
+            guard.mark_upstream_terminal();
+            assert!(!has_completion_context(&guard), "{cause:?} terminal owner");
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_after_terminal_proof_consumes_owner_without_waiting_for_eof() {
+        let mut provider_error = keepalive_guard();
+        provider_error.mark_upstream_terminal();
+        assert!(
+            has_completion_context(&provider_error),
+            "terminal proof alone must not eagerly renew an unseen response"
+        );
+        provider_error.mark_upstream_error(StreamTerminationCause::ProviderError, None);
+        assert!(!has_completion_context(&provider_error));
+        provider_error.mark_upstream_terminal();
+        provider_error.complete_keepalive();
+        assert!(!has_completion_context(&provider_error));
+
+        let mut proxy_error = keepalive_guard();
+        proxy_error.mark_upstream_terminal();
+        assert!(has_completion_context(&proxy_error));
+        proxy_error.mark_proxy_error(StreamTerminationCause::AffinityError);
+        assert!(!has_completion_context(&proxy_error));
+
+        for stop in ["refusal", "model_context_window_exceeded"] {
+            let mut abnormal = keepalive_guard();
+            abnormal.mark_upstream_terminal();
+            assert!(has_completion_context(&abnormal));
+            abnormal.mark_abnormal_stop(stop.to_owned(), "provider stopped".to_owned());
+            assert!(!has_completion_context(&abnormal));
+        }
+    }
+
+    #[tokio::test]
+    async fn preterminal_abnormal_stop_and_generic_finish_do_not_complete_owner() {
+        let mut guard = keepalive_guard();
+        guard.mark_abnormal_stop("refusal".to_owned(), "provider stopped".to_owned());
+        guard.complete_keepalive();
+        assert!(
+            has_completion_context(&guard),
+            "message_delta is not message_stop"
+        );
+        guard.finish(1, 1);
+        guard.complete_keepalive();
+        assert!(
+            has_completion_context(&guard),
+            "relay finalization is not terminal proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_without_emitted_success_can_finalize_on_drop_rail() {
+        let mut guard = keepalive_guard();
+        guard.mark_upstream_terminal();
+        assert!(!guard.semantic_completed);
+
+        guard.complete_keepalive_with_renewal(guard.semantic_completed);
+
+        assert!(!has_completion_context(&guard));
+    }
+
+    #[tokio::test]
+    async fn weak_semantic_completion_does_not_finalize_before_strong_terminal() {
+        let mut guard = keepalive_guard();
+        guard.mark_semantic_completion();
+        assert!(guard.semantic_completed);
+        assert!(!guard.upstream_terminal);
+        guard.complete_keepalive();
+        assert!(has_completion_context(&guard));
+
+        guard.mark_upstream_error(StreamTerminationCause::UnexpectedEof, None);
+        guard.complete_keepalive_with_renewal(guard.semantic_completed);
+        assert!(
+            has_completion_context(&guard),
+            "a Chat finish_reason before [DONE] must stay neutral on transport failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_semantic_completion_consumes_owner_once() {
+        let mut guard = keepalive_guard();
+        guard.mark_semantic_completion();
+        guard.mark_upstream_terminal();
+        guard.complete_keepalive();
+        assert!(!has_completion_context(&guard));
+        guard.complete_keepalive();
+        guard.finish(1, 1);
+        assert!(!has_completion_context(&guard));
+    }
 
     #[derive(Clone, Default)]
     struct ResponseTimingLayer {

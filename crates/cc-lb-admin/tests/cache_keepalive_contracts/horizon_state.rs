@@ -28,6 +28,11 @@ async fn selected_horizon_state_matrix_sqlite() {
 }
 
 #[tokio::test]
+async fn overdue_active_paid_renewal_http_sqlite() {
+    let (_directory, storage, state, _) = super::create_principal_id().await;
+    current_follow_up_evidence_matrix(storage.as_ref(), &state, true).await;
+}
+#[tokio::test]
 async fn selected_horizon_state_matrix_postgres() {
     let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
         eprintln!("skip: CI_POSTGRES_URL is required for PostgreSQL horizon parity");
@@ -555,6 +560,206 @@ async fn selected_horizon_state_matrix(
     }
     detail_table_retains_the_rail_cycle_range(storage, state, principal).await;
     detail_follow_up_counts_preserve_mixed_gap_outcomes(storage, state, principal).await;
+    current_follow_up_evidence_matrix(storage, state, false).await;
+}
+
+async fn current_follow_up_evidence_matrix(
+    storage: &dyn Storage,
+    state: &cc_lb_admin::AdminState,
+    overdue_active_only: bool,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut state = state.clone();
+    state.clock = Arc::new(TestClock::new_at_secs(now));
+    for (id, marker_age, renewal_age, expected_state, pending) in [
+        ("fresh-paid-request", 0, Some(100), "in_request", true),
+        ("expired-marker-live-cache", 120, Some(100), "expired", true),
+        (
+            "fresh-marker-expired-cache",
+            0,
+            Some(301),
+            "in_request",
+            false,
+        ),
+        (
+            "expired-marker-expired-cache",
+            120,
+            Some(301),
+            "expired",
+            false,
+        ),
+        ("fresh-empty-request", 0, None, "in_request", false),
+        ("expired-empty-request", 120, None, "expired", false),
+        ("active-live-cache", 0, Some(100), "scheduled", true),
+        ("active-expired-cache", 0, Some(301), "scheduled", false),
+        ("active-empty", 0, None, "scheduled", false),
+    ] {
+        let active = expected_state == "scheduled";
+        if overdue_active_only && id != "active-expired-cache" {
+            continue;
+        }
+        let mut principal_body = principal_create_body();
+        principal_body["name"] = serde_json::json!(format!("evidence-{id}"));
+        let (status, _, principal, _) = authed_json(
+            app(state.clone()),
+            "POST",
+            "/admin/v1/principals",
+            Some(principal_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{principal}");
+        let principal = principal["id"].as_str().unwrap();
+        let cycle = uuid::Uuid::new_v4();
+        let mut request = cache_keepalive_replace_request(principal, id, now - 600, now + 300);
+        request.cycle_id = cycle;
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("seed paused cycle");
+        if let Some(age) = renewal_age {
+            for (ordinal, renewal_at) in [(1, now - age - 270), (2, now - age)] {
+                let source = format!("{id}-{ordinal}");
+                let evidence = CacheKeepaliveEvidenceRow {
+                    evidence_id: format!("{source}-evidence"),
+                    cycle_id: Some(cycle),
+                    evidence_kind: "renewal".to_owned(),
+                    request_start_ms: renewal_at * 1_000,
+                    prefix_fingerprint: Some("fingerprint".to_owned()),
+                    prefix_hash: Some("prefix".to_owned()),
+                    prefix_policy_version: Some("policy".to_owned()),
+                    prefix_schema_version: Some("schema".to_owned()),
+                    principal_id: principal.to_owned(),
+                    upstream_id: uuid::Uuid::from_u128(0xa11ce),
+                    model: "unknown-horizon-model".to_owned(),
+                    ttl: CacheTtl::Ttl5m,
+                    hit_miss: Some("hit".to_owned()),
+                    cache_read_input_tokens: Some(1),
+                    cost_micros: Some(1_000),
+                    request_ref: Some(source.clone()),
+                    event_ref: Some(source.clone()),
+                };
+                seed_cycle_turn(
+                    storage,
+                    principal,
+                    id,
+                    source,
+                    renewal_at,
+                    if active { None } else { Some(cycle) },
+                    vec![evidence],
+                )
+                .await;
+            }
+        }
+        if !active {
+            let start = now - marker_age;
+            assert!(
+                storage
+                    .begin_cache_keepalive_request_fenced(id, None, start, start + 60)
+                    .await
+                    .expect("pause request")
+            );
+        }
+        let list = get(
+            &state,
+            &format!("/admin/v1/principals/{principal}/cache-keepalive?limit=10"),
+        )
+        .await;
+        assert_eq!(list["summary"]["renewing_now"], u64::from(active));
+        assert_eq!(
+            list["summary"]["evidence_status"],
+            if pending {
+                "pending"
+            } else if renewal_age.is_some() {
+                "observed"
+            } else {
+                "none"
+            },
+            "{id}: {list}"
+        );
+        let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
+        assert_eq!(detail["state"], expected_state, "{id}: {detail}");
+        assert_eq!(detail["is_active"], active);
+        assert_eq!(detail["is_last_pending"], pending);
+        assert_eq!(
+            detail["follow_up_outcomes"]["pending"],
+            u64::from(pending || (active && renewal_age.is_none()))
+        );
+        if let Some(renewal_age) = renewal_age {
+            assert_eq!(
+                detail["gaps"][0]["ending_kind"],
+                if pending {
+                    if active {
+                        "scheduled_waiting"
+                    } else {
+                        "followup_pending"
+                    }
+                } else {
+                    "ttl_expired_no_followup"
+                }
+            );
+            assert_eq!(detail["turns"][0]["pending"], pending);
+            assert_eq!(
+                detail["evidence_status"],
+                if pending { "pending" } else { "observed" }
+            );
+            if !pending {
+                assert_eq!(
+                    detail["gaps"][0]["ending_at_ms"],
+                    (now - renewal_age + 300) * 1_000
+                );
+            }
+        } else if active {
+            assert_eq!(detail["gaps"][0]["ending_kind"], "scheduled_waiting");
+            assert_eq!(detail["gaps"][0]["pulses"], serde_json::json!([]));
+            assert_eq!(detail["evidence_status"], "none");
+        } else {
+            assert_eq!(detail["gaps"], serde_json::json!([]));
+            assert_eq!(detail["evidence_status"], "none");
+        }
+        if id == "active-live-cache" {
+            let source = format!("{id}-unowned-latest");
+            let unknown = CacheKeepaliveEvidenceRow {
+                evidence_id: format!("{source}-evidence"),
+                cycle_id: None,
+                evidence_kind: "renewal".to_owned(),
+                request_start_ms: now * 1_000,
+                prefix_fingerprint: Some("unknown-fingerprint".to_owned()),
+                prefix_hash: Some("unknown-prefix".to_owned()),
+                prefix_policy_version: Some("policy".to_owned()),
+                prefix_schema_version: Some("schema".to_owned()),
+                principal_id: principal.to_owned(),
+                upstream_id: uuid::Uuid::from_u128(0xa11ce),
+                model: "unknown-horizon-model".to_owned(),
+                ttl: CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(1),
+                cost_micros: Some(1_000),
+                request_ref: Some(source.clone()),
+                event_ref: Some(source.clone()),
+            };
+            seed_cycle_turn(storage, principal, id, source, now, None, vec![unknown]).await;
+            let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
+            assert_eq!(detail["total_renewals_current_cycle"], 2);
+            assert_eq!(detail["retained_renewals"], 3);
+            assert_eq!(detail["turns"][0]["pending"], false);
+            assert_eq!(detail["turns"][1]["pending"], true);
+            assert_eq!(detail["is_last_pending"], true);
+            assert_eq!(detail["follow_up_outcomes"]["pending"], 1);
+            assert_eq!(detail["follow_up_outcomes"]["unknown"], 1);
+            let list = get(
+                &state,
+                &format!("/admin/v1/principals/{principal}/cache-keepalive?limit=10"),
+            )
+            .await;
+            assert_eq!(list["summary"]["evidence_status"], "unknown");
+            assert_eq!(list["summary"]["unknown_cycles"], 1);
+            assert_eq!(list["summary"]["renewing_now"], 1);
+            assert_eq!(list["rows"][0]["retained_renewals"], 3);
+        }
+    }
 }
 
 async fn detail_table_retains_the_rail_cycle_range(

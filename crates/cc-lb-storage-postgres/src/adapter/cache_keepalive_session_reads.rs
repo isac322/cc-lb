@@ -870,7 +870,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             "value exceeds i64::MAX",
         )?;
         let row = sqlx::query(concat!(
-            "WITH active_current_turns AS (
+            "WITH current_cycle_turns AS (
                 SELECT s.principal_id, s.session_key_hash, s.cycle_id, t.source_ref_id,
                        t.upstream_id, t.model,
                        ROW_NUMBER() OVER (
@@ -893,17 +893,21 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                                AND e.event_ref = t.source_ref_id
                                AND e.upstream_id = t.upstream_id
                                AND e.model = t.model
-                               AND (e.cycle_id IS NULL OR e.cycle_id = s.cycle_id)
+                               AND e.cycle_id = s.cycle_id
                          )
                      )
                  )
-                WHERE s.principal_id = $1 AND s.status = 'active' AND s.cycle_id IS NOT NULL
+                WHERE s.principal_id = $1 AND s.cycle_id IS NOT NULL
+                  AND (s.status = 'active' OR (
+                      s.status = 'terminal' AND s.terminal_reason = 'cancelled'
+                      AND s.cancel_reason = 'new_request' AND s.running_since_unix_secs IS NOT NULL
+                  ))
                   AND ($14 IS NULL OR t.ts * 1000 >= $14)
             ),
             current_renewals AS (
                 SELECT a.principal_id, a.session_key_hash, a.source_ref_id,
                        e.cycle_id, e.upstream_id, e.model
-                FROM active_current_turns a
+                FROM current_cycle_turns a
                 JOIN cache_keepalive_evidence e
                   ON e.principal_id = a.principal_id
                  AND e.evidence_kind = 'renewal'
@@ -915,6 +919,10 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND e.prefix_policy_version IS NOT NULL
                  AND e.prefix_schema_version IS NOT NULL
                 WHERE a.rn = 1
+                  AND FLOOR(EXTRACT(EPOCH FROM statement_timestamp()) * 1000)::BIGINT
+                      < e.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("e.ttl"),
+            "
             ),
             attributed_follow_ups AS (
                 SELECT a.principal_id, a.session_key_hash, r.event_ref,

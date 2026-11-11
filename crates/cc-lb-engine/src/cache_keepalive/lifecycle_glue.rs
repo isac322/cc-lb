@@ -118,17 +118,131 @@ enum CompletionDisposition {
     NotRenewable,
 }
 
-#[derive(Clone)]
+struct UnconsumedRequestOwner(Option<RequestStartOrder>);
+
+impl Drop for UnconsumedRequestOwner {
+    fn drop(&mut self) {
+        if let Some(order) = self.0.as_ref() {
+            tracing::debug!(
+                target: "cache_keepalive",
+                session_key_hash = %order.session_key,
+                completion_seq = order.sequence,
+                "completion owner dropped without a terminal outcome; retaining neutral deadline"
+            );
+        }
+    }
+}
+
 pub(crate) struct LifecycleKeepaliveContext {
-    pub(crate) principal: Principal,
-    pub(crate) accounting_key_id: String,
-    pub(crate) cache_metadata: RequestCacheMetadata,
-    pub(crate) upstream_id: Uuid,
-    pub(crate) shaped_body: Bytes,
-    pub(crate) original_body: Bytes,
-    pub(crate) downstream_headers: HeaderMap,
+    principal: Principal,
     pub(crate) request_dispatched_at: Instant,
-    pub(crate) request_start_order: Option<RequestStartOrder>,
+    request_start_order: UnconsumedRequestOwner,
+    renewal: Option<LifecycleKeepaliveRenewal>,
+    compaction_candidate: Option<(SessionKey, bool)>,
+}
+
+struct LifecycleKeepaliveRenewal {
+    accounting_key_id: String,
+    cache_metadata: RequestCacheMetadata,
+    upstream_id: Uuid,
+    shaped_body: Bytes,
+    original_body: Bytes,
+    downstream_headers: HeaderMap,
+}
+
+impl LifecycleKeepaliveContext {
+    pub(crate) fn new(
+        principal: Principal,
+        request_dispatched_at: Instant,
+        request_start_order: Option<RequestStartOrder>,
+    ) -> Self {
+        Self {
+            principal,
+            request_dispatched_at,
+            request_start_order: UnconsumedRequestOwner(request_start_order),
+            renewal: None,
+            compaction_candidate: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_renewal(
+        mut self,
+        accounting_key_id: String,
+        cache_metadata: RequestCacheMetadata,
+        upstream_id: Uuid,
+        shaped_body: Bytes,
+        original_body: Bytes,
+        downstream_headers: HeaderMap,
+    ) -> Self {
+        self.renewal = Some(LifecycleKeepaliveRenewal {
+            accounting_key_id,
+            cache_metadata,
+            upstream_id,
+            shaped_body,
+            original_body,
+            downstream_headers,
+        });
+        self
+    }
+
+    pub(crate) fn with_compaction_candidate(mut self, metadata: &RequestCacheMetadata) -> Self {
+        if !metadata.explicit_auxiliary
+            && is_keepalive_eligible_request_kind(metadata.request_kind.as_deref())
+        {
+            self.compaction_candidate = cache_keepalive_session_key(&self.principal, metadata)
+                .map(|key| (key, allows_sibling_backstop(metadata)));
+        }
+        self
+    }
+
+    pub(crate) fn response_observer(&self) -> Option<StreamingKeepaliveResponse> {
+        self.observes_response()
+            .then(|| StreamingKeepaliveResponse {
+                compaction_only: self.renewal.is_none(),
+                ..StreamingKeepaliveResponse::default()
+            })
+    }
+
+    pub(crate) fn observes_response(&self) -> bool {
+        self.renewal.is_some() || self.compaction_candidate.is_some()
+    }
+
+    pub(crate) fn complete(
+        mut self,
+        keepalive: &LifecycleKeepalive,
+        response: Option<&Value>,
+        cache_anchor_age: Duration,
+        cached_tokens: u64,
+    ) {
+        let request_start_order = self.request_start_order.0.take();
+        if let (Some(renewal), Some(response)) = (self.renewal, response) {
+            keepalive.on_response_completed(
+                response,
+                &self.principal,
+                renewal.accounting_key_id,
+                &renewal.cache_metadata,
+                renewal.upstream_id,
+                renewal.shaped_body,
+                renewal.original_body,
+                &renewal.downstream_headers,
+                cache_anchor_age,
+                cached_tokens,
+                request_start_order,
+            );
+        } else if let Some(order) = request_start_order {
+            keepalive.on_completed_not_renewable(self.principal, order, cache_anchor_age);
+        } else if let Some((session_key, allow_sibling_backstop)) = self.compaction_candidate
+            && response.is_some_and(HeuristicClassifier::is_compaction_boundary)
+        {
+            keepalive.on_compaction_completed(
+                self.principal,
+                session_key,
+                allow_sibling_backstop,
+                cache_anchor_age,
+            );
+        }
+    }
 }
 
 const SESSION_SHARD_COUNT: usize = 64;
@@ -509,6 +623,101 @@ impl LifecycleKeepalive {
         super::record_cancelled(&principal.id, reason);
     }
 
+    fn on_compaction_completed(
+        &self,
+        principal: Principal,
+        session_key: SessionKey,
+        allow_sibling_backstop: bool,
+        cache_anchor_age: Duration,
+    ) {
+        if self.enqueuer.is_none()
+            || !self
+                .dynamic_view
+                .load()
+                .principal_view
+                .get(&principal.id)
+                .and_then(|cached| cached.cache_keepalive())
+                .is_some_and(|config| config.enabled)
+        {
+            return;
+        }
+        let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.record_issued_seq(&session_key, sequence);
+        let this = self.clone();
+        tokio::spawn(async move {
+            if this
+                .dynamic_view
+                .load()
+                .principal_view
+                .get(&principal.id)
+                .and_then(|cached| cached.cache_keepalive())
+                .is_some_and(|config| config.enabled)
+            {
+                this.persist_compaction_boundary(
+                    &principal,
+                    &session_key,
+                    sequence,
+                    cache_anchor_age,
+                    allow_sibling_backstop,
+                    None,
+                )
+                .await;
+            }
+        });
+    }
+
+    async fn persist_compaction_boundary(
+        &self,
+        principal: &Principal,
+        session_key: &SessionKey,
+        completion_seq: u64,
+        cache_anchor_age: Duration,
+        allow_sibling_backstop: bool,
+        request_start_order: Option<&RequestStartOrder>,
+    ) -> CompletionDisposition {
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return CompletionDisposition::NotRenewable;
+        };
+        let mut shard = self.session_shard(session_key).lock().await;
+        let is_latest = self.claim_completion_seq(&mut shard, session_key, completion_seq);
+        if request_start_order.is_some() && !is_latest {
+            return CompletionDisposition::Handled(CancelReason::SessionIdentityChanged);
+        }
+        let expected_generation = if let Some(order) = request_start_order {
+            order.expected_generation
+        } else {
+            match enqueuer
+                .observe_session_generation(&session_key.to_string())
+                .await
+            {
+                Ok(expected) => expected,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive compaction fence: failed to observe session generation"
+                    );
+                    return CompletionDisposition::NotRenewable;
+                }
+            }
+        };
+        if is_latest {
+            let _ = self
+                .cancel_session(
+                    session_key,
+                    principal,
+                    CancelReason::UserTurnDetected,
+                    expected_generation,
+                    cache_anchor_age,
+                    allow_sibling_backstop,
+                    request_start_order,
+                )
+                .await;
+            super::record_cancelled(&principal.id, CancelReason::UserTurnDetected);
+        }
+        CompletionDisposition::Handled(CancelReason::UserTurnDetected)
+    }
     #[allow(clippy::too_many_arguments)]
     async fn persist_completion(
         &self,
@@ -551,44 +760,16 @@ impl LifecycleKeepalive {
             && cache_metadata.cache_breakpoints.is_empty()
             && cache_metadata.cache_keepalive_surface.is_none()
         {
-            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
-            let session_key_hash = session_key.to_string();
-            let mut shard = self.session_shard(&session_key).lock().await;
-            let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-            if request_start_order.is_some() && !is_latest {
-                return CompletionDisposition::Handled(CancelReason::SessionIdentityChanged);
-            }
-            let expected_generation = if let Some(order) = request_start_order {
-                order.expected_generation
-            } else {
-                match enqueuer.observe_session_generation(&session_key_hash).await {
-                    Ok(expected) => expected,
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "cache_keepalive",
-                            principal_id = principal.id.as_str(),
-                            %error,
-                            "skipping cache keep-alive compaction fence: failed to observe session generation"
-                        );
-                        return CompletionDisposition::NotRenewable;
-                    }
-                }
-            };
-            if is_latest {
-                let _ = self
-                    .cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::UserTurnDetected,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                        request_start_order,
-                    )
-                    .await;
-                super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
-            }
-            return CompletionDisposition::Handled(CancelReason::UserTurnDetected);
+            return self
+                .persist_compaction_boundary(
+                    principal,
+                    &session_key,
+                    completion_seq,
+                    cache_anchor_age,
+                    allow_sibling_backstop,
+                    request_start_order,
+                )
+                .await;
         }
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return CompletionDisposition::NotRenewable;
@@ -1093,48 +1274,85 @@ pub(crate) struct StreamingKeepaliveResponse {
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
     sse_observation_disabled: bool,
+    compaction_only: bool,
+    compaction_observed: bool,
 }
 
 impl StreamingKeepaliveResponse {
-    pub(crate) fn observe_emitted(&mut self, bytes: &[u8], max_pending_sse_bytes: usize) {
+    pub(crate) fn control_only() -> Self {
+        Self {
+            compaction_only: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn observe_emitted(
+        &mut self,
+        bytes: &[u8],
+        max_pending_sse_bytes: usize,
+        mut observe_event: impl FnMut(&ParsedSseEvent<'_>),
+    ) {
         if self.sse_observation_disabled {
             return;
         }
-        if self.pending_sse_bytes.is_empty() {
-            let mut offset = 0;
-            while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
-                let end = offset + end;
-                self.observe(&crate::usage_parser::parse_sse_event(&bytes[offset..end]));
-                offset = end;
-            }
-            if offset < bytes.len() {
-                let pending = &bytes[offset..];
-                if pending.len() > max_pending_sse_bytes {
+        let mut bytes = bytes;
+        if !self.pending_sse_bytes.is_empty() {
+            // The longest event delimiter is CRLF CRLF. Check its possible
+            // boundary overlap before scanning the incoming chunk directly.
+            let suffix_len = self.pending_sse_bytes.len().min(3);
+            let prefix_len = bytes.len().min(3);
+            let mut boundary = [0_u8; 6];
+            boundary[..suffix_len].copy_from_slice(
+                &self.pending_sse_bytes[self.pending_sse_bytes.len() - suffix_len..],
+            );
+            boundary[suffix_len..suffix_len + prefix_len].copy_from_slice(&bytes[..prefix_len]);
+            let completing_len =
+                crate::usage_parser::find_sse_event_end(&boundary[..suffix_len + prefix_len])
+                    .filter(|end| *end > suffix_len)
+                    .map(|end| end - suffix_len)
+                    .or_else(|| crate::usage_parser::find_sse_event_end(bytes));
+            let Some(completing_len) = completing_len else {
+                if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes
+                {
+                    self.pending_sse_bytes.clear();
                     self.sse_observation_disabled = true;
                 } else {
-                    self.pending_sse_bytes.extend_from_slice(pending);
+                    self.pending_sse_bytes.extend_from_slice(bytes);
                 }
+                return;
+            };
+
+            // Join only the split event, not the rest of a potentially large
+            // batch. Complete events are observed before budgeting the tail.
+            let mut event_bytes = std::mem::take(&mut self.pending_sse_bytes);
+            event_bytes.extend_from_slice(&bytes[..completing_len]);
+            {
+                let event = crate::usage_parser::parse_sse_event(&event_bytes);
+                observe_event(&event);
+                self.observe(&event);
             }
-            return;
+            if event_bytes.capacity() <= max_pending_sse_bytes {
+                event_bytes.clear();
+                self.pending_sse_bytes = event_bytes;
+            }
+            bytes = &bytes[completing_len..];
         }
 
-        if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes {
-            self.pending_sse_bytes.clear();
-            self.sse_observation_disabled = true;
-            return;
-        }
-        self.pending_sse_bytes.extend_from_slice(bytes);
         let mut offset = 0;
-        while let Some(relative_end) =
-            crate::usage_parser::find_sse_event_end(&self.pending_sse_bytes[offset..])
-        {
-            let end = offset + relative_end;
-            let event_bytes = self.pending_sse_bytes[offset..end].to_vec();
-            self.observe(&crate::usage_parser::parse_sse_event(&event_bytes));
+        while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
+            let end = offset + end;
+            let event = crate::usage_parser::parse_sse_event(&bytes[offset..end]);
+            observe_event(&event);
+            self.observe(&event);
             offset = end;
         }
-        if offset > 0 {
-            self.pending_sse_bytes.drain(..offset);
+        if offset < bytes.len() {
+            let pending = &bytes[offset..];
+            if pending.len() > max_pending_sse_bytes {
+                self.sse_observation_disabled = true;
+            } else {
+                self.pending_sse_bytes.extend_from_slice(pending);
+            }
         }
     }
 
@@ -1142,6 +1360,23 @@ impl StreamingKeepaliveResponse {
         let Ok(Some(value)) = event.value() else {
             return;
         };
+        if self.compaction_only {
+            self.compaction_observed |= HeuristicClassifier::is_compaction_boundary(value)
+                || value
+                    .get("message")
+                    .is_some_and(HeuristicClassifier::is_compaction_boundary)
+                || value
+                    .get("content_block")
+                    .and_then(|block| block.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("compaction")
+                || value
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    == Some("compaction");
+            return;
+        }
         if matches!(
             value.get("type").and_then(Value::as_str),
             Some("response.completed" | "response.incomplete")
@@ -1192,6 +1427,11 @@ impl StreamingKeepaliveResponse {
     }
 
     pub(crate) fn into_value(self) -> Option<Value> {
+        if self.compaction_only {
+            return self
+                .compaction_observed
+                .then(|| serde_json::json!({"stop_reason": "compaction"}));
+        }
         if self.openai_response.is_some() {
             return self.openai_response;
         }
@@ -1423,6 +1663,52 @@ mod tests {
         SigningCapability, UpstreamError,
     };
     use http::HeaderValue;
+
+    #[test]
+    fn compaction_only_stream_observer_retains_no_renewal_snapshot() {
+        for terminal in [
+            b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"compaction\"}}\n\n".as_slice(),
+            b"event: content_block_start\ndata: {\"content_block\":{\"type\":\"compaction\",\"content\":\"summary\"}}\n\n".as_slice(),
+        ] {
+            for emitted in [false, true] {
+                let mut response = StreamingKeepaliveResponse {
+                    compaction_only: true,
+                    ..StreamingKeepaliveResponse::default()
+                };
+                response.observe(&crate::usage_parser::parse_sse_event(
+                    b"event: message_start\ndata: {\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"large response\"}],\"usage\":{\"input_tokens\":12}}}\n\n",
+                ));
+                if emitted {
+                    let split = terminal.len() / 2;
+                    response.observe_emitted(&terminal[..split], 1024, |_| {});
+                    response.observe_emitted(&terminal[split..], 1024, |_| {});
+                } else {
+                    response.observe(&crate::usage_parser::parse_sse_event(terminal));
+                }
+                assert!(response.message.is_none());
+                assert!(response.openai_response.is_none());
+                assert!(response.content_blocks.is_empty());
+                assert!(response.stop_reason.is_none());
+                assert_eq!(response.into_value(), Some(serde_json::json!({"stop_reason": "compaction"})));
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_only_stream_observer_ignores_normal_tool_completion() {
+        let mut response = StreamingKeepaliveResponse {
+            compaction_only: true,
+            ..StreamingKeepaliveResponse::default()
+        };
+        response.observe_emitted(
+            b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"Bash\"}}\n\n\
+              event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
+            |_| {},
+        );
+        assert!(response.into_value().is_none());
+    }
 
     fn completion_ticket(sequence: u64) -> CacheKeepaliveCompletionTicket {
         CacheKeepaliveCompletionTicket {
@@ -2213,8 +2499,9 @@ mod tests {
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"ask\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
             1024,
+            |_| {},
         );
-        response.observe_emitted(b"", 1024);
+        response.observe_emitted(b"", 1024, |_| {});
         let value = response.into_value().expect("emitted message");
         assert_eq!(
             value["content"],
@@ -2232,11 +2519,13 @@ mod tests {
             b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"que",
             1024,
+            |_| {},
         );
         response.observe_emitted(
             b"stion\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
             1024,
+            |_| {},
         );
 
         let value = response
@@ -2249,8 +2538,8 @@ mod tests {
     #[test]
     fn emitted_sse_partial_buffer_disables_observation_at_budget() {
         let mut response = StreamingKeepaliveResponse::default();
-        response.observe_emitted(b"data: ", 4);
-        response.observe_emitted(b"xxxxx", 4);
+        response.observe_emitted(b"data: ", 4, |_| {});
+        response.observe_emitted(b"xxxxx", 4, |_| {});
 
         assert!(response.sse_observation_disabled);
         assert!(response.pending_sse_bytes.is_empty());

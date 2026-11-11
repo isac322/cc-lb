@@ -179,6 +179,20 @@ async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
 
 #[tokio::test]
 async fn compaction_response_without_current_breakpoint_fences_generation_json_and_sse() {
+    assert_no_breakpoint_compaction(false, &[false, true]).await;
+}
+
+#[tokio::test]
+async fn shape_fallback_without_breakpoint_buffered_compaction_fences_generation() {
+    assert_no_breakpoint_compaction(true, &[false]).await;
+}
+
+#[tokio::test]
+async fn shape_fallback_without_breakpoint_sse_compaction_fences_generation() {
+    assert_no_breakpoint_compaction(true, &[true]).await;
+}
+
+async fn assert_no_breakpoint_compaction(shape_fallback: bool, streaming_modes: &[bool]) {
     for (stop_reason, content) in [
         (
             "compaction",
@@ -192,7 +206,7 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
             ]),
         ),
     ] {
-        for streaming in [false, true] {
+        for &streaming in streaming_modes {
             let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
             let principal = principal_with_keepalive();
             let main_headers = [("x-claude-code-session-id", "no-breakpoint")];
@@ -214,13 +228,14 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
                 .expect("response JSON"),
             );
             let expected_body = response_body.clone();
-            let (response, _) = observed_keepalive_response(
+            let (response, _) = observed_keepalive_response_with_shape(
                 response_body,
                 Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
                 principal,
                 no_breakpoint_request(),
                 &main_headers,
                 streaming,
+                shape_fallback,
             )
             .await;
             assert_keepalive_response_fidelity(response, &expected_body, streaming).await;
@@ -1254,11 +1269,52 @@ async fn observed_keepalive_response(
     request_headers: &[(&str, &str)],
     streaming: bool,
 ) -> (Response<Body>, Option<String>) {
+    observed_keepalive_response_with_shape(
+        upstream_body,
+        enqueuer,
+        principal,
+        request_body,
+        request_headers,
+        streaming,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observed_keepalive_response_with_shape(
+    upstream_body: Bytes,
+    enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
+    principal: PrincipalRecord,
+    request_body: Bytes,
+    request_headers: &[(&str, &str)],
+    streaming: bool,
+    shape_fallback: bool,
+) -> (Response<Body>, Option<String>) {
     let principal_name = principal.name.clone();
-    let principal_view = Arc::new(PrincipalView::from_db(
-        &[principal],
-        std::collections::HashMap::new(),
-    ));
+    let mut chains = HashMap::new();
+    if shape_fallback {
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, RouterPipelineCache, ShapePluginCache,
+        };
+        chains.insert(
+            principal_name.clone(),
+            (
+                Some(Arc::new(RouterPipelineCache::empty(
+                    cc_lb_domain::TerminalStrategy::FirstPick,
+                ))),
+                DialectCache::Explicit(ShapePluginCache {
+                    dialect: Arc::new(FailingKeepaliveShape {
+                        fail: true,
+                        transform_sse: false,
+                        on_shape: Mutex::new(None),
+                        buffered_transform: None,
+                    }),
+                }),
+            ),
+        );
+    }
+    let principal_view = Arc::new(PrincipalView::from_db(&[principal], chains));
     let mut authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
     authn.authn = common::managed_authn(&principal_name);
     let dispatch: Arc<dyn UpstreamDispatch> = if streaming {
@@ -1364,8 +1420,42 @@ enum CompletionFallbackResponse {
     UnsupportedEncoding,
     AffinityRejected,
     SseTerminalOnly,
+    ShapeFallbackBuffered,
+    ShapeFallbackSse,
+    ShapeFallbackTransformedSse,
+    ShapeFallbackSseDropAfterTerminal,
+    ShapeFallbackSseAbortBeforeTerminal,
+    ShapeFallbackBodyFailure,
+    ShapeFallbackTransportFailure,
+    ShapeFallbackAbort,
+    DynamicStartBuffered,
+    DynamicStartSse,
     SseEmpty,
     SseAffinityRejected,
+    HttpFailure,
+    ProviderErrorEnvelope,
+    ProviderFailedEnvelope,
+    ProviderErrorWithoutDetails,
+    ProviderFailedWithoutDetails,
+    ContextWindowExceeded,
+    SseRefusal,
+    SseContextWindowExceeded,
+    SseRefusalWithoutTerminal,
+    SseContextWindowExceededWithoutTerminal,
+    SseRefusalAbortBeforeTerminal,
+    SseProviderError,
+    SseProviderFailed,
+    SseHttpErrorEof,
+    SseHttpErrorPartialEof,
+    SseHttpErrorTruncatedGzipEof,
+    HttpErrorStreamBodyEof,
+    SseProviderErrorIncomplete,
+    SseRedirectTerminal,
+    BufferedHookProviderError,
+    BufferedHookFailure,
+    BufferedCapFinalFrame,
+    BufferedCapBeforeFinalFrame,
+    AbnormalStop,
     BodyFailure,
     TransportFailure,
     ClientAbort,
@@ -1405,7 +1495,55 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
             CompletionFallbackResponse::SseAffinityRejected => {
                 streaming_body_from_message(&self.pending.body)
             }
-            CompletionFallbackResponse::BodyFailure => {
+            CompletionFallbackResponse::SseProviderError => Bytes::from_static(
+                b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fixture provider failed\"}}\n\n",
+            ),
+            CompletionFallbackResponse::SseProviderFailed => Bytes::from_static(
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"fixture provider failed\"}}}\n\n",
+            ),
+            CompletionFallbackResponse::SseHttpErrorEof => Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\n",
+            ),
+            CompletionFallbackResponse::SseHttpErrorPartialEof => Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":",
+            ),
+            CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof => {
+                use std::io::{Read as _, Write as _};
+                let plaintext = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\n";
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(plaintext).expect("gzip fixture writes");
+                let mut compressed = encoder.finish().expect("gzip fixture finishes");
+                compressed.truncate(compressed.len() - 8);
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(compressed.as_slice())
+                    .read_to_end(&mut decoded)
+                    .expect_err("missing CRC32/ISIZE trailer is a decode failure");
+                assert_eq!(decoded, plaintext, "nonterminal event decodes before trailer failure");
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("gzip"),
+                );
+                Bytes::from(compressed)
+            }
+            CompletionFallbackResponse::SseProviderErrorIncomplete => Bytes::from_static(
+                b"event: error\ndata: {\"type\":\"error\",\"error\":",
+            ),
+            CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRedirectTerminal => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+                let body = streaming_body_from_message(&self.pending.body);
+                let terminal = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                assert!(body.ends_with(terminal), "fixture must remove only message_stop");
+                body.slice(..body.len() - terminal.len())
+            }
+            CompletionFallbackResponse::BodyFailure
+            | CompletionFallbackResponse::ShapeFallbackBodyFailure => {
                 let partial = self.pending.body.clone();
                 *response.body_mut() = Body::from_stream(async_stream::stream! {
                     yield Ok::<Bytes, std::io::Error>(partial);
@@ -1413,12 +1551,35 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
                 });
                 return Ok(response);
             }
-            CompletionFallbackResponse::TransportFailure => {
+            CompletionFallbackResponse::TransportFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure => {
                 return Err(DispatchError::Transport {
                     source: Box::new(std::io::Error::other("fixture upstream connection reset")),
                 });
             }
-            CompletionFallbackResponse::AffinityRejected
+            CompletionFallbackResponse::ShapeFallbackSse
+            | CompletionFallbackResponse::DynamicStartSse
+            | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+            | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::ShapeFallbackBuffered
+            | CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::ShapeFallbackAbort
+            | CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+            | CompletionFallbackResponse::ContextWindowExceeded
+            | CompletionFallbackResponse::AbnormalStop
             | CompletionFallbackResponse::ClientAbort => self.pending.body.clone(),
         };
         if matches!(
@@ -1426,13 +1587,67 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
             CompletionFallbackResponse::SseTerminalOnly
                 | CompletionFallbackResponse::SseEmpty
                 | CompletionFallbackResponse::SseAffinityRejected
+                | CompletionFallbackResponse::SseRefusal
+                | CompletionFallbackResponse::SseContextWindowExceeded
+                | CompletionFallbackResponse::SseRefusalWithoutTerminal
+                | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::SseProviderError
+                | CompletionFallbackResponse::SseProviderFailed
+                | CompletionFallbackResponse::SseHttpErrorEof
+                | CompletionFallbackResponse::SseHttpErrorPartialEof
+                | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+                | CompletionFallbackResponse::SseProviderErrorIncomplete
+                | CompletionFallbackResponse::SseRedirectTerminal
+                | CompletionFallbackResponse::ShapeFallbackSse
+                | CompletionFallbackResponse::DynamicStartSse
+                | CompletionFallbackResponse::ShapeFallbackTransformedSse
+                | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
         ) {
             response.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("text/event-stream"),
             );
         }
-        *response.body_mut() = Body::from(body);
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::HttpFailure
+                | CompletionFallbackResponse::SseHttpErrorEof
+                | CompletionFallbackResponse::SseHttpErrorPartialEof
+                | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+                | CompletionFallbackResponse::HttpErrorStreamBodyEof
+        ) {
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::SseRedirectTerminal
+        ) {
+            *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+        }
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+        ) {
+            let body = if matches!(
+                self.response,
+                CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+            ) {
+                Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"content\":[]}}\n\n")
+            } else {
+                body
+            };
+            *response.body_mut() = Body::from_stream(async_stream::stream! {
+                yield Ok::<Bytes, std::io::Error>(body);
+                std::future::pending::<()>().await;
+            });
+        } else {
+            *response.body_mut() = Body::from(body);
+        }
         Ok(response)
     }
 }
@@ -1483,6 +1698,9 @@ async fn completion_fallback_incomplete_transport_body_and_abort_remain_neutral(
     for response in [
         CompletionFallbackResponse::SseEmpty,
         CompletionFallbackResponse::SseAffinityRejected,
+        CompletionFallbackResponse::SseRefusalWithoutTerminal,
+        CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal,
+        CompletionFallbackResponse::SseRefusalAbortBeforeTerminal,
         CompletionFallbackResponse::BodyFailure,
         CompletionFallbackResponse::TransportFailure,
         CompletionFallbackResponse::ClientAbort,
@@ -1492,6 +1710,374 @@ async fn completion_fallback_incomplete_transport_body_and_abort_remain_neutral(
         }
     }
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_buffered_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::ShapeFallbackBuffered,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_sse_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        for response in [
+            CompletionFallbackResponse::ShapeFallbackSse,
+            CompletionFallbackResponse::ShapeFallbackTransformedSse,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal,
+        ] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_incomplete_remains_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ShapeFallbackBodyFailure,
+        CompletionFallbackResponse::ShapeFallbackTransportFailure,
+        CompletionFallbackResponse::ShapeFallbackAbort,
+        CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_dynamic_start_without_initial_tracking_retires_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::DynamicStartBuffered,
+        CompletionFallbackResponse::DynamicStartSse,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_http_failure_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [CompletionFallbackResponse::HttpFailure] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_abnormal_stop_retires_captured_owners() {
+    let mut violations = Vec::new();
+    // R6's refusal-neutral expectation confused an unsuccessful outcome with
+    // absence of terminal evidence. Fully collected messages are terminal.
+    for response in [
+        CompletionFallbackResponse::AbnormalStop,
+        CompletionFallbackResponse::ContextWindowExceeded,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_provider_error_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ProviderErrorEnvelope,
+        CompletionFallbackResponse::ProviderFailedEnvelope,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_declared_terminal_without_details_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ProviderErrorWithoutDetails,
+        CompletionFallbackResponse::ProviderFailedWithoutDetails,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_declared_terminal_lookalike_content_remains_renewable() {
+    for lookalike in [
+        json!({"type": "error", "error": null}),
+        json!({"object": "response", "status": "failed", "error": null}),
+    ] {
+        let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+        let principal = principal_with_keepalive();
+        let headers = [
+            ("x-claude-code-session-id", "terminal-envelope-lookalike"),
+            ("x-claude-code-agent-id", "main"),
+        ];
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+        let before = enqueuer.snapshot();
+        let mut message: serde_json::Value =
+            serde_json::from_slice(&agent_turn_body("msg_error_lookalike", "Bash", 12_000))
+                .expect("ordinary renewable message");
+        message["content"]
+            .as_array_mut()
+            .expect("message content")
+            .push(json!({"type": "text", "text": lookalike.to_string()}));
+        let body = Bytes::from(serde_json::to_vec(&message).expect("lookalike JSON"));
+        let (response, _) = observed_keepalive_response(
+            body.clone(),
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal,
+            standard_keepalive_request(),
+            &headers,
+            false,
+        )
+        .await;
+        assert_keepalive_response_fidelity(response, &body, false).await;
+        enqueuer.wait_for_enqueue().await;
+        let after = enqueuer.snapshot();
+        let operations = &after.operations[before.operations.len()..];
+        assert!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, KeepaliveOperation::Enqueue(_, _))),
+            "error-shaped text is not a declared terminal error: {operations:?}"
+        );
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation,
+                KeepaliveOperation::Cancel(_, _, reason) if reason.as_str() == "completed_not_renewable"
+            )),
+            "ordinary success with error-shaped content remains renewable: {operations:?}"
+        );
+        assert_ne!(after.generations, before.generations);
+        eprintln!("lookalike content remains renewable: {lookalike}, operations={operations:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_sse_abnormal_terminal_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseRefusal,
+        CompletionFallbackResponse::SseContextWindowExceeded,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_provider_terminal_and_http_error_eof_retire_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseProviderError,
+        CompletionFallbackResponse::SseProviderFailed,
+        CompletionFallbackResponse::SseHttpErrorEof,
+        CompletionFallbackResponse::HttpErrorStreamBodyEof,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_redirect_terminal_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::SseRedirectTerminal,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_provider_terminal_incomplete_controls_remain_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseProviderErrorIncomplete,
+        CompletionFallbackResponse::SseRefusalWithoutTerminal,
+        CompletionFallbackResponse::SseAffinityRejected,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_http_error_sse_unvalidated_eof_remains_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseHttpErrorPartialEof,
+        CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_hook_failure_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::BufferedHookProviderError,
+        CompletionFallbackResponse::BufferedHookFailure,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_cap_final_frame_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::BufferedCapFinalFrame,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_cap_before_final_frame_remains_neutral() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::BufferedCapBeforeFinalFrame,
+                replace,
+                false,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+struct FailingKeepaliveShape {
+    fail: bool,
+    transform_sse: bool,
+    on_shape: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    buffered_transform: Option<CompletionFallbackResponse>,
+}
+
+impl cc_lb_upstream::UpstreamDialect for FailingKeepaliveShape {
+    fn shape(
+        &self,
+        context: &cc_lb_upstream::DialectShapeContext,
+        _upstream: &cc_lb_domain::Upstream,
+        _principal: &cc_lb_domain::Principal,
+        builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+    ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+        if let Some(on_shape) = self.on_shape.lock().expect("shape callback").take() {
+            on_shape();
+        }
+        if self.fail {
+            return Err(cc_lb_upstream::DialectError::UnsupportedRequest {
+                reason: "fixture shape failure exercises raw passthrough".to_owned(),
+            });
+        }
+        Ok(builder.shaped_request(
+            url::Url::parse("http://upstream.local/v1/messages").expect("fixture URL"),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
+        ))
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn cc_lb_upstream::SseEventTransformHook> {
+        self.transform_sse.then_some(self)
+    }
+
+    fn response_transform_hook(&self) -> Option<&dyn cc_lb_upstream::ResponseTransformHook> {
+        self.buffered_transform
+            .map(|_| self as &dyn cc_lb_upstream::ResponseTransformHook)
+    }
+}
+
+impl cc_lb_upstream::SseEventTransformHook for FailingKeepaliveShape {
+    fn transform_sse_event(
+        &self,
+        _request: cc_lb_upstream::TransformSseEventRequest,
+    ) -> Result<cc_lb_upstream::TransformSseEventResult, cc_lb_upstream::ResponseTransformError>
+    {
+        Ok(cc_lb_upstream::TransformSseEventResult::Unchanged)
+    }
+}
+
+impl cc_lb_upstream::ResponseTransformHook for FailingKeepaliveShape {
+    fn transform_response(
+        &self,
+        request: cc_lb_upstream::TransformResponseRequest,
+    ) -> Result<cc_lb_upstream::TransformResponseResult, cc_lb_upstream::ResponseTransformError>
+    {
+        let upstream: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("hook receives fully collected JSON");
+        assert_eq!(request.response_status, StatusCode::OK);
+        assert_eq!(upstream["type"], "message");
+        assert_eq!(upstream["stop_reason"], "tool_use");
+        match self.buffered_transform {
+            Some(CompletionFallbackResponse::BufferedHookProviderError) => {
+                Ok(cc_lb_upstream::TransformResponseResult::Replace {
+                    status: None,
+                    headers: None,
+                    body: Some(Bytes::from_static(
+                        br#"{"type":"error","error":{"type":"api_error","message":"fixture buffered hook error"}}"#,
+                    )),
+                })
+            }
+            Some(CompletionFallbackResponse::BufferedHookFailure) => {
+                Err(cc_lb_upstream::ResponseTransformError::Trap {
+                    reason: "fixture buffered hook failed after full collection".to_owned(),
+                })
+            }
+            _ => unreachable!("buffered hook is installed only for its declared fixture modes"),
+        }
+    }
 }
 
 async fn assert_completion_fallback(
@@ -1523,7 +2109,13 @@ async fn assert_completion_fallback(
     let mut message: serde_json::Value =
         serde_json::from_slice(&agent_turn_body("msg_fallback", "Bash", 12_000))
             .expect("completion fixture");
-    message["container"] = json!({"id": "container-completion-fallback"});
+    if matches!(
+        response,
+        CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        message["container"] = json!({"id": "container-completion-fallback"});
+    }
     if matches!(response, CompletionFallbackResponse::SseAffinityRejected) {
         message["content"]
             .as_array_mut()
@@ -1532,6 +2124,50 @@ async fn assert_completion_fallback(
                 "type": "web_search_tool_result",
                 "content": [{"encrypted_content": "container-completion-fallback"}]
             }));
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        // Larger than the response cap, while the request stays below it.
+        message["content"][0]["input"]["padding"] = json!("x".repeat(8_192));
+    }
+    match response {
+        CompletionFallbackResponse::AbnormalStop
+        | CompletionFallbackResponse::SseRefusal
+        | CompletionFallbackResponse::SseRefusalWithoutTerminal
+        | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+            message["stop_reason"] = json!("refusal");
+        }
+        CompletionFallbackResponse::ContextWindowExceeded
+        | CompletionFallbackResponse::SseContextWindowExceeded
+        | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal => {
+            message["stop_reason"] = json!("model_context_window_exceeded");
+        }
+        CompletionFallbackResponse::ProviderErrorEnvelope
+        | CompletionFallbackResponse::HttpFailure
+        | CompletionFallbackResponse::HttpErrorStreamBodyEof => {
+            message = json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": "fixture provider failed"}
+            });
+        }
+        CompletionFallbackResponse::ProviderFailedEnvelope => {
+            message = json!({
+                "id": "resp_failed",
+                "object": "response",
+                "status": "failed",
+                "error": {"type": "server_error", "code": "server_error", "message": "fixture provider failed"}
+            });
+        }
+        CompletionFallbackResponse::ProviderErrorWithoutDetails => {
+            message = json!({"type": "error", "error": null});
+        }
+        CompletionFallbackResponse::ProviderFailedWithoutDetails => {
+            message = json!({"object": "response", "status": "failed", "error": null});
+        }
+        _ => {}
     }
     let dispatch = Arc::new(CompletionFallbackDispatch {
         pending: PendingFollowupDispatch {
@@ -1543,18 +2179,107 @@ async fn assert_completion_fallback(
         },
         response,
     });
-    let mut lifecycle = lifecycle_with_parts(
-        TestAuthn::with_principal_view(
-            TestState::default(),
-            Arc::new(PrincipalView::from_db(
-                std::slice::from_ref(&principal),
-                HashMap::new(),
-            )),
+    let dynamic_start = matches!(
+        response,
+        CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::DynamicStartSse
+    );
+    let dialect = Arc::new(FailingKeepaliveShape {
+        fail: !dynamic_start
+            && !matches!(
+                response,
+                CompletionFallbackResponse::BufferedHookProviderError
+                    | CompletionFallbackResponse::BufferedHookFailure
+                    | CompletionFallbackResponse::BufferedCapFinalFrame
+                    | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+            ),
+        transform_sse: matches!(
+            response,
+            CompletionFallbackResponse::ShapeFallbackTransformedSse
         ),
-        dispatch.clone(),
-        LifecycleConfig::default(),
-    )
-    .with_cache_keepalive_enqueuer(enqueuer.clone());
+        on_shape: Mutex::new(None),
+        buffered_transform: matches!(
+            response,
+            CompletionFallbackResponse::BufferedHookProviderError
+                | CompletionFallbackResponse::BufferedHookFailure
+                | CompletionFallbackResponse::BufferedCapFinalFrame
+                | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+        )
+        .then_some(response),
+    });
+    let mut chains = HashMap::new();
+    if matches!(
+        response,
+        CompletionFallbackResponse::ShapeFallbackBuffered
+            | CompletionFallbackResponse::ShapeFallbackSse
+            | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+            | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+            | CompletionFallbackResponse::ShapeFallbackBodyFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure
+            | CompletionFallbackResponse::ShapeFallbackAbort
+            | CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::DynamicStartSse
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        chains.insert(
+            principal.name.clone(),
+            (
+                Some(Arc::new(
+                    cc_lb_control::api_keys::principal_view::RouterPipelineCache::empty(
+                        cc_lb_domain::TerminalStrategy::FirstPick,
+                    ),
+                )),
+                cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                    cc_lb_control::api_keys::principal_view::ShapePluginCache {
+                        dialect: dialect.clone(),
+                    },
+                ),
+            ),
+        );
+    }
+    let initial_principal = if dynamic_start {
+        let mut initial = principal.clone();
+        initial.cache_keepalive = None;
+        initial
+    } else {
+        principal.clone()
+    };
+    let authn = TestAuthn::with_principal_view(
+        TestState::default(),
+        Arc::new(PrincipalView::from_db(&[initial_principal], chains.clone())),
+    );
+    let config = if matches!(
+        response,
+        CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        assert!(dispatch.pending.body.len() > 4_096);
+        assert!(standard_keepalive_request().len() < 4_096);
+        LifecycleConfig {
+            messages_body_cap_bytes: 4_096,
+            ..LifecycleConfig::default()
+        }
+    } else {
+        LifecycleConfig::default()
+    };
+    let mut lifecycle = lifecycle_with_parts(authn, dispatch.clone(), config)
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+    if dynamic_start {
+        let holder = lifecycle.dynamic_view();
+        let enabled = cc_lb_control::DynamicViewBuilder::from_view(&holder.load())
+            .principal_view(Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal),
+                chains,
+            )))
+            .build();
+        *dialect.on_shape.lock().expect("shape callback") = Some(Box::new(move || {
+            holder.store(enabled);
+        }));
+    }
     if matches!(
         response,
         CompletionFallbackResponse::AffinityRejected
@@ -1567,6 +2292,19 @@ async fn assert_completion_fallback(
     let bus = Arc::new(cc_lb_control::InMemoryBus::new());
     let mut events = bus.attach_lifecycle_assembler(128);
     lifecycle = lifecycle.with_event_bus(bus);
+    let request_body = if matches!(
+        response,
+        CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&standard_keepalive_request()).expect("request fixture");
+        body["stream"] = json!(true);
+        Bytes::from(serde_json::to_vec(&body).expect("stream request"))
+    } else {
+        standard_keepalive_request()
+    };
     // No class/agent header: request-start must capture the generic sibling as
     // well as the primary, before upstream headers or body become available.
     let request = http::Request::builder()
@@ -1575,7 +2313,7 @@ async fn assert_completion_fallback(
         .header("x-api-key", managed_api_key())
         .header("anthropic-version", "2023-06-01")
         .header("x-claude-code-session-id", "completion-fallback")
-        .body(standard_keepalive_request())
+        .body(request_body)
         .expect("fallback request");
     let auth = lifecycle
         .authenticate(request.headers())
@@ -1602,18 +2340,66 @@ async fn assert_completion_fallback(
     }
     let before_completion = enqueuer.snapshot();
     let operations_start = before_completion.operations.len();
-    if matches!(response, CompletionFallbackResponse::ClientAbort) {
+    if matches!(
+        response,
+        CompletionFallbackResponse::ClientAbort | CompletionFallbackResponse::ShapeFallbackAbort
+    ) {
         drop(handling);
     } else {
         dispatch.pending.release.notify_one();
         let response_body = handling.await.expect("HTTP lifecycle response");
-        let (status, _headers, body) = collect_body(response_body).await;
+        let (status, _headers, body) = if matches!(
+            response,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+        ) {
+            use http_body_util::BodyExt as _;
+            let status = response_body.status();
+            let headers = response_body.headers().clone();
+            let mut downstream = response_body.into_body();
+            let after_terminal = matches!(
+                response,
+                CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal,
+            );
+            let body = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut body = Vec::new();
+                loop {
+                    let frame = downstream
+                        .frame()
+                        .await
+                        .expect("SSE frame")
+                        .expect("successful SSE frame")
+                        .into_data()
+                        .expect("data frame");
+                    body.extend_from_slice(&frame);
+                    let terminal = body
+                        .windows(b"message_stop".len())
+                        .any(|window| window == b"message_stop");
+                    if terminal || !after_terminal {
+                        assert_eq!(
+                            terminal, after_terminal,
+                            "drop occurs on the intended side of semantic completion"
+                        );
+                        break Bytes::from(body);
+                    }
+                }
+            })
+            .await
+            .expect("semantic terminal is delivered without waiting for EOF");
+            drop(downstream);
+            (status, headers, body)
+        } else {
+            collect_body(response_body).await
+        };
         match response {
             CompletionFallbackResponse::AffinityRejected => {
                 assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
                 assert!(!String::from_utf8_lossy(&body).contains("container-completion-fallback"));
             }
-            CompletionFallbackResponse::BodyFailure
+            CompletionFallbackResponse::ShapeFallbackBodyFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure
+            | CompletionFallbackResponse::BodyFailure
             | CompletionFallbackResponse::TransportFailure => {
                 assert_eq!(status, StatusCode::BAD_GATEWAY);
             }
@@ -1644,6 +2430,157 @@ async fn assert_completion_fallback(
             CompletionFallbackResponse::UnsupportedEncoding => {
                 assert_eq!(status, StatusCode::OK);
                 assert_eq!(body, dispatch.pending.body);
+            }
+            CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "HTTP error body remains truthful"
+                );
+            }
+            CompletionFallbackResponse::SseProviderError
+            | CompletionFallbackResponse::SseProviderFailed => {
+                assert_eq!(status, StatusCode::OK);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("fixture provider failed"),
+                    "native terminal error is delivered"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "provider errors supply their own terminal proof"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("msg_http_error"),
+                    "HTTP error SSE body is fully drained"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "HTTP error EOF is independent terminal proof"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorPartialEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("msg_http_error"),
+                    "complete nonterminal prefix is relayed"
+                );
+                assert!(
+                    body.contains("content_block_delta"),
+                    "trailing partial event is exercised"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "partial stream has no native terminal"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(_headers[http::header::CONTENT_ENCODING], "gzip");
+                use std::io::Read as _;
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(body.as_ref())
+                    .read_to_end(&mut decoded)
+                    .expect_err("downstream retains the truncated upstream gzip member");
+                let decoded = String::from_utf8_lossy(&decoded);
+                assert!(decoded.contains("msg_http_error"));
+                assert!(
+                    !decoded.contains("message_stop"),
+                    "decoded stream has no native terminal"
+                );
+            }
+            CompletionFallbackResponse::SseProviderErrorIncomplete => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(
+                    !String::from_utf8_lossy(&body).contains("fixture provider failed"),
+                    "incomplete declaration never supplied a provider terminal"
+                );
+            }
+            CompletionFallbackResponse::BufferedHookProviderError => {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "hook does not replace upstream status"
+                );
+                assert_eq!(
+                    body.as_ref(),
+                    br#"{"type":"error","error":{"type":"api_error","message":"fixture buffered hook error"}}"#,
+                    "replacement error body is preserved"
+                );
+            }
+            CompletionFallbackResponse::BufferedHookFailure => {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "hook failure preserves fail-open status"
+                );
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "hook failure preserves original body"
+                );
+            }
+            CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                let error: serde_json::Value =
+                    serde_json::from_slice(&body).expect("body-cap failure response JSON");
+                assert_eq!(error["type"], "error");
+                assert_eq!(error["error"]["type"], "api_error");
+                assert_eq!(
+                    error["error"]["message"],
+                    "upstream response body could not be read"
+                );
+            }
+            CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::AbnormalStop
+            | CompletionFallbackResponse::ContextWindowExceeded => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "buffered terminal body is preserved"
+                );
+            }
+            CompletionFallbackResponse::SseRedirectTerminal => {
+                assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+                assert_eq!(body, streaming_body_from_message(&dispatch.pending.body));
+                assert!(
+                    body.ends_with(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+                    "non-success status remains non-renewable despite explicit successful terminal"
+                );
+            }
+            CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+                assert_eq!(status, StatusCode::OK);
+                let terminal = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                let terminal_seen = body.windows(terminal.len()).any(|part| part == terminal);
+                assert_eq!(
+                    terminal_seen,
+                    matches!(
+                        response,
+                        CompletionFallbackResponse::SseRefusal
+                            | CompletionFallbackResponse::SseContextWindowExceeded
+                    ),
+                    "abnormal stop hint must not stand in for explicit message_stop"
+                );
+                let stop = message["stop_reason"]
+                    .as_str()
+                    .expect("abnormal fixture stop");
+                assert!(
+                    String::from_utf8_lossy(&body).contains(stop),
+                    "the abnormal stop hint must be delivered in both controls and terminals"
+                );
             }
             _ => assert_eq!(status, StatusCode::OK),
         }
@@ -1731,6 +2668,41 @@ async fn assert_completion_fallback(
         if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated { reason, .. } = event {
             terminal_reason = Some(reason);
         }
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::AbnormalStop
+            | CompletionFallbackResponse::ContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+            | CompletionFallbackResponse::SseProviderError
+            | CompletionFallbackResponse::SseProviderFailed
+            | CompletionFallbackResponse::SseHttpErrorEof
+            | CompletionFallbackResponse::SseHttpErrorPartialEof
+            | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseProviderErrorIncomplete
+            | CompletionFallbackResponse::SseRedirectTerminal
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        eprintln!(
+            "native terminal: {response:?}, newer={replace}, reason={terminal_reason:?}, operations={operations:?}"
+        );
+        assert!(
+            terminal_reason.is_some(),
+            "real lifecycle must emit its native termination"
+        );
     }
     if matches!(response, CompletionFallbackResponse::SseTerminalOnly) {
         assert_eq!(

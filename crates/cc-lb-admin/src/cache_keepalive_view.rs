@@ -121,6 +121,12 @@ pub fn derive_activity_view(
         source.item.status,
         Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
     );
+    // Scheduling stops during a real request; retained renewal evidence does not.
+    let is_request_paused = matches!(
+        source.item.status,
+        Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::InRequest)
+    ) || source.item.request_incomplete;
+    let cycle_open = is_active || is_request_paused;
     let cycle_id = source
         .session
         .and_then(|session| session.cycle_id)
@@ -144,23 +150,27 @@ pub fn derive_activity_view(
         .copied()
         .filter(|turn| {
             let Some(cycle_id) = cycle_id else {
-                return true;
+                // An open schedule without a cycle identity cannot own retained
+                // history. Closed legacy rows retain their historical counters.
+                return !cycle_open;
             };
-            if turn.cycle_id == Some(cycle_id) {
-                return true;
-            }
-            if turn.cycle_id.is_some() {
-                return false;
-            }
-            let renewal_cycle_id = renewal_evidence_for_turn(turn, source.evidence)
-                .and_then(|renewal| renewal.cycle_id);
-            if renewal_cycle_id.is_some() {
-                return renewal_cycle_id == Some(cycle_id);
-            }
-            !(is_active && turn.ts.saturating_mul(1_000) < source.item.last_message_at_ms)
+            turn.cycle_id.or_else(|| {
+                renewal_evidence_for_turn(turn, source.evidence)
+                    .and_then(|renewal| renewal.cycle_id)
+            }) == Some(cycle_id)
         })
         .collect::<Vec<_>>();
-    let pending_source_ref_id = if is_active && cycle_id.is_some() {
+    // A scheduled job can outlive its paid renewal's cache. Only known renewal
+    // evidence can close that window; missing legacy evidence remains unknown.
+    let evidence_window_open = current_records.first().is_some_and(|turn| {
+        match renewal_evidence_for_turn(turn, source.evidence)
+            .filter(|renewal| renewal_evidence_known(renewal))
+        {
+            Some(_) => source.now_ms < renewal_expiry_ms(turn, source.item.ttl, source.evidence),
+            None => !is_request_paused,
+        }
+    });
+    let pending_source_ref_id = if cycle_open && evidence_window_open && cycle_id.is_some() {
         current_records
             .first()
             .filter(|turn| {
@@ -175,7 +185,10 @@ pub fn derive_activity_view(
     let pending_current_ref = current_records
         .first()
         .filter(|turn| {
-            is_active
+            cycle_open
+                && evidence_window_open
+                && (!is_request_paused
+                    || pending_source_ref_id == Some(turn.source_ref_id.as_str()))
                 && (pending_source_ref_id.is_none()
                     || (pending_source_ref_id == Some(turn.source_ref_id.as_str())
                         && !follow_up_proven(turn, source.evidence)))
@@ -246,6 +259,7 @@ pub fn derive_activity_view(
         &chronological_order,
         cycle_id,
         is_active,
+        is_request_paused,
     );
     CacheKeepaliveActivityView {
         id: source.item.id.clone(),
@@ -306,6 +320,15 @@ fn pulse_time_ms(
     )
 }
 
+fn renewal_expiry_ms(
+    turn: &CacheKeepaliveTurnRecord,
+    ttl: CacheTtl,
+    evidence: &[CacheKeepaliveEvidenceRecord],
+) -> u64 {
+    let ttl = renewal_evidence_for_turn(turn, evidence).map_or(ttl, |renewal| renewal.ttl);
+    pulse_time_ms(turn, evidence).saturating_add(ttl.as_secs().saturating_mul(1_000))
+}
+
 fn idle_gaps(
     source: &CacheKeepaliveActivitySource<'_>,
     scoped_turns: &[&CacheKeepaliveTurnRecord],
@@ -313,6 +336,7 @@ fn idle_gaps(
     chronological_order: &[usize],
     current_cycle_id: Option<Uuid>,
     is_active: bool,
+    is_request_paused: bool,
 ) -> Vec<CacheKeepaliveIdleGap> {
     let ordered_turns = chronological_order
         .iter()
@@ -358,12 +382,11 @@ fn idle_gaps(
         };
         cycles[cycle_index].1.push(index);
     }
-    let has_current_cycle = match current_cycle_id {
-        Some(cycle_id) => cycle_indices.contains_key(&cycle_id),
-        None => cycles.iter().any(|(cycle_id, _)| cycle_id.is_none()),
-    };
+    let has_current_cycle =
+        current_cycle_id.is_some_and(|cycle_id| cycle_indices.contains_key(&cycle_id));
     let mut gaps = Vec::with_capacity(cycles.len() + usize::from(is_active && !has_current_cycle));
     for (cycle_id, indices) in cycles {
+        let is_current_cycle = cycle_id.is_some() && cycle_id == current_cycle_id;
         let first_turn = scoped_turns[indices[0]];
         let first_evidence = renewal_evidence_for_turn(first_turn, source.evidence);
         let ttl = first_evidence.map_or(source.item.ttl, |renewal| renewal.ttl);
@@ -396,6 +419,8 @@ fn idle_gaps(
             })
             .collect::<Vec<_>>();
         let last_pulse_ms = previous_time_ms.unwrap_or(first_pulse_ms);
+        let last_turn = scoped_turns[*indices.last().expect("nonempty cycle")];
+        let cache_expires_at_ms = renewal_expiry_ms(last_turn, ttl, source.evidence);
         let follow_up = source
             .evidence
             .iter()
@@ -417,7 +442,10 @@ fn idle_gaps(
         });
         let (ending_kind, ending_at_ms) = if let Some(follow_up) = follow_up {
             ("followup_hit", follow_up.request_start_ms)
-        } else if is_active && cycle_id == current_cycle_id {
+        } else if is_active
+            && is_current_cycle
+            && indices.iter().any(|&index| retained_turns[index].pending)
+        {
             (
                 "scheduled_waiting",
                 source
@@ -427,6 +455,12 @@ fn idle_gaps(
                     })
                     .max(last_pulse_ms),
             )
+        } else if is_request_paused
+            && is_current_cycle
+            && source.now_ms < cache_expires_at_ms
+            && indices.iter().any(|&index| retained_turns[index].pending)
+        {
+            ("followup_pending", source.now_ms.max(last_pulse_ms))
         } else if evidence_unknown {
             ("followup_unknown", last_pulse_ms)
         } else if u32::try_from(pulses.len()).unwrap_or(u32::MAX) >= max_attempts
@@ -440,7 +474,14 @@ fn idle_gaps(
         {
             ("capped_no_followup", last_pulse_ms)
         } else {
-            ("ttl_expired_no_followup", last_pulse_ms)
+            (
+                "ttl_expired_no_followup",
+                if (is_active || is_request_paused) && is_current_cycle {
+                    cache_expires_at_ms
+                } else {
+                    last_pulse_ms
+                },
+            )
         };
         let spent_micros = indices
             .iter()

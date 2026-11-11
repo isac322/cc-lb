@@ -415,6 +415,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     ['scheduled', false, 'scheduled_waiting', false],
     ['in_request', false, 'scheduled_waiting', false],
     ['expired', false, 'scheduled_waiting', false],
+    ['in_request', false, 'followup_pending', false],
+    ['expired', false, 'followup_pending', false],
     ['cancelled', false, 'scheduled_waiting', false],
     ['failed', false, 'scheduled_waiting', false],
     ['capped', false, 'scheduled_waiting', false],
@@ -523,6 +525,132 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       );
     },
   );
+
+  it.each(['in_request', 'expired'] as const)(
+    'keeps %s follow-up evidence pending without a terminal rail segment',
+    (state) => {
+      const detail = CacheKeepaliveDetailSchema.parse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        state,
+        is_active: false,
+        is_last_pending: true,
+        evidence_status: 'pending',
+        follow_up_outcomes: {
+          observed: 0,
+          pending: 1,
+          no_follow_up: 0,
+          unknown: 0,
+        },
+        gaps: [
+          {
+            cycle_id: 'paused-cycle',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: 1_700_000_270_000,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.006,
+                hit: true,
+              },
+            ],
+            ending_kind: 'followup_pending',
+            ending_at_ms: 1_700_000_370_000,
+            total_duration_sec: 370,
+            since_last_renewal_sec: 100,
+            spent_usd: 0.006,
+            avoided_usd: 0,
+            net_pnl_usd: -0.006,
+          },
+        ],
+        turns: [],
+      });
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery(detail),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="paused-cycle"
+          onClose={() => {}}
+        />,
+      );
+      const rail = screen.getByTestId('session-detail-time-rail');
+      expect(within(rail).getByText(/Follow-up pending/)).toBeDefined();
+      expect(within(rail).queryByText(/No follow-up/)).toBeNull();
+      expect(screen.queryByText(/Next renewal/)).toBeNull();
+      const endpoint = within(rail).getByRole('button', {
+        name: /Waiting for follow-up evidence/,
+      });
+      fireEvent.focus(endpoint);
+      expect(screen.getByRole('tooltip').textContent).toContain(
+        'Waiting for follow-up evidence',
+      );
+      expect(screen.getByRole('tooltip').textContent).not.toContain(
+        'No follow-up',
+      );
+    },
+  );
+
+  it('shows an expired paid evidence window even while renewal scheduling remains active', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery(
+        CacheKeepaliveDetailSchema.parse({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'renewed',
+          is_active: true,
+          is_last_pending: false,
+          evidence_status: 'observed',
+          follow_up_outcomes: {
+            observed: 0,
+            pending: 0,
+            no_follow_up: 1,
+            unknown: 0,
+          },
+          gaps: [
+            {
+              cycle_id: 'overdue-active',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [
+                {
+                  pulse_number: 1,
+                  time_ms: 1_700_000_270_000,
+                  offset_sec: 270,
+                  since_prev_renewal_sec: null,
+                  spent_usd: 0.006,
+                  hit: true,
+                },
+              ],
+              ending_kind: 'ttl_expired_no_followup',
+              ending_at_ms: 1_700_000_570_000,
+              total_duration_sec: 570,
+              since_last_renewal_sec: 300,
+              spent_usd: 0.006,
+              avoided_usd: 0,
+              net_pnl_usd: -0.006,
+            },
+          ],
+          turns: [],
+        }),
+      ),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="overdue-active"
+        onClose={() => {}}
+      />,
+    );
+    const rail = screen.getByTestId('session-detail-time-rail');
+    expect(within(rail).getByText(/No follow-up/)).toBeDefined();
+    expect(within(rail).queryByText(/Follow-up pending|Waiting/)).toBeNull();
+    expect(
+      within(rail).getByRole('button', { name: /No follow-up.*TTL expired/ }),
+    ).toBeDefined();
+  });
 
   it.each([false, true])(
     'shows the expired request deadline neutrally (retained history: %s)',

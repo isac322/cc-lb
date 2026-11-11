@@ -755,22 +755,23 @@ describe('cache keepalive wire additions', () => {
     ).toBe('failed');
   });
 
-  it('accepts followup_unknown gap endings', () => {
-    const gap = {
-      cycle_id: null,
-      pause_at_ms: 1,
-      cached_tokens: 1,
-      pulses: [],
-      ending_kind: 'followup_unknown',
-      ending_at_ms: 2,
-      total_duration_sec: 1,
-      since_last_renewal_sec: null,
-      spent_usd: 0.01,
-      avoided_usd: 0,
-      net_pnl_usd: -0.01,
-    };
-    expect(CacheKeepaliveGapSchema.parse(gap).ending_kind).toBe(
-      'followup_unknown',
-    );
-  });
+  it.each(['followup_unknown', 'followup_pending'])(
+    'accepts %s gap endings',
+    (ending) => {
+      const gap = {
+        cycle_id: null,
+        pause_at_ms: 1,
+        cached_tokens: 1,
+        pulses: [],
+        ending_kind: ending,
+        ending_at_ms: 2,
+        total_duration_sec: 1,
+        since_last_renewal_sec: null,
+        spent_usd: 0.01,
+        avoided_usd: 0,
+        net_pnl_usd: -0.01,
+      };
+      expect(CacheKeepaliveGapSchema.parse(gap).ending_kind).toBe(ending);
+    },
+  );
 });

@@ -192,7 +192,7 @@ pub(crate) fn summary_for_items(
         } else if activity.evidence_status == "observed" && evidence_status == "none" {
             evidence_status = "observed";
         }
-        renewals_fired = renewals_fired.saturating_add(u64::from(activity.total_renewals));
+        renewals_fired = renewals_fired.saturating_add(u64::from(activity.retained_renewals));
         if let Some(pnl) = activity.pnl {
             cost_saved_micros = cost_saved_micros.saturating_add(pnl.net_micros);
             total_avoided_micros = total_avoided_micros.saturating_add(pnl.avoided_micros);

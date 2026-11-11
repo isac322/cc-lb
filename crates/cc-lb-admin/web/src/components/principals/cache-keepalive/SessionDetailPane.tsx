@@ -206,14 +206,20 @@ function buildRailPoints(
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
-  } else if (gap.ending_kind === 'scheduled_waiting') {
+  } else if (
+    gap.ending_kind === 'scheduled_waiting' ||
+    gap.ending_kind === 'followup_pending'
+  ) {
     points.push({
       id: 'end',
       pct: 100,
       kind: 'end_waiting',
-      title: 'Waiting for next message',
+      title:
+        gap.ending_kind === 'followup_pending'
+          ? 'Waiting for follow-up evidence'
+          : 'Waiting for next message',
       badgeText: deltaLabel(gap.total_duration_sec),
-      badgeTone: 'accent',
+      badgeTone: gap.ending_kind === 'followup_pending' ? 'neutral' : 'accent',
       absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
@@ -380,9 +386,13 @@ function TimeRailGap({
                 {netText}
               </span>
             </>
-          ) : gap.ending_kind === 'scheduled_waiting' ? (
+          ) : gap.ending_kind === 'scheduled_waiting' ||
+            gap.ending_kind === 'followup_pending' ? (
             <span className="text-caption text-text-muted">
-              Waiting · {deltaLabel(gap.total_duration_sec)}
+              {gap.ending_kind === 'followup_pending'
+                ? 'Follow-up pending'
+                : 'Waiting'}{' '}
+              · {deltaLabel(gap.total_duration_sec)}
             </span>
           ) : gap.ending_kind === 'followup_unknown' ? (
             <>
@@ -466,7 +476,9 @@ function TimeRailGap({
                       : pt.kind === 'end_hit'
                         ? 'border-traffic-success-text bg-traffic-success-text'
                         : pt.kind === 'end_waiting'
-                          ? 'border-accent bg-accent'
+                          ? pt.badgeTone === 'neutral'
+                            ? 'border-subtle-strong bg-panel'
+                            : 'border-accent bg-accent'
                           : pt.kind === 'end_unknown'
                             ? 'border-subtle-strong bg-panel'
                             : 'border-subtle-strong bg-bg',
@@ -599,7 +611,9 @@ function synthesizeGapsFromTurns(
       cached_tokens: session.renewal_tokens,
       pulses,
       ending_kind: anyPending
-        ? 'scheduled_waiting'
+        ? session.is_active
+          ? 'scheduled_waiting'
+          : 'followup_pending'
         : anyUnknown
           ? 'followup_unknown'
           : anyFollowedUp
