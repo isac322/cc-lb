@@ -21,11 +21,26 @@ jobs:
     # vitest runs one worker, but the bun runtime, GC, and jsdom timers still
     # want more than a single core.
     runs-on: ubuntu-26.04
+    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
+    # and shared libraries are baked in; CI must not depend on apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
     defaults:
       run:
+        shell: bash
         working-directory: crates/cc-lb-admin/web
     steps:
       - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          # The mounted workspace belongs to the host runner, not container root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # runner.temp in action inputs is the host path; publish the actual
+          # container path used by the capture commands instead.
+          echo "visual-root=$RUNNER_TEMP/codex-credit-visuals" >> "$GITHUB_OUTPUT"
       - name: Install bun 1.4.4
         working-directory: .
         run: |
@@ -94,6 +109,9 @@ jobs:
             bun-${{ runner.os }}-
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Verify Playwright image version
+        run: |
+          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
       - name: Run web validations
         run: |
           set -euo pipefail
@@ -164,8 +182,6 @@ jobs:
           bun run --shell=bun lint
           bun run --shell=bun typecheck
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
-      - name: Install browser for credit visual regression
-        run: bunx playwright install --with-deps chromium
       - name: Verify and capture credit and provider pool views
         run: |
           bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts --retries=0 \
@@ -194,11 +210,11 @@ jobs:
         with:
           name: codex-credit-visuals-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/codex-credit-visuals/after/**/overview.png
-            ${{ runner.temp }}/codex-credit-visuals/after/**/detail.png
-            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
-            ${{ runner.temp }}/codex-credit-visuals/before/*.png
-            ${{ runner.temp }}/codex-credit-visuals/before/capture.json
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/detail.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
+            ${{ steps.container-setup.outputs.visual-root }}/before/*.png
+            ${{ steps.container-setup.outputs.visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
       - name: Publish provider pool visual evidence
@@ -207,7 +223,7 @@ jobs:
         with:
           name: provider-pool-visuals-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/codex-credit-visuals/after/**/provider-pool.png
-            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/provider-pool.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
           retention-days: 14
           if-no-files-found: error
