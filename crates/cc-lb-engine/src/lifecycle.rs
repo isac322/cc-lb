@@ -13286,62 +13286,20 @@ fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
     if json_prefix_is_unfinished(buffer) {
         return ErrorBodyClass::JsonCandidate;
     }
-    let number_start = buffer
-        .iter()
-        .rposition(|byte| !matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'))
-        .map_or(0, |last| last + 1);
-    // Only an unfinished trailing number may excuse a syntax error: the
-    // trailing bytes must be a prefix of a legal JSON number (not `01`, `+2`
-    // or a bare `e`), and a number must be able to stand where it begins, so
-    // the bytes before it plus one digit must still be an unfinished JSON
-    // document. `{\n\n2` (a key is required there) and a complete document
-    // followed by digits are not held.
-    let unfinished_number =
-        number_start < buffer.len() && is_json_number_prefix(&buffer[number_start..]) && {
-            let mut probe = Vec::with_capacity(number_start + 1);
-            probe.extend_from_slice(&buffer[..number_start]);
-            probe.push(b'0');
-            matches!(
-                serde_json::from_slice::<serde::de::IgnoredAny>(&probe),
-                Err(error) if error.is_eof()
-            )
-        };
-    if unfinished_number {
+    // A document cut inside a number (`-`, `2.`, `2.5e+`) is the one
+    // truncation `serde_json` reports as a syntax error. Every unfinished
+    // number accepts one more digit, so the buffer is still a JSON prefix
+    // exactly when appending `0` leaves an unfinished document. This rejects
+    // `01`, `+2`, a bare `e`, `0.e`, a number where a key is required
+    // (`{\n\n2`), and digits after a complete document.
+    let mut probe = Vec::with_capacity(buffer.len() + 1);
+    probe.extend_from_slice(buffer);
+    probe.push(b'0');
+    if json_prefix_is_unfinished(&probe) {
         ErrorBodyClass::JsonCandidate
     } else {
         ErrorBodyClass::Sse
     }
-}
-
-/// Whether `bytes` is a prefix of a legal JSON number:
-/// `-?(0|[1-9][0-9]*)(\.[0-9]*)?([eE][+-]?[0-9]*)?`, where `-` alone may still
-/// gain its integer part.
-fn is_json_number_prefix(bytes: &[u8]) -> bool {
-    let rest = bytes.strip_prefix(b"-").unwrap_or(bytes);
-    let int_len = match rest.first() {
-        None => return !bytes.is_empty(),
-        Some(b'0') => 1,
-        Some(b'1'..=b'9') => rest.iter().take_while(|byte| byte.is_ascii_digit()).count(),
-        Some(_) => return false,
-    };
-    let mut rest = &rest[int_len..];
-    if let Some(fraction) = rest.strip_prefix(b".") {
-        rest = &fraction[fraction
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count()..];
-    }
-    if let Some(exponent) = rest.strip_prefix(b"e").or_else(|| rest.strip_prefix(b"E")) {
-        let exponent = exponent
-            .strip_prefix(b"+")
-            .or_else(|| exponent.strip_prefix(b"-"))
-            .unwrap_or(exponent);
-        rest = &exponent[exponent
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count()..];
-    }
-    rest.is_empty()
 }
 
 /// Whether `bytes` is a valid JSON prefix: a complete document, or one that

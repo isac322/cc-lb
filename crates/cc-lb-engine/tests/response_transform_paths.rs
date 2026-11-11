@@ -769,6 +769,7 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         (b"{\"a\":\n\n01", b"{\"a\":\n\n"),
         (b"{\"a\":\n\n+2", b"{\"a\":\n\n"),
         (b"{\"a\":\n\ne", b"{\"a\":\n\n"),
+        (b"{\"a\":\n\n0.e", b"{\"a\":\n\n"),
     ] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
