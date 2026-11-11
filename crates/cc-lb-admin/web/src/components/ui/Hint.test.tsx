@@ -95,6 +95,98 @@ describe('Hint', () => {
   );
 
   it.each([true, false])(
+    'keeps the focused trigger focused through hover and Escape with openOnFocus=%s',
+    (openOnFocus) => {
+      render(
+        <Hint
+          openOnFocus={openOnFocus}
+          label={<span data-testid="hint-content">Tooltip Content</span>}
+        >
+          <button type="button" data-testid="hint-trigger">
+            Show breakdown
+          </button>
+        </Hint>,
+      );
+
+      act(() => screen.getByTestId('hint-trigger').focus());
+      const trigger = screen.getByTestId('hint-trigger');
+      if (!openOnFocus) expect(screen.queryByTestId('hint-content')).toBeNull();
+      fireEvent.pointerEnter(trigger, { pointerType: 'mouse' });
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByTestId('hint-content')).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByTestId('hint-content')).toBeNull();
+      expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+    },
+  );
+
+  it.each([true, false])(
+    'hovering an unfocused hint preserves the other focused control with openOnFocus=%s',
+    (openOnFocus) => {
+      render(
+        <>
+          <button type="button" data-testid="other-control">
+            Other control
+          </button>
+          <Hint
+            openOnFocus={openOnFocus}
+            label={<span data-testid="hint-content">Tooltip Content</span>}
+          >
+            <button type="button" data-testid="hint-trigger">
+              Show breakdown
+            </button>
+          </Hint>
+        </>,
+      );
+
+      const other = screen.getByTestId('other-control');
+      act(() => other.focus());
+      fireEvent.pointerEnter(screen.getByTestId('hint-trigger'));
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByTestId('hint-content')).toBeDefined();
+      expect(document.activeElement).toBe(other);
+      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByTestId('hint-content')).toBeNull();
+      expect(document.activeElement).toBe(other);
+    },
+  );
+
+  it('samples focus when the hover delay completes rather than at pointer entry', () => {
+    render(
+      <>
+        <button type="button" data-testid="other-control">
+          Other control
+        </button>
+        <Hint
+          openOnFocus={false}
+          label={<span data-testid="hint-content">Tooltip Content</span>}
+        >
+          <button type="button" data-testid="hint-trigger">
+            Show breakdown
+          </button>
+        </Hint>
+      </>,
+    );
+
+    act(() => screen.getByTestId('hint-trigger').focus());
+    fireEvent.pointerEnter(screen.getByTestId('hint-trigger'));
+    act(() => vi.advanceTimersByTime(100));
+    const other = screen.getByTestId('other-control');
+    act(() => other.focus());
+    act(() => vi.advanceTimersByTime(100));
+    expect(screen.getByTestId('hint-content')).toBeDefined();
+    expect(document.activeElement).toBe(other);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByTestId('hint-content')).toBeNull();
+    expect(document.activeElement).toBe(other);
+  });
+
+  it.each([true, false])(
     'preserves openOnFocus=%s after the hint has already been engaged',
     (openOnFocus) => {
       render(

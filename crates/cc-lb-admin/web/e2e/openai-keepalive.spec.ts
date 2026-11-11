@@ -222,8 +222,8 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
   }
 });
 
-for (const key of ['Enter', 'Space']) {
-  test(`fresh request metric keeps keyboard focus through ${key} and Escape`, async ({ page }) => {
+for (const key of ['Enter', 'Space', 'hover']) {
+  test(`focused request metric keeps focus through ${key} and Escape`, async ({ page }) => {
     await installFixtures(page);
     await page.route('**/admin/v1/events/recent**', (route) => route.fulfill({
       status: 200,
@@ -255,7 +255,8 @@ for (const key of ['Enter', 'Space']) {
     await page.keyboard.press('Tab');
     await expect(metric).toBeFocused();
     await expect(breakdown).not.toBeVisible();
-    await page.keyboard.press(key);
+    if (key === 'hover') await metric.hover();
+    else await page.keyboard.press(key);
     await expect(breakdown).toBeVisible();
     await expect(metric).toBeFocused();
     await page.keyboard.press('Escape');

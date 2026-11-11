@@ -613,6 +613,11 @@ export function Hint({
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+  const engage = (trigger: Element) => {
+    transferFocusRef.current = trigger === document.activeElement;
+    setEngaged(true);
+    setOpen(true);
+  };
   if (!label) return children;
 
   if (!engaged) {
@@ -621,10 +626,8 @@ export function Hint({
       return cloneElement(childElement, {
         onPointerEnter: (e) => {
           childElement.props.onPointerEnter?.(e);
-          timerRef.current = setTimeout(() => {
-            setEngaged(true);
-            setOpen(true);
-          }, 200);
+          const trigger = e.currentTarget;
+          timerRef.current = setTimeout(() => engage(trigger), 200);
         },
         onPointerLeave: (e) => {
           childElement.props.onPointerLeave?.(e);
@@ -633,46 +636,34 @@ export function Hint({
         onFocus: (e) => {
           childElement.props.onFocus?.(e);
           if (!openOnFocus) return;
-          transferFocusRef.current = e.currentTarget === document.activeElement;
-          setEngaged(true);
-          setOpen(true);
+          engage(e.currentTarget);
         },
         onClick: (e) => {
           if (stopClickPropagation) e.stopPropagation();
           childElement.props.onClick?.(e);
           if (!openOnFocus) {
-            transferFocusRef.current =
-              e.currentTarget === document.activeElement;
-            setEngaged(true);
-            setOpen(true);
+            engage(e.currentTarget);
           }
         },
       });
     }
     return (
       <span
-        onPointerEnter={() => {
-          timerRef.current = setTimeout(() => {
-            setEngaged(true);
-            setOpen(true);
-          }, 200);
+        onPointerEnter={(e) => {
+          const trigger = e.currentTarget;
+          timerRef.current = setTimeout(() => engage(trigger), 200);
         }}
         onPointerLeave={() => {
           if (timerRef.current) clearTimeout(timerRef.current);
         }}
         onFocus={(e) => {
           if (!openOnFocus) return;
-          transferFocusRef.current = e.currentTarget === document.activeElement;
-          setEngaged(true);
-          setOpen(true);
+          engage(e.currentTarget);
         }}
         onClick={(e) => {
           if (stopClickPropagation) e.stopPropagation();
           if (!openOnFocus) {
-            transferFocusRef.current =
-              e.currentTarget === document.activeElement;
-            setEngaged(true);
-            setOpen(true);
+            engage(e.currentTarget);
           }
         }}
       >
