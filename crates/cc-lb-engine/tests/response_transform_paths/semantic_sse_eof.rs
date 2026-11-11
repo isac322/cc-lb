@@ -3359,10 +3359,10 @@ async fn chat_terminal_provider_error_then_done_preserves_single_error() -> Test
 
 #[derive(Clone, Copy)]
 enum ChatTerminalTransform {
-    DropDone,
-    ReplaceDone,
-    EmitDone,
-    EmitErrorAndDone,
+    Drop,
+    ReplaceWithDelta,
+    Emit,
+    EmitError,
 }
 
 impl SseEventTransformHook for ChatTerminalTransform {
@@ -3372,8 +3372,8 @@ impl SseEventTransformHook for ChatTerminalTransform {
     ) -> Result<TransformSseEventResult, ResponseTransformError> {
         let done = request.event.data.as_ref() == b"[DONE]";
         match (*self, done) {
-            (Self::DropDone, true) => Ok(TransformSseEventResult::Drop),
-            (Self::ReplaceDone, true) => Ok(TransformSseEventResult::Replace {
+            (Self::Drop, true) => Ok(TransformSseEventResult::Drop),
+            (Self::ReplaceWithDelta, true) => Ok(TransformSseEventResult::Replace {
                 events: vec![SseEvent {
                     event: String::new(),
                     data: Bytes::from_static(
@@ -3381,7 +3381,7 @@ impl SseEventTransformHook for ChatTerminalTransform {
                     ),
                 }],
             }),
-            (Self::EmitDone, false) => Ok(TransformSseEventResult::Replace {
+            (Self::Emit, false) => Ok(TransformSseEventResult::Replace {
                 events: vec![
                     request.event,
                     SseEvent {
@@ -3390,7 +3390,7 @@ impl SseEventTransformHook for ChatTerminalTransform {
                     },
                 ],
             }),
-            (Self::EmitErrorAndDone, false) => Ok(TransformSseEventResult::Replace {
+            (Self::EmitError, false) => Ok(TransformSseEventResult::Replace {
                 events: vec![
                     SseEvent {
                         event: "error".to_owned(),
@@ -3417,7 +3417,7 @@ async fn chat_terminal_transformed_error_then_done_fault_is_not_warning() -> Tes
             vec![Bytes::from_static(CHAT_PARTIAL.as_bytes())],
             Some(std::io::ErrorKind::ConnectionReset),
         )),
-        Some(Arc::new(ChatTerminalTransform::EmitErrorAndDone)),
+        Some(Arc::new(ChatTerminalTransform::EmitError)),
         responses_eof_record(false),
         chat_terminal_request()?,
     )
@@ -3450,13 +3450,13 @@ async fn chat_terminal_transformed_done_uses_emitted_not_upstream_evidence() -> 
     // QA-08: dropping/replacing upstream DONE removes its protection; a newly
     // emitted DONE supplies protection even when the upstream never sent one.
     for (transform, fault) in [
-        (ChatTerminalTransform::DropDone, false),
-        (ChatTerminalTransform::DropDone, true),
-        (ChatTerminalTransform::ReplaceDone, false),
-        (ChatTerminalTransform::ReplaceDone, true),
-        (ChatTerminalTransform::EmitDone, true),
+        (ChatTerminalTransform::Drop, false),
+        (ChatTerminalTransform::Drop, true),
+        (ChatTerminalTransform::ReplaceWithDelta, false),
+        (ChatTerminalTransform::ReplaceWithDelta, true),
+        (ChatTerminalTransform::Emit, true),
     ] {
-        let emitted_done = matches!(transform, ChatTerminalTransform::EmitDone);
+        let emitted_done = matches!(transform, ChatTerminalTransform::Emit);
         let body = if emitted_done {
             CHAT_PARTIAL.to_owned()
         } else {
@@ -3488,7 +3488,7 @@ async fn chat_terminal_transformed_done_uses_emitted_not_upstream_evidence() -> 
             } else {
                 assert_chat_native_incomplete(&observed, CHAT_PARTIAL.as_bytes());
             }
-            if matches!(transform, ChatTerminalTransform::ReplaceDone) {
+            if matches!(transform, ChatTerminalTransform::ReplaceWithDelta) {
                 assert!(downstream.contains("\"content\":\"replacement\""));
             }
         }
