@@ -1050,13 +1050,13 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
     let projection_key_id: Option<String> = sqlx::query_scalar(
         "SELECT accounting_key_id FROM cache_keepalive_turns WHERE source_ref_id = ?",
     )
-    .bind("session-hash:00000000-0000-0000-0000-000000000000:1")
+    .bind("keepalive-v2:session-hash:00000000-0000-0000-0000-000000000000:1")
     .fetch_one(fixture.storage.pool())
     .await
     .expect("load observe-only turn projection key");
     let projection_cost_micros: i64 =
         sqlx::query_scalar("SELECT cost_micros FROM cache_keepalive_turns WHERE source_ref_id = ?")
-            .bind("session-hash:00000000-0000-0000-0000-000000000000:1")
+            .bind("keepalive-v2:session-hash:00000000-0000-0000-0000-000000000000:1")
             .fetch_one(fixture.storage.pool())
             .await
             .expect("load observe-only turn projection cost");
@@ -1374,12 +1374,12 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     let event = &events[0];
     assert_eq!(
         event.event_id.as_deref(),
-        Some("renewal:session-hash:00000000-0000-0000-0000-000000000000:1")
+        Some("renewal:keepalive-v2:session-hash:00000000-0000-0000-0000-000000000000:1")
     );
     assert_eq!(event.source_kind.as_deref(), Some("renewal"));
     assert_eq!(
         event.source_ref_id.as_deref(),
-        Some("session-hash:00000000-0000-0000-0000-000000000000:1")
+        Some("keepalive-v2:session-hash:00000000-0000-0000-0000-000000000000:1")
     );
     assert_eq!(event.principal_id.as_deref(), Some("principal"));
     assert_eq!(event.key_id.as_deref(), Some(key_id.as_str()));
@@ -1572,7 +1572,7 @@ async fn assert_mid_cycle_accounting(clear: bool, result: MidCycleResult) {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].event_id.as_deref(),
-            Some("renewal:session-hash:00000000-0000-0000-0000-000000000000:1")
+            Some("renewal:keepalive-v2:session-hash:00000000-0000-0000-0000-000000000000:1")
         );
         assert_eq!(events[0].input_tokens, Some(100));
         let (hit_miss, cache_read, cost) = if matches!(result, MidCycleResult::Hit) {
@@ -3723,10 +3723,23 @@ async fn assert_recreated_keepalive_cycle(fixture: &Fixture, storage: Arc<dyn St
             1
         );
     }
+    // Renewal dispatch awaits its atomic event/turn commit. Verify durable
+    // identity independently of the PostgreSQL tail cursor's xmin horizon.
+    for source in &sources {
+        let event = storage
+            .get_request_event(&format!("renewal:{source}"))
+            .await
+            .expect("read committed renewal event")
+            .expect("every paid renewal must commit its request event");
+        assert_eq!(event.source_ref_id.as_deref(), Some(source.as_str()));
+    }
+    // A commit (and a Final bus update) does not advance the cluster-wide
+    // PostgreSQL xmin horizon. Use the storage's existing visibility barrier
+    // before checking cursor consumers; unrelated transactions may pin xmin.
     let cursor = storage
-        .current_request_event_cursor()
+        .request_event_stable_seq_ceiling(Duration::from_secs(30))
         .await
-        .expect("cursor");
+        .expect("committed renewals must become safe for cursor reads");
     let mut events: Vec<String> = storage
         .query_request_events_between_cursors(
             0,
@@ -3740,7 +3753,10 @@ async fn assert_recreated_keepalive_cycle(fixture: &Fixture, storage: Arc<dyn St
         .map(|(_, event)| event.source_ref_id.expect("renewal source"))
         .collect();
     events.sort();
-    assert_eq!(events, sources);
+    assert_eq!(
+        events, sources,
+        "committed event identities were verified by point reads; tail cursor={cursor}"
+    );
     let mut refs: Vec<String> = storage
         .list_cache_keepalive_evidence_for_activity(
             "principal",
@@ -3876,7 +3892,17 @@ async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_ev
         fixture.seed_keepalive_storage(storage.as_ref()).await;
         assert_recreated_keepalive_cycle(&fixture, storage.clone()).await;
         assert_keepalive_dispatch_caps(&fixture, storage.clone()).await;
-        assert_partial_keepalive_preservation(&fixture, storage).await;
+        assert_partial_keepalive_preservation(&fixture, storage.clone()).await;
+        assert_legacy_null_cycle_identity_upgrade(&fixture, storage, async {
+            sqlx::query(
+                "UPDATE cache_keepalive_sessions SET cycle_id = NULL WHERE session_key_hash = $1",
+            )
+            .bind("session-hash")
+            .execute(&pool)
+            .await
+            .expect("legacy NULL cycle");
+        })
+        .await;
     })
     .catch_unwind()
     .await;
@@ -4262,4 +4288,178 @@ async fn keepalive_bulkhead_admission_rechecks_deadline_and_preserves_started_ht
         );
         drop(verifier);
     }
+}
+
+#[tokio::test]
+async fn legacy_null_cycle_renewal_identity_is_disjoint_from_retained_legacy_rows() {
+    let fixture = Fixture::new().await;
+    assert_legacy_null_cycle_identity_upgrade(&fixture, fixture.storage.clone(), async {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions SET cycle_id = NULL WHERE session_key_hash = ?",
+        )
+        .bind("session-hash")
+        .execute(fixture.storage.pool())
+        .await
+        .expect("legacy NULL cycle");
+    })
+    .await;
+}
+
+async fn assert_legacy_null_cycle_identity_upgrade(
+    fixture: &Fixture,
+    storage: Arc<dyn Storage>,
+    make_legacy_row: impl Future<Output = ()>,
+) {
+    use cc_lb_storage_api::{
+        CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
+        RequestEventProjections,
+    };
+
+    storage
+        .purge_cache_keepalive_expired(i64::MAX as u64)
+        .await
+        .expect("retire prior test sessions");
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    request.params.max_refreshes = 1;
+    fixture
+        .enqueuer_with_storage(storage.clone(), pusher.clone())
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue active session");
+    make_legacy_row.await;
+    let active = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load legacy session")
+        .expect("active session");
+    assert_eq!(active.cycle_id, None);
+    assert_eq!(active.status, CacheKeepaliveSessionStatus::Active);
+    let legacy_key = format!("session-hash:{}", Uuid::nil());
+    let legacy_source = format!("{legacy_key}:{}", active.generation);
+    let legacy_event_id = format!("renewal:{legacy_source}");
+    let ts = active.created_at_unix_secs.saturating_sub(1);
+    storage
+        .append_request_event_with_projections(
+            &RequestEvent {
+                ts,
+                ts_ms: Some(ts * 1_000),
+                request_id: legacy_event_id.clone(),
+                event_id: Some(legacy_event_id.clone()),
+                source_kind: Some("renewal".to_owned()),
+                source_ref_id: Some(legacy_source.clone()),
+                principal_id: Some("principal".to_owned()),
+                upstream_id: Some(fixture.upstream_id),
+                model: Some("claude-test".to_owned()),
+                status: 200,
+                cache_read_input_tokens: Some(37),
+                cost_usd_micros: Some(37),
+                ..RequestEvent::default()
+            },
+            &RequestEventProjections {
+                turn: Some(CacheKeepaliveTurnRow {
+                    source_ref_id: legacy_source.clone(),
+                    session_key_hash: legacy_key.clone(),
+                    principal_id: "principal".to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: fixture.upstream_id,
+                    cycle_id: None,
+                    model: "claude-test".to_owned(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_creation_input_tokens_5m: 0,
+                    cache_creation_input_tokens_1h: 0,
+                    cache_read_input_tokens: 37,
+                    cost_micros: Some(37),
+                    hit_miss: "hit".to_owned(),
+                    ts,
+                }),
+                decision: CacheKeepaliveDecisionRow {
+                    source_ref_id: legacy_source.clone(),
+                    principal_id: "principal".to_owned(),
+                    session_key_hash: Some(legacy_key.clone()),
+                    upstream_id: fixture.upstream_id,
+                    decision: "reschedule".to_owned(),
+                    reason: "legacy renewal".to_owned(),
+                    error: None,
+                    generation: active.generation,
+                    ttl: CacheTtl::Ttl5m,
+                    config_snapshot: None,
+                    last_message_at_ms: ts * 1_000,
+                    ts,
+                },
+                evidence: Vec::new(),
+            },
+        )
+        .await
+        .expect("retain pre-upgrade accounting");
+    let old_turns = storage
+        .list_cache_keepalive_turns("principal", &legacy_key)
+        .await
+        .expect("legacy turns");
+    assert_eq!(old_turns.len(), 1);
+    let before = storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("prior active turns")
+        .len();
+    let calls_before = fixture.http.requests.lock().expect("HTTP calls").len();
+    fixture.http.return_cache_hit_usage(0, 0, 10);
+    let job = fixture.pending_keepalive_job(active.generation).await;
+    let mut dispatch = fixture.dispatch(pusher);
+    dispatch.storage = storage.clone();
+    dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("renew upgraded session");
+    assert_eq!(
+        fixture.http.requests.lock().expect("HTTP calls").len(),
+        calls_before + 1
+    );
+    let turns = storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("new turns");
+    assert_eq!(
+        turns.len(),
+        before + 1,
+        "legacy source identity must not discard a paid renewal"
+    );
+    let source = format!(
+        "keepalive-v2:session-hash:{}:{}",
+        Uuid::nil(),
+        active.generation
+    );
+    let turn = turns
+        .iter()
+        .find(|turn| turn.source_ref_id == source)
+        .expect("versioned renewal identity");
+    assert_eq!(turn.cycle_id, None);
+    assert_eq!(turn.cache_read_input_tokens, 10);
+    let event = storage
+        .get_request_event(&format!("renewal:{source}"))
+        .await
+        .expect("new request event")
+        .expect("paid renewal event retained");
+    assert_eq!(event.source_ref_id.as_deref(), Some(source.as_str()));
+    assert_eq!(event.cache_read_input_tokens, Some(10));
+    assert_eq!(
+        storage
+            .list_cache_keepalive_turns("principal", &legacy_key)
+            .await
+            .expect("retained legacy turns"),
+        old_turns
+    );
+    let legacy_event = storage
+        .get_request_event(&legacy_event_id)
+        .await
+        .expect("legacy event")
+        .expect("retained legacy event");
+    assert_eq!(
+        legacy_event.source_ref_id.as_deref(),
+        Some(legacy_source.as_str())
+    );
+    assert_eq!(legacy_event.cache_read_input_tokens, Some(37));
+    assert_eq!(legacy_event.cost_usd_micros, Some(37));
 }

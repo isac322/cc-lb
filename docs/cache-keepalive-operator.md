@@ -79,9 +79,11 @@ real response writes a new generation and enqueues a lightweight
 generation before dispatch and again through conditional post-dispatch updates,
 so old queued/running work becomes a stale no-op.
 
-Completed renewal records use `<session_key_hash>:<cycle_id>:<generation>` as
-their source identity. Turns, request events, and renewal evidence share this
-identity, so purging and recreating a session cannot overwrite retained spend.
+Completed renewal records use `keepalive-v2:<session_key_hash>:<cycle_id>:<generation>`
+as their source identity. The version prefix separates new writes from retained
+legacy identities, including sessions whose old keys contain colons or have no
+cycle UUID. Turns, request events, and renewal evidence share this identity, so
+purging and recreating a session cannot overwrite retained spend.
 
 An authenticated, non-auxiliary, keep-alive-eligible real request retires the
 matching active generation before upstream dispatch. Its queued renewal cannot

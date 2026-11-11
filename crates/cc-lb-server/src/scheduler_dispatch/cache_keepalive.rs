@@ -547,10 +547,10 @@ impl SchedulerDispatch {
     }
 }
 
-/// A retained renewal must not collide with a recreated session's generation.
+/// Versioned outside the legacy session-key namespace, including NULL cycles.
 fn renewal_source_ref_id(job: &CacheKeepaliveJob, record: &CacheKeepaliveSessionRecord) -> String {
     format!(
-        "{}:{}:{}",
+        "keepalive-v2:{}:{}:{}",
         job.session_key_hash,
         record.cycle_id.unwrap_or_default(),
         job.generation

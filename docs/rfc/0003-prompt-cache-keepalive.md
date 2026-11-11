@@ -228,7 +228,7 @@ A job whose scheduled time or actual dispatch time reaches
 `first_scheduled_at + max_total_duration_secs` terminates as `max_duration`
 without an HTTP request. Post-dispatch cap checks remain as a second guard.
 Retained turns, request events, and evidence use a cycle-scoped source identity
-`<session_key_hash>:<cycle_id>:<generation>`, independent of session-row retention.
+`keepalive-v2:<session_key_hash>:<cycle_id>:<generation>`, independent of session-row retention and disjoint from legacy identities, including NULL-cycle sessions.
 
 `cancel(key, reason)` removes the entry, closes the channel, records the
 cancellation reason, and updates the `active_sessions` gauge.

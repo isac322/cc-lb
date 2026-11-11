@@ -836,7 +836,7 @@ impl Harness {
     ) -> (RequestEvent, CacheKeepaliveTurnRecord) {
         let record = self.read_session_record(session_key_hash).await;
         let source_ref_id = format!(
-            "{session_key_hash}:{}:{generation}",
+            "keepalive-v2:{session_key_hash}:{}:{generation}",
             record.cycle_id.unwrap_or_default()
         );
         let event = RequestEventStore::get_request_event(

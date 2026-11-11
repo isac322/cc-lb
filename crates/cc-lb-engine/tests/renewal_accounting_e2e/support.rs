@@ -133,7 +133,12 @@ impl RenewalAccountingScenario {
         reserve: bool,
     ) -> RenewalFinalization {
         let reservation = reserve.then(|| self.reserve());
-        let source_ref_id = format!("{}:{}", session.session_key_hash, session.generation);
+        let source_ref_id = format!(
+            "keepalive-v2:{}:{}:{}",
+            session.session_key_hash,
+            session.cycle_id.unwrap_or_default(),
+            session.generation
+        );
         let outcome = self
             .fixture
             .dispatcher
