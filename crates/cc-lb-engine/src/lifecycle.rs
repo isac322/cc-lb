@@ -9668,7 +9668,7 @@ impl Lifecycle {
                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                             event_id: o.event_id().to_owned(),
                             usage: to_usage_snapshot(&usage),
-                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                            source: cc_lb_lifecycle::UsageSource::Final,
                         });
                     }
                 }

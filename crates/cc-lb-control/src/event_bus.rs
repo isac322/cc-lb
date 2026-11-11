@@ -283,8 +283,8 @@ impl InMemoryBus {
     /// assembler: it creates the row (`RequestStarted`), finalizes it
     /// (`RequestTerminated`), or records an abnormal outcome
     /// (`RequestLogUpstreamErrorObserved`, `UpstreamStreamDiagnosticsObserved`,
-    /// `StreamCompleted` errors). These
-    /// must not be dropped when the assembler channel is full.
+    /// `StreamCompleted`, and authoritative final usage). These must not be
+    /// dropped when the assembler channel is full.
     fn carries_request_row(event: &LifecycleEvent) -> bool {
         matches!(
             event,
@@ -293,6 +293,10 @@ impl InMemoryBus {
                 | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
                 | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
                 | LifecycleEvent::StreamCompleted { .. }
+                | LifecycleEvent::UsageObserved {
+                    source: cc_lb_lifecycle::UsageSource::Final,
+                    ..
+                }
         )
     }
 

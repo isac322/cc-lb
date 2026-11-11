@@ -3386,6 +3386,36 @@ async fn chat_terminal_provider_error_retains_final_cumulative_usage() -> TestRe
         _ => None,
     });
     assert_eq!(final_usage, Some((7, 2)));
+
+    // Replay the actual lifecycle snapshots into a saturated durable channel.
+    // Progress may drop; the final snapshot must reach the assembler consumer.
+    let snapshots = observed
+        .events
+        .iter()
+        .filter(|event| matches!(event, LifecycleEvent::UsageObserved { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let bus = cc_lb_control::InMemoryBus::new();
+    let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+    bus.publish_lifecycle(snapshots[0].clone());
+    let mut progress = snapshots[0].clone();
+    if let LifecycleEvent::UsageObserved { usage, .. } = &mut progress {
+        usage.output_tokens = 99;
+    }
+    bus.publish_lifecycle(progress);
+    bus.publish_lifecycle(snapshots.last().expect("final usage snapshot").clone());
+    drop(bus);
+    let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut delivered = Vec::new();
+        while let Some(event) = assembler_rx.recv().await {
+            if let LifecycleEvent::UsageObserved { usage, .. } = event {
+                delivered.push((usage.input_tokens, usage.output_tokens));
+            }
+        }
+        delivered
+    })
+    .await?;
+    assert_eq!(delivered, vec![(7, 1), (7, 2)]);
     Ok(())
 }
 

@@ -52,7 +52,7 @@ pub struct UsageSnapshot {
     pub iterations: Option<JsonValue>,
 }
 
-/// Which SSE frame produced the update.
+/// Where a usage snapshot was observed or finalized.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -65,6 +65,9 @@ pub enum UsageSource {
     MessageStop,
     /// Non-streaming JSON body top-level `usage.*`.
     NonStreamBody,
+    /// Authoritative stream-end usage, retained like completion events at the
+    /// durable assembler boundary rather than treated as droppable progress.
+    Final,
 }
 
 // ---------------------------------------------------------------------------

@@ -126,6 +126,8 @@ For `/openai/v1/chat/completions`, clean SSE EOF succeeds after a finished choic
 
 A transport body fault after an emitted, fully delimited `[DONE]` can complete successfully with a body-end warning under the existing emitter, framing, and error-precedence checks. A finished choice alone does not permit this: an `include_usage` stream may still have a usage-only chunk before `[DONE]`. Provider-reported usage is preserved, and missing usage or cost remains unknown. Provider errors and existing decode, framing, transform, affinity, and cancellation rules retain precedence.
 
+Final usage from a failed Chat stream uses the same bounded assembler overflow as completion events; progress snapshots remain best-effort. This preserves the existing nonblocking request path and overflow limits.
+
 ### Request events API
 
 The authenticated request-event endpoints accept the same filters:
