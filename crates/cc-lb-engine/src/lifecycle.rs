@@ -9660,6 +9660,17 @@ impl Lifecycle {
             let finalize_ms = if let Some(o) = observer.as_ref() {
                 if usage.has_billable_usage() {
                     o.set_usage_counts(&usage, message_stop_at.is_some());
+                    if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                        && stream_provider_error_seen
+                    {
+                        // The provider error already completed the stream.
+                        // Flush usage that partial-update throttling held back.
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                            event_id: o.event_id().to_owned(),
+                            usage: to_usage_snapshot(&usage),
+                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                        });
+                    }
                 }
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);

@@ -3357,6 +3357,38 @@ async fn chat_terminal_provider_error_then_done_preserves_single_error() -> Test
     Ok(())
 }
 
+#[tokio::test]
+async fn chat_terminal_provider_error_retains_final_cumulative_usage() -> TestResult {
+    // All events share one upstream chunk, so the second usage snapshot is
+    // throttled until finalization. A failed completion must still publish it.
+    let body = Bytes::from(format!(
+        "{CHAT_PARTIAL}data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":1}}}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":2}}}}\n\ndata: {{\"error\":{{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"provider failure\"}}}}\n\n"
+    ));
+    let observed = observe_chat_terminal(
+        ScriptedDispatch::identity_sse(vec![body.clone()], None),
+        false,
+    )
+    .await?;
+    assert_eq!(observed.body, body);
+    assert_eq!(
+        observed.completion().as_ref().unwrap_err().error_type,
+        "server_error"
+    );
+    observed.assert_terminal(Some("upstream_stream_error"));
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(7), Some(2))
+    );
+    let final_usage = observed.events.iter().rev().find_map(|event| match event {
+        LifecycleEvent::UsageObserved { usage, .. } => {
+            Some((usage.input_tokens, usage.output_tokens))
+        }
+        _ => None,
+    });
+    assert_eq!(final_usage, Some((7, 2)));
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum ChatTerminalTransform {
     Drop,
