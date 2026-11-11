@@ -119,7 +119,7 @@ async function installPoolFixtures(page: Page, state: PoolState) {
 for (const width of [390, 768, 1440]) {
   for (const state of ['stale', 'mixed', 'recovered', 'first-read'] as const) {
     for (const surface of surfaces) {
-      test(`Provider pools keep ${state} facts on ${surface} at ${width}px`, async ({ page }) => {
+      test(`Provider pools keep ${state} facts on ${surface} at ${width}px`, async ({ page }, testInfo) => {
         await page.setViewportSize({ width, height: 900 });
         await installPoolFixtures(page, state);
         const visibleProviders = surface === 'overview' ? providers : [surface];
@@ -163,6 +163,12 @@ for (const width of [390, 768, 1440]) {
           expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({
+          path: testInfo.outputPath('provider-pool.png'),
+          fullPage: true,
+          animations: 'disabled',
+        });
       });
     }
   }

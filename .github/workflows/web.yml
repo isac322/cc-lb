@@ -166,9 +166,9 @@ jobs:
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
       - name: Install browser for credit visual regression
         run: bunx playwright install --with-deps chromium
-      - name: Verify and capture Codex credit views
+      - name: Verify and capture credit and provider pool views
         run: |
-          bun run e2e e2e/codex-credits.spec.ts --retries=0 \
+          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts --retries=0 \
             --output="$RUNNER_TEMP/codex-credit-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
       - name: Capture matching base-branch credit views
@@ -199,5 +199,15 @@ jobs:
             ${{ runner.temp }}/codex-credit-visuals/after-source.txt
             ${{ runner.temp }}/codex-credit-visuals/before/*.png
             ${{ runner.temp }}/codex-credit-visuals/before/capture.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish provider pool visual evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: provider-pool-visuals-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/codex-credit-visuals/after/**/provider-pool.png
+            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
           retention-days: 14
           if-no-files-found: error
