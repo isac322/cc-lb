@@ -347,6 +347,107 @@ pub(super) async fn fetch_gemini_quota(
     .await
 }
 
+/// Best-effort display enrichment, using only the configured OAuth metadata
+/// endpoints. Never follows a 401 into token refresh or account onboarding.
+pub(super) async fn fetch_gemini_account_metadata(
+    http: &JsonHttpClient,
+    config: &cc_lb_config::Config,
+    bundle: &OAuthTokenBundle,
+    cancel: &CancellationToken,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let default_antigravity;
+    let default_cli;
+    let (code_assist_url, userinfo_url, user_agent, body) = match bundle.oauth_profile {
+        GeminiOAuthProfile::Antigravity => {
+            let config = match config.oauth.antigravity.as_ref() {
+                Some(config) => config,
+                None => {
+                    default_antigravity = cc_lb_config::AntigravityOAuthConfig::default();
+                    &default_antigravity
+                }
+            };
+            (
+                &config.code_assist_url,
+                &config.userinfo_url,
+                config.user_agent.as_str(),
+                Bytes::from_static(br#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#),
+            )
+        }
+        GeminiOAuthProfile::GeminiCli => {
+            let config = match config.oauth.gemini.as_ref() {
+                Some(config) => config,
+                None => {
+                    default_cli = cc_lb_config::GeminiOAuthConfig::default();
+                    &default_cli
+                }
+            };
+            // Match Gemini CLI setup.ts's core metadata, scoped to this
+            // credential's already configured project. Never onboard here.
+            let body = serde_json::json!({
+                "cloudaicompanionProject": bundle.project_id,
+                "metadata": {
+                    "ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED",
+                    "pluginType": "GEMINI", "duetProject": bundle.project_id,
+                }
+            });
+            let Ok(body) = serde_json::to_vec(&body) else {
+                return (None, None);
+            };
+            (
+                &config.code_assist_url,
+                &config.userinfo_url,
+                "GeminiCLI/cc-lb",
+                Bytes::from(body),
+            )
+        }
+    };
+    let base = code_assist_url.as_str().trim_end_matches('/');
+    let endpoint = format!(
+        "{}/v1internal:loadCodeAssist",
+        base.trim_end_matches("/v1internal")
+    );
+    let Ok(load_url) = Url::parse(&endpoint) else {
+        return (None, None);
+    };
+    let load = JsonRequest {
+        url: load_url,
+        method: http::Method::POST,
+        body,
+        content_type: "application/json",
+        access_token: &bundle.access_token,
+        account_id: None,
+        codex: false,
+        user_agent,
+        anthropic: false,
+        cancel,
+    };
+    let userinfo = JsonRequest {
+        url: userinfo_url.clone(),
+        method: http::Method::GET,
+        body: Bytes::new(),
+        content_type: "application/json",
+        access_token: &bundle.access_token,
+        account_id: None,
+        codex: false,
+        user_agent,
+        anthropic: false,
+        cancel,
+    };
+    async fn fetch(http: &JsonHttpClient, request: JsonRequest<'_>) -> Option<serde_json::Value> {
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), fetch_json_request(http, request))
+                .await
+                .ok()?
+                .ok()?;
+        response
+            .status
+            .is_success()
+            .then(|| serde_json::from_slice(&response.body).ok())
+            .flatten()
+    }
+    tokio::join!(fetch(http, load), fetch(http, userinfo))
+}
+
 async fn fetch_json_request(
     http: &JsonHttpClient,
     request: JsonRequest<'_>,

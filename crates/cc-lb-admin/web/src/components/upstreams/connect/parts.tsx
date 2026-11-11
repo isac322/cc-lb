@@ -28,6 +28,7 @@ import type {
   DraftCompleteResponse,
   OAuthProvider,
 } from '../../../lib/api';
+import { providerPlanLabel } from '../../../lib/providerPlan';
 import { PROVIDER_LABELS } from '../../../lib/providers';
 import {
   Badge,
@@ -502,13 +503,32 @@ export function AccountCard({
     provider === 'anthropic'
       ? 'Claude account'
       : `${PROVIDER_LABELS[provider]} account`;
+  const accountPrimary =
+    account?.email ??
+    account?.displayName ??
+    account?.accountUuid ??
+    account?.projectId ??
+    'Connected account';
   const accountSubtitle =
     account &&
     [
-      account.organizationName,
-      planLabel(account, provider),
-      account.projectId ? `Project: ${account.projectId}` : null,
-      account.plan && account.accountUuid
+      account.organizationName !== accountPrimary
+        ? account.organizationName
+        : null,
+      providerPlanLabel(provider, {
+        plan: account.plan,
+        plan_name: account.planName,
+        organization_metadata: {
+          organization_type: account.organizationType,
+          rate_limit_tier: account.rateLimitTier,
+        },
+      }),
+      account.projectId && account.projectId !== accountPrimary
+        ? `Project: ${account.projectId}`
+        : null,
+      provider === 'openai' &&
+      account.accountUuid &&
+      account.accountUuid !== accountPrimary
         ? `Workspace: ${account.accountUuid}`
         : null,
     ]
@@ -528,11 +548,7 @@ export function AccountCard({
           </div>
           <div className="min-w-0">
             <div className="text-body-sm text-text truncate">
-              {account.email ??
-                account.displayName ??
-                account.accountUuid ??
-                account.projectId ??
-                'Connected account'}
+              {accountPrimary}
             </div>
             <div
               className={cx(
@@ -553,18 +569,6 @@ export function AccountCard({
   );
 }
 
-function oauthPlanLabel(
-  provider: OAuthProvider,
-  plan: string | null | undefined,
-): string {
-  const normalized = plan?.trim();
-  if (!normalized) return PROVIDER_LABELS[provider];
-  const title = normalized
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-  return `${PROVIDER_LABELS[provider]} ${title}`;
-}
-
 /** Matches Anthropic's compact account-plan suggestion for every provider. */
 export function oauthNameSuggestion(
   provider: OAuthProvider,
@@ -578,12 +582,7 @@ export function oauthNameSuggestion(
     draft.account_email?.trim() ??
     draft.organization_metadata?.account_email?.trim();
   const emailLocalPart = email?.split('@', 1)[0]?.trim();
-  const plan = oauthPlanLabel(
-    provider,
-    draft.plan ??
-      draft.organization_metadata?.rate_limit_tier ??
-      draft.organization_metadata?.organization_type,
-  );
+  const plan = providerPlanLabel(provider, draft);
   if (provider === 'gemini') {
     return (
       [email, plan].filter(Boolean).join(' · ') || draft.suggested_name.trim()
@@ -599,28 +598,6 @@ export function oauthNameSuggestion(
   return parts.join(' · ') || draft.suggested_name.trim() || 'OAuth Upstream';
 }
 
-export function planLabel(
-  account: AccountIdentity,
-  provider: OAuthProvider = 'anthropic',
-): string | null {
-  if (account.plan)
-    return account.plan
-      .replace(/[_-]/g, ' ')
-      .replace(/\b\w/g, (letter) => letter.toUpperCase());
-  const type = account.organizationType;
-  if (!type) return null;
-  const providerName =
-    provider === 'openai'
-      ? 'ChatGPT'
-      : provider === 'gemini'
-        ? 'Google'
-        : 'Claude';
-  if (/max/i.test(type)) return `${providerName} Max`;
-  if (/pro/i.test(type)) return `${providerName} Pro`;
-  if (/team/i.test(type)) return `${providerName} Team`;
-  if (/enterprise/i.test(type)) return `${providerName} Enterprise`;
-  return type.replace(/_/g, ' ');
-}
 // ─── Identity verdict ────────────────────────────────────────────────────────
 export function IdentityVerdictNotice({
   outcome,

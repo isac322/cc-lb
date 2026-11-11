@@ -2739,9 +2739,9 @@ async fn subscription_metadata_response(
     };
     Ok(SubscriptionMetadataResponse {
         upstream_id: upstream_id.to_string(),
-        account_identity: super::oauth::account_identity_from_metadata(
-            subscription_metadata.as_ref(),
-        ),
+        // Provider display identity is attached only after binding it to the
+        // current decrypted credential in the read handler.
+        account_identity: OAuthAccountIdentity::default(),
         subscription_metadata,
         organization_metadata,
     })

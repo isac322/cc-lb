@@ -9,7 +9,12 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { ApiError, type OAuthProvider, type Upstream } from '../../../lib/api';
+import {
+  ApiError,
+  type OAuthProvider,
+  type OrganizationMetadataInner,
+  type Upstream,
+} from '../../../lib/api';
 import {
   AccountCard,
   DeviceCodePanel,
@@ -314,7 +319,7 @@ describe('provider subscription OAuth flows', () => {
       const name = (await within(dialog).findByLabelText(
         'Upstream name',
       )) as HTMLInputElement;
-      expect(name.value).toBe('gemini@example.com · Gemini Standard Tier');
+      expect(name.value).toBe('gemini@example.com · Standard Tier');
       fireEvent.change(name, { target: { value: 'My Gemini account' } });
       expect(name.value).toBe('My Gemini account');
       expect(completeBody).toEqual({
@@ -386,7 +391,7 @@ describe('provider subscription OAuth flows', () => {
     const name = within(rendered.dialog()).getByLabelText(
       'Upstream name',
     ) as HTMLInputElement;
-    expect(name.value).toBe('OpenAI Team · operator');
+    expect(name.value).toBe('ChatGPT Team · operator');
     expect(
       within(rendered.dialog())
         .getByRole('button', { name: 'Add upstream' })
@@ -489,7 +494,7 @@ describe('provider subscription OAuth flows', () => {
     const name = (await within(dialog).findByLabelText(
       'Upstream name',
     )) as HTMLInputElement;
-    expect(name.value).toBe('OpenAI Pro · browser');
+    expect(name.value).toBe('ChatGPT Pro (More) · browser');
     expect(completeBody).toEqual({
       state_token: 'openai-state-token',
       code: callbackUrl,
@@ -885,23 +890,74 @@ describe('OAuth completion error messages', () => {
 });
 
 describe('provider account cards', () => {
-  test.each(['team', 'pro', 'plus'])(
-    'renders ChatGPT %s email, plan and workspace',
-    (plan) => {
+  test.each([
+    ['team', 'ChatGPT Team'],
+    ['pro', 'ChatGPT Pro (More)'],
+    ['plus', 'ChatGPT Plus'],
+    ['prolite', 'ChatGPT Pro'],
+    ['promax', 'ChatGPT Pro (Max)'],
+    ['future_plan', 'ChatGPT Future Plan'],
+  ])('renders ChatGPT %s email, plan and workspace', (plan, label) => {
+    const account = identityOfResult({
+      organization_metadata: null,
+      account_email: 'openai@example.com',
+      account_id: 'workspace-account-123',
+      plan,
+      project_id: null,
+    });
+    render(<AccountCard provider="openai" account={account} />);
+    expect(screen.getByText('openai@example.com')).toBeDefined();
+    expect(screen.getByText(/Workspace: workspace-account-123/)).toBeDefined();
+    expect(
+      screen.getByText(`${label} · Workspace: workspace-account-123`),
+    ).toBeDefined();
+    expect(screen.queryByText('No account connected yet')).toBeNull();
+  });
+
+  test.each([
+    ['anthropic', 'default_claude_max_20x', null, 'Claude Ultra'],
+    ['anthropic', 'default_claude_max_5x', null, 'Claude Max'],
+    ['gemini', 'g1-ultra-tier', 'Google AI Ultra', 'Google AI Ultra'],
+    ['gemini', 'future-tier', 'Provider Future Plan', 'Provider Future Plan'],
+    ['gemini', 'future-tier', null, 'Future Tier'],
+  ] as const)(
+    'uses the shared %s plan in connect cards',
+    (provider, plan, planName, label) => {
+      const organizationMetadata: OrganizationMetadataInner | null =
+        provider === 'anthropic'
+          ? {
+              organization_uuid: 'example-organization',
+              organization_name: null,
+              organization_type: 'claude_max',
+              rate_limit_tier: plan,
+              has_extra_usage_enabled: null,
+              billing_type: null,
+              subscription_created_at_unix_secs: null,
+              account_email: null,
+              account_display_name: null,
+              account_uuid: null,
+              overage_credit_amount_minor_units: null,
+              overage_credit_currency: null,
+              overage_credit_granted: null,
+              overage_credit_eligible: null,
+              observed_at_unix_millis: 0,
+              last_error: null,
+              raw_profile: null,
+              raw_overage_grant: null,
+            }
+          : null;
       const account = identityOfResult({
-        organization_metadata: null,
-        account_email: 'openai@example.com',
-        account_id: 'workspace-account-123',
-        plan,
-        project_id: null,
+        organization_metadata: organizationMetadata,
+        account_email: 'operator@example.com',
+        account_name: 'Example Operator',
+        account_id: null,
+        project_id: provider === 'gemini' ? 'example-project' : null,
+        plan: provider === 'anthropic' ? null : plan,
+        plan_name: planName,
       });
-      render(<AccountCard account={account} />);
-      expect(screen.getByText('openai@example.com')).toBeDefined();
-      expect(
-        screen.getByText(/Workspace: workspace-account-123/),
-      ).toBeDefined();
-      expect(screen.getByText(new RegExp(plan, 'i'))).toBeDefined();
-      expect(screen.queryByText('No account connected yet')).toBeNull();
+      render(<AccountCard provider={provider} account={account} />);
+      expect(screen.getByText(new RegExp(label))).toBeDefined();
+      expect(screen.getAllByText('operator@example.com')).toHaveLength(1);
     },
   );
 });
@@ -931,19 +987,23 @@ describe('provider-aware reconnect result copy', () => {
   );
   test.each([
     ['openai', 'ChatGPT Team'],
-    ['gemini', 'Google Team'],
+    ['gemini', 'Provider Team'],
   ] as const)('does not use Claude plan names for %s', (provider, label) => {
     render(
       <AccountCard
         provider={provider}
         account={accountIdentity({
-          organizationType: 'team',
-          plan: null,
+          plan: 'team',
+          planName: provider === 'gemini' ? 'Provider Team' : null,
         })}
       />,
     );
 
-    expect(screen.getByText(label)).toBeDefined();
+    expect(
+      screen.getByText(
+        provider === 'openai' ? `${label} · Workspace: account-uuid` : label,
+      ),
+    ).toBeDefined();
     expect(screen.queryByText(/Claude (Max|Pro|Team|Enterprise)/)).toBeNull();
   });
 

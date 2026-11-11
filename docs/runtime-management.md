@@ -689,6 +689,42 @@ Antigravity content requests use `https://daily-cloudcode-pa.googleapis.com`. Us
 > [!WARNING]
 > Google Antigravity Additional Terms [§6](https://antigravity.google/terms) prohibit using third-party software, tools, or services to access the Service with Antigravity OAuth. The terms state that this is a breach and may be grounds for suspension or termination of Antigravity and/or Gemini CLI accounts. Operators decide at their own risk whether to use this integration.
 
+#### Subscription account metadata
+
+`GET /admin/v1/upstreams/{id}/subscription-metadata` and OAuth status responses
+include nullable `account_email`, `account_name`, `account_id`, `plan`,
+`plan_name`, and `project_id` fields for OpenAI and Gemini subscriptions.
+`plan` retains the provider's identifier; `plan_name` is a provider-supplied
+display name when available.
+
+OpenAI sign-in reads the account name and identity from display-only token
+claims. Background usage polling updates the plan and email from the existing
+Codex usage response only when its account ID matches the stored credential.
+OpenAI organization memberships are not treated as ChatGPT workspace names.
+Gemini sign-in reads the account name and email from Google userinfo and the
+plan from `loadCodeAssist`, preferring the paid tier. The tier's name and ID
+always come from the same tier. Background metadata collection fills older
+records using the configured endpoints for the credential's OAuth profile.
+Metadata failures preserve previously collected fields and do not invalidate
+successful quota observations.
+Project-only Gemini imports do not need an account email in the token bundle.
+Their collected display identity is bound to the stored project and credential
+generation. Replacing that credential invalidates the old identity until the
+next successful collection. Background metadata writes atomically check both
+the captured credential generation and the metadata read before collection,
+so a delayed poll cannot overwrite account details saved by a newer reconnect.
+
+
+The admin web uses the same plan labels in upstream lists, detail headers,
+search, and OAuth account cards. Gemini's reported tier name takes precedence;
+unknown plan identifiers remain readable. Claude Max 20x is shown as
+[Claude Ultra](https://support.claude.com/en/articles/17728952-what-is-the-ultra-plan),
+and Max 5x as
+[Claude Max](https://support.claude.com/en/articles/11049741-what-is-the-max-plan).
+Account identity appears in the detail header and remaining account facts,
+while Connection contains endpoint information. Provider metadata collection
+adds no provider calls to the proxy request path.
+
 #### Access-only OAuth
 
 For either `openai_oauth` or `gemini_oauth`, set `never_refresh: true` to import

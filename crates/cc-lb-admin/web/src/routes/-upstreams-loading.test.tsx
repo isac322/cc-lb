@@ -20,7 +20,11 @@ import { pendingQuery } from '../lib/test-utils/hook-results';
 import * as requestEventsFeed from '../lib/useRequestEventsFeed';
 import { Route } from './upstreams';
 
-let searchState: { selectedId?: string; action?: 'new' | 'reconnect' } = {};
+let searchState: {
+  selectedId?: string;
+  action?: 'new' | 'reconnect';
+  q?: string;
+} = {};
 const navigateMock = vi.fn();
 
 vi.mock('@tanstack/react-router', async () => {
@@ -645,18 +649,345 @@ describe('/upstreams disabled list rows', () => {
 });
 
 describe('/upstreams provider account metadata', () => {
+  function setSearchVisibility(state: DocumentVisibilityState) {
+    Object.defineProperty(document, 'visibilityState', {
+      value: state,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  async function renderBackfillingPlanSearch(initialPlan: string | null) {
+    vi.useFakeTimers();
+    act(() => setSearchVisibility('visible'));
+    const actualQueries =
+      await vi.importActual<typeof queries>('../lib/queries');
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(
+      actualQueries.useUpstreamSubscriptionMetadata,
+    );
+    searchState = { q: 'Google AI Ultra' };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({
+        upstreams: [
+          { ...upstream, kind: 'gemini_oauth' },
+          ...Array.from({ length: 7 }, (_, index) => ({
+            ...apiKeyUpstream,
+            id: `backfill-api-${index}`,
+            name: `Backfill backup ${index}`,
+          })),
+        ],
+      }),
+    );
+    const initial: api.SubscriptionMetadataResponse = {
+      upstream_id: upstream.id,
+      subscription_metadata: null,
+      organization_metadata: null,
+      plan: initialPlan,
+      plan_name: null,
+    };
+    const getMetadata = vi.spyOn(api, 'getJson').mockResolvedValue(initial);
+    const metadataUrl = `/admin/v1/upstreams/${upstream.id}/subscription-metadata`;
+    const metadataRequestCount = () =>
+      getMetadata.mock.calls.filter(([path]) => path === metadataUrl).length;
+    const rendered = renderRoute();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(metadataRequestCount()).toBe(1);
+    expect(screen.queryByRole('button', { name: /OAuth Primary/ })).toBeNull();
+    return {
+      metadataRequestCount,
+      backfill: () => {
+        getMetadata.mockResolvedValue({
+          ...initial,
+          plan: 'g1-ultra-tier',
+          plan_name: 'Google AI Ultra',
+        } satisfies api.SubscriptionMetadataResponse);
+      },
+      dispose: () => {
+        rendered.unmount();
+        act(() => setSearchVisibility('visible'));
+      },
+    };
+  }
+
+  test.each([null, 'free-tier'])(
+    'finds a hidden row when its initially %s plan is backfilled on the metadata cadence',
+    async (initialPlan) => {
+      const search = await renderBackfillingPlanSearch(initialPlan);
+      try {
+        search.backfill();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(
+            queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS + 1,
+          );
+        });
+        const row = screen.getByRole('button', { name: /OAuth Primary/ });
+        expect(within(row).getByText('Google AI Ultra')).toBeDefined();
+        expect(search.metadataRequestCount()).toBe(2);
+        expect(searchState.q).toBe('Google AI Ultra');
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(
+            queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
+          );
+        });
+        expect(search.metadataRequestCount()).toBe(3);
+      } finally {
+        search.dispose();
+      }
+    },
+  );
+
+  test('pauses hidden-row metadata polling while the document is hidden and refetches on return', async () => {
+    const search = await renderBackfillingPlanSearch(null);
+    try {
+      act(() => setSearchVisibility('hidden'));
+      search.backfill();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS * 3,
+        );
+      });
+      expect(search.metadataRequestCount()).toBe(1);
+      expect(
+        screen.queryByRole('button', { name: /OAuth Primary/ }),
+      ).toBeNull();
+      act(() => setSearchVisibility('visible'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const row = screen.getByRole('button', { name: /OAuth Primary/ });
+      expect(within(row).getByText('Google AI Ultra')).toBeDefined();
+      expect(search.metadataRequestCount()).toBe(2);
+    } finally {
+      search.dispose();
+    }
+  });
+
   test.each([
-    ['openai_oauth', 'OpenAI', 'Team', 'Workspace', 'account-team-123'],
+    [
+      'anthropic_oauth',
+      'Claude Ultra',
+      {
+        organization_metadata: {
+          organization_type: 'claude_max',
+          rate_limit_tier: 'default_claude_max_20x',
+        },
+      },
+    ],
+    ['openai_oauth', 'ChatGPT Pro (More)', { plan: 'pro' }],
+    ['openai_oauth', 'ChatGPT Proto', { plan: '__proto__' }],
     [
       'gemini_oauth',
-      'Gemini',
-      'Standard Tier',
-      'Project',
-      'gemini-project-123',
+      'Google AI Ultra',
+      { plan: 'g1-ultra-tier', plan_name: 'Google AI Ultra' },
     ],
   ] as const)(
-    'shows the stored provider identity for %s',
-    (kind, provider, plan, scope, scopeId) => {
+    'resolves a cold %s plan search before its row mounts',
+    async (kind, label, metadata) => {
+      searchState = { q: label };
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({
+          upstreams: [
+            { ...upstream, kind },
+            ...Array.from({ length: 7 }, (_, index) => ({
+              ...apiKeyUpstream,
+              id: `cold-api-${index}`,
+              name: `Cold backup ${index}`,
+            })),
+          ],
+        }),
+      );
+      const getMetadata = vi.spyOn(api, 'getJson').mockResolvedValue({
+        upstream_id: upstream.id,
+        subscription_metadata: null,
+        organization_metadata: null,
+        ...metadata,
+      });
+      renderRoute();
+      expect(
+        await screen.findByRole('button', { name: new RegExp(upstream.name) }),
+      ).toBeDefined();
+      expect(
+        screen.queryByRole('button', { name: /Cold backup 0/ }),
+      ).toBeNull();
+      expect(getMetadata).toHaveBeenCalledWith(
+        `/admin/v1/upstreams/${upstream.id}/subscription-metadata`,
+        { signal: expect.any(AbortSignal) },
+      );
+    },
+  );
+
+  test.each([
+    [
+      'anthropic_oauth',
+      'Claude Ultra',
+      {
+        organization_metadata: {
+          organization_type: 'claude_max',
+          rate_limit_tier: 'default_claude_max_20x',
+        },
+      },
+    ],
+    ['openai_oauth', 'ChatGPT Pro (More)', { plan: 'pro' }],
+    [
+      'gemini_oauth',
+      'Google AI Ultra',
+      { plan: 'g1-ultra-tier', plan_name: 'Google AI Ultra' },
+    ],
+  ] as const)(
+    'finds %s by the same cached plan shown in its row',
+    (kind, label, metadata) => {
+      const target = { ...upstream, kind };
+      searchState = { q: label };
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({
+          upstreams: [
+            target,
+            ...Array.from({ length: 7 }, (_, index) => ({
+              ...apiKeyUpstream,
+              id: `api-${index}`,
+              name: `Backup ${index}`,
+            })),
+          ],
+        }),
+      );
+      const response = {
+        upstream_id: target.id,
+        subscription_metadata: null,
+        organization_metadata: null,
+        ...metadata,
+      };
+      queryClient.setQueryData(
+        queries.qk.upstreamSubscriptionMetadata(target.id),
+        response,
+      );
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult(response),
+      );
+      renderRoute();
+      expect(
+        screen.getByRole('button', { name: new RegExp(upstream.name) }),
+      ).toBeDefined();
+      expect(screen.queryByRole('button', { name: /Backup 0/ })).toBeNull();
+      expect(screen.getByText('Showing 1 of 8')).toBeDefined();
+    },
+  );
+
+  test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
+    'keeps %s known plan truthful while disabled',
+    (kind) => {
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({ upstreams: [{ ...upstream, kind, enabled: false }] }),
+      );
+      const label =
+        kind === 'anthropic_oauth'
+          ? 'Claude Ultra'
+          : kind === 'openai_oauth'
+            ? 'ChatGPT Team'
+            : 'Google AI Ultra';
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult({
+          organization_metadata:
+            kind === 'anthropic_oauth'
+              ? {
+                  organization_type: 'claude_max',
+                  rate_limit_tier: 'default_claude_max_20x',
+                }
+              : null,
+          subscription_metadata: null,
+          plan: kind === 'openai_oauth' ? 'team' : 'g1-ultra-tier',
+          plan_name: kind === 'gemini_oauth' ? 'Google AI Ultra' : null,
+        }),
+      );
+      renderRoute();
+      const header = document.querySelector(
+        '[data-detail-header]',
+      ) as HTMLElement;
+      expect(within(header).getByText(label)).toBeDefined();
+      expect(
+        (within(header).getByRole('switch') as HTMLInputElement).checked,
+      ).toBe(false);
+      expect(
+        screen.getByRole('button', { name: /OAuth Primary.*Disabled/ }),
+      ).toBeDefined();
+    },
+  );
+
+  test.each([
+    [
+      'anthropic_oauth',
+      'Claude Ultra',
+      {
+        organization_metadata: {
+          organization_type: 'claude_max',
+          rate_limit_tier: 'default_claude_max_20x',
+        },
+      },
+    ],
+    ['openai_oauth', 'ChatGPT Future Plan', { plan: 'future_plan' }],
+    ['gemini_oauth', 'Future Tier', { plan: 'future-tier' }],
+  ] as const)(
+    'keeps %s list caption and detail badge consistent',
+    (kind, label, metadata) => {
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({ upstreams: [{ ...upstream, kind }] }),
+      );
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult({
+          subscription_metadata: null,
+          organization_metadata: null,
+          ...metadata,
+        }),
+      );
+      renderRoute();
+      const row = screen.getByRole('button', {
+        name: new RegExp(upstream.name),
+      });
+      const header = document.querySelector(
+        '[data-detail-header]',
+      ) as HTMLElement;
+      expect(within(row).getByText(label)).toBeDefined();
+      expect(within(header).getByText(label)).toBeDefined();
+    },
+  );
+
+  test('keeps Anthropic organization and remaining account facts in their existing surfaces', () => {
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [upstream] }),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+      queryResult({
+        ...metadataData(upstream, 'claude_max', 'operator@example.com'),
+        organization_metadata: {
+          ...metadataData(upstream, 'claude_max', 'operator@example.com')
+            .organization_metadata,
+          rate_limit_tier: 'default_claude_max_20x',
+          account_display_name: 'Example Operator',
+          organization_name: 'Example Organization',
+        },
+      }),
+    );
+    renderRoute();
+    const header = document.querySelector(
+      '[data-detail-header]',
+    ) as HTMLElement;
+    expect(within(header).getByText('Claude Ultra')).toBeDefined();
+    expect(within(header).getByText('operator@example.com')).toBeDefined();
+    expect(within(header).getByText('Example Organization')).toBeDefined();
+    const facts = screen.getByTestId('upstream-metadata-strip');
+    expect(within(facts).getByText('Example Operator')).toBeDefined();
+    expect(within(facts).getByText('member')).toBeDefined();
+    expect(screen.getAllByText('operator@example.com')).toHaveLength(1);
+    expect(screen.getAllByText('Example Organization')).toHaveLength(1);
+  });
+
+  test.each([
+    ['openai_oauth', 'ChatGPT Pro (More)', 'Workspace', 'account-team-123'],
+    ['gemini_oauth', 'Google AI Ultra', 'Project', 'gemini-project-123'],
+  ] as const)(
+    'puts %s identity in the header and remaining stable facts in metadata',
+    (kind, plan, scope, scopeId) => {
       const subscription = { ...upstream, kind };
       vi.mocked(queries.useUpstreams).mockReturnValue({
         data: { upstreams: [subscription] },
@@ -670,20 +1001,30 @@ describe('/upstreams provider account metadata', () => {
           account_email: 'operator@example.com',
           account_id: kind === 'openai_oauth' ? scopeId : null,
           project_id: kind === 'gemini_oauth' ? scopeId : null,
-          plan: kind === 'openai_oauth' ? 'team' : 'standard-tier',
+          account_name: 'Example Operator',
+          plan: kind === 'openai_oauth' ? 'pro' : 'g1-ultra-tier',
+          plan_name: kind === 'gemini_oauth' ? 'Google AI Ultra' : null,
         }),
       );
 
       renderRoute();
 
-      expect(screen.getByRole('heading', { name: 'Connection' })).toBeDefined();
-      expect(screen.getByText('operator@example.com')).toBeDefined();
-      expect(screen.getByText(plan)).toBeDefined();
-      expect(screen.getByText(scope)).toBeDefined();
-      expect(screen.getByText(scopeId)).toBeDefined();
-      expect(
-        screen.queryByText(`Not available for ${provider} subscriptions.`),
-      ).toBeNull();
+      const header = document.querySelector(
+        '[data-detail-header]',
+      ) as HTMLElement;
+      expect(within(header).getByText('operator@example.com')).toBeDefined();
+      expect(within(header).getByText(plan)).toBeDefined();
+      expect(within(header).getByText(`${scope}: ${scopeId}`)).toBeDefined();
+      const facts = screen.getByTestId('upstream-metadata-strip');
+      expect(within(facts).getByText('Account name')).toBeDefined();
+      expect(within(facts).getByText('Example Operator')).toBeDefined();
+      expect(screen.getAllByText('operator@example.com')).toHaveLength(1);
+      expect(screen.getAllByText('Example Operator')).toHaveLength(1);
+      const connection = screen.getByTestId('provider-oauth-connection');
+      expect(within(connection).getByText('Endpoint')).toBeDefined();
+      expect(connection.textContent).not.toContain('operator@example.com');
+      expect(connection.textContent).not.toContain(scopeId);
+      expect(connection.textContent).not.toContain(plan);
       expect(
         screen.queryByRole('button', { name: 'Refresh subscription metadata' }),
       ).toBeNull();
@@ -707,6 +1048,15 @@ describe('/upstreams Gemini list geometry', () => {
     };
     vi.mocked(queries.useUpstreams).mockReturnValue(
       queryResult({ upstreams: [gemini, geminiApiKey, upstream] }),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+      queryResult({
+        upstream_id: gemini.id,
+        organization_metadata: null,
+        subscription_metadata: null,
+        plan: 'g1-ultra-tier',
+        plan_name: 'Google AI Ultra',
+      }),
     );
     vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
       queryResult({
@@ -733,7 +1083,7 @@ describe('/upstreams Gemini list geometry', () => {
     expect(quota.parentElement?.parentElement?.className).toContain('flex-col');
     const caption = quota.parentElement?.previousElementSibling;
     expect(caption?.className).toContain('shrink-0');
-    expect(caption?.textContent).toBe('Subscription');
+    expect(caption?.textContent).toBe('Google AI Ultra');
     expect(caption?.querySelector('svg')).not.toBeNull();
     expect(
       Array.from(quota.children, (cell) => cell.getAttribute('data-window')),
@@ -2241,19 +2591,25 @@ describe('/upstreams essential provider connection facts', () => {
       renderRoute();
 
       const connection = screen.getByTestId('provider-oauth-connection');
+      const header = document.querySelector(
+        '[data-detail-header]',
+      ) as HTMLElement;
+      expect(within(header).getByText('operator@example.com')).toBeDefined();
       expect(
-        within(connection).getByText('operator@example.com'),
-      ).toBeDefined();
-      expect(
-        within(connection).getByText(
-          kind === 'openai_oauth' ? 'Team' : 'Standard Tier',
+        within(header).getByText(
+          kind === 'openai_oauth' ? 'ChatGPT Team' : 'Standard Tier',
         ),
       ).toBeDefined();
       expect(
-        within(connection).getByText(
-          kind === 'openai_oauth' ? 'workspace-123' : 'project-123',
+        within(header).getByText(
+          kind === 'openai_oauth'
+            ? 'Workspace: workspace-123'
+            : 'Project: project-123',
         ),
       ).toBeDefined();
+      expect(connection.textContent).not.toContain('operator@example.com');
+      expect(connection.textContent).not.toContain('workspace-123');
+      expect(connection.textContent).not.toContain('project-123');
       expect(within(connection).getByText('Endpoint')).toBeDefined();
       expect(connection.textContent).not.toMatch(
         /connected|refresh|token|expir|rotate|scope|client|profile|Antigravity|Gemini CLI|long-lived/i,

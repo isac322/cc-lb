@@ -118,6 +118,16 @@ OpenAI and Gemini also accept imported OAuth token bundles through the authentic
 
 OAuth warm-up is opt-out after credentials exist for all three OAuth kinds. Operators can disable it per upstream with an ETag-protected update.
 
+The upstream list and detail header show the provider's plan name, including
+ChatGPT plans and Gemini's reported paid tier. Claude's previous Max 20x and
+Max 5x plans display as Ultra and Max. Unknown plan identifiers stay readable.
+The detail header shows the account email and workspace or project identifier;
+remaining account facts include the name when the provider supplies it.
+Connection keeps endpoint details without repeating account identity.
+See [subscription account metadata](/docs/reference/source/runtime-management/#subscription-account-metadata)
+for field sources and background update behavior.
+
+
 ## Revision safety
 
 Admin updates use optimistic concurrency. Read the current ETag or revision before an update, send it with `If-Match`, and handle `stale_revision` by reading the resource again. This prevents an older operator view from overwriting a newer runtime change.
