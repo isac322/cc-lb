@@ -11,8 +11,15 @@ import type React from 'react';
 import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as previewControls from '../lib/previewControls';
+import type { ProviderFamily } from '../lib/providers';
 import * as queries from '../lib/queries';
 import { queryClient as appQueryClient } from '../lib/queryClient';
+import {
+  idleMutation,
+  mutationContext,
+  pendingQuery,
+  successQuery,
+} from '../lib/test-utils/hook-results';
 import * as requestEventsFeed from '../lib/useRequestEventsFeed';
 import {
   ApiKeysCard,
@@ -401,32 +408,48 @@ test('principal detail reads keepalive to access with every section expanded', (
 const subscriptionPlugin = {
   id: 'subscription-preference-id',
   name: 'subscription-preference',
+  original_filename: 'builtin://subscription-preference',
+  description: 'Prefer subscription upstreams',
+  usage: 'Router filter',
+  hook_metadata: {},
+  label: null,
+  size_bytes: 0,
+  refcount: 0,
+  revision: 1,
+  uploaded_at_unix_secs: 0,
   metadata: null,
   sha256_hex: '',
   supported_slots: ['router'],
-};
+} satisfies queries.PluginEntry;
 const subscriptionEntry = {
   id: 'entry-subscription-preference',
+  principal_id: 'p-1',
+  slot: 'router',
   wasm_registry_id: subscriptionPlugin.id,
   order: 0,
   revision: 2,
   config: { urgency: 'saved' },
-};
+} satisfies queries.PluginChainEntry;
 
 function subscriptionChain(saved = false) {
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: { entries: [subscriptionPlugin] },
-    isLoading: false,
-  } as never);
-  vi.mocked(queries.usePluginChain).mockImplementation(
-    (_pid, slot) =>
-      ({
-        data: {
-          entries: saved && slot === 'router' ? [subscriptionEntry] : [],
-        },
-        isLoading: false,
-      }) as never,
+  vi.mocked(queries.usePluginRegistry).mockReturnValue(
+    successQuery({ entries: [subscriptionPlugin] }),
   );
+  vi.mocked(queries.usePluginChain).mockImplementation((_pid, slot) =>
+    successQuery({
+      entries: saved && slot === 'router' ? [subscriptionEntry] : [],
+    }),
+  );
+}
+
+function mockProviderScope(providers: readonly ProviderFamily[] | undefined) {
+  vi.mocked(previewControls.useProviderScope).mockReturnValue({
+    previewProviders: undefined,
+    scope: providers?.[0] ?? 'all',
+    explicit: providers !== undefined,
+    providers,
+    setScope: vi.fn(),
+  });
 }
 
 for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
@@ -434,14 +457,17 @@ for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
     `${provider} OAuth exposes subscription preference in scope %j`,
     ({ providers }) => {
       subscriptionChain(true);
-      vi.mocked(previewControls.useProviderScope).mockReturnValue({
-        providers,
-      } as never);
-      vi.mocked(queries.useUpstreams).mockReturnValue({
-        data: {
-          upstreams: [{ ...keepaliveUpstream, kind: `${provider}_oauth` }],
-        },
-      } as never);
+      mockProviderScope(providers);
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        successQuery({
+          upstreams: [
+            {
+              ...keepaliveUpstream,
+              kind: `${provider}_oauth`,
+            } satisfies queries.Upstream,
+          ],
+        }),
+      );
       renderPrincipalDetail();
       const toggle = cardNamed('Router').getByRole('switch', {
         name: 'Prefer subscription upstreams',
@@ -454,21 +480,28 @@ for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
     `${provider} API key hides subscription preference in scope %j`,
     ({ providers }) => {
       subscriptionChain(true);
-      vi.mocked(previewControls.useProviderScope).mockReturnValue({
-        providers,
-      } as never);
-      vi.mocked(queries.useUpstreams).mockReturnValue({
-        data: {
-          upstreams: [{ ...keepaliveUpstream, kind: `${provider}_api_key` }],
-        },
-      } as never);
+      mockProviderScope(providers);
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        successQuery({
+          upstreams: [
+            {
+              ...keepaliveUpstream,
+              kind: `${provider}_api_key`,
+            } satisfies queries.Upstream,
+          ],
+        }),
+      );
       renderPrincipalDetail();
       expect(cardNamed('Router').queryByRole('switch')).toBeNull();
     },
   );
 }
 
-test.each([
+test.each<{
+  scope: readonly ProviderFamily[] | undefined;
+  allowed: string[];
+  visible: boolean;
+}>([
   { scope: undefined, allowed: [], visible: true },
   { scope: ['openai'], allowed: ['openai-oauth'], visible: true },
   { scope: ['gemini'], allowed: [], visible: false },
@@ -478,24 +511,22 @@ test.each([
   'subscription visibility intersects scope and allowlist: %j',
   ({ scope, allowed, visible }) => {
     subscriptionChain();
-    vi.mocked(previewControls.useProviderScope).mockReturnValue({
-      providers: scope,
-    } as never);
-    vi.mocked(queries.useUpstreams).mockReturnValue({
-      data: {
+    mockProviderScope(scope);
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      successQuery({
         upstreams: [
           { ...keepaliveUpstream, id: 'anthropic-oauth' },
           { ...keepaliveUpstream, id: 'openai-oauth', kind: 'openai_oauth' },
           { ...keepaliveUpstream, id: 'gemini-key', kind: 'gemini_api_key' },
-        ],
-      },
-    } as never);
+        ] satisfies queries.Upstream[],
+      }),
+    );
     renderPrincipalDetail(principalFixture({ allowed_upstreams: allowed }));
     expect(cardNamed('Router').queryByRole('switch') !== null).toBe(visible);
   },
 );
 
-test.each([
+test.each<{ kinds: queries.Upstream['kind'][] | undefined }>([
   { kinds: undefined },
   { kinds: [] },
   { kinds: ['anthropic_api_key', 'openai_api_key', 'gemini_api_key'] },
@@ -503,12 +534,13 @@ test.each([
   'subscription preference stays hidden with no OAuth inventory: %j',
   ({ kinds }) => {
     subscriptionChain();
-    vi.mocked(queries.useUpstreams).mockReturnValue({
-      data: kinds
-        ? { upstreams: kinds.map((kind) => ({ ...keepaliveUpstream, kind })) }
-        : undefined,
-      isLoading: kinds === undefined,
-    } as never);
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      kinds
+        ? successQuery({
+            upstreams: kinds.map((kind) => ({ ...keepaliveUpstream, kind })),
+          })
+        : pendingQuery(),
+    );
     renderPrincipalDetail();
     expect(cardNamed('Router').queryByRole('switch')).toBeNull();
   },
@@ -518,21 +550,17 @@ test('scope changes preserve the principal-wide saved chain in Advanced', () => 
   subscriptionChain(true);
   const insert = vi.fn();
   const del = vi.fn();
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: insert,
-    isPending: false,
-  } as never);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate: del,
-    isPending: false,
-  } as never);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue(
+    idleMutation({ mutate: insert }),
+  );
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue(
+    idleMutation({ mutate: del }),
+  );
   const view = renderPrincipalDetail();
   expect(
     (cardNamed('Router').getByRole('switch') as HTMLInputElement).checked,
   ).toBe(true);
-  vi.mocked(previewControls.useProviderScope).mockReturnValue({
-    providers: ['openai'],
-  } as never);
+  mockProviderScope(['openai']);
   view.rerender(withProviders(<Component />));
   expect(cardNamed('Router').queryByRole('switch')).toBeNull();
   fireEvent.click(cardNamed('Router').getByRole('tab', { name: 'Advanced' }));
@@ -809,48 +837,15 @@ test('loading router metadata keeps Basic selected and disables mutations', () =
 });
 
 test('empty router chain keeps Basic available and enables subscription-preference', () => {
+  subscriptionChain();
   const insertMock = vi.fn();
-  vi.mocked(queries.usePluginChain).mockReturnValue({
-    data: { entries: [] },
-  } as unknown as ReturnType<typeof queries.usePluginChain>);
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: {
-      entries: [
-        {
-          id: 'subscription-preference-id',
-          name: 'subscription-preference',
-          metadata: null,
-          sha256_hex: '',
-        },
-      ],
-    },
-  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
-  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
-    data: { strategy: 'first-pick', revision: 1 },
-    isLoading: false,
-  } as unknown as ReturnType<typeof queries.useRouterTerminalStrategy>);
-  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useUpdateRouterTerminalStrategy>);
-  vi.mocked(queries.useReorderChain).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useReorderChain>);
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: insertMock,
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
-
   const deleteMock = vi.fn();
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate: deleteMock,
-    isPending: false,
-  } as never);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue(
+    idleMutation({ mutate: insertMock }),
+  );
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue(
+    idleMutation({ mutate: deleteMock }),
+  );
   const successToast = vi.spyOn(toast, 'success');
   renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
@@ -871,11 +866,26 @@ test('empty router chain keeps Basic available and enables subscription-preferen
     },
     expect.anything(),
   );
-  insertMock.mock.calls[0]![1].onSuccess({ id: 'new-entry', revision: 9 });
-  const action = successToast.mock.calls[0]![1]?.action as unknown as {
-    onClick: () => void;
-  };
-  action.onClick();
+  insertMock.mock.calls[0]![1].onSuccess(
+    {
+      ...subscriptionEntry,
+      id: 'new-entry',
+      revision: 9,
+    } satisfies queries.PluginChainEntry,
+    insertMock.mock.calls[0]![0],
+    undefined,
+    mutationContext,
+  );
+  const action = successToast.mock.calls[0]![1]?.action;
+  if (!action || typeof action !== 'object' || !('onClick' in action)) {
+    throw new Error('Expected a toast Undo action');
+  }
+  renderWithProviders(
+    <button type="button" onClick={action.onClick}>
+      Undo
+    </button>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
   expect(deleteMock).toHaveBeenCalledWith(
     { id: 'new-entry', revision: 9 },
     expect.anything(),
@@ -1024,56 +1034,15 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
 });
 
 test('Subscription preference toggle removes the built-in chain entry', async () => {
+  subscriptionChain(true);
   const deleteMock = vi.fn();
-  const subscriptionPreferencePlugin = {
-    id: 'subscription-preference-id',
-    name: 'subscription-preference',
-    metadata: null,
-    sha256_hex: '',
-  };
-
-  vi.mocked(queries.usePluginChain).mockReturnValue({
-    data: {
-      entries: [
-        {
-          id: 'entry-subscription-preference',
-          wasm_registry_id: 'subscription-preference-id',
-          order: 0,
-          revision: 2,
-          config: { urgency: 'saved' },
-        },
-      ],
-    },
-  } as unknown as ReturnType<typeof queries.usePluginChain>);
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: { entries: [subscriptionPreferencePlugin] },
-  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
-  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
-    data: { strategy: 'first-pick', revision: 1 },
-    isLoading: false,
-  } as unknown as ReturnType<typeof queries.useRouterTerminalStrategy>);
-  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useUpdateRouterTerminalStrategy>);
-  vi.mocked(queries.useReorderChain).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useReorderChain>);
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate: deleteMock,
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
-
   const insertMock = vi.fn();
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: insertMock,
-    isPending: false,
-  } as never);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue(
+    idleMutation({ mutate: deleteMock }),
+  );
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue(
+    idleMutation({ mutate: insertMock }),
+  );
   const successToast = vi.spyOn(toast, 'success');
   renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
@@ -1084,11 +1053,22 @@ test('Subscription preference toggle removes the built-in chain entry', async ()
     { id: 'entry-subscription-preference', revision: 2 },
     expect.anything(),
   );
-  deleteMock.mock.calls[0]![1].onSuccess();
-  const action = successToast.mock.calls[0]![1]?.action as unknown as {
-    onClick: () => void;
-  };
-  action.onClick();
+  deleteMock.mock.calls[0]![1].onSuccess(
+    undefined,
+    deleteMock.mock.calls[0]![0],
+    undefined,
+    mutationContext,
+  );
+  const action = successToast.mock.calls[0]![1]?.action;
+  if (!action || typeof action !== 'object' || !('onClick' in action)) {
+    throw new Error('Expected a toast Undo action');
+  }
+  renderWithProviders(
+    <button type="button" onClick={action.onClick}>
+      Undo
+    </button>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
   expect(insertMock).toHaveBeenCalledWith(
     {
       pid: 'p-1',
