@@ -26,6 +26,7 @@ import {
   poolQuotaResponseLatest,
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
+  poolWindowPace,
   poolWindowResets,
   visiblePoolQuotaChartData,
 } from '../routes/-overviewPoolQuota';
@@ -165,6 +166,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
     visibleWindows,
   );
   const resets = poolWindowResets(normalizedAggregate);
+  const paces = poolWindowPace(normalizedAggregate);
   const error = hasSubscription && (aggregate.isError || history.isError);
   const weighting =
     normalizedAggregate && 'weighting' in normalizedAggregate
@@ -248,6 +250,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 loading={loading}
                 nowUnixSecs={nowUnixSecs}
                 resets={resets}
+                paces={paces}
                 timeZone={timeZone}
                 windows={visibleWindows}
               />

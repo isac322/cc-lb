@@ -180,6 +180,23 @@ for (const width of [390, 768, 1440]) {
           await expect(card.locator('[data-slot="pool-quota-legend-used"]')).toHaveText(
             windows[provider].map(() => value),
           );
+          // Headings share the rows' columns: each right edge lines up with its values.
+          const columnEdges = await card.locator('[data-slot="pool-quota-legend-grid"]').evaluate((grid) =>
+            [
+              ['Used', '[data-slot="pool-quota-legend-used"]'],
+              ['Resets in', '[data-slot="pool-quota-legend-reset"]'],
+            ].map(([heading, cells]) => ({
+              heading: Math.round(
+                [...grid.querySelectorAll('[data-slot="pool-quota-legend-header"] > *')]
+                  .find((el) => el.textContent === heading)
+                  ?.getBoundingClientRect().right ?? Number.NaN,
+              ),
+              cells: [...grid.querySelectorAll(cells)].map((el) => Math.round(el.getBoundingClientRect().right)),
+            })),
+          );
+          for (const column of columnEdges) {
+            expect(column.cells).toEqual(column.cells.map(() => column.heading));
+          }
           await expect(card.getByText('Stale reading', { exact: true })).toHaveCount(staleProvider ? 1 : 0);
           if (surface !== 'overview') {
             await expect(card.getByText(staleProvider ? STALE_PROVIDER_READING : RECENT_PROVIDER_READING)).toBeVisible();

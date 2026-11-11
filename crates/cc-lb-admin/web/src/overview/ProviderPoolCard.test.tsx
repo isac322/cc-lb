@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { PoolQuotaLegend } from '../designs/default/OverviewPage';
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
+import { poolWindowPace, poolWindowResets } from '../routes/-overviewPoolQuota';
 import { presentProviderWindows } from './ProviderPoolCard';
 
 const NOW = 1_700_000_000;
+
+afterEach(cleanup);
 
 function aggregateWindow(
   window: string,
@@ -13,6 +18,8 @@ function aggregateWindow(
     window,
     cc_window_start_unix_secs: NOW - 3600,
     cc_window_reset_unix_secs: NOW + 3600,
+    pool_pace_fraction: state === 'absent' ? null : 0.5,
+    next_reset_unix_secs: state === 'absent' ? null : NOW + 3600,
     used_tokens: 100,
     utilization: utilizationPercent == null ? null : utilizationPercent / 100,
     utilization_percent: utilizationPercent,
@@ -161,5 +168,99 @@ describe('presentProviderWindows', () => {
         false,
       ),
     ).toEqual([]);
+  });
+});
+
+describe('provider pool quota legend', () => {
+  it.each(['5h', 'gemini_5h'])(
+    'uses weighted account pace and the next account reset for %s',
+    (window) => {
+      const entry = {
+        ...aggregateWindow(window, 'fresh', 87.6),
+        pool_pace_fraction: 0.54,
+        next_reset_unix_secs: NOW + 2 * 3600,
+      };
+      const response = aggregate([entry]);
+      render(
+        <PoolQuotaLegend
+          latest={{ [window]: 87.6 }}
+          nowUnixSecs={NOW}
+          paces={poolWindowPace(response)}
+          resets={poolWindowResets(response)}
+          windows={[window]}
+        />,
+      );
+
+      const row = screen.getByTestId('pool-quota-legend-slot');
+      const tick = row.querySelector('[data-slot="pace-marker"]');
+      expect(tick?.getAttribute('data-pace-pct')).toBe('54');
+      expect((tick as HTMLElement).style.left).toBe('54%');
+      expect(
+        row.querySelector('[role="meter"]')?.getAttribute('aria-valuetext'),
+      ).toBe('88% used, even pace 54%');
+      expect(
+        row.querySelector('[data-slot="pool-quota-legend-used"]')?.className,
+      ).toContain('text-danger-text');
+      expect(
+        row.querySelector('[data-slot="pool-quota-legend-reset"]')?.textContent,
+      ).toBe('2h');
+      expect(row.getAttribute('aria-label')).toContain('resets in 2h');
+    },
+  );
+
+  it('draws no pace tick when the server has no pace despite an upcoming reset', () => {
+    const response = aggregate([
+      {
+        ...aggregateWindow('5h', 'fresh', 87.6),
+        pool_pace_fraction: null,
+      },
+    ]);
+    render(
+      <PoolQuotaLegend
+        latest={{ '5h': 87.6 }}
+        nowUnixSecs={NOW}
+        paces={poolWindowPace(response)}
+        resets={poolWindowResets(response)}
+        windows={['5h']}
+      />,
+    );
+
+    const row = screen.getByTestId('pool-quota-legend-slot');
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    expect(
+      row.querySelector('[data-slot="pool-quota-legend-used"]')?.className,
+    ).toContain('text-text');
+    expect(
+      row.querySelector('[role="meter"]')?.getAttribute('aria-valuetext'),
+    ).toBe('88% used');
+  });
+
+  it('keeps a zero pace tick without inventing an account reset', () => {
+    const response = aggregate([
+      {
+        ...aggregateWindow('5h', 'fresh', 40),
+        pool_pace_fraction: 0,
+        next_reset_unix_secs: null,
+      },
+    ]);
+    render(
+      <PoolQuotaLegend
+        latest={{ '5h': 40 }}
+        nowUnixSecs={NOW}
+        paces={poolWindowPace(response)}
+        resets={poolWindowResets(response)}
+        windows={['5h']}
+      />,
+    );
+
+    const row = screen.getByTestId('pool-quota-legend-slot');
+    expect(
+      row
+        .querySelector('[data-slot="pace-marker"]')
+        ?.getAttribute('data-pace-pct'),
+    ).toBe('0');
+    expect(
+      row.querySelector('[data-slot="pool-quota-legend-reset"]')?.textContent,
+    ).toBe('—');
   });
 });

@@ -37,7 +37,13 @@ const RESET_SUFFIX_CELL_CLASS =
   'col-start-5 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
 const RESET_STATUS_CELL_CLASS =
   'col-start-3 col-span-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
+/** Separates the reset phrase from the usage figure. */
 const RESET_GAP_CLASS = 'ml-3 @[40rem]:ml-6';
+/**
+ * Joins the parts of one reset phrase ("Resets in 2h", "2시간 후 초기화"):
+ * a word space, not a column gap, so the phrase still reads as one unit.
+ */
+const RESET_WORD_GAP_CLASS = 'ml-1';
 const HINT_TRIGGER_CLASS =
   'cursor-help border-b border-dashed border-text-faint/60';
 
@@ -194,7 +200,7 @@ export function QuotaWindowRow({
             data-slot="window-reset-value"
             className={cx(
               korean ? RESET_VALUE_KO_CELL_CLASS : RESET_VALUE_CELL_CLASS,
-              RESET_GAP_CLASS,
+              parts.prefix ? RESET_WORD_GAP_CLASS : RESET_GAP_CLASS,
             )}
           >
             {parts.value}
@@ -204,7 +210,7 @@ export function QuotaWindowRow({
             data-slot="window-reset-suffix"
             className={cx(
               RESET_SUFFIX_CELL_CLASS,
-              parts.suffix ? RESET_GAP_CLASS : null,
+              parts.suffix ? RESET_WORD_GAP_CLASS : null,
             )}
           >
             {parts.suffix}
