@@ -1765,6 +1765,12 @@ fn build_aggregate_window_response(
         }
         next_reset_unix_secs =
             Some(next_reset_unix_secs.map_or(reset, |next: u64| next.min(reset)));
+        // Pace describes the accounts behind the displayed usage. Equal-weighted
+        // (OpenAI/Gemini) pool usage counts fresh accounts only, while the
+        // plan-weighted figure uses every account's latest reading.
+        if weighting == "equal" && lot.state == "stale" {
+            continue;
+        }
         let elapsed = ((now_unix_secs - start) as f64 / (reset - start) as f64).clamp(0.0, 1.0);
         let weight = if weighting == "plan" {
             lot.capacity_ratio
@@ -3320,6 +3326,42 @@ mod tests {
         );
 
         assert_eq!(response.pool_pace_fraction, Some(0.35));
+    }
+
+    #[test]
+    fn aggregate_pool_pace_follows_the_accounts_behind_displayed_usage() {
+        // Fresh account 10% into its window; a stale account 90% into its own.
+        let mut fresh = lot("fresh", Some(0.5), Some(1_000), None, None);
+        fresh.provider_start_unix_secs = Some(90);
+        fresh.provider_reset_unix_secs = Some(190);
+        let mut stale = lot("stale", Some(0.2), Some(1_000), None, None);
+        stale.state = "stale".to_owned();
+        stale.provider_start_unix_secs = Some(10);
+        stale.provider_reset_unix_secs = Some(110);
+        let lots = [fresh, stale];
+
+        // OpenAI/Gemini usage excludes stale accounts, so pace must too, or a
+        // fresh pool far ahead of pace reads as on pace.
+        let equal = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "equal",
+        );
+        assert_eq!(equal.pool_pace_fraction, Some(0.1));
+        // A stale account's observed reset is still a real reset time.
+        assert_eq!(equal.next_reset_unix_secs, Some(110));
+
+        // Plan-weighted usage takes every account's latest reading; pace matches.
+        let plan = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            0,
+            100,
+            "plan",
+        );
+        assert_eq!(plan.pool_pace_fraction, Some(0.5));
     }
 
     #[test]
