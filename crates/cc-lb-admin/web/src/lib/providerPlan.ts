@@ -10,12 +10,18 @@ const CLAUDE_PRO = /pro/i;
 const CLAUDE_TEAM = /team/i;
 const CLAUDE_ENTERPRISE = /enterprise/i;
 
+/**
+ * `chatgpt_plan_type` values to OpenAI's published plan names. The Pro tiers
+ * are sold as Pro 100 / Pro 200 / Pro 500 (help.openai.com/articles/9793128);
+ * the token's `prolite` / `pro` / `promax` are those tiers, not the Codex CLI
+ * labels `Pro` / `Pro (More)` / `Pro (Max)`.
+ */
 const CHATGPT_PLANS: Readonly<Record<string, string>> = {
   free: 'Free',
   plus: 'Plus',
-  pro: 'Pro (More)',
-  prolite: 'Pro',
-  promax: 'Pro (Max)',
+  prolite: 'Pro 100',
+  pro: 'Pro 200',
+  promax: 'Pro 500',
   team: 'Team',
   business: 'Business',
   enterprise: 'Enterprise',
