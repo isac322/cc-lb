@@ -1,0 +1,14 @@
+{
+  "issue": 1235,
+  "beforeSource": "eba5253e9f3b168e751dc0e436d6e5ffb956cb84",
+  "afterSource": "44d04004de15d4e2afb1fd30a0db7f8f3d220ffd",
+  "surface": "Principal Router Basic",
+  "providers": ["anthropic", "openai", "gemini"],
+  "widths": [390, 768, 1440],
+  "height": 900,
+  "fixture": "Synthetic OAuth inventories with provider-restricted principal allowlists and saved subscription-preference entries",
+  "backend": "Real SQLite admin API; provider traffic is not exercised",
+  "captureScript": "qa/capture-subscription-preference.mjs",
+  "browser": "Chromium",
+  "checks": ["Router heading and description not occluded", "No horizontal overflow", "Expected visible switch enabled before capture"]
+}
