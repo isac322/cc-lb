@@ -30,6 +30,8 @@ The coverage report downloads its binaries and runtime while the test shards run
 
 The barrier rejects workflow reruns because artifacts are scoped to the run rather than the attempt. Diagnose failed CI locally and push a verified fix to start a new run; do not rerun a failed workflow.
 
+The web workflow runs in the official Playwright container with browsers, fonts, and system libraries preinstalled. Keep its image tag aligned with the locked `playwright` package version; the workflow checks that match after dependency installation. Do not add runtime apt or browser installation steps. The existing visual tests and base-branch captures use the image's browsers and publish the same evidence artifacts.
+
 ## Documentation and public claims
 
 Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic, OpenAI, and Gemini API-key and OAuth, with operation and credential limits in [`runtime management`](../docs/runtime-management.md). Bedrock and Vertex remain unsupported; do not add claims or guarantees without source evidence.
