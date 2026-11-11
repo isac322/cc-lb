@@ -119,6 +119,14 @@ If an OpenAI Responses SSE body ends cleanly before `response.completed`, `respo
 
 An emitted provider failure keeps precedence over later upstream faults. Response transforms determine which terminal the client actually receives. SSE responses use streaming HTTP framing instead of forwarding an upstream `Content-Length`, so local failures or suppressed malformed suffixes cannot leave an incomplete fixed-length body. Passthrough payload bytes and their content encoding remain unchanged.
 
+#### OpenAI Chat Completions stream endings
+
+For `/openai/v1/chat/completions`, clean SSE EOF succeeds after a finished choice (`finish_reason`) or a fully delimited `data: [DONE]` event. EOF before either signal records `upstream_stream_error` with `upstream_response_incomplete`. When cc-lb emits the SSE bytes (identity passthrough or decoded transformation), it appends one native Chat-compatible `event: error` with an `api_error` payload, after committing the failed completion. Already-forwarded content and HTTP `200` remain unchanged. Compressed raw passthrough keeps its original encoding and bytes; the incomplete outcome is recorded without appending a plaintext frame.
+
+A transport body fault after an emitted, fully delimited `[DONE]` can complete successfully with a body-end warning under the existing emitter, framing, and error-precedence checks. A finished choice alone does not permit this: an `include_usage` stream may still have a usage-only chunk before `[DONE]`. Provider-reported usage is preserved, and missing usage or cost remains unknown. Provider errors and existing decode, framing, transform, affinity, and cancellation rules retain precedence.
+
+Final usage from a failed Chat stream uses the same bounded assembler overflow as completion events; progress snapshots remain best-effort. This preserves the existing nonblocking request path and overflow limits.
+
 ### Request events API
 
 The authenticated request-event endpoints accept the same filters:
