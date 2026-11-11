@@ -1577,8 +1577,6 @@ async fn responses_semantic_sse_eof_replaced_terminal_later_fault_is_warning() -
 
 #[tokio::test]
 async fn responses_semantic_sse_eof_out_of_scope_controls() -> TestResult {
-    let partial =
-        Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
     let json = Bytes::from_static(br#"{"object":"response","status":"in_progress","usage":null}"#);
     let stacked = brotli_bytes(&gzip_bytes(&Bytes::from_static(
         RESPONSES_CREATED.as_bytes(),
@@ -1586,13 +1584,6 @@ async fn responses_semantic_sse_eof_out_of_scope_controls() -> TestResult {
     let mut stacked_headers = sse_headers();
     stacked_headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip, br"));
     for (record, path, request_body, body, headers) in [
-        (
-            responses_eof_record(false),
-            "/v1/chat/completions",
-            br#"{"model":"gpt-test","messages":[],"stream":true}"#.as_slice(),
-            partial,
-            sse_headers(),
-        ),
         (
             upstream_record(
                 StorageUpstreamKind::GeminiApiKey,
@@ -3056,6 +3047,653 @@ async fn semantic_client_close_abnormal_stop_preserves_error_precedence() -> Tes
                 observed.row.upstream_error_type.as_deref(),
                 Some("overloaded_error")
             );
+        }
+    }
+    Ok(())
+}
+
+const CHAT_PARTIAL: &str = "data: {\"id\":\"chatcmpl-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+const CHAT_FINISH: &str = "data: {\"id\":\"chatcmpl-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+const CHAT_USAGE: &str = "data: {\"id\":\"chatcmpl-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":7,\"total_tokens\":20}}\n\n";
+const CHAT_DONE: &str = "data: [DONE]\n\n";
+
+fn chat_terminal_request() -> TestResult<http::Request<Bytes>> {
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","messages":[],"stream":true,"stream_options":{"include_usage":true}}"#,
+        ))?;
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+    Ok(request)
+}
+
+async fn observe_chat_terminal(
+    dispatcher: ScriptedDispatch,
+    transform: bool,
+) -> TestResult<Observation> {
+    observe(
+        Arc::new(dispatcher),
+        transform,
+        responses_eof_record(false),
+        chat_terminal_request()?,
+    )
+    .await
+}
+
+fn assert_chat_unknown_usage(observed: &Observation) {
+    assert_eq!(
+        (
+            observed.row.input_tokens,
+            observed.row.output_tokens,
+            observed.row.cost_usd_micros,
+        ),
+        (None, None, None)
+    );
+    assert!(observed.events.iter().all(|event| !matches!(
+        event,
+        LifecycleEvent::UsageObserved { .. } | LifecycleEvent::Priced { .. }
+    )));
+}
+
+fn chat_json_events(body: &[u8]) -> Vec<serde_json::Value> {
+    std::str::from_utf8(body)
+        .expect("Chat SSE is UTF-8")
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter(|data| data.trim() != "[DONE]")
+        .map(|data| serde_json::from_str(data).expect("Chat data is JSON"))
+        .collect()
+}
+
+fn assert_chat_native_incomplete(observed: &Observation, prefix: &[u8]) {
+    observed.assert_incomplete_outcome();
+    assert!(
+        observed.body.starts_with(prefix),
+        "preserve streamed content"
+    );
+    let events = chat_json_events(&observed.body);
+    let errors = events
+        .iter()
+        .filter_map(|event| event.get("error"))
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "one native Chat error frame");
+    assert_eq!(errors[0]["type"], "api_error");
+    assert_eq!(errors[0]["code"], "api_error");
+    assert!(errors[0]["param"].is_null());
+    assert!(events.iter().all(|event| event.get("type").is_none()));
+    assert!(errors[0]["message"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(!events.iter().any(|event| event.get("usage").is_some()));
+    assert!(
+        !std::str::from_utf8(&observed.body)
+            .unwrap()
+            .lines()
+            .any(|line| line == "data: [DONE]")
+    );
+    assert!(observed.body.ends_with(b"\n\n"));
+    assert_chat_unknown_usage(observed);
+}
+
+fn assert_chat_terminal_success(
+    observed: &Observation,
+    warning_type: Option<&str>,
+    measured: bool,
+) {
+    assert_eq!(observed.status, StatusCode::OK);
+    let success = observed
+        .completion()
+        .as_ref()
+        .expect("Chat terminal succeeds");
+    let terminations = observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } => Some((reason, client_status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminations.len(), 1);
+    assert_eq!(terminations[0].0, &TerminationReason::Success);
+    assert_eq!(*terminations[0].1, 200);
+    assert_eq!(observed.row.status, 200);
+    assert_eq!(observed.row.error_code, None);
+    assert_eq!(observed.row.upstream_error_type, None);
+    assert_eq!(observed.row.upstream_error_message, None);
+    assert_eq!(
+        observed.row.upstream_stream_warning_type.as_deref(),
+        warning_type
+    );
+    assert_eq!(
+        observed
+            .row
+            .upstream_stream_warning_message
+            .as_deref()
+            .is_some_and(|message| !message.is_empty()),
+        warning_type.is_some()
+    );
+    if measured {
+        assert_eq!(
+            (observed.row.input_tokens, observed.row.output_tokens),
+            (Some(13), Some(7))
+        );
+        assert_eq!(
+            (success.usage.input_tokens, success.usage.output_tokens),
+            (13, 7)
+        );
+    } else {
+        assert_chat_unknown_usage(observed);
+    }
+    assert!(
+        chat_json_events(&observed.body)
+            .iter()
+            .all(|event| event.get("error").is_none())
+    );
+}
+
+#[tokio::test]
+async fn chat_terminal_empty_and_partial_eof_emit_native_incomplete() -> TestResult {
+    // QA-02: two progress states and both identity emission paths, not a
+    // Cartesian product of providers, encodings, and chunk sizes.
+    for (body, transform) in [("", false), (CHAT_PARTIAL, false), (CHAT_PARTIAL, true)] {
+        let observed = observe_chat_terminal(
+            ScriptedDispatch::identity_sse(vec![Bytes::copy_from_slice(body.as_bytes())], None),
+            transform,
+        )
+        .await?;
+        assert_chat_native_incomplete(&observed, body.as_bytes());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_incomplete_error_immediate_client_close_keeps_failure() -> TestResult {
+    // QA-03: drop as soon as the consumer receives the complete native frame.
+    let observed = observe_drop_after_terminal(
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![Bytes::from_static(CHAT_PARTIAL.as_bytes())],
+            None,
+        )),
+        responses_eof_record(false),
+        chat_terminal_request()?,
+        b"event: error\n",
+        None,
+    )
+    .await?;
+    assert_chat_native_incomplete(&observed, CHAT_PARTIAL.as_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_finish_reason_clean_but_not_fault_is_success() -> TestResult {
+    // QA-04: a finished choice accepts normal EOF, never a transport fault.
+    let body = Bytes::from(format!("{CHAT_PARTIAL}{CHAT_FINISH}"));
+    for fault in [false, true] {
+        let observed = observe_chat_terminal(
+            ScriptedDispatch::identity_sse(
+                vec![body.clone()],
+                fault.then_some(std::io::ErrorKind::ConnectionReset),
+            ),
+            false,
+        )
+        .await?;
+        if fault {
+            assert_eq!(
+                observed.completion().as_ref().unwrap_err().error_type,
+                "upstream_response_body_error"
+            );
+            observed.assert_terminal(Some("upstream_stream_error"));
+        } else {
+            assert_eq!(observed.body, body);
+            assert_chat_terminal_success(&observed, None, false);
+        }
+        assert_chat_unknown_usage(&observed);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_done_clean_and_transport_fault_preserve_usage() -> TestResult {
+    // QA-01, QA-04, QA-05: usage-only final chunks must not erase completion.
+    let full = format!("{CHAT_PARTIAL}{CHAT_FINISH}{CHAT_USAGE}");
+    for (prefix, fault, transform, measured) in [
+        (CHAT_PARTIAL, false, false, false),
+        (CHAT_PARTIAL, true, false, false),
+        (CHAT_PARTIAL, true, true, false),
+        (CHAT_USAGE, false, false, true),
+        (CHAT_USAGE, true, true, true),
+        (full.as_str(), false, false, true),
+        (full.as_str(), true, true, true),
+    ] {
+        let body = Bytes::from(format!("{prefix}{CHAT_DONE}"));
+        let observed = observe_chat_terminal(
+            ScriptedDispatch::identity_sse(
+                vec![body.clone()],
+                fault.then_some(std::io::ErrorKind::ConnectionReset),
+            ),
+            transform,
+        )
+        .await?;
+        assert_eq!(observed.body, body);
+        assert_chat_terminal_success(
+            &observed,
+            fault.then_some("upstream_response_body_error"),
+            measured,
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_split_done_requires_complete_delimiter_before_fault() -> TestResult {
+    // QA-06: seeing the sentinel bytes without a full SSE delimiter is unsafe.
+    for complete in [false, true] {
+        let mut chunks = vec![
+            Bytes::from_static(CHAT_PARTIAL.as_bytes()),
+            Bytes::from_static(b"data: [DO"),
+            Bytes::from_static(b"NE]\n"),
+        ];
+        if complete {
+            chunks.push(Bytes::from_static(b"\n"));
+        }
+        let observed = observe_chat_terminal(
+            ScriptedDispatch::identity_sse(chunks, Some(std::io::ErrorKind::ConnectionReset)),
+            false,
+        )
+        .await?;
+        if complete {
+            assert_eq!(
+                observed.body,
+                Bytes::from(format!("{CHAT_PARTIAL}{CHAT_DONE}"))
+            );
+            assert_chat_terminal_success(&observed, Some("upstream_response_body_error"), false);
+        } else {
+            assert_eq!(
+                observed.completion().as_ref().unwrap_err().error_type,
+                "upstream_response_body_error"
+            );
+            observed.assert_terminal(Some("upstream_stream_error"));
+            assert_chat_unknown_usage(&observed);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_provider_error_then_done_preserves_single_error() -> TestResult {
+    // QA-07: terminal evidence cannot overwrite a provider-declared failure.
+    let body = Bytes::from(format!(
+        "{CHAT_PARTIAL}data: {{\"error\":{{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"provider failure\"}}}}\n\n{CHAT_DONE}"
+    ));
+    let observed = observe_chat_terminal(
+        ScriptedDispatch::identity_sse(vec![body.clone()], None),
+        false,
+    )
+    .await?;
+    assert_eq!(observed.body, body);
+    assert_eq!(
+        observed.completion().as_ref().unwrap_err().error_type,
+        "server_error"
+    );
+    observed.assert_terminal(Some("upstream_stream_error"));
+    assert_eq!(
+        observed.row.upstream_error_type.as_deref(),
+        Some("server_error")
+    );
+    assert_eq!(
+        chat_json_events(&observed.body)
+            .iter()
+            .filter(|event| event.get("error").is_some())
+            .count(),
+        1
+    );
+    assert_chat_unknown_usage(&observed);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ChatTerminalTransform {
+    DropDone,
+    ReplaceDone,
+    EmitDone,
+    EmitErrorAndDone,
+}
+
+impl SseEventTransformHook for ChatTerminalTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        let done = request.event.data.as_ref() == b"[DONE]";
+        match (*self, done) {
+            (Self::DropDone, true) => Ok(TransformSseEventResult::Drop),
+            (Self::ReplaceDone, true) => Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: String::new(),
+                    data: Bytes::from_static(
+                        br#"{"choices":[{"index":0,"delta":{"content":"replacement"},"finish_reason":null}]}"#,
+                    ),
+                }],
+            }),
+            (Self::EmitDone, false) => Ok(TransformSseEventResult::Replace {
+                events: vec![
+                    request.event,
+                    SseEvent {
+                        event: String::new(),
+                        data: Bytes::from_static(b"[DONE]"),
+                    },
+                ],
+            }),
+            (Self::EmitErrorAndDone, false) => Ok(TransformSseEventResult::Replace {
+                events: vec![
+                    SseEvent {
+                        event: "error".to_owned(),
+                        data: Bytes::from_static(
+                            br#"{"error":{"type":"server_error","code":"server_error","message":"transformed failure"}}"#,
+                        ),
+                    },
+                    SseEvent {
+                        event: String::new(),
+                        data: Bytes::from_static(b"[DONE]"),
+                    },
+                ],
+            }),
+            _ => Ok(TransformSseEventResult::Unchanged),
+        }
+    }
+}
+
+#[tokio::test]
+async fn chat_terminal_transformed_error_then_done_fault_is_not_warning() -> TestResult {
+    // QA-07: emitted provider errors cannot be downgraded by an emitted DONE.
+    let observed = observe_with_sse_hook(
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![Bytes::from_static(CHAT_PARTIAL.as_bytes())],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+        Some(Arc::new(ChatTerminalTransform::EmitErrorAndDone)),
+        responses_eof_record(false),
+        chat_terminal_request()?,
+    )
+    .await?;
+    let error = observed
+        .completion()
+        .as_ref()
+        .expect_err("provider error remains fatal");
+    assert_ne!(error.error_type, "upstream_response_incomplete");
+    observed.assert_terminal(Some("upstream_stream_error"));
+    assert_eq!(
+        chat_json_events(&observed.body)
+            .iter()
+            .filter(|event| event.get("error").is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::str::from_utf8(&observed.body)?
+            .matches("[DONE]")
+            .count(),
+        1
+    );
+    assert_chat_unknown_usage(&observed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_transformed_done_uses_emitted_not_upstream_evidence() -> TestResult {
+    // QA-08: dropping/replacing upstream DONE removes its protection; a newly
+    // emitted DONE supplies protection even when the upstream never sent one.
+    for (transform, fault) in [
+        (ChatTerminalTransform::DropDone, false),
+        (ChatTerminalTransform::DropDone, true),
+        (ChatTerminalTransform::ReplaceDone, false),
+        (ChatTerminalTransform::ReplaceDone, true),
+        (ChatTerminalTransform::EmitDone, true),
+    ] {
+        let emitted_done = matches!(transform, ChatTerminalTransform::EmitDone);
+        let body = if emitted_done {
+            CHAT_PARTIAL.to_owned()
+        } else {
+            format!("{CHAT_PARTIAL}{CHAT_DONE}")
+        };
+        let observed = observe_with_sse_hook(
+            Arc::new(ScriptedDispatch::identity_sse(
+                vec![Bytes::from(body)],
+                fault.then_some(std::io::ErrorKind::ConnectionReset),
+            )),
+            Some(Arc::new(transform)),
+            responses_eof_record(false),
+            chat_terminal_request()?,
+        )
+        .await?;
+        let downstream = std::str::from_utf8(&observed.body)?;
+        assert!(downstream.contains("\"content\":\"partial\""));
+        if emitted_done {
+            assert_eq!(downstream.matches("data: [DONE]").count(), 1);
+            assert_chat_terminal_success(&observed, Some("upstream_response_body_error"), false);
+        } else {
+            assert!(!downstream.lines().any(|line| line == "data: [DONE]"));
+            if fault {
+                assert_eq!(
+                    observed.completion().as_ref().unwrap_err().error_type,
+                    "upstream_response_body_error"
+                );
+                observed.assert_terminal(Some("upstream_stream_error"));
+            } else {
+                assert_chat_native_incomplete(&observed, CHAT_PARTIAL.as_bytes());
+            }
+            if matches!(transform, ChatTerminalTransform::ReplaceDone) {
+                assert!(downstream.contains("\"content\":\"replacement\""));
+            }
+        }
+        assert_chat_unknown_usage(&observed);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_decoded_gzip_transform_emits_native_incomplete() -> TestResult {
+    // QA-02, QA-09: decoded transform output permits a plaintext native error.
+    let observed = observe_chat_terminal(
+        ScriptedDispatch::gzip_sse(
+            vec![gzip_bytes(&Bytes::from_static(CHAT_PARTIAL.as_bytes()))],
+            None,
+        ),
+        true,
+    )
+    .await?;
+    assert!(observed.headers.get(CONTENT_ENCODING).is_none());
+    assert_chat_native_incomplete(&observed, CHAT_PARTIAL.as_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_raw_gzip_preserves_wire_without_plaintext_error() -> TestResult {
+    // QA-02, QA-09: observe decoded completion without corrupting passthrough.
+    for fault in [false, true] {
+        let plaintext = if fault {
+            format!("{CHAT_PARTIAL}{CHAT_DONE}")
+        } else {
+            CHAT_PARTIAL.to_owned()
+        };
+        let wire = gzip_bytes(&Bytes::from(plaintext));
+        let observed = observe_chat_terminal(
+            ScriptedDispatch::gzip_sse(
+                vec![wire.clone()],
+                fault.then_some(std::io::ErrorKind::ConnectionReset),
+            ),
+            false,
+        )
+        .await?;
+        assert_eq!(observed.body, wire);
+        assert_eq!(
+            observed.headers.get(CONTENT_ENCODING),
+            Some(&HeaderValue::from_static("gzip"))
+        );
+        if fault {
+            assert_eq!(
+                observed.completion().as_ref().unwrap_err().error_type,
+                "upstream_response_body_error"
+            );
+            observed.assert_terminal(Some("upstream_stream_error"));
+        } else {
+            observed.assert_incomplete_outcome();
+        }
+        assert_chat_unknown_usage(&observed);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_framing_and_decoder_failures_keep_precedence() -> TestResult {
+    // QA-07: native incomplete must never replace existing processing errors.
+    let partial = Bytes::from_static(CHAT_PARTIAL.as_bytes());
+    for (error_type, dispatcher, transform) in [
+        (
+            "upstream_response_framing_error",
+            ScriptedDispatch::identity_sse(
+                vec![Bytes::from(format!(
+                    "{CHAT_PARTIAL}data: {{\"choices\":[]}}\n"
+                ))],
+                None,
+            ),
+            true,
+        ),
+        (
+            "upstream_response_decode_error",
+            ScriptedDispatch::gzip_sse(
+                vec![
+                    incomplete_gzip_prefix(&partial),
+                    Bytes::from_static(b"\x07"),
+                ],
+                None,
+            ),
+            true,
+        ),
+        (
+            "upstream_response_decode_error",
+            ScriptedDispatch::gzip_sse(vec![gzip_without_trailer(&partial)], None),
+            false,
+        ),
+    ] {
+        let observed = observe_chat_terminal(dispatcher, transform).await?;
+        assert_eq!(
+            observed.completion().as_ref().unwrap_err().error_type,
+            error_type
+        );
+        observed.assert_terminal(Some("upstream_stream_error"));
+        assert_eq!(
+            observed.row.upstream_error_type.as_deref(),
+            Some(error_type)
+        );
+        assert!(
+            !observed
+                .body
+                .windows(b"upstream_response_incomplete".len())
+                .any(|part| part == b"upstream_response_incomplete")
+        );
+        assert_chat_unknown_usage(&observed);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_done_before_decoder_fault_is_warning() -> TestResult {
+    // QA-01, QA-05: both decoder push and finish faults after emitted DONE are
+    // warnings, preserving the usage-only final chunk and exact plaintext.
+    let body = Bytes::from(format!("{CHAT_PARTIAL}{CHAT_USAGE}{CHAT_DONE}"));
+    for (warning_type, body_end, dispatcher) in responses_terminal_faults(&body) {
+        let observed = observe_chat_terminal(dispatcher, true).await?;
+        assert_eq!(observed.body, body);
+        assert_chat_terminal_success(&observed, Some(warning_type), true);
+        assert_eq!(observed.row.upstream_body_end.as_deref(), Some(body_end));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_terminal_gemini_compatible_and_legacy_remain_out_of_scope() -> TestResult {
+    // QA-09: these Chat-shaped protocols retain partial-EOF success and fatal
+    // post-DONE body faults. Neither may inherit native OpenAI Chat policy.
+    for gemini in [false, true] {
+        for fault in [false, true] {
+            let body = Bytes::from(if fault {
+                format!("{CHAT_PARTIAL}{CHAT_DONE}")
+            } else {
+                CHAT_PARTIAL.to_owned()
+            });
+            let (record, path, provider, request_body) = if gemini {
+                (
+                    upstream_record(
+                        StorageUpstreamKind::GeminiApiKey,
+                        "https://generativelanguage.googleapis.com/",
+                    ),
+                    "/v1beta/openai/chat/completions",
+                    cc_lb_domain::Provider::Gemini,
+                    br#"{"model":"gemini-test","messages":[],"stream":true}"#.as_slice(),
+                )
+            } else {
+                (
+                    responses_eof_record(false),
+                    "/v1/completions",
+                    cc_lb_domain::Provider::Openai,
+                    br#"{"model":"gpt-test","prompt":"hello","stream":true}"#.as_slice(),
+                )
+            };
+            let mut request = http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", common::managed_api_key())
+                .body(Bytes::copy_from_slice(request_body))?;
+            request
+                .extensions_mut()
+                .insert(cc_lb_engine::ProviderScope(provider));
+            let observed = observe(
+                Arc::new(ScriptedDispatch::identity_sse(
+                    vec![body.clone()],
+                    fault.then_some(std::io::ErrorKind::ConnectionReset),
+                )),
+                false,
+                record,
+                request,
+            )
+            .await?;
+            if fault {
+                assert_eq!(
+                    observed.completion().as_ref().unwrap_err().error_type,
+                    "upstream_response_body_error"
+                );
+                observed.assert_terminal(Some("upstream_stream_error"));
+                assert!(observed.body.starts_with(&body));
+                let events = chat_json_events(&observed.body);
+                let errors = events
+                    .iter()
+                    .filter_map(|event| event.get("error"))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "existing local transport error is preserved"
+                );
+                assert_eq!(errors[0]["type"], "api_error");
+                assert!(
+                    errors[0]["message"]
+                        .as_str()
+                        .is_some_and(|message| !message.is_empty())
+                );
+                assert!(observed.body.ends_with(b"\n\n"));
+            } else {
+                observed.assert_terminal(None);
+                assert!(observed.completion().is_ok());
+                assert_eq!(observed.body, body);
+            }
+            assert_chat_unknown_usage(&observed);
         }
     }
     Ok(())

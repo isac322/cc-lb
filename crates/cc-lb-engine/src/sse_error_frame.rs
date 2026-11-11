@@ -15,6 +15,7 @@ pub(crate) struct ResponsesSseErrorContext {
 pub(crate) struct TransformedSseOutput {
     pub(crate) emitted_error: bool,
     pub(crate) completes_response: bool,
+    pub(crate) done: bool,
 }
 
 impl ResponsesSseErrorContext {
@@ -36,6 +37,7 @@ impl ResponsesSseErrorContext {
         while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
             let end = offset + end;
             let parsed = crate::usage_parser::parse_sse_event(&bytes[offset..end]);
+            output.done |= parsed.is_done();
             if !output.completes_response {
                 output.completes_response =
                     crate::lifecycle::sse_event_completes_response(capability, &parsed, false);
