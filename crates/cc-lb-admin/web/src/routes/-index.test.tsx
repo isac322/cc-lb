@@ -968,12 +968,11 @@ describe('Pool quota aligned readout', () => {
       );
       expect(within(legend).getAllByText('Used')).toHaveLength(1);
       expect(within(legend).getAllByText('Resets in')).toHaveLength(1);
-      expect(header?.firstElementChild?.textContent).toBe('Window');
-      expect(header?.firstElementChild?.className).toContain('sr-only');
-      expect(grid?.className).toContain(
-        'grid-cols-[max-content_minmax(1rem,1fr)_4.5ch_8ch]',
-      );
-      expect(grid?.className).toContain('gap-y-2');
+      // Every heading cell stays in the grid flow, one per row column.
+      expect(
+        [...(header?.children ?? [])].map((cell) => cell.textContent),
+      ).toEqual(['', '', 'Used', 'Resets in']);
+      expect(header?.querySelector('.sr-only')).toBeNull();
       const rows = screen.getAllByTestId('pool-quota-legend-slot');
       expect(rows.map((row) => row.dataset.window)).toEqual(windows);
       expect(grid?.children).toHaveLength(windows.length + 1);

@@ -1551,7 +1551,10 @@ export function PoolQuotaLegend({
           className={cx(POOL_QUOTA_LEGEND_ROW_CLASS, 'text-text-faint')}
           data-slot="pool-quota-legend-header"
         >
-          <span className="sr-only">Window</span>
+          {/* Plain spacer cells: an `sr-only` child is absolutely positioned,
+              leaves the grid flow, and shifts the headings one column left.
+              Rows carry their own accessible labels. */}
+          <span />
           <span />
           <span className="text-right">Used</span>
           <span className="text-right whitespace-nowrap">Resets in</span>

@@ -371,3 +371,64 @@ test.describe('Upstreams Sidebar Quota', () => {
     }
   });
 });
+
+for (const locale of ['ko-KR', 'en-US'] as const) {
+  test.describe(`Upstream reset phrase in ${locale}`, () => {
+    test.use({ locale });
+
+    test('Scenario: reset countdown reads as one phrase and stays aligned across rows', async ({ page }) => {
+      const now = Math.floor(Date.now() / 1000);
+      const snap = {
+        status: null,
+        surpassed_threshold: null,
+        representative_claim: null,
+        disabled_reason: null,
+        extra_usage_enabled: null,
+        extra_usage_monthly_limit: null,
+        extra_usage_used_credits: null,
+        age_secs: 0,
+        source: 'api' as const,
+        state: 'fresh' as const,
+        observed_at_unix_millis: now * 1000,
+      };
+      await installAppFixtures(page, {
+        latestWindows: [
+          { ...snap, window: '5h', utilization: 0.4, resets_at_unix_secs: now + 2 * 3600 + 600 },
+          { ...snap, window: '7d', utilization: 0.2, resets_at_unix_secs: now + 5 * 24 * 3600 + 600 },
+        ],
+      });
+
+      for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 800 });
+        await openUpstreams(page, 'oauth-healthy');
+        const quota = page.getByTestId('quota-snapshot-grid');
+        await expect(quota.getByRole('listitem')).toHaveCount(2);
+        await expect(quota.locator('[data-slot="window-reset-value"]')).toHaveText(
+          locale === 'ko-KR' ? ['2시간', '5일'] : ['2h', '5d'],
+        );
+
+        // Text boxes, not cell boxes: the gap a reader sees between the words.
+        const rows = await quota.getByRole('listitem').evaluateAll((items) =>
+          items.map((item) =>
+            ['window-reset-prefix', 'window-reset-value', 'window-reset-suffix'].map((slot) => {
+              const range = document.createRange();
+              range.selectNodeContents(item.querySelector(`[data-slot="${slot}"]`) as Node);
+              const box = range.getBoundingClientRect();
+              return box.width > 0 ? { left: Math.round(box.left), right: Math.round(box.right) } : null;
+            }),
+          ),
+        );
+        for (const [prefix, value, suffix] of rows) {
+          // Korean: "2시간 후 초기화"; English: "Resets in 2h". One word space apart.
+          const [first, second] = locale === 'ko-KR' ? [value, suffix] : [prefix, value];
+          expect(first).not.toBeNull();
+          expect(second).not.toBeNull();
+          expect(second!.left - first!.right).toBeLessThanOrEqual(8);
+        }
+        // The shared columns still align the fixed words across rows.
+        const fixedWord = rows.map(([prefix, , suffix]) => (locale === 'ko-KR' ? suffix : prefix)!.left);
+        expect(fixedWord).toEqual(fixedWord.map(() => fixedWord[0]));
+      }
+    });
+  });
+}
