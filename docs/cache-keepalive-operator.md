@@ -127,8 +127,10 @@ The initial schedule subtracts the existing cache anchor age. After a
 cache-hit renewal, the next schedule uses the full configured `ttl - lead_time`
 interval from the synthetic response's cache anchor; it does not reuse the
 initial shortened delay. Session caps retain the original duration anchor.
-When another renewal is permitted, rescheduling increments `refresh_count`.
-A final capped renewal does not increment `refresh_count`. New real requests
+Rescheduling increments `refresh_count`. The final successful renewal that
+reaches the refresh cap also increments it. That final hit advances the durable generation
+and is immediately terminalized without enqueuing another renewal. Its turn
+and evidence retain the generation that actually dispatched. New real requests
 reset `refresh_count` and `first_scheduled_at`.
 
 Both caps are checked before provider dispatch. A renewal scheduled at or after
@@ -239,6 +241,8 @@ lifetime total and do not imply that a session is still active.
   the latest renewal whose TTL window contains the first positive-cache-read
   follow-up whose effective prefix evidence matches one of the renewal's
   candidate prefixes.
+  Evidence retention uses that same full TTL window, including long-retention
+  renewals; housekeeping does not shorten it to five minutes.
   Avoided value is `renewal tokens × (cache-creation price − cache-read price)`:
   the follow-up still pays for its cache read.
 - Missing, legacy, malformed, or ambiguous evidence is reported as
@@ -256,14 +260,32 @@ lifetime total and do not imply that a session is still active.
 The base status is one of Renewed, Scheduled, In request, Capped, Expired,
 Cancelled, Failed, or Not tracked. In request uses a neutral badge and explains
 that real traffic has paused renewal. The `in_request` API status filter selects
-that state; `visible` and `tracked` include it. The sessions drawer keeps its
-existing horizon control and server-side visibility filter.
+that state; `visible` and `tracked` include it. The `renewed` filter selects only
+active renewal sessions, not requests currently in flight. The sessions drawer
+keeps its existing horizon control and server-side visibility filter.
+Cancelled sessions show Cancelled only when the selected horizon contains a
+renewal turn. Otherwise they show Not tracked. List filters, group counts, and
+the selected session's detail state use the same horizon.
+The detail renewal table and rail cover all cycles inside that horizon. Each
+table row carries its cycle ID; legacy rows without an owned cycle remain
+unknown. `total_renewals_current_cycle` and pending status describe only the
+current cycle, so a newly replaced cycle can show zero current renewals while
+retaining earlier cycles in the table and rail.
+
+The detail header uses `follow_up_outcomes` to count observed follow-ups,
+pending gaps, closed gaps with no follow-up, and unknown gaps separately.
+Each rail gap contributes exactly once, including an empty waiting gap as
+pending. These counts preserve mixed historical outcomes; the existing
+`evidence_status` keeps its conservative semantics for list and filter consumers.
 
 Errors are orthogonal: a terminal dispatch/decrypt/provider error does not
 become a live Scheduled or Renewed row, and `error` is displayed alongside the
-terminal base state. An expired request marker is terminal/stale in storage
-but projects as Expired without an invented error. Its deadline explanation
-remains visible alongside retained renewal history.
+terminal base state. An expired request marker projects as Expired without an
+invented error. Its deadline explanation remains visible alongside retained
+renewal history; without renewal history in the selected horizon, normal
+cancelled-session visibility rules hide it.
+Completion uses the request's original durable start ticket to resolve its own
+marker. Cache-anchor timestamps do not grant ownership of a newer request's marker.
 
 
 Renewal request events retain the originating `thread_id` for thread-scoped

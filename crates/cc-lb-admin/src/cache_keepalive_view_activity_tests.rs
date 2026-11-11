@@ -29,6 +29,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         ttl: CacheTtl::Ttl5m,
         generation: 42,
         refresh_count: None,
+        has_renewal_in_horizon: false,
         status: None,
         enqueue_state: None,
         terminal_reason: None,
@@ -308,7 +309,7 @@ fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_t
             .iter()
             .map(|turn| turn.turn_number)
             .collect::<Vec<_>>(),
-        [3, 2, 1]
+        [2, 3, 1]
     );
 }
 #[test]
@@ -675,12 +676,12 @@ fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
             .iter()
             .map(|turn| turn.source_ref_id.as_str())
             .collect::<Vec<_>>(),
-        ["legacy-turn"]
+        ["legacy-turn", "c1-turn"]
     );
 }
 
 #[test]
-fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
+fn active_current_cycle_counters_exclude_retained_legacy_rows_before_last_message() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Active);
     item.cycle_id = Some(Uuid::from_u128(21));
@@ -707,8 +708,12 @@ fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
             .iter()
             .map(|turn| turn.source_ref_id.as_str())
             .collect::<Vec<_>>(),
-        ["current"]
+        ["current", "legacy"]
     );
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.retained_renewals, 2);
+    assert!(activity.turns[0].pending);
+    assert!(!activity.turns[1].pending);
 }
 
 #[test]
@@ -746,7 +751,14 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
     assert_eq!(pnl.net_micros, 48_000);
     assert_eq!(activity.total_spent_micros, 21_000);
     assert_eq!(activity.total_avoided_micros, Some(69_000));
-    assert!(activity.turns.is_empty());
+    assert_eq!(
+        activity.turns.len(),
+        1,
+        "retained C1 table rows must match rail pulses"
+    );
+    assert_eq!(activity.turns[0].source_ref_id, "c1-turn");
+    assert_eq!(activity.turns[0].cycle_id, Some(c1));
+    assert_eq!(activity.turns[0].turn_number, 1);
     assert_eq!(activity.total_renewals, 0);
     assert!(!activity.is_last_pending);
     assert_eq!(activity.retained_renewals, 1);
@@ -1049,7 +1061,7 @@ fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
 }
 
 #[test]
-fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or_pnl() {
+fn idle_gaps_and_table_share_all_cycles_without_changing_current_counters_or_pnl() {
     let c1 = Uuid::from_u128(31);
     let c2 = Uuid::from_u128(32);
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
@@ -1094,8 +1106,24 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
 
     assert_eq!(activity.retained_renewals, 2);
     assert_eq!(activity.total_renewals, 0);
-    assert_eq!(activity.turns.len(), 1);
-    assert_eq!(activity.turns[0].source_ref_id, "c2");
+    assert_eq!(activity.turns.len(), 3);
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| (
+                turn.source_ref_id.as_str(),
+                turn.cycle_id,
+                turn.turn_number,
+                turn.pending
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("c2", Some(c2), 1, true),
+            ("c1-a", Some(c1), 1, false),
+            ("c1-b", Some(c1), 2, false),
+        ]
+    );
     assert!(activity.is_last_pending);
     let pnl = activity.pnl.expect("retained cycle pnl");
     assert_eq!(pnl.spent_micros, 9_000);

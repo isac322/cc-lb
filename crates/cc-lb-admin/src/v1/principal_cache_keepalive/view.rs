@@ -22,7 +22,10 @@ pub(crate) use wire::{
     CacheKeepaliveDetailResponse, CacheKeepaliveGroupResponse, CacheKeepaliveListResponse,
     CacheKeepaliveRowResponse, CacheKeepaliveSummaryResponse,
 };
-use wire::{CacheKeepaliveGapResponse, CacheKeepalivePulseResponse, CacheKeepaliveTurnResponse};
+use wire::{
+    CacheKeepaliveFollowUpOutcomesResponse, CacheKeepaliveGapResponse, CacheKeepalivePulseResponse,
+    CacheKeepaliveTurnResponse,
+};
 
 pub(super) const FIVE_MINUTES_MS: u64 = 5 * 60 * 1_000;
 
@@ -243,7 +246,7 @@ pub(super) async fn list_upstream_names(
 
 pub(super) async fn detail_for_item(
     context: &CacheKeepaliveViewContext<'_>,
-    item: &CacheKeepaliveSessionListItem,
+    item: &mut CacheKeepaliveSessionListItem,
 ) -> StorageResult<CacheKeepaliveDetailResponse> {
     let loaded = load_detail_activity(context, item).await?;
     let upstream = UpstreamStore::get_by_id(context.storage, item.upstream_id)
@@ -261,6 +264,7 @@ pub(super) async fn detail_for_item(
             let turn_evidence_known = turn.action != "follow-up evidence unavailable";
             let followed_up = turn_evidence_known.then_some(turn.followed_up);
             Ok(CacheKeepaliveTurnResponse {
+                cycle_id: turn.cycle_id.map(|cycle_id| cycle_id.to_string()),
                 turn_number: turn.turn_number,
                 renewals: turn.renewals,
                 followed_up,
@@ -286,6 +290,9 @@ pub(super) async fn detail_for_item(
             })
         })
         .collect::<StorageResult<Vec<_>>>()?;
+    let follow_up_outcomes = CacheKeepaliveFollowUpOutcomesResponse::from_endings(
+        loaded.activity.gaps.iter().map(|gap| gap.ending_kind),
+    );
     let gaps = loaded
         .activity
         .gaps
@@ -324,6 +331,7 @@ pub(super) async fn detail_for_item(
         renewal_tokens,
         total_renewals_current_cycle: loaded.activity.total_renewals,
         is_last_pending: loaded.activity.is_last_pending,
+        follow_up_outcomes,
         config_snapshot: item.config_snapshot.as_ref().map(config_snapshot),
         raw_record: raw_record(item, loaded.session.as_ref()),
         row,
@@ -405,7 +413,7 @@ pub(crate) fn activity_for_item(
 
 async fn load_detail_activity(
     context: &CacheKeepaliveViewContext<'_>,
-    item: &CacheKeepaliveSessionListItem,
+    item: &mut CacheKeepaliveSessionListItem,
 ) -> StorageResult<LoadedActivity> {
     let (session, turns) = match item.source {
         CacheKeepaliveSessionEntrySource::Session => {
@@ -433,6 +441,12 @@ async fn load_detail_activity(
         }
         CacheKeepaliveSessionEntrySource::Decision => (None, Vec::new()),
     };
+    // Scalar lookup is all-time; scope state using the turns detail already loads.
+    if let Some(start_ms) = context.horizon_start_ms {
+        item.has_renewal_in_horizon = turns
+            .iter()
+            .any(|turn| turn.ts.saturating_mul(1_000) >= start_ms);
+    }
     let evidence = match evidence_scope(&turns) {
         Some((cycle_ids, source_ref_ids, from_ms, until_ms)) => {
             CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence_for_activity(

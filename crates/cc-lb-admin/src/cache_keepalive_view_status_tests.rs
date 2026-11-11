@@ -26,6 +26,7 @@ fn item(
         ttl: CacheTtl::Ttl5m,
         generation: 42,
         refresh_count,
+        has_renewal_in_horizon: refresh_count.is_some_and(|count| count > 0),
         status,
         enqueue_state: None,
         terminal_reason,
@@ -190,5 +191,39 @@ fn request_markers_have_neutral_states_and_no_renewal_schedule() {
         );
         expired.request_incomplete = false;
         assert_eq!(state_from_item(&expired), CacheKeepaliveViewState::Failed);
+    }
+}
+
+#[test]
+fn cancellation_requires_a_horizon_turn_independent_of_all_time_count() {
+    for refresh_count in [0, 1, 12] {
+        for has_turn in [false, true] {
+            let mut cancelled = item(
+                CacheKeepaliveSessionEntrySource::Session,
+                Some(CacheKeepaliveSessionStatus::Terminal),
+                Some(refresh_count),
+                Some(CacheKeepaliveTerminalReason::Cancelled),
+            );
+            cancelled.has_renewal_in_horizon = has_turn;
+            assert_eq!(
+                state_from_item(&cancelled),
+                if has_turn {
+                    CacheKeepaliveViewState::Cancelled
+                } else {
+                    CacheKeepaliveViewState::NotTracked
+                }
+            );
+            cancelled.status = Some(CacheKeepaliveSessionStatus::InRequest);
+            assert_eq!(
+                state_from_item(&cancelled),
+                CacheKeepaliveViewState::InRequest
+            );
+            cancelled.status = Some(CacheKeepaliveSessionStatus::Terminal);
+            cancelled.request_incomplete = true;
+            assert_eq!(
+                state_from_item(&cancelled),
+                CacheKeepaliveViewState::Expired
+            );
+        }
     }
 }

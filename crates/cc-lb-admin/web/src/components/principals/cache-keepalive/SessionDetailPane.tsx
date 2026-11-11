@@ -5,17 +5,27 @@ import type {
   CacheKeepaliveDetail,
   CacheKeepaliveGap,
   CacheKeepaliveHorizon,
+  CacheKeepaliveRow,
+  CacheKeepaliveTurn,
 } from '../../../lib/cacheKeepaliveApi';
 import { useTimezone } from '../../../lib/locale';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
+import {
+  Table,
+  TableCell,
+  TableHead,
+  TableHeadCell,
+  TableRow,
+} from '../../ui/Table';
 
 interface Props {
   principalId: string;
   sessionId: string;
   horizon?: CacheKeepaliveHorizon;
   rowFingerprint?: string | null;
+  rowLifecycle?: Pick<CacheKeepaliveRow, 'generation' | 'state' | 'is_active'>;
   onClose: () => void;
 }
 
@@ -69,20 +79,30 @@ function plusDeltaLabel(seconds: number): string {
   return `+${deltaLabel(seconds)}`;
 }
 
-function railTime(ms: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-GB', {
+function railTime(ms: number, timeZone: string, previousMs?: number): string {
+  const formatter = new Intl.DateTimeFormat('en-GB', {
     timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date(ms));
-  const map: Record<string, string> = {};
-  for (const part of parts) map[part.type] = part.value;
-  const hh = map.hour === '24' ? '00' : (map.hour ?? '00');
-  const mm = map.minute ?? '00';
-  const ss = map.second ?? '00';
-  return `${hh}:${mm}:${ss}`;
+    hourCycle: 'h23',
+  });
+  const values = (at: number) =>
+    Object.fromEntries(
+      formatter
+        .formatToParts(new Date(at))
+        .map((part) => [part.type, part.value]),
+    );
+  const parts = values(ms);
+  const day = (parts: Record<string, string>) =>
+    `${parts.year}-${parts.month}-${parts.day}`;
+  const needsDate =
+    day(parts) !== day(values(Date.now())) ||
+    (previousMs !== undefined && day(parts) !== day(values(previousMs)));
+  return `${needsDate ? `${parts.month}-${parts.day} ` : ''}${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 function shortThreadDisplay(id: string): string {
@@ -145,7 +165,7 @@ function buildRailPoints(
       badgeText:
         pulse.spent_usd === null ? '—' : `−${fmtUsdPlain(pulse.spent_usd)}`,
       badgeTone: 'accent',
-      absTime: railTime(pulse.time_ms, timeZone),
+      absTime: railTime(pulse.time_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(pulse.offset_sec),
       sinceLastRenewal:
         prevPulse && sincePrevSec !== null
@@ -182,7 +202,7 @@ function buildRailPoints(
           : gap.net_pnl_usd !== null && gap.net_pnl_usd < 0
             ? 'warn'
             : 'neutral',
-      absTime: railTime(gap.ending_at_ms, timeZone),
+      absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -194,7 +214,7 @@ function buildRailPoints(
       title: 'Waiting for next message',
       badgeText: deltaLabel(gap.total_duration_sec),
       badgeTone: 'accent',
-      absTime: railTime(gap.ending_at_ms, timeZone),
+      absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -206,7 +226,7 @@ function buildRailPoints(
       title: 'Follow-up unknown',
       badgeText: fmtUsdSigned(gap.net_pnl_usd),
       badgeTone: 'neutral',
-      absTime: railTime(gap.ending_at_ms, timeZone),
+      absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -229,7 +249,7 @@ function buildRailPoints(
           : gap.net_pnl_usd !== null && gap.net_pnl_usd > 0
             ? 'ok'
             : 'neutral',
-      absTime: railTime(gap.ending_at_ms, timeZone),
+      absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -347,7 +367,7 @@ function TimeRailGap({
               <span className="text-caption text-text-muted">
                 Next msg{' '}
                 <span className="font-mono">
-                  {railTime(gap.ending_at_ms, timeZone)}
+                  {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}
                 </span>{' '}
                 ({afterRenewalLabel})
               </span>
@@ -367,7 +387,8 @@ function TimeRailGap({
           ) : gap.ending_kind === 'followup_unknown' ? (
             <>
               <span className="text-caption text-text-faint">
-                Follow-up unknown ({railTime(gap.ending_at_ms, timeZone)})
+                Follow-up unknown (
+                {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})
               </span>
               <span
                 className={cx(
@@ -381,7 +402,8 @@ function TimeRailGap({
           ) : (
             <>
               <span className="text-caption text-text-faint">
-                No follow-up ({railTime(gap.ending_at_ms, timeZone)})
+                No follow-up (
+                {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})
               </span>
               <span
                 className={cx(
@@ -595,11 +617,88 @@ function synthesizeGapsFromTurns(
   ];
 }
 
+function RenewalTable({
+  label,
+  turns,
+  timeZone,
+  cycleStartMs,
+}: {
+  label: string;
+  turns: CacheKeepaliveTurn[];
+  timeZone: string;
+  cycleStartMs?: number;
+}) {
+  const ordered = [...turns].sort((a, b) => a.time_ms - b.time_ms);
+  return (
+    <div className="min-w-0 overflow-x-auto">
+      <Table aria-label={`${label} renewals`}>
+        <caption className="pb-2 text-left text-label text-text-muted">
+          {label}
+        </caption>
+        <TableHead sticky={false}>
+          <tr>
+            <TableHeadCell>Renewal</TableHeadCell>
+            <TableHeadCell>Time</TableHeadCell>
+            <TableHeadCell>Follow-up</TableHeadCell>
+            <TableHeadCell numeric>Net</TableHeadCell>
+          </tr>
+        </TableHead>
+        <tbody>
+          {ordered.map((turn) => (
+            <TableRow key={`${turn.turn_number}-${turn.time_ms}`} dense>
+              <TableCell>
+                <span className="block">#{turn.turn_number}</span>
+                <span
+                  className={cx(
+                    'text-caption',
+                    turn.renewals > 0
+                      ? 'text-traffic-success-text'
+                      : 'text-warn-text',
+                  )}
+                >
+                  {turn.renewals > 0 ? 'Hit' : 'Miss'}
+                </span>
+              </TableCell>
+              <TableCell>
+                <time
+                  dateTime={new Date(turn.time_ms).toISOString()}
+                  title={new Date(turn.time_ms).toLocaleString('en-US', {
+                    timeZone,
+                  })}
+                >
+                  {railTime(
+                    turn.time_ms,
+                    timeZone,
+                    cycleStartMs ?? ordered[0]?.time_ms,
+                  )}
+                </time>
+              </TableCell>
+              <TableCell>
+                {turn.pending
+                  ? 'Pending'
+                  : turn.followed_up === true
+                    ? 'Observed'
+                    : turn.followed_up === false
+                      ? 'None'
+                      : 'Unknown'}
+              </TableCell>
+              <TableCell numeric className={pnlTone(turn.pnl)}>
+                {fmtUsdSigned(turn.pnl)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </tbody>
+      </Table>
+    </div>
+  );
+}
+
 export function SessionDetailPane({
   principalId,
   sessionId,
   horizon,
   rowFingerprint,
+  rowLifecycle,
   onClose,
 }: Props) {
   const query = useCacheKeepaliveSessionDetail(
@@ -607,6 +706,7 @@ export function SessionDetailPane({
     sessionId,
     horizon ?? 'all',
     rowFingerprint,
+    rowLifecycle,
   );
   const { effective: timeZone } = useTimezone();
 
@@ -703,6 +803,25 @@ export function SessionDetailPane({
       : session.gaps && session.gaps.length > 0
         ? session.gaps
         : synthesizeGapsFromTurns(session);
+  const cycleLabels = new Map<string, string>();
+  for (const gap of railGaps) {
+    if (gap.cycle_id !== null && !cycleLabels.has(gap.cycle_id)) {
+      cycleLabels.set(gap.cycle_id, `Cycle ${cycleLabels.size + 1}`);
+    }
+  }
+  const cycleTurns = new Map<string | null, CacheKeepaliveTurn[]>();
+  for (const turn of [...session.turns].sort((a, b) => a.time_ms - b.time_ms)) {
+    const cycleId = turn.cycle_id ?? null;
+    if (cycleId !== null && !cycleLabels.has(cycleId)) {
+      cycleLabels.set(cycleId, `Cycle ${cycleLabels.size + 1}`);
+    }
+    const turns = cycleTurns.get(cycleId) ?? [];
+    turns.push(turn);
+    cycleTurns.set(cycleId, turns);
+  }
+  const tableCycles = [...cycleLabels.keys(), null].filter((id) =>
+    cycleTurns.has(id),
+  );
 
   return (
     <div
@@ -749,11 +868,12 @@ export function SessionDetailPane({
               {fmtUsdPlain(session.total_spent)}
             </span>
           </span>
-          {session.evidence_status !== 'observed' ? (
-            <span className="text-text-faint">
-              Follow-up {session.evidence_status} ·
-            </span>
-          ) : null}
+          <span className="text-text-faint" aria-label="Follow-up outcomes">
+            Observed {session.follow_up_outcomes.observed} · No follow-up{' '}
+            {session.follow_up_outcomes.no_follow_up} · Unknown{' '}
+            {session.follow_up_outcomes.unknown} · Pending{' '}
+            {session.follow_up_outcomes.pending}
+          </span>
           <span
             className={cx(
               'whitespace-nowrap font-mono text-data font-medium',
@@ -813,19 +933,28 @@ export function SessionDetailPane({
         {railGaps.length > 0 ? (
           <div className="space-y-2.5" data-testid="session-detail-time-rail">
             {railGaps.map((gap, index) => (
-              <TimeRailGap
+              <section
                 key={gap.cycle_id ?? `${gap.pause_at_ms}-${index}`}
-                gap={gap}
-                maxAttempts={session.max_attempts}
-                renewalScheduled={
-                  session.is_active &&
-                  (session.state === 'scheduled' ||
-                    session.state === 'renewed') &&
-                  gap.ending_kind === 'scheduled_waiting'
-                }
-                placeTooltipBelow={index === 0}
-                timeZone={timeZone}
-              />
+                aria-label={`${gap.cycle_id ? cycleLabels.get(gap.cycle_id) : 'Unknown cycle'} timeline`}
+              >
+                <h3 className="mb-2 text-label text-text-muted">
+                  {gap.cycle_id
+                    ? cycleLabels.get(gap.cycle_id)
+                    : 'Unknown cycle'}
+                </h3>
+                <TimeRailGap
+                  gap={gap}
+                  maxAttempts={session.max_attempts}
+                  renewalScheduled={
+                    session.is_active &&
+                    (session.state === 'scheduled' ||
+                      session.state === 'renewed') &&
+                    gap.ending_kind === 'scheduled_waiting'
+                  }
+                  placeTooltipBelow={index === 0}
+                  timeZone={timeZone}
+                />
+              </section>
             ))}
           </div>
         ) : session.state !== 'cancelled' &&
@@ -834,6 +963,29 @@ export function SessionDetailPane({
           <div className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
             {session.reason}
           </div>
+        ) : null}
+        {tableCycles.length > 0 ? (
+          <section aria-label="Renewals by cycle" className="space-y-4">
+            <h3 className="text-title-card text-text">Renewals</h3>
+            {tableCycles.map((cycleId) => (
+              <RenewalTable
+                key={cycleId ?? 'unknown-cycle'}
+                label={
+                  cycleId === null
+                    ? 'Unknown cycle'
+                    : (cycleLabels.get(cycleId) ?? 'Unknown cycle')
+                }
+                turns={cycleTurns.get(cycleId) ?? []}
+                timeZone={timeZone}
+                cycleStartMs={
+                  cycleId === null
+                    ? undefined
+                    : railGaps.find((gap) => gap.cycle_id === cycleId)
+                        ?.pause_at_ms
+                }
+              />
+            ))}
+          </section>
         ) : null}
       </div>
     </div>

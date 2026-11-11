@@ -74,6 +74,7 @@ pub struct CacheKeepaliveActivityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CacheKeepaliveActivityTurn {
     pub source_ref_id: String,
+    pub cycle_id: Option<Uuid>,
     pub turn_number: u32,
     pub time_ms: u64,
     pub renewal_tokens: u64,
@@ -115,20 +116,7 @@ pub fn derive_activity_view(
     catalog: &PriceCatalog,
 ) -> CacheKeepaliveActivityView {
     let horizon_start_ms = source.horizon_start_ms;
-    let mut state = state_from_item(source.item);
-    if state == CacheKeepaliveViewState::NotTracked
-        && !source.item.is_decision()
-        && !source.turns.is_empty()
-    {
-        state = if matches!(
-            source.item.terminal_reason,
-            Some(CacheKeepaliveTerminalReason::Cancelled)
-        ) {
-            CacheKeepaliveViewState::Cancelled
-        } else {
-            CacheKeepaliveViewState::Capped
-        };
-    }
+    let state = state_from_item(source.item);
     let is_active = matches!(
         source.item.status,
         Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
@@ -137,12 +125,23 @@ pub fn derive_activity_view(
         .session
         .and_then(|session| session.cycle_id)
         .or(source.item.cycle_id);
-    let mut records = source
+    // The table, rail, and retained economics share one horizon-scoped range.
+    let mut scoped_turns = source
         .turns
         .iter()
         .filter(|turn| {
             horizon_start_ms.is_none_or(|start_ms| turn.ts.saturating_mul(1_000) >= start_ms)
         })
+        .collect::<Vec<_>>();
+    scoped_turns.sort_by(|left, right| {
+        right
+            .ts
+            .cmp(&left.ts)
+            .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
+    });
+    let current_records = scoped_turns
+        .iter()
+        .copied()
         .filter(|turn| {
             let Some(cycle_id) = cycle_id else {
                 return true;
@@ -161,14 +160,8 @@ pub fn derive_activity_view(
             !(is_active && turn.ts.saturating_mul(1_000) < source.item.last_message_at_ms)
         })
         .collect::<Vec<_>>();
-    records.sort_by(|left, right| {
-        right
-            .ts
-            .cmp(&left.ts)
-            .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
-    });
     let pending_source_ref_id = if is_active && cycle_id.is_some() {
-        records
+        current_records
             .first()
             .filter(|turn| {
                 renewal_evidence_for_turn(turn, source.evidence)
@@ -179,51 +172,48 @@ pub fn derive_activity_view(
     } else {
         None
     };
-    // A proven follow-up closes the active window for the newest turn. Keep
-    // the newest turn pending only while its current-cycle renewal is unresolved.
-    let turns = records
-        .iter()
-        .enumerate()
-        .map(|(index, record)| {
-            let pending = is_active
-                && index == 0
-                && (pending_source_ref_id.is_none()
-                    || (pending_source_ref_id == Some(record.source_ref_id.as_str())
-                        && !follow_up_proven(record, source.evidence)));
-            let turn_number =
-                u32::try_from(records.len().saturating_sub(index)).unwrap_or(u32::MAX);
-            activity_turn(
-                record,
-                turn_number,
-                pending,
-                catalog,
-                source.item.ttl,
-                source.evidence,
-            )
-        })
-        .collect::<Vec<_>>();
-    let scoped_turns = source
-        .turns
-        .iter()
+    let pending_current_ref = current_records
+        .first()
         .filter(|turn| {
-            horizon_start_ms.is_none_or(|start_ms| turn.ts.saturating_mul(1_000) >= start_ms)
+            is_active
+                && (pending_source_ref_id.is_none()
+                    || (pending_source_ref_id == Some(turn.source_ref_id.as_str())
+                        && !follow_up_proven(turn, source.evidence)))
         })
-        .collect::<Vec<_>>();
-    let retained_turns = scoped_turns
+        .map(|turn| turn.source_ref_id.as_str());
+    let total_renewals_current_cycle = current_records.iter().fold(0_u32, |total, turn| {
+        total.saturating_add(u32::from(turn.hit_miss.eq_ignore_ascii_case("hit")))
+    });
+    let mut turns = scoped_turns
         .iter()
-        .enumerate()
-        .map(|(index, record)| {
+        .map(|record| {
             activity_turn(
                 record,
-                u32::try_from(scoped_turns.len().saturating_sub(index)).unwrap_or(u32::MAX),
-                false,
+                0,
+                pending_current_ref == Some(record.source_ref_id.as_str()),
                 catalog,
                 source.item.ttl,
                 source.evidence,
             )
         })
         .collect::<Vec<_>>();
-    let priced_turns = retained_turns
+    let mut chronological_order = (0..scoped_turns.len()).collect::<Vec<_>>();
+    chronological_order.sort_by(|&left, &right| {
+        let left = scoped_turns[left];
+        let right = scoped_turns[right];
+        pulse_time_ms(left, source.evidence)
+            .cmp(&pulse_time_ms(right, source.evidence))
+            .then_with(|| left.ts.cmp(&right.ts))
+            .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
+    });
+    let mut cycle_ordinals = HashMap::<Option<Uuid>, u32>::new();
+    for &index in &chronological_order {
+        let turn = &mut turns[index];
+        let ordinal = cycle_ordinals.entry(turn.cycle_id).or_default();
+        *ordinal = ordinal.saturating_add(1);
+        turn.turn_number = *ordinal;
+    }
+    let priced_turns = turns
         .iter()
         .map(|turn| turn.pnl)
         .collect::<Option<Vec<_>>>();
@@ -249,7 +239,14 @@ pub fn derive_activity_view(
             source.now_ms,
         )
     });
-    let gaps = idle_gaps(&source, &scoped_turns, &retained_turns, cycle_id, is_active);
+    let gaps = idle_gaps(
+        &source,
+        &scoped_turns,
+        &turns,
+        &chronological_order,
+        cycle_id,
+        is_active,
+    );
     CacheKeepaliveActivityView {
         id: source.item.id.clone(),
         source: source.item.source,
@@ -270,13 +267,11 @@ pub fn derive_activity_view(
         next_renewal,
         pnl,
         net_pnl_display: pnl.map_or_else(|| "-".to_owned(), |pnl| format_net_pnl(pnl.net_micros)),
-        total_renewals: turns
+        total_renewals: total_renewals_current_cycle,
+        retained_renewals: turns
             .iter()
             .fold(0_u32, |total, turn| total.saturating_add(turn.renewals)),
-        retained_renewals: retained_turns
-            .iter()
-            .fold(0_u32, |total, turn| total.saturating_add(turn.renewals)),
-        is_last_pending: turns.first().is_some_and(|turn| turn.pending),
+        is_last_pending: pending_current_ref.is_some(),
         is_active,
         total_spent_micros,
         total_avoided_micros,
@@ -315,16 +310,13 @@ fn idle_gaps(
     source: &CacheKeepaliveActivitySource<'_>,
     scoped_turns: &[&CacheKeepaliveTurnRecord],
     retained_turns: &[CacheKeepaliveActivityTurn],
+    chronological_order: &[usize],
     current_cycle_id: Option<Uuid>,
     is_active: bool,
 ) -> Vec<CacheKeepaliveIdleGap> {
-    let mut ordered_turns = scoped_turns.iter().copied().enumerate().collect::<Vec<_>>();
-    ordered_turns.sort_by(|(_, left), (_, right)| {
-        pulse_time_ms(left, source.evidence)
-            .cmp(&pulse_time_ms(right, source.evidence))
-            .then_with(|| left.ts.cmp(&right.ts))
-            .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
-    });
+    let ordered_turns = chronological_order
+        .iter()
+        .map(|&index| (index, scoped_turns[index]));
     let config = source.item.config_snapshot.as_ref();
     let max_attempts = config.map_or(12, |config| config.max_refreshes_per_session);
     let mut cycle_indices = HashMap::new();
@@ -676,6 +668,9 @@ fn activity_turn(
     let pnl_display = pnl.map_or_else(|| "-".to_owned(), format_turn_pnl);
     CacheKeepaliveActivityTurn {
         source_ref_id: record.source_ref_id.clone(),
+        cycle_id: record
+            .cycle_id
+            .or_else(|| renewal_evidence.and_then(|renewal| renewal.cycle_id)),
         turn_number,
         time_ms: record.ts.saturating_mul(1_000),
         renewal_tokens: record.cache_read_input_tokens,

@@ -195,6 +195,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut ticket_is_newer = true;
+        let mut ticket_is_owner = false;
+        let mut ticket_is_latest = true;
         if let Some(ticket) = expected_ticket {
             let order_key = cache_keepalive_order_meta_key(&request.session_key_hash);
             sqlx::query(
@@ -211,9 +214,14 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                     .await
                     .map_err(map_sqlx_error)?;
             let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
-            if ticket <= applied {
+            // Equality is eligible only when the upsert resolves its own marker;
+            // both the insert path and conflict update enforce that below.
+            if ticket < applied {
                 return Ok(None);
             }
+            ticket_is_newer = ticket > applied;
+            ticket_is_owner = ticket == applied;
+            ticket_is_latest = ticket >= issued;
             let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
             sqlx::query("UPDATE meta SET value = $2 WHERE key = $1")
                 .bind(&order_key)
@@ -229,7 +237,10 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
              (session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, generation, refresh_count,
               first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
               current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, 1, 0, $6, $7, $8, $9, 'active', 'pending', NULL, $10, $11, $12, NULL, $13, $14, NULL, $15, $16, $17)
+             SELECT $1, $2, $3, $4, $5, 1, 0, $6, $7, $8, $9, 'active', 'pending', NULL, $10, $11, $12, NULL, $13, $14, NULL, $15, $16, $17
+             WHERE ($19 AND ($21 OR EXISTS (SELECT 1 FROM cache_keepalive_sessions WHERE session_key_hash = $1)))
+                OR ($20 AND EXISTS (SELECT 1 FROM cache_keepalive_sessions WHERE session_key_hash = $1
+                    AND status = 'terminal' AND terminal_reason = 'cancelled' AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL))
              ON CONFLICT(session_key_hash) DO UPDATE SET
               principal_id = EXCLUDED.principal_id,
               accounting_key_id = EXCLUDED.accounting_key_id,
@@ -254,9 +265,13 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               cancel_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
-             WHERE ($18 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
+             WHERE (($18 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
                 OR (NOT $18 AND cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
-                    AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at))
+                    AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at)))
+               AND (NOT $18 OR CASE WHEN cache_keepalive_sessions.status = 'terminal'
+                    AND cache_keepalive_sessions.terminal_reason = 'cancelled'
+                    AND cache_keepalive_sessions.cancel_reason = 'new_request'
+                    AND cache_keepalive_sessions.running_since_unix_secs IS NOT NULL THEN $20 ELSE $19 END)
              RETURNING *",
         )
         .bind(&request.session_key_hash)
@@ -298,6 +313,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             "cache keepalive updated_at",
         )?)
         .bind(expected_ticket.is_some())
+        .bind(ticket_is_newer)
+        .bind(ticket_is_owner)
+        .bind(ticket_is_latest)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -621,7 +639,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
-        sqlx::query(
+        sqlx::query(concat!(
             "DELETE FROM cache_keepalive_evidence AS f
              WHERE f.evidence_kind = 'follow_up'
                AND NOT EXISTS (
@@ -648,8 +666,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                          AND r.model = f.model
                          AND r.prefix_hash = f.prefix_hash
                          AND f.request_start_ms > r.request_start_ms
-                         AND f.request_start_ms <= r.request_start_ms +
-                             CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                         AND f.request_start_ms <= r.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
                          AND NOT EXISTS (
                              SELECT 1
                              FROM cache_keepalive_evidence AS e
@@ -674,13 +693,14 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                                      AND r2.model = r.model
                                      AND r2.prefix_hash = e.prefix_hash
                                      AND e.request_start_ms > r2.request_start_ms
-                                     AND e.request_start_ms <= r2.request_start_ms +
-                                         CASE r2.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                                     AND e.request_start_ms <= r2.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r2.ttl"),
+            "
                                )
                          )
                    )
              )",
-        )
+        ))
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -724,6 +744,8 @@ impl PostgresStorage {
             .map(|deadline| u64_to_i64(deadline, "cache keepalive request deadline"))
             .transpose()?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut ticket_is_newer = true;
+        let mut ticket_is_owner = false;
         if let Some(ticket) = expected_ticket {
             let order_key = cache_keepalive_order_meta_key(session_key_hash);
             sqlx::query(
@@ -740,9 +762,14 @@ impl PostgresStorage {
                     .await
                     .map_err(map_sqlx_error)?;
             let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
-            if ticket <= applied {
+            // Equality belongs only to completion of the provisional marker.
+            // The UPDATE below rejects equality on active rows and newer tickets
+            // completing a marker; begin must still advance the owner.
+            if ticket < applied || ticket == applied && request_deadline.is_some() {
                 return Ok(false);
             }
+            ticket_is_newer = ticket > applied;
+            ticket_is_owner = ticket == applied;
             let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
             sqlx::query("UPDATE meta SET value = $2 WHERE key = $1")
                 .bind(&order_key)
@@ -766,7 +793,8 @@ impl PostgresStorage {
              WHERE session_key_hash = $3
                AND (status = 'active' OR (status = 'terminal' AND terminal_reason = 'cancelled' AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL))
                AND (CASE WHEN $4 THEN first_scheduled_at ELSE cache_anchor_at END) <= $5
-               AND (status = 'active' OR running_since_unix_secs <= $5)",
+               AND (status = 'active' OR running_since_unix_secs <= $5)
+               AND (CASE WHEN status = 'active' OR $9 IS NOT NULL THEN $10 ELSE $11 END)",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
@@ -780,6 +808,8 @@ impl PostgresStorage {
         .bind(cancel_reason)
         .bind(request_started_at)
         .bind(request_deadline)
+        .bind(ticket_is_newer)
+        .bind(expected_ticket.is_none() || ticket_is_owner)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;

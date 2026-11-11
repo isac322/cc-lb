@@ -31,6 +31,231 @@ fn cache_keepalive_postgres_conformance() {
         .expect("cache keepalive postgres conformance");
 }
 
+#[tokio::test]
+async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let mut failures = Vec::new();
+    for start_b in [105, 100] {
+        for replacement in [false, true] {
+            for fresh_completion_ticket in [true, false] {
+                let key = format!("owner-{start_b}-{replacement}-{fresh_completion_ticket}");
+                let seed = replace_request(&key, b"prefix", 90);
+                let original = storage.replace_from_real_request(&seed).await?;
+                let ticket_a = storage
+                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .await?;
+                assert!(
+                    storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_a), 100, 900)
+                        .await?
+                );
+                let ticket_b = storage
+                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .await?;
+                assert!(
+                    storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), start_b, 905)
+                        .await?
+                );
+                let marker = storage.get_cache_keepalive_session(&key).await?.unwrap();
+                assert_eq!(marker.generation, original.generation);
+                assert_eq!(marker.running_since_unix_secs, Some(start_b));
+                let completion_ticket = if fresh_completion_ticket {
+                    storage
+                        .allocate_cache_keepalive_completion_ticket(&key)
+                        .await?
+                } else {
+                    ticket_a
+                };
+                // A first receives bytes at 110, after B starts; timestamps cannot identify B's owner.
+                let mut completion = seed.clone();
+                completion.cache_anchor_at_unix_secs = 110;
+                completion.now_unix_secs = 111;
+                completion.encrypted_payload = b"stale-a".to_vec();
+                let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(&key);
+                let order_before = storage.get_meta_value(&order_key).await?;
+                let accepted = if replacement {
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(completion_ticket))
+                        .await?
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(completion_ticket),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("request_failed"),
+                            111,
+                        )
+                        .await?
+                };
+                let after = storage.get_cache_keepalive_session(&key).await?.unwrap();
+                if accepted || after != marker {
+                    failures.push(format!("{key}: stale A resolved B's marker"));
+                    continue;
+                }
+                assert_eq!(storage.get_meta_value(&order_key).await?, order_before);
+                // Even allocation after B's start must leave B's original ticket authoritative.
+                let healthy = if replacement {
+                    completion.encrypted_payload = b"healthy-b".to_vec();
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(ticket_b))
+                        .await?
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(ticket_b),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("user_turn_detected"),
+                            112,
+                        )
+                        .await?
+                };
+                if !healthy {
+                    failures.push(format!("{key}: B's original start ticket was rejected"));
+                    continue;
+                }
+                let resolved = storage.get_cache_keepalive_session(&key).await?.unwrap();
+                assert_eq!(resolved.running_since_unix_secs, None);
+                assert_eq!(
+                    resolved.generation,
+                    original.generation + u64::from(replacement)
+                );
+                assert_eq!(
+                    resolved.status,
+                    if replacement {
+                        CacheKeepaliveSessionStatus::Active
+                    } else {
+                        CacheKeepaliveSessionStatus::Terminal
+                    }
+                );
+                assert!(
+                    !storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), 113, 910)
+                        .await?
+                );
+            }
+        }
+    }
+    for absent in [false, true] {
+        let key = format!("compatibility-{absent}");
+        let request = replace_request(&key, b"compatible", 100);
+        if !absent {
+            storage.replace_from_real_request(&request).await?;
+        }
+        let ticket = storage
+            .allocate_cache_keepalive_completion_ticket(&key)
+            .await?;
+        if absent {
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket), 100, 900)
+                    .await?
+            );
+        }
+        // Without a marker, the original ticket can insert or replace using the ordinary fence.
+        let completed = storage
+            .replace_from_real_request_fenced(&request, Some(ticket))
+            .await?
+            .unwrap();
+        assert_eq!(completed.generation, if absent { 1 } else { 2 });
+        assert!(
+            storage
+                .replace_from_real_request_fenced(&request, Some(ticket))
+                .await?
+                .is_none()
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    111
+                )
+                .await?
+        );
+        assert_eq!(
+            storage.get_cache_keepalive_session(&key).await?.unwrap(),
+            completed
+        );
+        let cancel_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(&key)
+            .await?;
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(cancel_ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    111
+                )
+                .await?
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(cancel_ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    112
+                )
+                .await?
+        );
+    }
+    let first = replace_request("competing-first-session", b"first", 110);
+    let older = storage
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .await?;
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced(&first.session_key_hash, Some(older), 100, 900)
+            .await?
+    );
+    let newer = storage
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .await?;
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced(&first.session_key_hash, Some(newer), 105, 905)
+            .await?
+    );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(&first, Some(older))
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .replace_from_real_request_fenced(&first, Some(newer))
+            .await?
+            .unwrap()
+            .generation,
+        1
+    );
+    fixture.drop_schema().await?;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
     storage: &PostgresStorage,
 ) -> Result<()> {
@@ -357,6 +582,123 @@ async fn append_evidence_waits_for_pair_advisory_lock(storage: &PostgresStorage)
     sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'advisory-lock-%'")
         .execute(storage.pool())
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_ttl_sql_matches_cache_ttl_seconds() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    for (persisted, ttl) in [
+        ("5m", CacheTtl::Ttl5m),
+        ("1h", CacheTtl::Ttl1h),
+        ("30m", CacheTtl::Ttl30m),
+        ("12h", CacheTtl::Ttl12h),
+        ("unknown", CacheTtl::Ttl5m),
+    ] {
+        let millis: i64 = sqlx::query_scalar(concat!(
+            "SELECT CAST(",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            " AS BIGINT) FROM (SELECT $1::text AS ttl) AS r",
+        ))
+        .bind(persisted)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(millis as u64, ttl.as_secs() * 1000, "{persisted}");
+    }
+    fixture.drop_schema().await
+}
+
+#[tokio::test]
+async fn purge_expired_preserves_canonical_ttl_windows_and_deduplicates_siblings() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let start_ms = 1_000_000_i64;
+    let mut expected = Vec::new();
+    for (index, (ttl, within_ms, ttl_ms)) in [
+        ("5m", 300_000_i64, 300_000_i64),
+        ("1h", 3_600_000, 3_600_000),
+        ("30m", 600_000, 1_800_000),
+        ("12h", 7_200_000, 43_200_000),
+        ("unknown", 300_000, 300_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (case, offset_ms) in [
+            ("within", within_ms),
+            ("boundary", ttl_ms),
+            ("beyond", ttl_ms + 1),
+        ] {
+            let cycle = Uuid::from_u128(
+                100 + index as u128 * 3
+                    + match case {
+                        "within" => 0,
+                        "boundary" => 1,
+                        _ => 2,
+                    },
+            );
+            let prefix_a = format!("{ttl}-{case}-a");
+            let prefix_b = format!("{ttl}-{case}-b");
+            for (suffix, kind, at, prefix) in [
+                ("renewal-a", "renewal", start_ms, &prefix_a),
+                ("renewal-b", "renewal", start_ms, &prefix_b),
+                ("a-earliest", "follow_up", start_ms + offset_ms, &prefix_a),
+                ("z-duplicate", "follow_up", start_ms + offset_ms, &prefix_b),
+            ] {
+                let id = format!("{ttl}-{case}-{suffix}");
+                sqlx::query(
+                    "INSERT INTO cache_keepalive_evidence
+                     (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+                      prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+                      upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+                      request_ref, event_ref, created_at_ms)
+                     VALUES ($1, $2, $3, $4, 'fingerprint', $5, 'policy', 'schema', 'principal',
+                             $6, 'model', $7, 'hit', 1, 1, $1, $1, $4)",
+                )
+                .bind(&id)
+                .bind((kind == "renewal").then_some(cycle))
+                .bind(kind)
+                .bind(at)
+                .bind(prefix)
+                .bind(Uuid::from_u128(7))
+                .bind(ttl)
+                .execute(storage.pool())
+                .await?;
+                if kind == "renewal" || (suffix == "a-earliest" && case != "beyond") {
+                    expected.push(id);
+                }
+            }
+        }
+    }
+    let retained_from_ms: Option<i64> =
+        sqlx::query_scalar("SELECT MIN(request_start_ms) FROM cache_keepalive_evidence")
+            .fetch_one(storage.pool())
+            .await?;
+    assert_eq!(retained_from_ms, Some(start_ms));
+    assert_eq!(
+        storage.purge_cache_keepalive_expired(100_000).await?,
+        0,
+        "evidence pruning does not change the expired-session count"
+    );
+    let actual: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await?;
+    expected.sort();
+    fixture.drop_schema().await?;
+    assert_eq!(
+        actual, expected,
+        "inclusive TTL windows retain only the earliest matching proof per cycle"
+    );
     Ok(())
 }
 

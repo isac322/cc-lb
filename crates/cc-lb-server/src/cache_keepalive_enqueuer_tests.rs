@@ -983,15 +983,11 @@ async fn request_fence_is_provisional_until_the_real_completion_resolves_it() {
         assert_eq!(item.status, Some(CacheKeepaliveSessionStatus::InRequest));
         assert_eq!(item.reason, "In request");
 
-        let completion_ticket = enqueuer
-            .observe_session_generation("session-hash")
-            .await
-            .expect("completion ticket");
         enqueuer
             .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                 session_key_hash: "session-hash".to_owned(),
                 reason: final_reason,
-                expected_generation: completion_ticket,
+                expected_generation: ticket,
                 cache_anchor_age: std::time::Duration::ZERO,
             })
             .await
@@ -1049,10 +1045,7 @@ async fn agent_in_turn_completion_reactivates_a_provisional_request_fence() {
         .expect("request fence");
     let mut completion = enqueue_request();
     completion.cache_anchor_age = std::time::Duration::ZERO;
-    completion.expected_generation = enqueuer
-        .observe_session_generation("session-hash")
-        .await
-        .expect("completion ticket");
+    completion.expected_generation = ticket;
     enqueuer
         .enqueue_cache_keepalive(completion)
         .await

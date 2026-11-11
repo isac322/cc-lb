@@ -119,14 +119,11 @@ fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
         ensure!(extended.running_since_unix_secs == Some(380));
         ensure!(extended.run_at_unix_secs == 950);
         ensure!(extended.generation == marker.generation);
-        let final_ticket = storage
-            .allocate_cache_keepalive_completion_ticket(key)
-            .await?;
         ensure!(
             !storage
                 .cancel_cache_keepalive_fenced(
                     key,
-                    Some(final_ticket),
+                    Some(next_ticket),
                     379,
                     CacheKeepaliveTerminalReason::Cancelled,
                     Some("request_failed"),
@@ -138,7 +135,7 @@ fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
             storage
                 .cancel_cache_keepalive_fenced(
                     key,
-                    Some(final_ticket),
+                    Some(next_ticket),
                     380,
                     CacheKeepaliveTerminalReason::Cancelled,
                     Some("request_failed"),
@@ -198,13 +195,10 @@ fn in_request_marker_replacement_and_legacy_terminal_states() {
                 )
                 .await?
         );
-        let ticket = storage
-            .allocate_cache_keepalive_completion_ticket(key)
-            .await?;
         let request =
             replacement_request(key, b"new-prefix", 201, "principal", 7, "accounting", 30);
         let active = storage
-            .replace_from_real_request_fenced(&request, Some(ticket))
+            .replace_from_real_request_fenced(&request, None)
             .await?
             .context("completion replaces marker")?;
         ensure!(active.status == CacheKeepaliveSessionStatus::Active);
@@ -212,12 +206,6 @@ fn in_request_marker_replacement_and_legacy_terminal_states() {
         ensure!(active.terminal_reason.is_none());
         ensure!(active.cancel_reason.is_none());
         ensure!(active.encrypted_payload == b"new-prefix");
-        ensure!(
-            !storage
-                .begin_cache_keepalive_request_fenced(key, Some(ticket), 202, 950)
-                .await?,
-            "applied completion ticket cannot retire replacement"
-        );
         ensure!(
             storage
                 .cancel_cache_keepalive_fenced(

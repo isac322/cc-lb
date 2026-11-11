@@ -55,6 +55,9 @@ pub(crate) fn list_item_from_row(row: SqliteRow) -> StorageResult<CacheKeepalive
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u32(value, "cache keepalive refresh count"))
             .transpose()?,
+        has_renewal_in_horizon: row
+            .try_get("has_renewal_in_horizon")
+            .map_err(map_sqlx_error)?,
         status: row
             .try_get::<Option<String>, _>("status")
             .map_err(map_sqlx_error)?

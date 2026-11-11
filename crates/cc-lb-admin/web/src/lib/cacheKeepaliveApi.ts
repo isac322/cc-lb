@@ -3,9 +3,9 @@
 // (parse-don't-validate): every payload from the server is parsed into a
 // typed value here, so hooks and components downstream never re-validate.
 //
-// State strings are the frozen wire values shared with the Rust view model
-// and mirrored by the Todo 1 render contract
-// (`components/principals/cache-keepalive/__fixtures__/cacheKeepaliveContract.ts`).
+// Wire vocabularies are checked against the Rust canonical enums through
+// `__contract__/cache_keepalive_vocabulary.json`; Rust contract tests keep the
+// fixture exhaustive and check actual serialization/as_str and filter parsing.
 import * as z from 'zod';
 import { getJson } from './api';
 
@@ -24,13 +24,19 @@ export const CacheKeepaliveStateSchema = z.enum(CACHE_KEEPALIVE_STATES);
 export type CacheKeepaliveState = z.infer<typeof CacheKeepaliveStateSchema>;
 
 export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h', '30m', '12h']);
-export const CacheKeepaliveCancelReasonSchema = z.enum([
+export const CACHE_KEEPALIVE_CANCEL_REASONS = [
   'new_request',
   'user_turn_detected',
+  'ambiguous_turn',
+  'retention_recorded',
+  'renewal_not_beneficial',
   'snapshot_too_large',
   'cached_prefix_too_small',
   'zero_token_renewal_unsupported',
-]);
+] as const;
+export const CacheKeepaliveCancelReasonSchema = z.enum(
+  CACHE_KEEPALIVE_CANCEL_REASONS,
+);
 export type CacheKeepaliveTtl = z.infer<typeof CacheKeepaliveTtlSchema>;
 
 export const CacheKeepaliveHorizonSchema = z.enum([
@@ -141,6 +147,7 @@ export type CacheKeepaliveListResponse = z.infer<
 >;
 
 export const CacheKeepaliveTurnSchema = z.object({
+  cycle_id: z.string().nullable(),
   turn_number: z.number(),
   renewals: z.number(),
   followed_up: z.boolean().nullable(),
@@ -208,6 +215,16 @@ export const CacheKeepaliveGapSchema = z.object({
 });
 export type CacheKeepaliveGap = z.infer<typeof CacheKeepaliveGapSchema>;
 
+export const CacheKeepaliveFollowUpOutcomesSchema = z.object({
+  observed: z.number().int().nonnegative(),
+  pending: z.number().int().nonnegative(),
+  no_follow_up: z.number().int().nonnegative(),
+  unknown: z.number().int().nonnegative(),
+});
+export type CacheKeepaliveFollowUpOutcomes = z.infer<
+  typeof CacheKeepaliveFollowUpOutcomesSchema
+>;
+
 export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   renewal_tokens: z.number(),
   total_renewals_current_cycle: z.number(),
@@ -216,6 +233,7 @@ export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   config_snapshot: CacheKeepaliveConfigSnapshotSchema.nullable(),
   raw_record: CacheKeepaliveRawRecordSchema,
   gaps: z.array(CacheKeepaliveGapSchema).optional(),
+  follow_up_outcomes: CacheKeepaliveFollowUpOutcomesSchema,
 });
 export type CacheKeepaliveDetail = z.infer<typeof CacheKeepaliveDetailSchema>;
 

@@ -117,6 +117,10 @@ pub struct CacheKeepaliveSessionListItem {
     pub ttl: CacheTtl,
     pub generation: u64,
     pub refresh_count: Option<u32>,
+    /// Whether an actual renewal turn exists in the read's selected horizon.
+    /// All-time refresh counters do not establish horizon-local cancellation.
+    #[serde(default)]
+    pub has_renewal_in_horizon: bool,
     pub status: Option<CacheKeepaliveSessionStatus>,
     pub enqueue_state: Option<CacheKeepaliveEnqueueState>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,

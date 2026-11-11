@@ -289,7 +289,11 @@ async fn successful_keepalive_publishes_observation_before_reschedule_cap() {
                 "terminal".to_owned(),
                 terminal_reason.to_owned(),
                 "pending".to_owned(),
-                1
+                if terminal_reason == "max_refreshes" {
+                    2
+                } else {
+                    1
+                }
             )
         );
         let renewed = observations(storage.pool(), &upstream_id, (NOW + 270) as i64, 1).await;

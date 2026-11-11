@@ -41,7 +41,7 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
             Some(CacheKeepaliveTerminalReason::Cancelled),
-        ) if item.refresh_count.unwrap_or(0) == 0 => CacheKeepaliveViewState::NotTracked,
+        ) if !item.has_renewal_in_horizon => CacheKeepaliveViewState::NotTracked,
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
             Some(CacheKeepaliveTerminalReason::Cancelled),

@@ -257,6 +257,10 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         request: &CacheKeepaliveReplaceRequest,
     ) -> StorageResult<CacheKeepaliveSessionRecord>;
 
+    /// Allocates a durable real-request ordering ticket.
+    ///
+    /// Allocate at request start and retain it through completion. Requests
+    /// without a start ticket may allocate here at completion instead.
     async fn allocate_cache_keepalive_completion_ticket(
         &self,
         session_key_hash: &str,
@@ -266,6 +270,11 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     }
 
     /// Returns the accepted mutation's row image, not a later writer's session record.
+    /// A provisional in-request marker accepts only its original start ticket
+    /// (`ticket == applied`), never a freshly allocated completion ticket.
+    /// Active and absent rows retain the strictly-newer applied-ticket fence;
+    /// absent rows additionally reject tickets older than the latest issuance.
+    /// `None` retains the unticketed timestamp-fence behavior.
     async fn replace_from_real_request_fenced(
         &self,
         request: &CacheKeepaliveReplaceRequest,
@@ -286,9 +295,11 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     /// A newer request may replace an existing provisional marker. Final
     /// cancellation or real-request replacement resolves it.
     ///
-    /// Uses the same ticket and logical-anchor fences as final cancellation.
-    /// An accepted ticket is consumed, so completion must allocate a new ticket.
-    /// Returns false without consuming the ticket if no eligible row is matched.
+    /// An accepted begin consumes the ticket as the marker's durable owner.
+    /// Final cancellation or replacement must carry that same start ticket.
+    /// Newer tickets may begin a subsequent request, but cannot complete another
+    /// request's marker. Returns false without consuming the ticket if no
+    /// eligible row is matched.
     async fn begin_cache_keepalive_request_fenced(
         &self,
         session_key_hash: &str,
@@ -298,6 +309,8 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     ) -> StorageResult<bool>;
 
     /// Finalizes active work or a provisional in-request marker, clearing its start.
+    /// Ticketed marker completion requires its exact original start ticket;
+    /// active-row cancellation still requires a strictly newer applied ticket.
     async fn cancel_cache_keepalive_fenced(
         &self,
         session_key_hash: &str,

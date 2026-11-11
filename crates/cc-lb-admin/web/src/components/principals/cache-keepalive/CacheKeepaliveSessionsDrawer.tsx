@@ -5,7 +5,7 @@ import {
   CornerDownRight,
   Terminal,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
   CacheKeepaliveRow,
@@ -17,6 +17,7 @@ import {
   useCacheKeepaliveSessions,
 } from '../../../lib/queries';
 import {
+  Badge,
   Button,
   cx,
   Drawer,
@@ -132,32 +133,75 @@ export function DecimalAlignedUsd({
 }
 
 function sessionDotTone(row: CacheKeepaliveRow): string {
-  if (row.error != null) return 'danger';
-  if (row.state === 'in_request' || row.state === 'expired') return 'neutral';
+  if (row.error != null || row.state === 'failed') return 'danger';
   if (row.state === 'scheduled') return 'live';
-  if (row.state === 'renewed' || (row.net_pnl != null && row.net_pnl > 0)) {
-    return 'ok';
-  }
+  if (row.state === 'renewed') return 'ok';
   return 'neutral';
 }
 
-function shortId8(id: string): string {
+function threadId(id: string): string {
   const threadIdx = id.indexOf('thread:');
-  if (threadIdx >= 0) {
-    return id.slice(threadIdx + 'thread:'.length).slice(0, 8);
-  }
-  const slashIdx = id.lastIndexOf('/');
-  const tail = slashIdx >= 0 ? id.slice(slashIdx + 1) : id;
-  return tail.slice(0, 8);
+  if (threadIdx >= 0) return id.slice(threadIdx + 'thread:'.length);
+  return id.slice(id.lastIndexOf('/') + 1);
 }
+
+function sessionLabels(
+  rows: CacheKeepaliveRow[],
+  assigned: Map<string, string>,
+) {
+  const used = new Set(assigned.values());
+  for (const row of rows) {
+    if (assigned.has(row.id)) continue;
+    const raw = threadId(row.id);
+    const prefix = raw.slice(0, 8);
+    const peers = rows.filter(
+      (peer) => threadId(peer.id).slice(0, 8) === prefix,
+    );
+    let label = prefix;
+    if (peers.length > 1 || used.has(label)) {
+      let length = Math.min(6, raw.length);
+      while (
+        length < raw.length &&
+        (peers.some(
+          (peer) =>
+            peer.id !== row.id &&
+            threadId(peer.id).slice(-length) === raw.slice(-length),
+        ) ||
+          used.has(`${prefix}…${raw.slice(-length)}`))
+      )
+        length += 1;
+      label =
+        prefix.length + length >= raw.length
+          ? raw
+          : `${prefix}…${raw.slice(-length)}`;
+      if (used.has(label)) label = row.id;
+    }
+    assigned.set(row.id, label);
+    used.add(label);
+  }
+  return assigned;
+}
+
+const SESSION_STATE_LABELS: Record<CacheKeepaliveRow['state'], string> = {
+  renewed: 'Renewed',
+  scheduled: 'Scheduled',
+  in_request: 'In request',
+  capped: 'Capped',
+  expired: 'Expired',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+  not_tracked: 'Not tracked',
+};
 
 function SessionMasterRow({
   row,
+  label,
   selected,
   maxItemFracDigits,
   onSelect,
 }: {
   row: CacheKeepaliveRow;
+  label: string;
   selected: boolean;
   maxItemFracDigits: number;
   onSelect: () => void;
@@ -176,7 +220,7 @@ function SessionMasterRow({
       data-session-id={row.id}
       title={row.id}
       className={cx(
-        'flex w-full items-center justify-between gap-2 rounded-sm pl-5 pr-3.5 py-1.5 text-left transition-colors',
+        'flex w-full items-start justify-between gap-2 rounded-sm pl-5 pr-3.5 py-1.5 text-left transition-colors',
         selected
           ? 'bg-selected text-text'
           : 'text-text-muted hover:bg-overlay-2 hover:text-text',
@@ -185,30 +229,34 @@ function SessionMasterRow({
       aria-current={selected ? 'true' : undefined}
       onClick={onSelect}
     >
-      <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+      <span className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1">
         <span
           aria-hidden="true"
           className={cx('status-dot shrink-0', sessionDotTone(row))}
         />
-        <span className="truncate font-mono text-data text-text">
-          {shortId8(row.id)}
+        <span className="break-all font-mono text-data text-text">{label}</span>
+        <span className="col-start-2 flex flex-wrap items-center gap-2">
+          <span className="shrink-0 text-caption text-text-faint tabular-nums">
+            {renewalLabel}
+          </span>
+          <span
+            role="status"
+            aria-label={`Session state: ${SESSION_STATE_LABELS[row.state]}`}
+            className="shrink-0"
+          >
+            <Badge
+              tone={
+                row.state === 'failed'
+                  ? 'danger'
+                  : row.state === 'renewed'
+                    ? 'ok'
+                    : 'neutral'
+              }
+            >
+              {SESSION_STATE_LABELS[row.state]}
+            </Badge>
+          </span>
         </span>
-        <span className="shrink-0 text-caption text-text-faint tabular-nums">
-          {renewalLabel}
-        </span>
-        {row.state === 'in_request' ? (
-          <span className="shrink-0 rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
-            In request
-          </span>
-        ) : row.state === 'cancelled' ? (
-          <span className="shrink-0 rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
-            Cancelled
-          </span>
-        ) : row.state === 'failed' ? (
-          <span className="shrink-0 rounded-sm bg-danger/12 px-1.5 py-0.5 text-caption text-danger-text">
-            Failed
-          </span>
-        ) : null}
       </span>
       <DecimalAlignedUsd
         value={row.net_pnl}
@@ -363,6 +411,7 @@ export function CacheKeepaliveSessionsDrawer({
   principal,
 }: Props) {
   const queryClient = useQueryClient();
+  const labelsByPrincipal = useRef(new Map<string, Map<string, string>>());
   const [collapsedTriggers, setCollapsedTriggers] = useState<
     Record<string, boolean>
   >({});
@@ -402,6 +451,12 @@ export function CacheKeepaliveSessionsDrawer({
       ),
     [query.data],
   );
+  let assignedLabels = labelsByPrincipal.current.get(principal.id);
+  if (!assignedLabels) {
+    assignedLabels = new Map();
+    labelsByPrincipal.current.set(principal.id, assignedLabels);
+  }
+  const labels = sessionLabels(loadedRows, assignedLabels);
   const loadedRowsByGroup = useMemo(() => {
     const byGroup = new Map<string, CacheKeepaliveRow[]>();
     for (const row of loadedRows) {
@@ -669,6 +724,7 @@ export function CacheKeepaliveSessionsDrawer({
                             <SessionMasterRow
                               key={row.id}
                               row={row}
+                              label={labels.get(row.id) ?? threadId(row.id)}
                               selected={row.id === desktopSessionId}
                               maxItemFracDigits={maxItemFracDigits}
                               onSelect={() => setSelectedSessionId(row.id)}
@@ -745,6 +801,7 @@ export function CacheKeepaliveSessionsDrawer({
                   <SessionDetailPane
                     principalId={principal.id}
                     sessionId={desktopSessionId}
+                    rowLifecycle={selectedDetailRow}
                     horizon={horizon}
                     rowFingerprint={detailRowFingerprint}
                     onClose={() => setSelectedSessionId(null)}

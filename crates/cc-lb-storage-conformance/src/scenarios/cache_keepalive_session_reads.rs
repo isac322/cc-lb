@@ -326,7 +326,7 @@ where
             (CacheKeepaliveSessionFilter::Visible, vec!["active", "fresh", "fresh-renewed", "renewal-stale", "user-cancelled"]),
             (CacheKeepaliveSessionFilter::Tracked, vec!["active", "fresh", "fresh-renewed", "renewal-stale", "user-cancelled"]),
             (CacheKeepaliveSessionFilter::InRequest, vec!["fresh", "fresh-renewed"]),
-            (CacheKeepaliveSessionFilter::Renewed, vec!["fresh-renewed"]),
+            (CacheKeepaliveSessionFilter::Renewed, vec![]),
             (CacheKeepaliveSessionFilter::Scheduled, vec!["active"]),
             (CacheKeepaliveSessionFilter::Expired, vec!["incomplete"]),
             (CacheKeepaliveSessionFilter::Cancelled, vec!["user-cancelled"]),

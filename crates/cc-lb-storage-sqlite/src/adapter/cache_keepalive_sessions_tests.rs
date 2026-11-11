@@ -46,6 +46,269 @@ fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
 }
 
 #[tokio::test]
+async fn in_request_completion_requires_original_start_ticket() {
+    let (_dir, storage) = storage().await;
+    let mut failures = Vec::new();
+    for start_b in [105, 100] {
+        for replacement in [false, true] {
+            for fresh_completion_ticket in [true, false] {
+                let key = format!("owner-{start_b}-{replacement}-{fresh_completion_ticket}");
+                let mut seed = replace_request(b"prefix", 90);
+                seed.session_key_hash = key.clone();
+                let original = storage.replace_from_real_request(&seed).await.unwrap();
+                let ticket_a = storage
+                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .await
+                    .unwrap();
+                assert!(
+                    storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_a), 100, 900)
+                        .await
+                        .unwrap()
+                );
+                let ticket_b = storage
+                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .await
+                    .unwrap();
+                assert!(
+                    storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), start_b, 905)
+                        .await
+                        .unwrap()
+                );
+                let marker = storage
+                    .get_cache_keepalive_session(&key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(marker.generation, original.generation);
+                assert_eq!(marker.running_since_unix_secs, Some(start_b));
+                let completion_ticket = if fresh_completion_ticket {
+                    storage
+                        .allocate_cache_keepalive_completion_ticket(&key)
+                        .await
+                        .unwrap()
+                } else {
+                    ticket_a
+                };
+                // A first receives bytes at 110, after B starts; timestamps cannot identify B's owner.
+                let mut completion = seed.clone();
+                completion.cache_anchor_at_unix_secs = 110;
+                completion.now_unix_secs = 111;
+                completion.encrypted_payload = b"stale-a".to_vec();
+                let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(&key);
+                let order_before = storage.get_meta_value(&order_key).await.unwrap();
+                let accepted = if replacement {
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(completion_ticket))
+                        .await
+                        .unwrap()
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(completion_ticket),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("request_failed"),
+                            111,
+                        )
+                        .await
+                        .unwrap()
+                };
+                let after = storage
+                    .get_cache_keepalive_session(&key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if accepted || after != marker {
+                    failures.push(format!("{key}: stale A resolved B's marker"));
+                    continue;
+                }
+                assert_eq!(
+                    storage.get_meta_value(&order_key).await.unwrap(),
+                    order_before
+                );
+                // Even allocation after B's start must leave B's original ticket authoritative.
+                let healthy = if replacement {
+                    completion.encrypted_payload = b"healthy-b".to_vec();
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(ticket_b))
+                        .await
+                        .unwrap()
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(ticket_b),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("user_turn_detected"),
+                            112,
+                        )
+                        .await
+                        .unwrap()
+                };
+                if !healthy {
+                    failures.push(format!("{key}: B's original start ticket was rejected"));
+                    continue;
+                }
+                let resolved = storage
+                    .get_cache_keepalive_session(&key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(resolved.running_since_unix_secs, None);
+                assert_eq!(
+                    resolved.generation,
+                    original.generation + u64::from(replacement)
+                );
+                assert_eq!(
+                    resolved.status,
+                    if replacement {
+                        CacheKeepaliveSessionStatus::Active
+                    } else {
+                        CacheKeepaliveSessionStatus::Terminal
+                    }
+                );
+                assert!(
+                    !storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), 113, 910)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+    }
+    for absent in [false, true] {
+        let key = format!("compatibility-{absent}");
+        let mut request = replace_request(b"compatible", 100);
+        request.session_key_hash = key.clone();
+        if !absent {
+            storage.replace_from_real_request(&request).await.unwrap();
+        }
+        let ticket = storage
+            .allocate_cache_keepalive_completion_ticket(&key)
+            .await
+            .unwrap();
+        if absent {
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket), 100, 900)
+                    .await
+                    .unwrap()
+            );
+        }
+        // Without a marker, the original ticket can insert or replace using the ordinary fence.
+        let completed = storage
+            .replace_from_real_request_fenced(&request, Some(ticket))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.generation, if absent { 1 } else { 2 });
+        assert!(
+            storage
+                .replace_from_real_request_fenced(&request, Some(ticket))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    111
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .unwrap(),
+            completed
+        );
+        let cancel_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(&key)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(cancel_ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    111
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(cancel_ticket),
+                    110,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    112
+                )
+                .await
+                .unwrap()
+        );
+    }
+    let mut first = replace_request(b"first", 110);
+    first.session_key_hash = "competing-first-session".to_owned();
+    let older = storage
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced(&first.session_key_hash, Some(older), 100, 900)
+            .await
+            .unwrap()
+    );
+    let newer = storage
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced(&first.session_key_hash, Some(newer), 105, 905)
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(&first, Some(older))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .replace_from_real_request_fenced(&first, Some(newer))
+            .await
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
 async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
     let (_dir, storage) = storage().await;
     let original = storage
@@ -155,15 +418,11 @@ async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences(
     assert_eq!(extended.running_since_unix_secs, Some(380));
     assert_eq!(extended.run_at_unix_secs, 950);
     assert_eq!(extended.generation, marker.generation);
-    let final_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
-        .await
-        .expect("final cancellation ticket");
     assert!(
         !storage
             .cancel_cache_keepalive_fenced(
                 "session-hash",
-                Some(final_ticket),
+                Some(next_ticket),
                 379,
                 CacheKeepaliveTerminalReason::Cancelled,
                 Some("request_failed"),
@@ -176,7 +435,7 @@ async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences(
         storage
             .cancel_cache_keepalive_fenced(
                 "session-hash",
-                Some(final_ticket),
+                Some(next_ticket),
                 380,
                 CacheKeepaliveTerminalReason::Cancelled,
                 Some("request_failed"),
@@ -240,12 +499,8 @@ async fn in_request_marker_replacement_and_legacy_terminal_states() {
             .await
             .expect("unticketed older cancellation cannot clear marker")
     );
-    let ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
-        .await
-        .expect("completion ticket");
     let active = storage
-        .replace_from_real_request_fenced(&replace_request(b"new-prefix", 201), Some(ticket))
+        .replace_from_real_request_fenced(&replace_request(b"new-prefix", 201), None)
         .await
         .expect("completion replaces marker")
         .expect("accepted completion");
@@ -254,12 +509,6 @@ async fn in_request_marker_replacement_and_legacy_terminal_states() {
     assert_eq!(active.terminal_reason, None);
     assert_eq!(active.cancel_reason, None);
     assert_eq!(active.encrypted_payload, b"new-prefix");
-    assert!(
-        !storage
-            .begin_cache_keepalive_request_fenced("session-hash", Some(ticket), 202, 950)
-            .await
-            .expect("applied completion ticket cannot retire replacement")
-    );
     assert!(
         storage
             .cancel_cache_keepalive_fenced(

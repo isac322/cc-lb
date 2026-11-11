@@ -99,6 +99,7 @@ fn summary_item(
         ttl: CacheTtl::Ttl5m,
         generation: 1,
         refresh_count: matches!(source, CacheKeepaliveSessionEntrySource::Session).then_some(2),
+        has_renewal_in_horizon: matches!(source, CacheKeepaliveSessionEntrySource::Session),
         status: matches!(source, CacheKeepaliveSessionEntrySource::Session)
             .then_some(CacheKeepaliveSessionStatus::Active),
         enqueue_state: None,

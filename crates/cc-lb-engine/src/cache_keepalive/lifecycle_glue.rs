@@ -33,6 +33,7 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub accounting_key_id: Option<String>,
     pub cycle_id: Uuid,
     pub cache_anchor_age: Duration,
+    /// Durable ticket acquired at request start, reused unchanged at completion.
     pub expected_generation: Option<u64>,
     pub params: super::ScheduleParams,
     pub display_reason: String,
@@ -44,6 +45,7 @@ pub struct CacheKeepaliveEnqueueRequest {
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
     pub reason: CancelReason,
+    /// Request-start ticket for owned completions; no new completion ticket.
     pub expected_generation: Option<u64>,
     pub cache_anchor_age: Duration,
 }
@@ -102,6 +104,14 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
     }
 }
 
+/// Ownership acquired before dispatch; completion must not mint a newer owner.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RequestStartOrder {
+    sequence: u64,
+    expected_generation: Option<u64>,
+    sibling_generation: Option<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) principal: Principal,
@@ -112,6 +122,7 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) original_body: Bytes,
     pub(crate) downstream_headers: HeaderMap,
     pub(crate) request_dispatched_at: Instant,
+    pub(crate) request_start_order: Option<RequestStartOrder>,
 }
 
 const SESSION_SHARD_COUNT: usize = 64;
@@ -232,40 +243,32 @@ impl LifecycleKeepalive {
         _authenticated: &crate::authn_rail::Authenticated,
         principal: &Principal,
         cache_metadata: &RequestCacheMetadata,
-    ) {
-        let Some(enqueuer) = self.enqueuer.as_ref() else {
-            return;
-        };
+    ) -> Option<RequestStartOrder> {
+        let enqueuer = self.enqueuer.as_ref()?;
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
             || (cache_metadata.cache_breakpoints.is_empty()
                 && cache_metadata.cache_keepalive_surface.is_none())
         {
-            return;
+            return None;
         }
         let view = self.dynamic_view.load();
-        let Some(config) = view
+        let config = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
-            .filter(|config| config.enabled)
-        else {
-            return;
-        };
+            .filter(|config| config.enabled)?;
         if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
             && !config.classifier.openai_responses_enabled
         {
-            return;
+            return None;
         }
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
-        };
+        let session_key = cache_keepalive_session_key(principal, cache_metadata)?;
         let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.record_issued_seq(&session_key, sequence);
-        let mut shard = self.session_shard(&session_key).lock().await;
-        // Freshness suppresses stale completions, never a real request's fence:
-        // a newer waiter may be dropped before it performs its durable write.
-        let _ = self.claim_completion_seq(&mut shard, &session_key, sequence);
+        let _shard = self.session_shard(&session_key).lock().await;
+        // Issuance fences older completions, but only completion claims this
+        // ordinal: the request must retain it until its response completes.
         let expected_generation = match enqueuer
             .observe_session_generation(&session_key.to_string())
             .await
@@ -278,18 +281,25 @@ impl LifecycleKeepalive {
                     %error,
                     "skipping cache keep-alive request fence: failed to observe session generation"
                 );
-                return;
+                return None;
             }
         };
-        self.cancel_session(
-            &session_key,
-            principal,
-            CancelReason::NewRequest,
+        let sibling_generation = self
+            .cancel_session(
+                &session_key,
+                principal,
+                CancelReason::NewRequest,
+                expected_generation,
+                Duration::ZERO,
+                allows_sibling_backstop(cache_metadata),
+                None,
+            )
+            .await;
+        Some(RequestStartOrder {
+            sequence,
             expected_generation,
-            Duration::ZERO,
-            allows_sibling_backstop(cache_metadata),
-        )
-        .await;
+            sibling_generation,
+        })
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
@@ -309,6 +319,7 @@ impl LifecycleKeepalive {
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
+        request_start_order: Option<RequestStartOrder>,
     ) {
         if self.enqueuer.is_none() {
             return;
@@ -343,8 +354,14 @@ impl LifecycleKeepalive {
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
-        let completion_seq = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.record_issued_seq(&session_key, completion_seq);
+        let completion_seq = request_start_order.map_or_else(
+            || {
+                let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                self.record_issued_seq(&session_key, sequence);
+                sequence
+            },
+            |order| order.sequence,
+        );
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
@@ -363,6 +380,7 @@ impl LifecycleKeepalive {
                 &downstream_headers,
                 cache_anchor_age,
                 cached_tokens,
+                request_start_order,
             )
             .await;
         });
@@ -382,6 +400,7 @@ impl LifecycleKeepalive {
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
+        request_start_order: Option<RequestStartOrder>,
     ) {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
@@ -411,31 +430,37 @@ impl LifecycleKeepalive {
             let session_key_hash = session_key.to_string();
             let mut shard = self.session_shard(&session_key).lock().await;
             let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-            let expected_generation = match enqueuer
-                .observe_session_generation(&session_key_hash)
-                .await
-            {
-                Ok(expected) => expected,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "cache_keepalive",
-                        principal_id = principal.id.as_str(),
-                        %error,
-                        "skipping cache keep-alive compaction fence: failed to observe session generation"
-                    );
-                    return;
+            if request_start_order.is_some() && !is_latest {
+                return;
+            }
+            let expected_generation = if let Some(order) = request_start_order {
+                order.expected_generation
+            } else {
+                match enqueuer.observe_session_generation(&session_key_hash).await {
+                    Ok(expected) => expected,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "cache_keepalive",
+                            principal_id = principal.id.as_str(),
+                            %error,
+                            "skipping cache keep-alive compaction fence: failed to observe session generation"
+                        );
+                        return;
+                    }
                 }
             };
             if is_latest {
-                self.cancel_session(
-                    &session_key,
-                    principal,
-                    CancelReason::UserTurnDetected,
-                    expected_generation,
-                    cache_anchor_age,
-                    allow_sibling_backstop,
-                )
-                .await;
+                let _ = self
+                    .cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::UserTurnDetected,
+                        expected_generation,
+                        cache_anchor_age,
+                        allow_sibling_backstop,
+                        request_start_order,
+                    )
+                    .await;
                 super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
             }
             return;
@@ -455,17 +480,23 @@ impl LifecycleKeepalive {
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
         let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-        let expected_generation = match enqueuer.observe_session_generation(&session_key_hash).await
-        {
-            Ok(expected) => expected,
-            Err(error) => {
-                tracing::warn!(
-                    target: "cache_keepalive",
-                    principal_id = principal.id.as_str(),
-                    %error,
-                    "skipping cache keep-alive completion: failed to observe session generation"
-                );
-                return;
+        if request_start_order.is_some() && !is_latest {
+            return;
+        }
+        let expected_generation = if let Some(order) = request_start_order {
+            order.expected_generation
+        } else {
+            match enqueuer.observe_session_generation(&session_key_hash).await {
+                Ok(expected) => expected,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive completion: failed to observe session generation"
+                    );
+                    return;
+                }
             }
         };
         let renewal_request_json =
@@ -494,15 +525,17 @@ impl LifecycleKeepalive {
             )
             .await;
             if is_latest {
-                self.cancel_session(
-                    &session_key,
-                    principal,
-                    CancelReason::ZeroTokenRenewalUnsupported,
-                    expected_generation,
-                    cache_anchor_age,
-                    allow_sibling_backstop,
-                )
-                .await;
+                let _ = self
+                    .cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::ZeroTokenRenewalUnsupported,
+                        expected_generation,
+                        cache_anchor_age,
+                        allow_sibling_backstop,
+                        request_start_order,
+                    )
+                    .await;
                 super::record_cancelled(&principal_name, CancelReason::ZeroTokenRenewalUnsupported);
             }
             return;
@@ -562,15 +595,17 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::SnapshotTooLarge,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::SnapshotTooLarge,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 }
                 return;
@@ -615,15 +650,17 @@ impl LifecycleKeepalive {
                     )
                     .await;
                     if is_latest {
-                        self.cancel_session(
-                            &session_key,
-                            principal,
-                            CancelReason::CachedPrefixTooSmall,
-                            expected_generation,
-                            cache_anchor_age,
-                            allow_sibling_backstop,
-                        )
-                        .await;
+                        let _ = self
+                            .cancel_session(
+                                &session_key,
+                                principal,
+                                CancelReason::CachedPrefixTooSmall,
+                                expected_generation,
+                                cache_anchor_age,
+                                allow_sibling_backstop,
+                                request_start_order,
+                            )
+                            .await;
                         super::record_cancelled(
                             &principal_name,
                             CancelReason::CachedPrefixTooSmall,
@@ -644,15 +681,17 @@ impl LifecycleKeepalive {
                         "openai 12h retention is recorded without read re-anchoring",
                     )
                     .await;
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::RetentionRecorded,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::RetentionRecorded,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                     return;
                 }
                 if cache_metadata.cache_keepalive_surface.is_some()
@@ -675,15 +714,17 @@ impl LifecycleKeepalive {
                         "refresh expected value is unknown or non-positive",
                     )
                     .await;
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::RenewalNotBeneficial,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::RenewalNotBeneficial,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                     return;
                 }
                 let params =
@@ -731,15 +772,17 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::UserTurnDetected,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::UserTurnDetected,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                 }
             }
             super::TurnDecision::Ambiguous => {
@@ -753,20 +796,23 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::AmbiguousTurn,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::AmbiguousTurn,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn cancel_session(
         &self,
         session_key: &SessionKey,
@@ -775,10 +821,9 @@ impl LifecycleKeepalive {
         expected_generation: Option<u64>,
         cache_anchor_age: Duration,
         allow_sibling_backstop: bool,
-    ) {
-        let Some(enqueuer) = self.enqueuer.as_ref() else {
-            return;
-        };
+        request_start_order: Option<RequestStartOrder>,
+    ) -> Option<u64> {
+        let enqueuer = self.enqueuer.as_ref()?;
         if let Err(error) = enqueuer
             .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                 session_key_hash: session_key.to_string(),
@@ -797,7 +842,7 @@ impl LifecycleKeepalive {
             );
         }
         if !allow_sibling_backstop {
-            return;
+            return None;
         }
         let SessionKey {
             principal_id,
@@ -805,29 +850,32 @@ impl LifecycleKeepalive {
             agent_scope: None,
         } = session_key
         else {
-            return;
+            return None;
         };
         let sibling_key =
             SessionKey::from_thread_and_agent(*principal_id, thread_id.clone(), "subagent");
-        let sibling_generation = match enqueuer
-            .observe_session_generation(&sibling_key.to_string())
-            .await
-        {
-            Ok(generation) => generation,
-            Err(error) => {
-                tracing::warn!(
-                    target: "cache_keepalive",
-                    principal_id = principal.id.as_str(),
-                    reason = reason.as_str(),
-                    %error,
-                    "durable subagent cache keep-alive generation lookup failed"
-                );
-                None
+        let sibling_generation = if let Some(order) = request_start_order {
+            // A captured absence is not permission to acquire a new owner.
+            order.sibling_generation
+        } else {
+            match enqueuer
+                .observe_session_generation(&sibling_key.to_string())
+                .await
+            {
+                Ok(generation) => generation,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        reason = reason.as_str(),
+                        %error,
+                        "durable subagent cache keep-alive generation lookup failed"
+                    );
+                    None
+                }
             }
         };
-        let Some(sibling_generation) = sibling_generation else {
-            return;
-        };
+        let sibling_generation = sibling_generation?;
         if let Err(error) = enqueuer
             .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                 session_key_hash: sibling_key.to_string(),
@@ -845,6 +893,7 @@ impl LifecycleKeepalive {
                 "durable subagent cache keep-alive cancellation failed"
             );
         }
+        Some(sibling_generation)
     }
 
     async fn record_not_tracked(
@@ -1377,7 +1426,7 @@ mod tests {
             .expect("generation state")
             .insert(sibling.to_string(), Some(9));
         let keepalive = backstop_keepalive(Arc::clone(&state));
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1388,6 +1437,7 @@ mod tests {
                 Some(3),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
@@ -1400,13 +1450,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_completion_reuses_sibling_start_ticket_after_newer_sibling_start() {
+        let state = Arc::new(BackstopState::default());
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let principal_id = cache_keepalive_principal_uuid(&principal.id);
+        let primary = SessionKey::from_thread_id(principal_id, "owned-sibling");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "owned-sibling", "subagent");
+        state
+            .generations
+            .lock()
+            .expect("generations")
+            .insert(sibling.to_string(), Some(9));
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        let sibling_generation = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::NewRequest,
+                Some(3),
+                Duration::ZERO,
+                true,
+                None,
+            )
+            .await;
+        assert_eq!(sibling_generation, Some(9));
+        state
+            .generations
+            .lock()
+            .expect("generations")
+            .insert(sibling.to_string(), Some(10));
+        let _ = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::UserTurnDetected,
+                Some(3),
+                Duration::ZERO,
+                true,
+                Some(RequestStartOrder {
+                    sequence: 1,
+                    expected_generation: Some(3),
+                    sibling_generation,
+                }),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellations"),
+            vec![
+                (primary.to_string(), Some(3)),
+                (sibling.to_string(), Some(9)),
+                (primary.to_string(), Some(3)),
+                (sibling.to_string(), Some(9)),
+            ],
+            "completion cannot acquire sibling ticket 10 after dispatch"
+        );
+        state.cancellations.lock().expect("cancellations").clear();
+        let _ = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::UserTurnDetected,
+                Some(3),
+                Duration::ZERO,
+                true,
+                Some(RequestStartOrder {
+                    sequence: 1,
+                    expected_generation: Some(3),
+                    sibling_generation: None,
+                }),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellations"),
+            vec![(primary.to_string(), Some(3))],
+            "an uncaptured sibling must not acquire ticket 10 at completion"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_backstop_skips_inactive_and_scoped_sessions_and_is_restart_safe() {
         let state = Arc::new(BackstopState::default());
         let principal_id = cache_keepalive_principal_uuid("principal-test");
         let primary = SessionKey::from_thread_id(principal_id, "thread-2");
         let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-2", "subagent");
         let keepalive = backstop_keepalive(Arc::clone(&state));
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1417,6 +1548,7 @@ mod tests {
                 None,
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
@@ -1430,7 +1562,7 @@ mod tests {
             .expect("generation state")
             .insert(sibling.to_string(), Some(12));
         let scoped = SessionKey::from_thread_and_agent(principal_id, "thread-2", "advisor");
-        backstop_keepalive(Arc::clone(&state))
+        let _ = backstop_keepalive(Arc::clone(&state))
             .cancel_session(
                 &scoped,
                 &Principal {
@@ -1441,6 +1573,7 @@ mod tests {
                 Some(4),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
@@ -1449,7 +1582,7 @@ mod tests {
         );
 
         let restarted = backstop_keepalive(Arc::clone(&state));
-        restarted
+        let _ = restarted
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1460,6 +1593,7 @@ mod tests {
                 Some(5),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
@@ -1487,7 +1621,7 @@ mod tests {
         let keepalive = backstop_keepalive(Arc::clone(&state));
         let mut metadata = RequestCacheMetadata::default();
         metadata.claude_agent_id = Some("main".to_owned());
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1498,6 +1632,7 @@ mod tests {
                 Some(4),
                 Duration::ZERO,
                 allows_sibling_backstop(&metadata),
+                None,
             )
             .await;
         assert_eq!(
@@ -1559,6 +1694,7 @@ mod tests {
                         &headers,
                         Duration::ZERO,
                         12_000,
+                        None,
                     )
                     .await;
                 assert!(
@@ -1578,6 +1714,7 @@ mod tests {
                 &headers,
                 Duration::ZERO,
                 12_000,
+                None,
             );
             if !detached_gate {
                 keepalive.on_response_completed(
@@ -1591,6 +1728,7 @@ mod tests {
                     &headers,
                     Duration::ZERO,
                     12_000,
+                    None,
                 );
             }
             drop(shard);
@@ -1647,22 +1785,11 @@ mod tests {
             ordinary.thread_id = legitimate.thread_id.clone();
             let headers = HeaderMap::new();
             let shard = keepalive.session_shard(&key).lock().await;
-            keepalive.on_response_completed(
-                &serde_json::json!({
-                    "type": "message",
-                    "content": [{"type": "tool_use", "id": "toolu_pending", "name": "Bash", "input": {}}],
-                    "stop_reason": "tool_use"
-                }),
-                &principal,
-                "accounting-key".to_owned(),
-                &legitimate,
-                Uuid::nil(),
-                body.clone(),
-                body.clone(),
-                &headers,
-                Duration::ZERO,
-                12_000,
-            );
+            keepalive.on_response_completed(&serde_json::json!({
+                "type": "message",
+                "content": [{"type": "tool_use", "id": "toolu_pending", "name": "Bash", "input": {}}],
+                "stop_reason": "tool_use"
+            }), &principal, "accounting-key".to_owned(), &legitimate, Uuid::nil(), body.clone(), body.clone(), &headers, Duration::ZERO, 12_000, None);
             keepalive.on_response_completed(
                 &ordinary_response,
                 &principal,
@@ -1674,6 +1801,7 @@ mod tests {
                 &headers,
                 Duration::ZERO,
                 12_000,
+                None,
             );
             drop(shard);
             let operations = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2456,7 +2584,7 @@ mod tests {
             drop(newer.take());
         }
         drop(held_shard);
-        first.await;
+        let first_order = first.await;
         assert!(
             !enqueuer.active_generation.load(Ordering::SeqCst),
             "returning to actual dispatch must fence the queued generation even when a newer request issued a sequence"
@@ -2470,8 +2598,26 @@ mod tests {
             OrderedCompletion::Cancel(key.to_string(), Some(41))
         );
         if let Some(newer) = newer {
-            newer.await;
+            let _ = newer.await;
         }
+        keepalive.on_response_completed(
+            &serde_json::json!({"stop_reason": "end_turn", "content": []}),
+            &principal,
+            "request-owner-key".to_owned(),
+            &metadata,
+            Uuid::nil(),
+            Bytes::new(),
+            Bytes::new(),
+            &HeaderMap::new(),
+            Duration::ZERO,
+            12_000,
+            first_order,
+        );
+        assert_eq!(
+            keepalive.latest_issued_seq(&key),
+            first_sequence + 1,
+            "A's response must not advance local issuance past the newer B start"
+        );
     }
 
     #[tokio::test]
@@ -2608,6 +2754,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         keepalive
@@ -2623,6 +2770,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         assert_eq!(
@@ -2661,6 +2809,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         keepalive
@@ -2676,6 +2825,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         assert_eq!(
@@ -2716,6 +2866,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::ZERO,
                 0,
+                None,
             )
             .await;
         assert_eq!(

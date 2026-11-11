@@ -139,8 +139,10 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
         let mut tx = self.begin_immediate().await?;
-        let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64)>(
-            "SELECT generation, created_at, status, cache_anchor_at, updated_at, first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64, bool)>(
+            "SELECT generation, created_at, status, cache_anchor_at, updated_at, first_scheduled_at,
+             COALESCE(status = 'terminal' AND terminal_reason = 'cancelled' AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL, 0)
+             FROM cache_keepalive_sessions WHERE session_key_hash = ?",
         )
         .bind(&request.session_key_hash)
         .fetch_optional(&mut *tx)
@@ -154,6 +156,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 cache_anchor_at,
                 updated_at,
                 first_scheduled_at,
+                request_marker,
             )) => Some((
                 i64_to_u64(generation, "cache keepalive generation")?,
                 i64_to_u64(created_at, "cache keepalive created_at")?,
@@ -161,10 +164,11 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 i64_to_u64(cache_anchor_at, "cache keepalive cache_anchor_at")?,
                 i64_to_u64(updated_at, "cache keepalive updated_at")?,
                 i64_to_u64(first_scheduled_at, "cache keepalive first_scheduled_at")?,
+                request_marker,
             )),
             None => None,
         };
-        if let Some((_, _, status, existing_anchor, existing_updated, logical_anchor)) =
+        if let Some((_, _, status, existing_anchor, existing_updated, logical_anchor, _)) =
             parsed_existing
         {
             // Synthetic hits move cache_anchor_at, but not the real-completion
@@ -190,7 +194,13 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                     .await
                     .map_err(map_sqlx_error)?;
             let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
-            if ticket <= applied {
+            let request_marker = parsed_existing.is_some_and(|(_, _, _, _, _, _, marker)| marker);
+            let ticket_matches = if request_marker {
+                ticket == applied
+            } else {
+                ticket > applied && (parsed_existing.is_some() || ticket >= issued)
+            };
+            if !ticket_matches {
                 return Ok(None);
             }
             let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
@@ -205,14 +215,14 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
         }
         let generation = parsed_existing
-            .map(|(generation, _, _, _, _, _)| generation)
+            .map(|(generation, _, _, _, _, _, _)| generation)
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| StorageError::Fatal {
                 message: "cache keepalive generation overflow".to_owned(),
             })?;
         let created_at = parsed_existing
-            .map(|(_, created_at, _, _, _, _)| created_at)
+            .map(|(_, created_at, _, _, _, _, _)| created_at)
             .unwrap_or(request.now_unix_secs);
         let job_key = cache_keepalive_job_key(&request.session_key_hash, generation);
         sqlx::query(
@@ -613,7 +623,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
-        sqlx::query(
+        sqlx::query(concat!(
             "DELETE FROM cache_keepalive_evidence AS f
              WHERE f.evidence_kind = 'follow_up'
                AND NOT EXISTS (
@@ -640,8 +650,9 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                          AND r.model = f.model
                          AND r.prefix_hash = f.prefix_hash
                          AND f.request_start_ms > r.request_start_ms
-                         AND f.request_start_ms <= r.request_start_ms +
-                             CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                         AND f.request_start_ms <= r.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
                          AND NOT EXISTS (
                              SELECT 1
                              FROM cache_keepalive_evidence AS e
@@ -666,13 +677,14 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                                      AND r2.model = r.model
                                      AND r2.prefix_hash = e.prefix_hash
                                      AND e.request_start_ms > r2.request_start_ms
-                                     AND e.request_start_ms <= r2.request_start_ms +
-                                         CASE r2.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                                     AND e.request_start_ms <= r2.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r2.ttl"),
+            "
                                )
                          )
                    )
              )",
-        )
+        ))
         .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -715,6 +727,8 @@ impl SqliteStorage {
             .map(|deadline| u64_to_i64(deadline, "cache keepalive request deadline"))
             .transpose()?;
         let mut tx = self.begin_immediate().await?;
+        let mut ticket_is_newer = true;
+        let mut ticket_is_owner = false;
         if let Some(ticket) = expected_ticket {
             let order_key = cache_keepalive_order_meta_key(session_key_hash);
             let order_raw =
@@ -724,9 +738,14 @@ impl SqliteStorage {
                     .await
                     .map_err(map_sqlx_error)?;
             let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
-            if ticket <= applied {
+            // Equality belongs only to completion of the provisional marker.
+            // The UPDATE below rejects equality on active rows and newer tickets
+            // completing a marker; begin must still advance the owner.
+            if ticket < applied || ticket == applied && request_deadline.is_some() {
                 return Ok(false);
             }
+            ticket_is_newer = ticket > applied;
+            ticket_is_owner = ticket == applied;
             let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
             sqlx::query(
                 "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
@@ -757,7 +776,8 @@ impl SqliteStorage {
              WHERE session_key_hash = ?
                AND (status = 'active' OR (status = 'terminal' AND terminal_reason = 'cancelled' AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL))
                AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?
-               AND (status = 'active' OR running_since_unix_secs <= ?)",
+               AND (status = 'active' OR running_since_unix_secs <= ?)
+               AND (CASE WHEN status = 'active' OR ? THEN ? ELSE ? END)",
         )
         .bind(reason.as_str())
         .bind(cancel_reason)
@@ -772,6 +792,9 @@ impl SqliteStorage {
         .bind(expected_ticket.is_some())
         .bind(cancel_anchor)
         .bind(cancel_anchor)
+        .bind(request_deadline.is_some())
+        .bind(ticket_is_newer)
+        .bind(expected_ticket.is_none() || ticket_is_owner)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;

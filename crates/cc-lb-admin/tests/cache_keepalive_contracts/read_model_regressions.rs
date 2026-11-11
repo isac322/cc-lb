@@ -472,7 +472,18 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     assert_eq!(detail["net_pnl"], json!(0.048));
     assert_eq!(detail["total_renewals_current_cycle"], 0);
     assert_eq!(detail["is_last_pending"], false);
-    assert_eq!(detail["turns"], json!([]));
+    assert_eq!(detail["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["turns"][0]["cycle_id"], json!(CYCLE_ONE.to_string()));
+    assert_eq!(detail["turns"][0]["pending"], false);
+    assert_eq!(
+        detail["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|gap| gap["pulses"].as_array().unwrap().len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]
@@ -1159,8 +1170,9 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_json_dollars(&historical_detail["total_spent"], 12_000);
     assert_json_dollars(&historical_detail["net_pnl"], -12_000);
     assert_json_dollars(&historical_detail["total_avoided"], 0);
-    assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 2);
     assert_eq!(historical_detail["turns"][0]["pending"], true);
+    assert_eq!(historical_detail["turns"][1]["pending"], false);
 
     let (_follow_ups_directory, follow_ups_storage, follow_ups_state, follow_ups_principal_id) =
         create_principal_id().await;
@@ -2621,7 +2633,7 @@ async fn provisional_requests_remain_visible_without_inventing_final_cancellatio
             vec!["fresh", "fresh-renewed", "incomplete-renewed"],
         ),
         ("in_request", vec!["fresh", "fresh-renewed"]),
-        ("renewed", vec!["fresh-renewed"]),
+        ("renewed", vec![]),
         ("expired", vec!["incomplete", "incomplete-renewed"]),
         ("scheduled", vec![]),
         ("cancelled", vec![]),

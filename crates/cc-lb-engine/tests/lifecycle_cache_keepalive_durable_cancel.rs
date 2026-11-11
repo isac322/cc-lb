@@ -1103,6 +1103,7 @@ enum KeepaliveOperation {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ScopedKeepaliveState {
     generations: std::collections::BTreeMap<String, u64>,
+    request_owners: std::collections::BTreeMap<String, Option<u64>>,
     operations: Vec<KeepaliveOperation>,
     next_generation: u64,
 }
@@ -1152,10 +1153,11 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let key = request.session_key_hash;
-        assert_eq!(
-            request.expected_generation,
-            state.generations.get(&key).copied()
-        );
+        let expected_owner = state
+            .request_owners
+            .remove(&key)
+            .unwrap_or_else(|| state.generations.get(&key).copied());
+        assert_eq!(request.expected_generation, expected_owner);
         state.operations.push(KeepaliveOperation::Enqueue(
             key.clone(),
             request.expected_generation,
@@ -1174,10 +1176,18 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let key = request.session_key_hash;
-        assert_eq!(
-            request.expected_generation,
+        let expected_owner = if request.reason == CancelReason::NewRequest {
+            state
+                .request_owners
+                .insert(key.clone(), request.expected_generation);
             state.generations.get(&key).copied()
-        );
+        } else {
+            state
+                .request_owners
+                .remove(&key)
+                .unwrap_or_else(|| state.generations.get(&key).copied())
+        };
+        assert_eq!(request.expected_generation, expected_owner);
         state.operations.push(KeepaliveOperation::Cancel(
             key.clone(),
             request.expected_generation,
@@ -1726,8 +1736,8 @@ async fn non_auxiliary_turns_preserve_keepalive_lifecycle() {
             );
             assert_eq!(
                 completed.operations.iter().filter(|operation| matches!(
-                    operation, KeepaliveOperation::Cancel(session, None, CancelReason::UserTurnDetected)
-                        if session == key
+                    operation, KeepaliveOperation::Cancel(session, Some(owner), CancelReason::UserTurnDetected)
+                        if session == key && owner == generation
                 )).count(),
                 1
             );
@@ -2183,6 +2193,234 @@ async fn cache_keepalive_response_completion_does_not_await_generation_persisten
         enqueuer.inner.wait_for_enqueue().await;
         assert_eq!(enqueuer.inner.snapshot().generations.len(), 1);
     }
+}
+
+// The store issues durable ordering tickets, not the current active row's
+// generation. A request's completion must return its dispatch ticket unchanged.
+#[derive(Default)]
+struct RequestOwnerEnqueuer {
+    state: Mutex<RequestOwnerState>,
+    completed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct RequestOwnerState {
+    next_ticket: u64,
+    owner: Option<u64>,
+    updated_at: u64,
+    now: u64,
+    completions: Vec<Option<u64>>,
+    observations: usize,
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for RequestOwnerEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        _key: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        state.next_ticket += 1;
+        state.observations += 1;
+        Ok(Some(state.next_ticket))
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        if request.reason == CancelReason::NewRequest {
+            state.owner = request.expected_generation;
+            state.updated_at = state.now;
+        } else {
+            state.completions.push(request.expected_generation);
+            // Model the pre-fix monotonic-ticket acceptance rule, so an engine
+            // that invents a fresh completion owner visibly mutates B's marker.
+            if request.expected_generation >= state.owner {
+                state.owner = None;
+                state.updated_at = state.now;
+            }
+            self.completed.notify_one();
+        }
+        Ok(())
+    }
+
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        state.completions.push(request.expected_generation);
+        if request.expected_generation >= state.owner {
+            state.owner = request.expected_generation;
+            state.updated_at = state.now;
+        }
+        self.completed.notify_one();
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+}
+
+struct OwnedRequestDispatch {
+    calls: AtomicUsize,
+    entered: [tokio::sync::Notify; 2],
+    release: [tokio::sync::Notify; 2],
+    old_agent_turn: bool,
+    streaming: bool,
+}
+
+#[async_trait]
+impl UpstreamDispatch for OwnedRequestDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered[index].notify_one();
+        self.release[index].notified().await;
+        let body = if index == 0 && !self.old_agent_turn {
+            end_turn_body("msg_old_owner")
+        } else {
+            agent_turn_body(
+                if index == 0 {
+                    "msg_old_owner"
+                } else {
+                    "msg_current_owner"
+                },
+                "Bash",
+                12_000,
+            )
+        };
+        let mut response = Response::new(Body::from(if self.streaming {
+            streaming_body_from_message(&body)
+        } else {
+            body
+        }));
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(if self.streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            }),
+        );
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn request_start_owner_survives_late_first_byte_and_same_second_starts() {
+    let mut violations = Vec::new();
+    for (second_start, old_agent_turn, streaming) in [
+        (105, false, false),
+        (100, false, false),
+        (105, true, false),
+        (100, true, false),
+        (105, false, true),
+        (100, true, true),
+    ] {
+        let enqueuer = Arc::new(RequestOwnerEnqueuer::default());
+        let dispatch = Arc::new(OwnedRequestDispatch {
+            calls: AtomicUsize::new(0),
+            entered: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            release: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            old_agent_turn,
+            streaming,
+        });
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::with_principal_view(
+                TestState::default(),
+                Arc::new(PrincipalView::from_db(
+                    &[principal_with_keepalive()],
+                    HashMap::new(),
+                )),
+            ),
+            dispatch.clone(),
+            LifecycleConfig::default(),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+        let request_a = followup_request("request-owner", false, true);
+        let request_b = followup_request("request-owner", false, true);
+        let auth_a = lifecycle
+            .authenticate(request_a.headers())
+            .await
+            .expect("A authenticates");
+        let auth_b = lifecycle
+            .authenticate(request_b.headers())
+            .await
+            .expect("B authenticates");
+        let completion_a = async {
+            collect_body(
+                lifecycle
+                    .handle(request_a, &auth_a)
+                    .await
+                    .expect("A response"),
+            )
+            .await
+        };
+        let completion_b = async {
+            collect_body(
+                lifecycle
+                    .handle(request_b, &auth_b)
+                    .await
+                    .expect("B response"),
+            )
+            .await
+        };
+        tokio::pin!(completion_a, completion_b);
+        enqueuer.state.lock().expect("request owner").now = 100;
+        tokio::select! {
+            () = dispatch.entered[0].notified() => {}
+            _ = &mut completion_a => panic!("A must wait for its first byte"),
+        }
+        enqueuer.state.lock().expect("request owner").now = second_start;
+        tokio::select! {
+            () = dispatch.entered[1].notified() => {}
+            _ = &mut completion_b => panic!("B must wait for its first byte"),
+        }
+        let owner_b = enqueuer.state.lock().expect("request owner").owner;
+        enqueuer.state.lock().expect("request owner").now = 110;
+        dispatch.release[0].notify_one();
+        assert_eq!(completion_a.await.0, StatusCode::OK);
+        // Let detached completion persistence run before dispatching B's
+        // healthy completion; no wall-clock delay or same-second race.
+        tokio::task::yield_now().await;
+        let stale_persisted = {
+            let state = enqueuer.state.lock().expect("request owner");
+            if (state.owner, state.updated_at, state.observations) != (owner_b, second_start, 2)
+                || !state.completions.is_empty()
+            {
+                violations.push(format!(
+                    "A100/B{second_start}/A-first-byte110: owner={:?}, marker={}, observations={}, completion tickets={:?}; expected owner={owner_b:?}, marker={second_start}, observations=2, no stale persistence; agent={old_agent_turn}, sse={streaming}",
+                    state.owner, state.updated_at, state.observations, state.completions
+                ));
+            }
+            !state.completions.is_empty()
+        };
+        if stale_persisted {
+            enqueuer.completed.notified().await;
+        }
+        dispatch.release[1].notify_one();
+        assert_eq!(completion_b.await.0, StatusCode::OK);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            enqueuer.completed.notified(),
+        )
+        .await
+        .expect("latest healthy completion persists");
+        let state = enqueuer.state.lock().expect("request owner");
+        if state.completions != vec![owner_b] || state.owner != owner_b || state.observations != 2 {
+            violations.push(format!(
+                "latest B completion must reuse {owner_b:?}; completions={:?}, owner={:?}, observations={}",
+                state.completions, state.owner, state.observations
+            ));
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 #[derive(Default)]

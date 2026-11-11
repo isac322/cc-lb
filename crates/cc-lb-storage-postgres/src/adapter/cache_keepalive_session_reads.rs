@@ -82,7 +82,8 @@ SELECT \
     display_reason, \
     error, \
     config_snapshot";
-const SESSION_WITH_PURGED_TURNS_SQL: &str = r#"
+const SESSION_WITH_PURGED_TURNS_SQL: &str = concat!(
+    r#"
 (
     SELECT
         session_key_hash,
@@ -146,12 +147,9 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = r#"
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
-                 AND f.request_start_ms <= r.request_start_ms + CASE r.ttl
-                     WHEN '1h' THEN 3600000
-                     WHEN '30m' THEN 1800000
-                     WHEN '12h' THEN 43200000
-                     ELSE 300000
-                 END
+                 AND f.request_start_ms <= r.request_start_ms + "#,
+    cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+    r#"
                 WHERE r.principal_id = t.principal_id
                   AND r.evidence_kind = 'renewal'
                   AND r.event_ref = (ARRAY_AGG(t.source_ref_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1]
@@ -207,19 +205,32 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = r#"
           AND e.evidence_kind = 'renewal'
     )
     GROUP BY t.principal_id, t.session_key_hash
-) AS cache_keepalive_sessions"#;
+) AS cache_keepalive_sessions"#
+);
 
-fn push_cancelled_without_turns(
-    builder: &mut QueryBuilder<Postgres>,
-    horizon_start_ms: Option<i64>,
-) {
-    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash");
+fn push_renewal_in_horizon(builder: &mut QueryBuilder<Postgres>, horizon_start_ms: Option<i64>) {
+    builder.push("EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash");
     if let Some(start_ms) = horizon_start_ms {
         builder
             .push(" AND turn_row.ts * 1000 >= ")
             .push_bind(start_ms);
     }
-    builder.push("))");
+    builder.push(")");
+}
+
+fn push_cancelled_without_turns(
+    builder: &mut QueryBuilder<Postgres>,
+    horizon_start_ms: Option<i64>,
+) {
+    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND NOT ");
+    push_renewal_in_horizon(builder, horizon_start_ms);
+    builder.push(")");
+}
+
+fn push_session_entry_select(builder: &mut QueryBuilder<Postgres>, horizon_start_ms: Option<i64>) {
+    builder.push(SESSION_ENTRY_SELECT).push(", ");
+    push_renewal_in_horizon(builder, horizon_start_ms);
+    builder.push(" AS has_renewal_in_horizon");
 }
 
 const DECISION_ENTRY_SELECT: &str = "\
@@ -243,7 +254,8 @@ SELECT \
     reason, \
     reason AS display_reason, \
     error, \
-    config_snapshot";
+    config_snapshot, \
+    FALSE AS has_renewal_in_horizon";
 
 const VISIBLE_DECISION_ANTI_JOIN: &str = " AND NOT EXISTS (\
     SELECT 1 FROM cache_keepalive_turns turn_row \
@@ -319,9 +331,7 @@ fn push_session_filter(
             builder.push(")");
         }
         CacheKeepaliveSessionFilter::Renewed => {
-            builder.push(" AND (status = 'active' OR ");
-            builder.push(REQUEST_FRESH_SQL);
-            builder.push(") AND refresh_count > 0");
+            builder.push(" AND status = 'active' AND refresh_count > 0");
         }
         CacheKeepaliveSessionFilter::Scheduled => {
             builder.push(" AND status = 'active' AND refresh_count = 0");
@@ -424,7 +434,7 @@ fn push_session_list_branch(
     cursor_entry_id: Option<&str>,
     fetch_limit: i64,
 ) {
-    builder.push(SESSION_ENTRY_SELECT);
+    push_session_entry_select(builder, horizon_start_ms);
     builder.push(" FROM ");
     builder.push(SESSION_WITH_PURGED_TURNS_SQL);
     builder.push(" WHERE principal_id = ");
@@ -587,7 +597,8 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             "cache_keepalive_summary_cutoff_ms",
             "value exceeds i64::MAX",
         )?;
-        let mut sessions_query = QueryBuilder::<Postgres>::new(SESSION_ENTRY_SELECT);
+        let mut sessions_query = QueryBuilder::<Postgres>::new("");
+        push_session_entry_select(&mut sessions_query, None);
         sessions_query.push(" FROM cache_keepalive_sessions WHERE principal_id = ");
         sessions_query.push_bind(principal_id);
         sessions_query.push(" ORDER BY last_message_at_ms DESC, entry_id ASC");
@@ -621,7 +632,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         id: &str,
     ) -> StorageResult<Option<CacheKeepaliveSessionListItem>> {
         let mut builder = QueryBuilder::<Postgres>::new("WITH candidates AS (");
-        builder.push(SESSION_ENTRY_SELECT);
+        push_session_entry_select(&mut builder, None);
         builder.push(" FROM ");
         builder.push(SESSION_WITH_PURGED_TURNS_SQL);
         builder.push(" WHERE principal_id = ");
@@ -856,7 +867,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             "cache_keepalive_summary_cutoff_ms",
             "value exceeds i64::MAX",
         )?;
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             "WITH active_current_turns AS (
                 SELECT s.principal_id, s.session_key_hash, s.cycle_id, t.source_ref_id,
                        t.upstream_id, t.model,
@@ -929,12 +940,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3600000
-                           WHEN '30m' THEN 1800000
-                           WHEN '12h' THEN 43200000
-                           ELSE 300000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
             ),
             pending_current AS (
                 SELECT a.principal_id, a.source_ref_id
@@ -1009,7 +1017,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                      AND t.source_ref_id = e_summary.event_ref
                      AND t.ts * 1000 >= $14
                ))",
-        )
+        ))
         .bind(principal_id)
         .bind(principal_id)
         .bind(principal_id)
@@ -1065,7 +1073,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             .map_err(|_| StorageError::Corrupted {
                 message: "negative cache keepalive successful hit count".to_owned(),
             })?;
-        let group_rows = sqlx::query(
+        let group_rows = sqlx::query(concat!(
 "WITH renewals AS (
                 SELECT *
                 FROM cache_keepalive_evidence
@@ -1095,12 +1103,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3600000
-                           WHEN '30m' THEN 1800000
-                           WHEN '12h' THEN 43200000
-                           ELSE 300000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
              ),
              selected_follow_ups AS (
                 SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
@@ -1123,12 +1128,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.follow_up_request_start_ms > r.request_start_ms
                  AND f.follow_up_request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3600000
-                           WHEN '30m' THEN 1800000
-                           WHEN '12h' THEN 43200000
-                           ELSE 300000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
              )
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
@@ -1136,7 +1138,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
              WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
              GROUP BY r.model, r.ttl, r.cache_read_input_tokens
              ORDER BY r.model, r.ttl, r.cache_read_input_tokens",
-        )
+        ))
         .bind(principal_id)
         .bind(horizon_start_ms)
         .fetch_all(&self.pool)

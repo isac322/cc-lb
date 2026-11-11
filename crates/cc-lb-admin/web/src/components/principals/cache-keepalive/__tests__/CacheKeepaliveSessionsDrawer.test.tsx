@@ -146,6 +146,12 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
 
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
+        follow_up_outcomes: {
+          observed: 1,
+          pending: 0,
+          no_follow_up: 0,
+          unknown: 0,
+        },
         id: 'a1f39c2b7e04',
         last_message_at_ms: 1_700_000_600_000,
         state: 'renewed',
@@ -504,6 +510,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       'a1f39c2b7e04',
       '24h',
       initialFingerprint,
+      rowForState(false, 1),
     );
 
     for (const netPnl of [0.102, 9]) {
@@ -534,6 +541,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
           0.12,
           3,
         ]),
+        rowForState(true, 2, netPnl),
       );
     }
   });
@@ -696,10 +704,14 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   });
 
   it.each([
+    ['renewed', 'Renewed', 'ok'],
+    ['scheduled', 'Scheduled', 'live'],
     ['in_request', 'In request', 'neutral'],
-    ['expired', null, 'neutral'],
+    ['capped', 'Capped', 'neutral'],
+    ['expired', 'Expired', 'neutral'],
     ['cancelled', 'Cancelled', 'neutral'],
-    ['failed', 'Failed', 'neutral'],
+    ['failed', 'Failed', 'danger'],
+    ['not_tracked', 'Not tracked', 'neutral'],
   ] as const)(
     'keeps a server-visible %s row without inventing a renewal or cancellation',
     (state, badgeLabel, dotTone) => {
@@ -750,19 +762,24 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       );
 
       const button = screen.getByTitle(row.id);
-      expect(within(button).getByText('0×')).toBeDefined();
-      expect(within(button).queryByText('scheduled')).toBeNull();
+      expect(
+        within(button).getByText(state === 'scheduled' ? 'scheduled' : '0×'),
+      ).toBeDefined();
       expect(
         button.querySelector('.status-dot')?.classList.contains(dotTone),
       ).toBe(true);
-      if (badgeLabel) {
-        const badge = within(button).getByText(badgeLabel);
-        expect(badge).toBeDefined();
-        if (state === 'in_request') {
-          expect(badge.className).toContain('bg-overlay-5');
-          expect(badge.className).toContain('text-text-muted');
-        }
-      }
+      const badge = within(button).getByRole('status', {
+        name: `Session state: ${badgeLabel}`,
+      });
+      expect(badge.textContent).toBe(badgeLabel);
+      expect(within(button).getAllByRole('status')).toHaveLength(1);
+      const toneClass =
+        state === 'failed'
+          ? 'text-danger-text'
+          : state === 'renewed'
+            ? 'text-traffic-success-text'
+            : 'text-text-muted';
+      expect(badge.firstElementChild?.className).toContain(toneClass);
       if (state === 'in_request' || state === 'expired') {
         expect(within(button).queryByText(/Cancelled|Failed/)).toBeNull();
       }
@@ -840,6 +857,139 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     );
     expect(fetchNextPage).toHaveBeenCalledOnce();
   });
+  it('disambiguates colliding thread prefixes and preserves labels across polls and loaded pages', () => {
+    const ids = [
+      'p-123/thread:01a1c484-1111-aaaaaa',
+      'p-123/thread:01a1c484-2222-bbbbbb',
+      'p-123/thread:01a1c484-3333-aaaaaa',
+    ];
+    const rows = ids.map((id, index) => ({
+      ...apiRowFromFixture(cacheKeepaliveRows[0], index),
+      id,
+    }));
+    const setRows = (pages: CacheKeepaliveRow[][]) => {
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        data: {
+          pages: pages.map((rows) => ({
+            rows,
+            summary: summaryBase,
+            next_cursor: null,
+            groups: [
+              {
+                key: rows[0]?.group_key ?? 'Bash',
+                label: 'Bash',
+                kind: 'tool',
+                sessions: 3,
+                net_pnl: 0,
+                total_spent: 0,
+                total_avoided: 0,
+              },
+            ],
+          })),
+        },
+        isLoading: false,
+        isError: false,
+        hasNextPage: false,
+        isFetchingNextPage: false,
+        fetchNextPage: vi.fn(),
+      } as never);
+    };
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const ui = () => (
+      <QueryClientProvider client={client}>
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={mockPrincipal}
+          onOpenChange={() => {}}
+        />
+      </QueryClientProvider>
+    );
+    setRows([rows.slice(0, 2)]);
+    const { rerender } = render(ui());
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484…aaaaaa'),
+    ).toBeDefined();
+    expect(
+      within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
+    ).toBeDefined();
+    setRows([rows.slice(0, 2), [rows[2]]]);
+    rerender(ui());
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484…aaaaaa'),
+    ).toBeDefined();
+    expect(
+      within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
+    ).toBeDefined();
+    expect(
+      within(screen.getByTitle(ids[2])).queryByText('01a1c484…aaaaaa'),
+    ).toBeNull();
+    setRows([[rows[1]]]);
+    rerender(ui());
+    expect(
+      within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
+    ).toBeDefined();
+    setRows([[rows[2], rows[0], rows[1]]]);
+    rerender(ui());
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484…aaaaaa'),
+    ).toBeDefined();
+    expect(
+      within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
+    ).toBeDefined();
+  });
+  it.each([
+    ['short', ['session-2', 'session-3']],
+    ['exactly prefix plus tail length', ['12345678aaaaaa', '12345678bbbbbb']],
+  ] as const)(
+    'shows full %s ids instead of overlapping prefix/tail text',
+    (_name, rawIds) => {
+      const rows = rawIds.map((raw, index) => ({
+        ...apiRowFromFixture(cacheKeepaliveRows[0], index),
+        id: `p-123/thread:${raw}`,
+      }));
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        data: {
+          pages: [
+            {
+              rows,
+              summary: summaryBase,
+              next_cursor: null,
+              groups: [
+                {
+                  key: rows[0].group_key,
+                  label: rows[0].group_label,
+                  kind: rows[0].group_kind,
+                  sessions: rows.length,
+                  net_pnl: 0,
+                  total_spent: 0,
+                  total_avoided: 0,
+                },
+              ],
+            },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        hasNextPage: false,
+        isFetchingNextPage: false,
+        fetchNextPage: vi.fn(),
+      } as never);
+      renderWithProviders(
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={mockPrincipal}
+          onOpenChange={() => {}}
+        />,
+      );
+      rows.forEach((row, index) => {
+        const button = screen.getByTitle(row.id);
+        expect(within(button).getByText(rawIds[index])).toBeDefined();
+        expect(within(button).queryByText(/…/)).toBeNull();
+      });
+    },
+  );
 });
 
 it('renders the non-clickable deleted-session aggregate with real money', () => {

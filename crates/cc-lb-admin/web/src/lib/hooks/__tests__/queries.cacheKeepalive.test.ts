@@ -2,7 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import type { CacheKeepaliveListResponse } from '../../cacheKeepaliveApi';
+import type {
+  CacheKeepaliveDetail,
+  CacheKeepaliveListResponse,
+} from '../../cacheKeepaliveApi';
 import {
   POLLING_INTERVALS,
   qk,
@@ -901,6 +904,7 @@ describe('useCacheKeepaliveSessionDetail', () => {
           SESSION_ID,
           '24h',
           fingerprint,
+          original,
         ),
       {
         initialProps: { fingerprint: 'economics-before' },
@@ -920,6 +924,47 @@ describe('useCacheKeepaliveSessionDetail', () => {
     rerender({ fingerprint: 'economics-after' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  test.each(['cancelled', 'in_request', 'expired'] as const)(
+    'clears active placeholder data while the same session changes to %s',
+    async (state) => {
+      const original: CacheKeepaliveDetail = {
+        ...cacheKeepaliveRenewedDetailFixture,
+        state: 'scheduled',
+        is_active: true,
+      };
+      const updated = { ...original, state, is_active: false };
+      const next = Promise.withResolvers<Response>();
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(jsonResponse(original))
+          .mockImplementationOnce(() => next.promise),
+      );
+      const { result, rerender } = renderHook(
+        ({ lifecycle, fingerprint }) =>
+          useCacheKeepaliveSessionDetail(
+            PRINCIPAL_ID,
+            SESSION_ID,
+            '24h',
+            fingerprint,
+            lifecycle,
+          ),
+        {
+          initialProps: { lifecycle: original, fingerprint: 'scheduled' },
+          wrapper: makeWrapper(makeClient()),
+        },
+      );
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      rerender({ lifecycle: updated, fingerprint: state });
+      expect(result.current.data).toBeUndefined();
+      expect(result.current.isLoading).toBe(true);
+      expect(result.current.isPlaceholderData).toBe(false);
+      next.resolve(jsonResponse(updated));
+      await waitFor(() => expect(result.current.data?.state).toBe(state));
+    },
+  );
 
   test('stays idle and issues no request when sessionId is null', () => {
     const fetchMock = stubFetchOnce(cacheKeepaliveRenewedDetailFixture);

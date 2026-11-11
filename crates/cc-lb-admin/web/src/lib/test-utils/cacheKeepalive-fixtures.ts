@@ -60,6 +60,7 @@ function apiTurnFromFixture(
   turn: CacheKeepaliveTurnFixture,
 ): CacheKeepaliveTurn {
   return {
+    cycle_id: null,
     turn_number: turn.number,
     renewals: turn.renewals,
     followed_up: turn.followedUp,
@@ -143,6 +144,12 @@ export function apiDetailFromFixture(
     ...apiRowFromFixture(fixture, index),
     renewal_tokens: 20_000,
     total_renewals_current_cycle: fixture.attempts ?? 0,
+    follow_up_outcomes: {
+      observed: 0,
+      pending: 0,
+      no_follow_up: 0,
+      unknown: 0,
+    },
     is_last_pending: newestTurn.pending,
     turns: newestFirstTurns.map(apiTurnFromFixture),
     config_snapshot: {

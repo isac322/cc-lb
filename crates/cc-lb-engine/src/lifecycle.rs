@@ -6198,7 +6198,10 @@ impl Lifecycle {
                 shaped_body,
                 original_body: ctx.body_bytes.clone(),
                 downstream_headers: ctx.downstream_headers.clone(),
-                request_dispatched_at: keepalive_request_dispatched_at.unwrap_or(dispatch_started),
+                request_dispatched_at: keepalive_request_dispatched_at
+                    .map(|(at, _)| at)
+                    .unwrap_or(dispatch_started),
+                request_start_order: keepalive_request_dispatched_at.and_then(|(_, order)| order),
             }
         });
         let response_affinity_context = ResponseAffinityContext {
@@ -6794,6 +6797,7 @@ impl Lifecycle {
                 usage
                     .cache_read_input_tokens
                     .saturating_add(usage.cache_creation_input_tokens),
+                context.request_start_order,
             );
         }
         if status.is_success()
@@ -6987,7 +6991,10 @@ impl Lifecycle {
         attempt_timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<Instant>,
+        keepalive_request_dispatched_at: &mut Option<(
+            Instant,
+            Option<crate::cache_keepalive::RequestStartOrder>,
+        )>,
     ) -> Result<Response<Body>, AttemptFailure> {
         let attempt_scope = match reserved {
             Some(reserved) => reserved.begin_attempt(),
@@ -7226,7 +7233,10 @@ impl Lifecycle {
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<Instant>,
+        keepalive_request_dispatched_at: &mut Option<(
+            Instant,
+            Option<crate::cache_keepalive::RequestStartOrder>,
+        )>,
     ) -> Result<Response<Body>, AttemptFailure> {
         tracing::Span::current().record(
             "cc_lb.upstream.id",
@@ -7315,10 +7325,11 @@ impl Lifecycle {
         );
 
         if keepalive_request_dispatched_at.is_none() {
-            self.cache_keepalive
+            let order = self
+                .cache_keepalive
                 .on_request_started(authenticated, principal, cache_metadata)
                 .await;
-            *keepalive_request_dispatched_at = Some(Instant::now());
+            *keepalive_request_dispatched_at = Some((Instant::now(), order));
         }
 
         let dispatch_start = Instant::now();
