@@ -8,7 +8,8 @@
     "session_identity_changed",
     "snapshot_too_large",
     "cached_prefix_too_small",
-    "zero_token_renewal_unsupported"
+    "zero_token_renewal_unsupported",
+    "completed_not_renewable"
   ],
   "states": [
     "renewed",

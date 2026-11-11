@@ -6779,27 +6779,35 @@ impl Lifecycle {
         } else {
             response_body_json.as_ref()
         };
-        if !affinity_bind_failed
-            && let (Some(context), Some(response_json)) =
-                (keepalive_completion, keepalive_response_json)
+        if let Some(context) = keepalive_completion
+            && !body_collect_failed
         {
-            self.cache_keepalive.on_response_completed(
-                response_json,
-                &context.principal,
-                context.accounting_key_id,
-                &context.cache_metadata,
-                context.upstream_id,
-                context.shaped_body,
-                context.original_body,
-                &context.downstream_headers,
-                first_body_chunk_at
-                    .unwrap_or(context.request_dispatched_at)
-                    .elapsed(),
-                usage
-                    .cache_read_input_tokens
-                    .saturating_add(usage.cache_creation_input_tokens),
-                context.request_start_order,
-            );
+            let cache_anchor_age = first_body_chunk_at
+                .unwrap_or(context.request_dispatched_at)
+                .elapsed();
+            if !affinity_bind_failed && let Some(response_json) = keepalive_response_json {
+                self.cache_keepalive.on_response_completed(
+                    response_json,
+                    &context.principal,
+                    context.accounting_key_id,
+                    &context.cache_metadata,
+                    context.upstream_id,
+                    context.shaped_body,
+                    context.original_body,
+                    &context.downstream_headers,
+                    cache_anchor_age,
+                    usage
+                        .cache_read_input_tokens
+                        .saturating_add(usage.cache_creation_input_tokens),
+                    context.request_start_order,
+                );
+            } else if let Some(order) = context.request_start_order {
+                self.cache_keepalive.on_completed_not_renewable(
+                    context.principal,
+                    order,
+                    cache_anchor_age,
+                );
+            }
         }
         if status.is_success()
             && let Some(context) = prompt_cache_observation_context.as_ref()

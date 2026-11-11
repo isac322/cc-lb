@@ -574,6 +574,10 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       'zero_token_renewal_unsupported',
       'Cancelled: zero-token renewal unsupported',
     ],
+    [
+      'completed_not_renewable',
+      'Cancelled: request completed, renewal not possible',
+    ],
     [null, 'Cancelled'],
     [undefined, 'Cancelled'],
   ] as const)(
@@ -604,47 +608,62 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
 
       expect(screen.getByText(expected)).toBeDefined();
       expect(screen.queryByText(/first renewal in/)).toBeNull();
+      expect(screen.getByText(expected).className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('Failed')).toBeNull();
     },
   );
 
-  it('keeps the cancellation cause visible alongside retained renewal history', () => {
-    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
-      successQuery<CacheKeepaliveDetail>({
-        ...cacheKeepaliveRenewedDetailFixture,
-        state: 'cancelled',
-        is_active: false,
-        cancel_reason: 'new_request',
-        reason: 'Cancelled: new request',
-        gaps: [
-          {
-            cycle_id: 'retained-cycle',
-            pause_at_ms: 1_700_000_000_000,
-            cached_tokens: 20_000,
-            pulses: [],
-            ending_kind: 'ttl_expired_no_followup',
-            ending_at_ms: 1_700_000_300_000,
-            total_duration_sec: 300,
-            since_last_renewal_sec: null,
-            spent_usd: 0,
-            avoided_usd: null,
-            net_pnl_usd: null,
-          },
-        ],
-      }),
-    );
+  it.each([
+    ['new_request', 'Cancelled: new request'],
+    [
+      'completed_not_renewable',
+      'Cancelled: request completed, renewal not possible',
+    ],
+  ] as const)(
+    'keeps %s visible alongside retained renewal history',
+    (cancelReason, expected) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'cancelled',
+          is_active: false,
+          cancel_reason: cancelReason,
+          reason: expected,
+          gaps: [
+            {
+              cycle_id: 'retained-cycle',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: 'ttl_expired_no_followup',
+              ending_at_ms: 1_700_000_300_000,
+              total_duration_sec: 300,
+              since_last_renewal_sec: null,
+              spent_usd: 0,
+              avoided_usd: null,
+              net_pnl_usd: null,
+            },
+          ],
+        }),
+      );
 
-    renderWithProviders(
-      <SessionDetailPane
-        principalId="p-123"
-        sessionId="cancelled-session"
-        onClose={() => {}}
-      />,
-    );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="cancelled-session"
+          onClose={() => {}}
+        />,
+      );
 
-    expect(screen.getByText('Cancelled: new request')).toBeDefined();
-    expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
-    expect(screen.queryByText(/first renewal in/)).toBeNull();
-  });
+      expect(screen.getByText(expected)).toBeDefined();
+      expect(screen.getByText(expected).className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('Failed')).toBeNull();
+      expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+      expect(screen.queryByText(/first renewal in/)).toBeNull();
+    },
+  );
 
   it('shows every horizon cycle in the renewal table and matches the timeline cycle labels', () => {
     const base = 1_700_000_000_000;

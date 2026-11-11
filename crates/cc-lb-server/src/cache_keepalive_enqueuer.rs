@@ -294,7 +294,8 @@ fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalRe
         | CancelReason::SessionIdentityChanged
         | CancelReason::SnapshotTooLarge
         | CancelReason::CachedPrefixTooSmall
-        | CancelReason::ZeroTokenRenewalUnsupported => CacheKeepaliveTerminalReason::Cancelled,
+        | CancelReason::ZeroTokenRenewalUnsupported
+        | CancelReason::CompletedNotRenewable => CacheKeepaliveTerminalReason::Cancelled,
     }
 }
 

@@ -141,10 +141,21 @@ Drain and stop those old pods before starting new writers, or upgrade to 2.2.x
 first. Normal client requests still succeed, but ignoring this recommendation
 can schedule unnecessary renewals from an older snapshot.
 
-If failover changes a threadless request's fallback cache identity, completion
-retires the original marker with `session_identity_changed` using its original
-owner ticket. The final identity receives a normal fresh completion, never a
-ticket borrowed from the original identity.
+If failover changes or removes a threadless request's eligible cache identity,
+completion retires the original marker with `session_identity_changed` using
+its original owner ticket. A final eligible identity receives a normal fresh
+completion, never a ticket borrowed from the original identity. Without a
+final eligible identity, completion only retires the original owner.
+An unscoped main request also retires the generic subagent owner captured at
+start, independently of whether a newer request superseded its primary owner.
+Neither retirement re-observes or replaces a newer owner.
+
+Completed requests that cannot produce a safe renewal snapshot finalize their
+captured primary and sibling owners with `completed_not_renewable`: “Cancelled:
+request completed, renewal not possible”. This includes configuration changes,
+missing or invalid snapshot metadata, undecodable completed responses, and
+responses rejected by affinity binding. Genuine transport failures, incomplete
+streams, and aborts before completion still use the neutral deadline fallback.
 
 The proxy waits for the request-start fence before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
@@ -152,8 +163,9 @@ if the fence cannot be persisted.
 
 Successful real-request cancellations persist a nullable `cancel_reason`:
 `new_request`, `user_turn_detected`, `ambiguous_turn`, `retention_recorded`,
-`renewal_not_beneficial`, `session_identity_changed`, `snapshot_too_large`,
-`cached_prefix_too_small`, or `zero_token_renewal_unsupported`. Older rows
+`renewal_not_beneficial`, `session_identity_changed`, `completed_not_renewable`,
+`snapshot_too_large`, `cached_prefix_too_small`, or
+`zero_token_renewal_unsupported`. Older rows
 remain null; their display must say only “Cancelled”, without guessing a cause.
 
 Scheduling is anchored to cache creation / response begin:
@@ -423,6 +435,11 @@ The keep-alive Prometheus surface includes these counters:
   - `user_turn_detected`: a response-derived compaction boundary with no
     current cache breakpoint. Ordinary `UserTurn` and `Ambiguous` classifier
     decisions do not increment this cancellation counter.
+  - `session_identity_changed`: failover changed or removed the final eligible
+    cache identity, or a completed unscoped main request retired its captured
+    generic subagent owner.
+  - `completed_not_renewable`: a completed request could not produce a safe
+    renewal snapshot; its captured owner was finalized without rescheduling.
   - `snapshot_too_large`: the captured, trimmed shaped body exceeded the
     principal's `snapshot_max_bytes`.
   - `cached_prefix_too_small`: an `AgentInTurn` response reported fewer than

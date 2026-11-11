@@ -26,6 +26,7 @@ struct Session {
 #[derive(Default)]
 struct State {
     sessions: HashMap<String, Session>,
+    observations: Vec<String>,
     enqueues: Vec<(String, Option<CacheKeepaliveCompletionTicket>)>,
     cancellations: Vec<(String, Option<CacheKeepaliveCompletionTicket>, &'static str)>,
     preserve_newer_start: bool,
@@ -35,6 +36,7 @@ struct State {
 struct IdentityEnqueuer {
     state: Mutex<State>,
     completed: tokio::sync::Notify,
+    retired: tokio::sync::Notify,
 }
 
 // Models the storage boundary, not lifecycle logic: independently allocated
@@ -49,6 +51,7 @@ impl CacheKeepaliveEnqueuer for IdentityEnqueuer {
         key: &str,
     ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().unwrap();
+        state.observations.push(key.to_owned());
         let initial_ticket = if state.sessions.is_empty() { 40 } else { 0 };
         let session = state
             .sessions
@@ -112,7 +115,7 @@ impl CacheKeepaliveEnqueuer for IdentityEnqueuer {
         if accepted {
             session.owner = Some(ticket);
             session.in_request = request.reason == CancelReason::NewRequest;
-            if session.in_request && preserve_newer && session.ticket == 1 {
+            if session.in_request && preserve_newer {
                 // A newer authenticated start has acquired this same K1 while
                 // the older request is in flight. Its ticket must survive.
                 session.ticket += 1;
@@ -120,6 +123,9 @@ impl CacheKeepaliveEnqueuer for IdentityEnqueuer {
             } else if !session.in_request {
                 session.terminal_reason = Some(request.reason.as_str());
             }
+        }
+        if request.reason == CancelReason::SessionIdentityChanged {
+            self.retired.notify_one();
         }
         Ok(())
     }
@@ -308,4 +314,151 @@ async fn official_custom_failover_uses_fresh_identity_ticket_sse() {
 async fn official_custom_failover_preserves_newer_original_identity_owner() {
     assert_identity_change(false, true).await;
     assert_identity_change(true, true).await;
+}
+
+fn billing_only_request(streaming: bool) -> Request<Bytes> {
+    // This is the policy boundary from
+    // literal_only_billing_breakpoint_records_custom_cache_creation: tools
+    // contribute a large prefix, but only the billing system block is cached.
+    // Official policy removes that sole breakpoint; literal/custom policy does not.
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 32,
+        "stream": streaming,
+        "tools": [{
+            "name": "large_tool",
+            "description": "tool schema context ".repeat(2_000),
+            "input_schema": {"type": "object"}
+        }],
+        "system": [{
+            "type": "text",
+            "text": "x-anthropic-billing-header: cron-attribution",
+            "cache_control": {"type": "ephemeral"}
+        }],
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    messages_request(Bytes::from(serde_json::to_vec(&body).unwrap()))
+}
+
+// QA: a real completed JSON/SSE response must retire a captured start even
+// when final official policy has neither an eligible breakpoint nor a key.
+// Retirement uses the captured ticket, never a fresh observation of K1.
+async fn assert_identity_disappears(streaming: bool, preserve_newer_start: bool) {
+    let enqueuer = Arc::new(IdentityEnqueuer::default());
+    let (success, expected_body) = reply(streaming);
+    let warm = Fixture::with_principal_view(
+        vec![api_key(1, "custom").replies(vec![success.clone()])],
+        keepalive_principal_view(),
+    )
+    .with_lifecycle(|lifecycle| lifecycle.with_cache_keepalive_enqueuer(enqueuer.clone()));
+    let (status, body) = warm.send_request(billing_only_request(streaming)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, expected_body);
+    tokio::time::timeout(Duration::from_secs(5), enqueuer.completed.notified())
+        .await
+        .expect("custom literal breakpoint seeds a tracked K1");
+    let k1 = {
+        let mut state = enqueuer.state.lock().unwrap();
+        assert_eq!(state.enqueues.len(), 1);
+        let k1 = state.enqueues[0].0.clone();
+        assert_eq!(state.sessions[&k1].owner, Some(completion_ticket(41)));
+        assert!(!state.sessions[&k1].in_request);
+        state.preserve_newer_start = preserve_newer_start;
+        k1
+    };
+
+    let mut official = api_key(2, "official").replies(vec![success]);
+    official.record.base_url = None;
+    let fixture = Fixture::with_principal_view(
+        vec![
+            api_key(1, "custom").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
+            official,
+        ],
+        keepalive_principal_view(),
+    )
+    .with_lifecycle(|lifecycle| lifecycle.with_cache_keepalive_enqueuer(enqueuer.clone()));
+    let replies = fixture
+        .dispatch
+        .replies
+        .lock()
+        .unwrap()
+        .remove(&host("official"))
+        .unwrap();
+    fixture
+        .dispatch
+        .replies
+        .lock()
+        .unwrap()
+        .insert("api.anthropic.com".to_owned(), replies);
+    let (status, body) = fixture.send_request(billing_only_request(streaming)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body, expected_body,
+        "response fidelity, streaming={streaming}"
+    );
+    assert_eq!(
+        fixture.hosts(),
+        vec![host("custom"), "api.anthropic.com".to_owned()]
+    );
+    // The notification is emitted after the terminal storage operation, even
+    // when fencing rejects it for a newer owner. No timing-based sleeps.
+    let retired = tokio::time::timeout(Duration::from_secs(5), enqueuer.retired.notified()).await;
+    let state = enqueuer.state.lock().unwrap();
+    let original = &state.sessions[&k1];
+    assert!(
+        retired.is_ok(),
+        "completed official response must retire captured K1; streaming={streaming}, \
+         newer_owner={preserve_newer_start}, cancellations={:?}, owner={:?}, in_request={}",
+        state.cancellations,
+        original.owner,
+        original.in_request,
+    );
+    assert_eq!(
+        state.observations,
+        vec![k1.clone(), k1.clone()],
+        "only warm and failover starts observe K1; empty final identity must not be observed"
+    );
+    assert_eq!(state.sessions.len(), 1, "no empty replacement identity");
+    assert_eq!(
+        state.enqueues.len(),
+        1,
+        "only the warm custom response schedules"
+    );
+    assert_eq!(
+        state.cancellations,
+        vec![
+            (k1.clone(), Some(completion_ticket(41)), "new_request"),
+            (k1.clone(), Some(completion_ticket(42)), "new_request"),
+            (k1, Some(completion_ticket(42)), "session_identity_changed"),
+        ],
+        "retire exactly the captured owner without re-observing K1"
+    );
+    if preserve_newer_start {
+        assert_eq!(original.owner, Some(completion_ticket(43)));
+        assert!(original.in_request, "the newer start remains active");
+        assert_eq!(original.terminal_reason, None);
+    } else {
+        assert_eq!(original.owner, Some(completion_ticket(42)));
+        assert!(
+            !original.in_request,
+            "captured K1 must not linger until timeout"
+        );
+        assert_eq!(original.terminal_reason, Some("session_identity_changed"));
+    }
+}
+
+#[tokio::test]
+async fn custom_official_failover_retires_identity_without_final_breakpoint_json() {
+    assert_identity_disappears(false, false).await;
+}
+
+#[tokio::test]
+async fn custom_official_failover_retires_identity_without_final_breakpoint_sse() {
+    assert_identity_disappears(true, false).await;
+}
+
+#[tokio::test]
+async fn custom_official_failover_without_final_breakpoint_preserves_newer_original_owner() {
+    assert_identity_disappears(false, true).await;
+    assert_identity_disappears(true, true).await;
 }

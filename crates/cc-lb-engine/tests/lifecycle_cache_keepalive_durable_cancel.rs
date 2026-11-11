@@ -1114,6 +1114,8 @@ enum KeepaliveOperation {
 struct ScopedKeepaliveState {
     generations: std::collections::BTreeMap<String, CacheKeepaliveCompletionTicket>,
     request_owners: std::collections::BTreeMap<String, Option<CacheKeepaliveCompletionTicket>>,
+    cancellations:
+        std::collections::BTreeMap<String, (Option<CacheKeepaliveCompletionTicket>, CancelReason)>,
     operations: Vec<KeepaliveOperation>,
     next_generation: u64,
 }
@@ -1174,6 +1176,7 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
         ));
         state.next_generation += 1;
         let generation = completion_ticket(state.next_generation);
+        state.cancellations.remove(&key);
         state.generations.insert(key, generation);
         self.enqueued.notify_one();
         self.completed.notify_one();
@@ -1187,22 +1190,39 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let key = request.session_key_hash;
         let expected_owner = if request.reason == CancelReason::NewRequest {
-            state
-                .request_owners
-                .insert(key.clone(), request.expected_generation);
             state.generations.get(&key).copied()
         } else {
             state
                 .request_owners
-                .remove(&key)
+                .get(&key)
+                .copied()
                 .unwrap_or_else(|| state.generations.get(&key).copied())
         };
-        assert_eq!(request.expected_generation, expected_owner);
         state.operations.push(KeepaliveOperation::Cancel(
             key.clone(),
             request.expected_generation,
             request.reason,
         ));
+        if request.expected_generation != expected_owner {
+            // Storage rejects an older captured ticket after a new owner has
+            // replaced the provisional marker; recording the attempt is useful
+            // for checking that completion did not re-observe that newer owner.
+            assert_ne!(request.reason, CancelReason::NewRequest);
+            self.completed.notify_one();
+            return Ok(());
+        }
+        if request.reason == CancelReason::NewRequest {
+            state
+                .request_owners
+                .insert(key.clone(), request.expected_generation);
+        } else {
+            state.request_owners.remove(&key);
+        }
+        // The real store retains a terminal NewRequest marker, including its
+        // owner, until a real completion replaces its reason or enqueues it.
+        state
+            .cancellations
+            .insert(key.clone(), (request.expected_generation, request.reason));
         state.generations.remove(&key);
         if request.reason.as_str() != "new_request" {
             self.completed.notify_one();
@@ -1334,6 +1354,693 @@ async fn establish_scoped_keepalive(
     assert_keepalive_response_fidelity(response, &body, false).await;
     enqueuer.wait_for_completion().await;
     enqueuer.wait_for_enqueue().await;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompletionFallbackResponse {
+    InvalidJson,
+    Empty,
+    InvalidGzip,
+    UnsupportedEncoding,
+    AffinityRejected,
+    SseTerminalOnly,
+    SseEmpty,
+    SseAffinityRejected,
+    BodyFailure,
+    TransportFailure,
+    ClientAbort,
+}
+
+struct CompletionFallbackDispatch {
+    pending: PendingFollowupDispatch,
+    response: CompletionFallbackResponse,
+}
+
+#[async_trait]
+impl UpstreamDispatch for CompletionFallbackDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let mut response = self.pending.dispatch(request).await?;
+        let body = match self.response {
+            CompletionFallbackResponse::InvalidJson => Bytes::from_static(b"not completion JSON"),
+            CompletionFallbackResponse::Empty | CompletionFallbackResponse::SseEmpty => {
+                Bytes::new()
+            }
+            CompletionFallbackResponse::InvalidGzip => {
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("gzip"),
+                );
+                Bytes::from_static(b"not a gzip member")
+            }
+            CompletionFallbackResponse::UnsupportedEncoding => {
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("unsupported-test-encoding"),
+                );
+                self.pending.body.clone()
+            }
+            CompletionFallbackResponse::SseTerminalOnly => {
+                Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            }
+            CompletionFallbackResponse::SseAffinityRejected => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::BodyFailure => {
+                let partial = self.pending.body.clone();
+                *response.body_mut() = Body::from_stream(async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(partial);
+                    yield Err(std::io::Error::other("fixture upstream body reset"));
+                });
+                return Ok(response);
+            }
+            CompletionFallbackResponse::TransportFailure => {
+                return Err(DispatchError::Transport {
+                    source: Box::new(std::io::Error::other("fixture upstream connection reset")),
+                });
+            }
+            CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::ClientAbort => self.pending.body.clone(),
+        };
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::SseTerminalOnly
+                | CompletionFallbackResponse::SseEmpty
+                | CompletionFallbackResponse::SseAffinityRejected
+        ) {
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/event-stream"),
+            );
+        }
+        *response.body_mut() = Body::from(body);
+        Ok(response)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_undecodable_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::InvalidJson,
+        CompletionFallbackResponse::Empty,
+        CompletionFallbackResponse::InvalidGzip,
+        CompletionFallbackResponse::UnsupportedEncoding,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_affinity_rejection_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(CompletionFallbackResponse::AffinityRejected, replace, true)
+                .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_sse_terminal_without_snapshot_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(CompletionFallbackResponse::SseTerminalOnly, replace, true)
+                .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_incomplete_transport_body_and_abort_remain_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseEmpty,
+        CompletionFallbackResponse::SseAffinityRejected,
+        CompletionFallbackResponse::BodyFailure,
+        CompletionFallbackResponse::TransportFailure,
+        CompletionFallbackResponse::ClientAbort,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+async fn assert_completion_fallback(
+    response: CompletionFallbackResponse,
+    replace: bool,
+    should_complete: bool,
+) -> Vec<String> {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let primary_headers = [
+        ("x-claude-code-session-id", "completion-fallback"),
+        ("x-claude-code-agent-id", "main"),
+    ];
+    let sibling_headers = [
+        ("x-claude-code-session-id", "completion-fallback"),
+        ("x-claude-code-request-class", "subagent"),
+    ];
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &primary_headers).await;
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &sibling_headers).await;
+    let captured = enqueuer.snapshot().generations;
+    assert_eq!(
+        captured.len(),
+        2,
+        "fixture must establish primary and sibling"
+    );
+
+    // A successful tool response is renewable unless the real response-affinity
+    // gate rejects its unsolicited provider-owned container.
+    let mut message: serde_json::Value =
+        serde_json::from_slice(&agent_turn_body("msg_fallback", "Bash", 12_000))
+            .expect("completion fixture");
+    message["container"] = json!({"id": "container-completion-fallback"});
+    if matches!(response, CompletionFallbackResponse::SseAffinityRejected) {
+        message["content"]
+            .as_array_mut()
+            .expect("content")
+            .push(json!({
+                "type": "web_search_tool_result",
+                "content": [{"encrypted_content": "container-completion-fallback"}]
+            }));
+    }
+    let dispatch = Arc::new(CompletionFallbackDispatch {
+        pending: PendingFollowupDispatch {
+            streaming: false,
+            body: Bytes::from(serde_json::to_vec(&message).expect("completion JSON")),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            calls: AtomicUsize::new(0),
+        },
+        response,
+    });
+    let mut lifecycle = lifecycle_with_parts(
+        TestAuthn::with_principal_view(
+            TestState::default(),
+            Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal),
+                HashMap::new(),
+            )),
+        ),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+    )
+    .with_cache_keepalive_enqueuer(enqueuer.clone());
+    if matches!(
+        response,
+        CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        let store = Arc::new(crate::upstream_affinity::MemoryAffinityStore::default());
+        store.fail_bind("fixture response-affinity storage unavailable");
+        lifecycle = lifecycle.with_upstream_affinity_store(store);
+    }
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.attach_lifecycle_assembler(128);
+    lifecycle = lifecycle.with_event_bus(bus);
+    // No class/agent header: request-start must capture the generic sibling as
+    // well as the primary, before upstream headers or body become available.
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "completion-fallback")
+        .body(standard_keepalive_request())
+        .expect("fallback request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("auth");
+    let mut handling = Box::pin(lifecycle.handle(request, &auth));
+    tokio::select! {
+        () = dispatch.pending.entered.notified() => {}
+        _ = &mut handling => panic!("dispatch must wait for the deterministic release"),
+    }
+    let pending = enqueuer.snapshot();
+    for (key, owner) in &captured {
+        assert_eq!(
+            pending.cancellations.get(key),
+            Some(&(Some(*owner), CancelReason::NewRequest)),
+            "fixture must retain each captured owner in its provisional marker"
+        );
+    }
+    if replace {
+        // These are new real completions, not a mutation of the expected result.
+        // Explicit main identity prevents setup from capturing the sibling.
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &primary_headers).await;
+        establish_scoped_keepalive(&enqueuer, principal, &sibling_headers).await;
+    }
+    let before_completion = enqueuer.snapshot();
+    let operations_start = before_completion.operations.len();
+    if matches!(response, CompletionFallbackResponse::ClientAbort) {
+        drop(handling);
+    } else {
+        dispatch.pending.release.notify_one();
+        let response_body = handling.await.expect("HTTP lifecycle response");
+        let (status, _headers, body) = collect_body(response_body).await;
+        match response {
+            CompletionFallbackResponse::AffinityRejected => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert!(!String::from_utf8_lossy(&body).contains("container-completion-fallback"));
+            }
+            CompletionFallbackResponse::BodyFailure
+            | CompletionFallbackResponse::TransportFailure => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+            }
+            CompletionFallbackResponse::SseAffinityRejected => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(String::from_utf8_lossy(&body).contains("event: error"));
+                assert!(!String::from_utf8_lossy(&body).contains("container-completion-fallback"));
+            }
+            CompletionFallbackResponse::SseEmpty => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(
+                    body.is_empty(),
+                    "Anthropic preserves the empty upstream body"
+                );
+            }
+            CompletionFallbackResponse::InvalidJson => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body.as_ref(), b"not completion JSON");
+            }
+            CompletionFallbackResponse::Empty => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(body.is_empty());
+            }
+            CompletionFallbackResponse::InvalidGzip => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body.as_ref(), b"not a gzip member");
+            }
+            CompletionFallbackResponse::UnsupportedEncoding => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body, dispatch.pending.body);
+            }
+            _ => assert_eq!(status, StatusCode::OK),
+        }
+    }
+    // The paused clock advances only after runnable completion work has been
+    // polled. Notify is the existing persistence seam; the five-second bound is
+    // unchanged, and no sleep/yield/re-observation substitutes for completion.
+    let persisted =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = enqueuer.completed.notified();
+                if enqueuer.snapshot().operations[operations_start..]
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    KeepaliveOperation::Cancel(_, _, reason) if reason.as_str() != "new_request"
+                ))
+                .count() >= captured.len()
+            {
+                break;
+            }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok();
+    let after = enqueuer.snapshot();
+    let operations = &after.operations[operations_start..];
+    let mut violations = Vec::new();
+    if should_complete {
+        if !persisted {
+            violations.push(format!("{response:?}, newer={replace}: completed response left captured markers unresolved; operations={operations:?}, cancellations={:?}", after.cancellations));
+        }
+        for (key, owner) in &captured {
+            if !operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    KeepaliveOperation::Cancel(actual_key, Some(actual_owner), reason)
+                        if actual_key == key && actual_owner == owner
+                            && reason.as_str() == "completed_not_renewable"
+                )
+            }) {
+                violations.push(format!("{response:?}, newer={replace}: missing completed_not_renewable for captured {key} owner {owner:?}; operations={operations:?}"));
+            }
+            if !replace
+                && !after
+                    .cancellations
+                    .get(key)
+                    .is_some_and(|(actual_owner, reason)| {
+                        actual_owner == &Some(*owner)
+                            && reason.as_str() == "completed_not_renewable"
+                    })
+            {
+                violations.push(format!(
+                    "{response:?}: provisional marker not retired: {key}"
+                ));
+            }
+        }
+    } else if persisted || after != before_completion {
+        violations.push(format!("{response:?}, newer={replace}: incomplete/aborted response invented completion; before={before_completion:?}, after={after:?}"));
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation,
+            KeepaliveOperation::Enqueue(_, _) | KeepaliveOperation::Observe(_, _)
+        )
+    }) {
+        violations.push(format!("{response:?}, newer={replace}: completion must neither reschedule nor re-observe captured owners: {operations:?}"));
+    }
+    if after.generations != before_completion.generations {
+        violations.push(format!(
+            "{response:?}, newer={replace}: completion changed newer/unrelated active owners"
+        ));
+    }
+    if replace
+        && (after.cancellations != before_completion.cancellations
+            || after.request_owners != before_completion.request_owners)
+    {
+        violations.push(format!(
+            "{response:?}: old completion altered a newer owner's marker"
+        ));
+    }
+    let mut terminal_reason = None;
+    while let Ok(event) = events.try_recv() {
+        if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated { reason, .. } = event {
+            terminal_reason = Some(reason);
+        }
+    }
+    if matches!(response, CompletionFallbackResponse::SseTerminalOnly) {
+        assert_eq!(
+            terminal_reason,
+            Some(cc_lb_lifecycle::TerminationReason::Success),
+            "message_stop-only fixture must be admitted as semantic completion"
+        );
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::SseEmpty | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        assert_eq!(
+            terminal_reason,
+            Some(cc_lb_lifecycle::TerminationReason::ErrorCode(
+                "upstream_stream_error".to_owned()
+            )),
+            "incomplete/affinity-aborted SSE is not semantic completion"
+        );
+    }
+    violations
+}
+
+#[tokio::test]
+async fn agent_completion_retires_captured_generic_subagent_marker() {
+    for streaming in [false, true] {
+        assert_agent_completion_resolves_generic_subagent(streaming, false).await;
+    }
+}
+
+#[tokio::test]
+async fn agent_completion_preserves_newer_generic_subagent_owner_without_reobserve() {
+    for streaming in [false, true] {
+        assert_agent_completion_resolves_generic_subagent(streaming, true).await;
+    }
+}
+
+async fn assert_agent_completion_resolves_generic_subagent(streaming: bool, replace_sibling: bool) {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let sibling_headers = [
+        ("x-claude-code-session-id", "agent-completion-sibling"),
+        ("x-claude-code-request-class", "subagent"),
+    ];
+    // Explicit subagent classification without an agent ID creates the generic
+    // sibling. Renew it through another real eligible response before capture.
+    for _ in 0..2 {
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &sibling_headers).await;
+    }
+    let before = enqueuer.snapshot();
+    let (sibling_key, captured_owner) = before
+        .generations
+        .iter()
+        .find(|(key, _)| key.ends_with("/thread:agent-completion-sibling/agent:subagent"))
+        .expect("explicit subagent without agent ID establishes the generic sibling");
+    let sibling_key = sibling_key.clone();
+    let captured_owner = *captured_owner;
+    let primary_key = sibling_key
+        .strip_suffix("/agent:subagent")
+        .expect("generic sibling suffix")
+        .to_owned();
+    let dispatch = Arc::new(PendingFollowupDispatch {
+        streaming,
+        body: agent_turn_body("msg_agent_completion_sibling", "Bash", 12_000),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        calls: AtomicUsize::new(0),
+    });
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::with_principal_view(
+            TestState::default(),
+            Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal),
+                HashMap::new(),
+            )),
+        ),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+    )
+    .with_cache_keepalive_enqueuer(enqueuer.clone());
+    // Keep the thread header, but omit both request class and agent identity:
+    // this is the plain main/unknown request that enables the sibling backstop.
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "agent-completion-sibling")
+        .body(standard_keepalive_request())
+        .expect("plain followup request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("plain followup authenticates");
+    let completion = async {
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("plain followup handles");
+        assert_keepalive_response_fidelity(response, &dispatch.body, streaming).await;
+    };
+    tokio::pin!(completion);
+    tokio::select! {
+        () = dispatch.entered.notified() => {}
+        () = &mut completion => panic!("followup must remain pending until released"),
+    }
+    let pending = enqueuer.snapshot();
+    assert_eq!(
+        pending.cancellations.get(&sibling_key),
+        Some(&(Some(captured_owner), CancelReason::NewRequest)),
+        "request start must retain the captured sibling's provisional marker"
+    );
+    assert_eq!(
+        pending.request_owners.get(&sibling_key),
+        Some(&Some(captured_owner))
+    );
+    assert!(!pending.generations.contains_key(&sibling_key));
+    let completion_operations_start;
+    let replacement_owner = if replace_sibling {
+        establish_scoped_keepalive(&enqueuer, principal, &sibling_headers).await;
+        let replacement = enqueuer.snapshot();
+        let owner = replacement.generations[&sibling_key];
+        assert_ne!(owner, captured_owner);
+        completion_operations_start = replacement.operations.len();
+        Some(owner)
+    } else {
+        completion_operations_start = pending.operations.len();
+        None
+    };
+    dispatch.release.notify_one();
+    completion.await;
+    enqueuer.wait_for_enqueue().await;
+    let completed = enqueuer.snapshot();
+    assert!(
+        completed.generations.contains_key(&primary_key),
+        "eligible AgentInTurn completion must enqueue the primary identity"
+    );
+    let completion_operations = &completed.operations[completion_operations_start..];
+    assert!(
+        !completion_operations.iter().any(
+            |operation| matches!(operation, KeepaliveOperation::Observe(key, _) if key == &sibling_key)
+        ),
+        "completion must not re-observe the captured sibling"
+    );
+    if let Some(replacement_owner) = replacement_owner {
+        assert_eq!(
+            completed.generations.get(&sibling_key),
+            Some(&replacement_owner),
+            "an older primary completion must not cancel the newer sibling owner"
+        );
+        assert!(!completed.cancellations.contains_key(&sibling_key));
+    } else {
+        assert_eq!(
+            completed.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::SessionIdentityChanged)),
+            "a completed primary response must resolve the sibling marker to a real retirement reason, not NewRequest"
+        );
+        assert!(!completed.request_owners.contains_key(&sibling_key));
+    }
+    assert!(
+        completion_operations.iter().any(|operation| matches!(
+            operation,
+            KeepaliveOperation::Cancel(key, Some(owner), CancelReason::SessionIdentityChanged)
+                if key == &sibling_key && owner == &captured_owner
+        )),
+        "sibling retirement must use its captured start ticket even after a newer sibling takes over"
+    );
+}
+
+#[tokio::test]
+async fn stale_primary_agent_completion_retires_unchanged_captured_sibling() {
+    for streaming in [false, true] {
+        let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+        let principal = principal_with_keepalive();
+        let session = "stale-primary-sibling";
+        establish_scoped_keepalive(
+            &enqueuer,
+            principal.clone(),
+            &[
+                ("x-claude-code-session-id", session),
+                ("x-claude-code-request-class", "subagent"),
+            ],
+        )
+        .await;
+        let established = enqueuer.snapshot();
+        let (sibling_key, captured_owner) = established
+            .generations
+            .iter()
+            .find(|(key, _)| key.ends_with("/thread:stale-primary-sibling/agent:subagent"))
+            .expect("generic sibling established");
+        let sibling_key = sibling_key.clone();
+        let captured_owner = *captured_owner;
+        let primary_key = sibling_key
+            .strip_suffix("/agent:subagent")
+            .expect("generic sibling suffix")
+            .to_owned();
+        let dispatch = Arc::new(OwnedRequestDispatch {
+            calls: AtomicUsize::new(0),
+            entered: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            release: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            old_agent_turn: true,
+            streaming,
+        });
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::with_principal_view(
+                TestState::default(),
+                Arc::new(PrincipalView::from_db(&[principal], HashMap::new())),
+            ),
+            dispatch.clone(),
+            LifecycleConfig::default(),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+        let mut original = followup_request(session, false, true);
+        original.headers_mut().remove("x-claude-code-request-class");
+        let newer = followup_request(session, false, true);
+        let original_auth = lifecycle
+            .authenticate(original.headers())
+            .await
+            .expect("original plain request authenticates");
+        let newer_auth = lifecycle
+            .authenticate(newer.headers())
+            .await
+            .expect("newer explicit-main request authenticates");
+        let original_completion = async {
+            let response = lifecycle
+                .handle(original, &original_auth)
+                .await
+                .expect("original plain response");
+            assert_keepalive_response_fidelity(
+                response,
+                &agent_turn_body("msg_old_owner", "Bash", 12_000),
+                streaming,
+            )
+            .await;
+        };
+        tokio::pin!(original_completion);
+        tokio::select! {
+            () = dispatch.entered[0].notified() => {}
+            () = &mut original_completion => panic!("original response must wait for release"),
+        }
+        let pending = enqueuer.snapshot();
+        assert_eq!(
+            pending.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::NewRequest))
+        );
+        let newer_completion = async {
+            let response = lifecycle
+                .handle(newer, &newer_auth)
+                .await
+                .expect("newer explicit-main response");
+            assert_keepalive_response_fidelity(
+                response,
+                &agent_turn_body("msg_current_owner", "Bash", 12_000),
+                streaming,
+            )
+            .await;
+        };
+        tokio::pin!(newer_completion);
+        tokio::select! {
+            () = dispatch.entered[1].notified() => {}
+            () = &mut newer_completion => panic!("newer response must wait for release"),
+        }
+        dispatch.release[1].notify_one();
+        newer_completion.await;
+        enqueuer.wait_for_enqueue().await;
+        let superseded = enqueuer.snapshot();
+        let newer_primary_owner = superseded.generations[&primary_key];
+        assert_eq!(
+            superseded.cancellations.get(&sibling_key),
+            pending.cancellations.get(&sibling_key),
+            "explicit-main request must supersede only the primary, not the captured sibling"
+        );
+        assert_eq!(
+            superseded.request_owners.get(&sibling_key),
+            Some(&Some(captured_owner))
+        );
+        let completion_operations_start = superseded.operations.len();
+        dispatch.release[0].notify_one();
+        original_completion.await;
+        // Drain the detached completion on this current-thread runtime even
+        // when stale-primary rejection makes no persistence call to notify.
+        settle().await;
+        let completed = enqueuer.snapshot();
+        assert_eq!(
+            completed.generations.get(&primary_key),
+            Some(&newer_primary_owner),
+            "stale primary completion must preserve the newer primary owner"
+        );
+        let completion_operations = &completed.operations[completion_operations_start..];
+        assert!(
+            !completion_operations.iter().any(
+                |operation| matches!(operation, KeepaliveOperation::Observe(key, _) if key == &sibling_key)
+            ),
+            "retirement must not re-observe the already captured sibling"
+        );
+        assert_eq!(
+            completed.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::SessionIdentityChanged)),
+            "primary freshness must not gate retirement of its unchanged captured sibling"
+        );
+        assert!(!completed.request_owners.contains_key(&sibling_key));
+        assert!(
+            completion_operations.iter().any(|operation| matches!(
+                operation,
+                KeepaliveOperation::Cancel(key, Some(owner), CancelReason::SessionIdentityChanged)
+                    if key == &sibling_key && owner == &captured_owner
+            )),
+            "stale primary completion must retire the sibling using its captured ticket"
+        );
+    }
 }
 
 #[tokio::test]

@@ -101,37 +101,42 @@ impl StreamCompletionOwner {
     }
 
     fn complete(&mut self) {
-        let Some(response) = self
-            .response
-            .take()
-            .and_then(StreamingKeepaliveResponse::into_value)
-        else {
+        let Some(response) = self.response.take() else {
             return;
         };
+        let response = response.into_value();
         let runtime = self.runtime.clone();
         if tokio::runtime::Handle::try_current().is_err() {
             let _entered = runtime.enter();
-            self.dispatch_completion(&response);
+            self.dispatch_completion(response.as_ref());
         } else {
-            self.dispatch_completion(&response);
+            self.dispatch_completion(response.as_ref());
         }
     }
 
-    fn dispatch_completion(&mut self, response: &serde_json::Value) {
+    fn dispatch_completion(&mut self, response: Option<&serde_json::Value>) {
         let context = &mut self.context;
-        self.keepalive.on_response_completed(
-            response,
-            &context.principal,
-            std::mem::take(&mut context.accounting_key_id),
-            &context.cache_metadata,
-            context.upstream_id,
-            std::mem::take(&mut context.shaped_body),
-            std::mem::take(&mut context.original_body),
-            &context.downstream_headers,
-            self.cache_anchor_at.elapsed(),
-            self.cached_tokens,
-            context.request_start_order.take(),
-        );
+        if let Some(response) = response {
+            self.keepalive.on_response_completed(
+                response,
+                &context.principal,
+                std::mem::take(&mut context.accounting_key_id),
+                &context.cache_metadata,
+                context.upstream_id,
+                std::mem::take(&mut context.shaped_body),
+                std::mem::take(&mut context.original_body),
+                &context.downstream_headers,
+                self.cache_anchor_at.elapsed(),
+                self.cached_tokens,
+                context.request_start_order.take(),
+            );
+        } else if let Some(order) = context.request_start_order.take() {
+            self.keepalive.on_completed_not_renewable(
+                context.principal.clone(),
+                order,
+                self.cache_anchor_at.elapsed(),
+            );
+        }
     }
 }
 

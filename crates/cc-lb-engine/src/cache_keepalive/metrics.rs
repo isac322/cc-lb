@@ -16,6 +16,7 @@ pub enum CancelReason {
     SnapshotTooLarge,
     CachedPrefixTooSmall,
     ZeroTokenRenewalUnsupported,
+    CompletedNotRenewable,
 }
 
 impl CancelReason {
@@ -30,6 +31,7 @@ impl CancelReason {
             Self::SnapshotTooLarge => "snapshot_too_large",
             Self::CachedPrefixTooSmall => "cached_prefix_too_small",
             Self::ZeroTokenRenewalUnsupported => "zero_token_renewal_unsupported",
+            Self::CompletedNotRenewable => "completed_not_renewable",
         }
     }
 }
@@ -82,6 +84,7 @@ mod tests {
             CancelReason::SnapshotTooLarge,
             CancelReason::CachedPrefixTooSmall,
             CancelReason::ZeroTokenRenewalUnsupported,
+            CancelReason::CompletedNotRenewable,
         ];
         // The source declaration guards completeness without adding a public
         // enum-iteration API used only by tests. A new variant must join this

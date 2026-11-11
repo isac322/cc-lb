@@ -35,6 +35,41 @@ describe('Cache keepalive canonical wire vocabulary', () => {
     );
   });
 
+  it('decodes completed requests that cannot renew as cancelled without changing the server label', () => {
+    const row = {
+      ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+      state: 'cancelled',
+      is_active: false,
+      cancel_reason: 'completed_not_renewable',
+      reason: 'Cancelled: request completed, renewal not possible',
+      error: null,
+    };
+    const list = CacheKeepaliveListResponseSchema.parse({
+      summary: null,
+      groups: null,
+      rows: [row],
+      next_cursor: null,
+    });
+    const detail = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      ...row,
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        status: 'terminal',
+      },
+    });
+
+    for (const decoded of [list.rows[0], detail]) {
+      expect(decoded.state).toBe('cancelled');
+      expect(decoded.is_active).toBe(false);
+      expect(decoded.cancel_reason).toBe('completed_not_renewable');
+      expect(decoded.reason).toBe(
+        'Cancelled: request completed, renewal not possible',
+      );
+      expect(decoded.error).toBeNull();
+    }
+  });
+
   it('keeps state and filter sets equal to the server contract', () => {
     expect([...CACHE_KEEPALIVE_STATES].sort()).toEqual(
       [...vocabulary.states].sort(),

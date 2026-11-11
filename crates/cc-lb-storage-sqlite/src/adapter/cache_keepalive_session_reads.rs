@@ -68,6 +68,7 @@ SELECT
             WHEN 'retention_recorded' THEN 'Retention recorded without renewal'
             WHEN 'renewal_not_beneficial' THEN 'Refresh expected value is unknown or non-positive'
             WHEN 'session_identity_changed' THEN 'Cancelled: the request completed under a different cache identity'
+            WHEN 'completed_not_renewable' THEN 'Cancelled: request completed, renewal not possible'
             ELSE 'Cancelled'
         END
         WHEN 'max_refreshes' THEN 'max renewals reached'

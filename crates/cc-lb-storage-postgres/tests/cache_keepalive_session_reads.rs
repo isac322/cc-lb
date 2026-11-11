@@ -2754,6 +2754,10 @@ fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
                 Some("zero_token_renewal_unsupported"),
                 "Cancelled: zero-token renewals are unsupported",
             ),
+            (
+                Some("completed_not_renewable"),
+                "Cancelled: request completed, renewal not possible",
+            ),
             (None, "Cancelled"),
         ] {
             let id = cause.unwrap_or("legacy");

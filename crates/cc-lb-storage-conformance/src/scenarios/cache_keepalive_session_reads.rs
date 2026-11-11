@@ -385,6 +385,7 @@ where
             ("retention_recorded", "Retention recorded without renewal"),
             ("renewal_not_beneficial", "Refresh expected value is unknown or non-positive"),
             ("session_identity_changed", "Cancelled: the request completed under a different cache identity"),
+            ("completed_not_renewable", "Cancelled: request completed, renewal not possible"),
         ].into_iter().enumerate() {
             let now = 1_100 + index as u64;
             storage.replace_from_real_request(&request("final-reason", now)).await?;
@@ -404,7 +405,7 @@ where
             ).await?.expect("resolved cancellation");
             ensure!(final_row.status == Some(CacheKeepaliveSessionStatus::Terminal));
             ensure!(final_row.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
-            ensure!(!final_row.request_incomplete);
+            ensure!(!final_row.request_incomplete && final_row.error.is_none());
             ensure!(final_row.cancel_reason.as_deref() == Some(cancel_reason));
             ensure!(final_row.reason == expected_reason);
         }

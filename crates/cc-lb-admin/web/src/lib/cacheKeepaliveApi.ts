@@ -34,6 +34,7 @@ export const CACHE_KEEPALIVE_CANCEL_REASONS = [
   'snapshot_too_large',
   'cached_prefix_too_small',
   'zero_token_renewal_unsupported',
+  'completed_not_renewable',
 ] as const;
 export const CacheKeepaliveCancelReasonSchema = z.enum(
   CACHE_KEEPALIVE_CANCEL_REASONS,

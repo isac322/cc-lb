@@ -882,6 +882,7 @@ async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
         CancelReason::SnapshotTooLarge,
         CancelReason::CachedPrefixTooSmall,
         CancelReason::ZeroTokenRenewalUnsupported,
+        CancelReason::CompletedNotRenewable,
     ] {
         let fixture = Fixture::new().await;
         let backend = crate::scheduler_factory::open_scheduler_storage(
@@ -940,6 +941,7 @@ async fn request_fence_is_provisional_until_the_real_completion_resolves_it() {
         CancelReason::SnapshotTooLarge,
         CancelReason::CachedPrefixTooSmall,
         CancelReason::ZeroTokenRenewalUnsupported,
+        CancelReason::CompletedNotRenewable,
     ] {
         let fixture = Fixture::new().await;
         let backend = crate::scheduler_factory::open_scheduler_storage(
