@@ -7612,6 +7612,17 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
+            // Cloud Code Assist answers a rejected `streamGenerateContent`
+            // with a plain JSON error under `text/event-stream`. An error
+            // status body on a transformed stream is therefore held unparsed
+            // until its first non-whitespace byte shows whether it can be
+            // JSON; SSE splitting would otherwise consume blank lines inside
+            // the JSON and replace the provider error with a framing error.
+            let mut error_body_class = if upstream_error_status && sse_transform_active {
+                ErrorBodyClass::Pending
+            } else {
+                ErrorBodyClass::Sse
+            };
             // Observation precedes affinity inspection and transformation; only
             // a validated terminal sent downstream or committed to the deferred
             // Content-Length flush takes precedence over local errors.
@@ -7903,9 +7914,14 @@ impl Lifecycle {
                                     }
                                 }
                             }
+                            if error_body_class == ErrorBodyClass::Pending {
+                                error_body_class = classify_error_body_prefix(&buffer);
+                            }
                             let hold_unsolicited_chunk = unsolicited_hold_pending;
                             let mut unsolicited_event_completed = false;
-                                while !raw_passthrough_current_chunk {
+                                while !raw_passthrough_current_chunk
+                                    && error_body_class == ErrorBodyClass::Sse
+                                {
                                     let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
                                         break;
                                     };
@@ -8827,7 +8843,13 @@ impl Lifecycle {
                     }
                     if parse_sse_events_active {
                         buffer.extend_from_slice(&tail);
-                        while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
+                        if error_body_class == ErrorBodyClass::Pending {
+                            error_body_class = classify_error_body_prefix(&buffer);
+                        }
+                        // A held JSON candidate is decided after the loop.
+                        while error_body_class != ErrorBodyClass::JsonCandidate
+                            && let Some(end) = usage_parser::find_sse_event_end(&buffer)
+                        {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             if matches!(
@@ -9428,27 +9450,20 @@ impl Lifecycle {
                     }
                 }
             }
-            // An error status whose body is JSON rather than SSE is the
-            // provider's error response, not a truncated stream: Cloud Code
-            // Assist answers a rejected `streamGenerateContent` with plain JSON
-            // under `text/event-stream`. No SSE field line starts with `{` or
-            // `[`, so an unterminated real SSE event still fails as framing.
-            // The transform had nothing to rewrite; relay the decoded body
-            // unchanged instead of a framing error that would replace the
-            // provider's status and message.
-            if upstream_error_status
+            // A held error body that is complete, valid JSON is the provider's
+            // error response: relay it unchanged. A candidate that fails
+            // validation stays in `buffer` and reaches the framing error below.
+            if error_body_class == ErrorBodyClass::JsonCandidate
+                && upstream_body_eof
+                && parse_sse_events_active
                 && sse_transform_active
                 && !transformed_output_started
-                && sse_event_count == 0
-                && buffer
-                    .iter()
-                    .find(|byte| !byte.is_ascii_whitespace())
-                    .is_some_and(|byte| matches!(byte, b'{' | b'['))
                 && stream_upstream_error.is_none()
                 && !stream_provider_error_forwarded
                 && !stream_upstream_error_frame_emitted
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
+                && sonic_rs::from_slice::<serde::de::IgnoredAny>(&buffer).is_ok()
             {
                 raw_before_transform_output.clear();
                 stream_provider_error_forwarded = true;
@@ -13056,6 +13071,45 @@ fn announce_attempt(
             attempt_num: *attempt_num,
             upstream_id,
         });
+    }
+}
+
+/// How an error-status body on a transformed SSE stream is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorBodyClass {
+    /// Too few bytes to tell; SSE splitting waits for more.
+    Pending,
+    /// Starts like JSON; held whole and validated at end of stream.
+    JsonCandidate,
+    /// Parsed as SSE events.
+    Sse,
+}
+
+/// Classifies an error body by its opening tokens. JSON opens with `{` then
+/// `"` or `}`, or with `[` then a value or `]`; no SSE field line does
+/// (`{extension: x` is SSE), so only a real JSON prefix is held.
+fn classify_error_body_prefix(buffer: &[u8]) -> ErrorBodyClass {
+    let mut tokens = buffer.iter().filter(|byte| !byte.is_ascii_whitespace());
+    let Some(open) = tokens.next() else {
+        return ErrorBodyClass::Pending;
+    };
+    if !matches!(open, b'{' | b'[') {
+        return ErrorBodyClass::Sse;
+    }
+    let Some(next) = tokens.next() else {
+        return ErrorBodyClass::Pending;
+    };
+    let json = match open {
+        b'{' => matches!(next, b'"' | b'}'),
+        _ => matches!(
+            next,
+            b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n' | b']'
+        ),
+    };
+    if json {
+        ErrorBodyClass::JsonCandidate
+    } else {
+        ErrorBodyClass::Sse
     }
 }
 

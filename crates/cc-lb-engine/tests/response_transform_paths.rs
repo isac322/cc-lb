@@ -669,19 +669,13 @@ async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
     );
 }
 
-/// Cloud Code Assist answers a rejected `streamGenerateContent` with a plain
-/// JSON error under `text/event-stream`. The client must receive Google's
-/// error, not a local SSE framing error that replaces 429 with 502.
-async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
-    let error = Bytes::from_static(
-        br#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#,
-    );
+async fn gemini_oauth_stream_error(chunks: &[&'static [u8]]) -> (StatusCode, Bytes) {
     let lifecycle = with_test_limit_subject(lifecycle_with_record(
         None,
-        Arc::new(FixedDispatch {
+        Arc::new(ChunkedDispatch {
             status: StatusCode::TOO_MANY_REQUESTS,
             headers: sse_headers(),
-            body: error.clone(),
+            chunks: chunks.iter().copied().map(Bytes::from_static).collect(),
         }),
         upstream_record(
             StorageUpstreamKind::GeminiOauth,
@@ -698,9 +692,46 @@ async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
         .await
         .expect("lifecycle handles Gemini OAuth stream error");
     let (status, _headers, received) = collect_body(response).await;
+    (status, received)
+}
 
+/// Cloud Code Assist answers a rejected `streamGenerateContent` with a plain
+/// JSON error under `text/event-stream`. The client must receive Google's
+/// error, not a local SSE framing error that replaces 429 with 502, including
+/// when the JSON carries blank lines that SSE splitting would consume.
+async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
+    let compact: &[u8] = br#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#;
+    let cases: [&[&'static [u8]]; 4] = [
+        &[compact],
+        &[b"\n\n", compact],
+        &[
+            b"{\n  \"error\": {\n\n    \"code\": 429,\n",
+            b"    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+        ],
+        &[b"[{\"error\":{\"code\":429}}]\n\n"],
+    ];
+    for chunks in cases {
+        let (status, received) = gemini_oauth_stream_error(chunks).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(received, Bytes::from(chunks.concat()));
+    }
+}
+
+/// A body that merely starts with `{` but is SSE keeps SSE semantics: an
+/// unterminated event is a framing error, and complete events are relayed.
+async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
+    let (status, received) = gemini_oauth_stream_error(&[
+        b"{extension: ignored\nevent: error\ndata: {\"error\":{\"code\":429}}\n",
+    ])
+    .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(received, error);
+    let text = std::str::from_utf8(&received).expect("error frame is utf8");
+    assert!(text.contains("incomplete event before transform output"));
+
+    let complete: &[u8] = b"{extension: ignored\nevent: error\ndata: {\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n";
+    let (status, received) = gemini_oauth_stream_error(&[complete]).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(received, Bytes::from_static(complete));
 }
 
 async fn ingress_cap_does_not_limit_existing_response_paths() {
@@ -4658,6 +4689,7 @@ async fn response_transform_paths_suite_part_1() {
     non_sse_stream_transform_never_receives_a_capped_prefix().await;
     gemini_json_array_stream_is_transformed_once_as_a_whole().await;
     gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
+    gemini_oauth_stream_sse_error_starting_with_brace_stays_sse().await;
     gemini_oauth_stream_json_error_reaches_client_unchanged().await;
     ingress_cap_does_not_limit_existing_response_paths().await;
     audio_json_response_preserves_the_ordinary_buffered_path().await;
