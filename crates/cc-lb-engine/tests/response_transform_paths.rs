@@ -753,6 +753,39 @@ async fn gemini_oauth_stream_json_error_after_rewritten_event_stays_sse() {
     assert!(text.contains("incomplete event after transform output"));
 }
 
+/// A compressed JSON error is decided on its fully decoded body, including
+/// bytes the decoder releases only when the stream ends.
+async fn gemini_oauth_stream_gzip_json_error_is_relayed_decoded() {
+    const ERROR: &[u8] = br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let lifecycle = with_test_limit_subject(lifecycle_with_record(
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            headers,
+            body: gzip_bytes(&Bytes::from_static(ERROR)),
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    ));
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[]}"#))
+        .expect("Gemini OAuth streaming request builds");
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles compressed Gemini OAuth stream error");
+    let (status, headers, received) = collect_body(response).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.get(CONTENT_ENCODING).is_none());
+    assert_eq!(received, Bytes::from_static(ERROR));
+}
+
 /// SSE whose first field happens to read like JSON keeps SSE semantics: an
 /// unterminated event is a framing error, and complete events are relayed
 /// byte-for-byte, as on a body that never looked like JSON.
@@ -799,6 +832,9 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         (b"{\"a\":\n\n+2", b"{\"a\":\n\n"),
         (b"{\"a\":\n\ne", b"{\"a\":\n\n"),
         (b"{\"a\":\n\n0.e", b"{\"a\":\n\n"),
+        // Still an unfinished JSON document at EOF: parsed as SSE like master.
+        (b"{\"a\":\n\n-", b"{\"a\":\n\n"),
+        (b"[\n\n2", b"[\n\n"),
     ] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -809,9 +845,10 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         ));
     }
 
-    // A `\u` escape whose following bytes cannot be hex is not JSON, so its
-    // completed event is relayed like any SSE event.
-    for body in [&b"{\"a\":\"\\u\n\n"[..], b"[\"\\u0\r\r"] {
+    // Bodies that are not one complete JSON document relay their completed
+    // events like any SSE: a `\u` escape followed by non-hex bytes, and an
+    // unfinished document that is also a whole event.
+    for body in [&b"{\"a\":\"\\u\n\n"[..], b"[\"\\u0\r\r", b"{\n\n"] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(received, Bytes::from_static(body));
@@ -4805,6 +4842,7 @@ async fn response_transform_paths_suite_part_1() {
     gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
     gemini_oauth_stream_sse_error_starting_with_brace_stays_sse().await;
     gemini_oauth_stream_json_error_after_rewritten_event_stays_sse().await;
+    gemini_oauth_stream_gzip_json_error_is_relayed_decoded().await;
     gemini_oauth_stream_json_error_reaches_client_unchanged().await;
     ingress_cap_does_not_limit_existing_response_paths().await;
     audio_json_response_preserves_the_ordinary_buffered_path().await;

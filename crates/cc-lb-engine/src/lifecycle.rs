@@ -7761,11 +7761,52 @@ impl Lifecycle {
             // frame. A decoder finish failure after cc-lb aborted the loop
             // locally is not upstream evidence.
             let mut upstream_body_eof = false;
+            // A held JSON candidate takes the decoder's final bytes at EOF so
+            // its decision sees the whole body; a decoder failure there is kept
+            // for the normal post-loop handling.
+            let mut early_decoder_finish_error: Option<std::io::Error> = None;
             'upstream: loop {
-                let Some(frame) = timed_body_frame(&mut body, &stream_body_io_timing).await
-                else {
-                    upstream_body_eof = true;
+                if upstream_body_eof {
+                    // Only the held-body replay chunk below runs after EOF.
                     break;
+                }
+                let frame = match timed_body_frame(&mut body, &stream_body_io_timing).await {
+                    Some(frame) => frame,
+                    None => {
+                        upstream_body_eof = true;
+                        if error_body_class == ErrorBodyClass::JsonCandidate
+                            && !matches!(usage_decoder, UsageDecoder::Identity)
+                        {
+                            match std::mem::replace(&mut usage_decoder, UsageDecoder::Identity)
+                                .finish()
+                            {
+                                Ok(tail) => {
+                                    if upstream_error_status {
+                                        append_bounded_upstream_error_body(
+                                            &mut upstream_error_body,
+                                            &tail,
+                                            &mut upstream_error_body_truncated,
+                                        );
+                                    }
+                                    buffer.extend_from_slice(&tail);
+                                }
+                                Err(error) => early_decoder_finish_error = Some(error),
+                            }
+                        }
+                        // EOF ends JSON candidacy. A held body that is not one
+                        // complete document is parsed as SSE through this chunk
+                        // path, exactly as if it had never been held; only a
+                        // real remainder reaches the incomplete-event check.
+                        if error_body_class == ErrorBodyClass::JsonCandidate
+                            && early_decoder_finish_error.is_none()
+                            && !held_error_body_is_json(&buffer)
+                        {
+                            error_body_class = ErrorBodyClass::Sse;
+                            Ok(http_body::Frame::data(Bytes::new()))
+                        } else {
+                            break;
+                        }
+                    }
                 };
                 match frame {
                     Ok(frame) => {
@@ -8960,7 +9001,7 @@ impl Lifecycle {
                 }
             }
             let mut keepalive_decode_complete = false;
-            match usage_decoder.finish() {
+            match early_decoder_finish_error.map_or_else(|| usage_decoder.finish(), Err) {
                 Ok(tail) if !tail.is_empty() => {
                     keepalive_decode_complete = true;
                     if upstream_error_status {
