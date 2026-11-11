@@ -42,6 +42,9 @@ pub(crate) fn list_item_from_row(row: PgRow) -> StorageResult<CacheKeepaliveSess
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u32(value, "cache keepalive refresh count"))
             .transpose()?,
+        has_renewal_in_horizon: row
+            .try_get("has_renewal_in_horizon")
+            .map_err(map_sqlx_error)?,
         status: row
             .try_get::<Option<String>, _>("status")
             .map_err(map_sqlx_error)?
@@ -61,6 +64,7 @@ pub(crate) fn list_item_from_row(row: PgRow) -> StorageResult<CacheKeepaliveSess
             .map(terminal_reason_from_db)
             .transpose()?,
         cancel_reason: row.try_get("cancel_reason").map_err(map_sqlx_error)?,
+        request_incomplete: row.try_get("request_incomplete").map_err(map_sqlx_error)?,
         decision: row.try_get("decision").map_err(map_sqlx_error)?,
         reason: row.try_get("reason").map_err(map_sqlx_error)?,
         display_reason: row.try_get("display_reason").map_err(map_sqlx_error)?,
@@ -175,6 +179,7 @@ fn ttl_from_db(value: &str) -> StorageResult<CacheTtl> {
 fn status_from_db(value: &str) -> StorageResult<CacheKeepaliveSessionStatus> {
     match value {
         "active" => Ok(CacheKeepaliveSessionStatus::Active),
+        "in_request" => Ok(CacheKeepaliveSessionStatus::InRequest),
         "terminal" => Ok(CacheKeepaliveSessionStatus::Terminal),
         _ => Err(StorageError::Corrupted {
             message: format!("invalid cache keepalive status {value}"),

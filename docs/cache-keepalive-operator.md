@@ -88,17 +88,102 @@ purging and recreating a session cannot overwrite retained spend.
 An authenticated, non-auxiliary, keep-alive-eligible real request retires the
 matching active generation before upstream dispatch. Its queued renewal cannot
 fire while that real request waits for response headers or streams its response.
-If the real request fails, cc-lb does not resume the old snapshot. A later
-eligible response classified as `AgentInTurn` can establish a new generation;
-completion-sequence fencing prevents an older completion from replacing it.
+The session appears as **In request** (`in_request`), with renewals paused.
+This state remains tracked and visible even without retained renewal history,
+but does not count toward **Renewing now** or match Scheduled/Renewed filters.
 
-The proxy waits for the cancellation attempt before dispatch. Storage errors
+The request marker expires at the deadline derived from the server's configured
+request timeout. Without a recorded terminal upstream response by then, the
+read model shows Expired with the neutral reason “Request did not complete
+before its deadline”.
+This does not claim a known abort or error. Legacy `new_request` cancellations
+without a request-start marker remain Cancelled.
+
+A completed eligible response classified as `AgentInTurn` can establish a new
+generation. A final cancellation records its actual completion reason. If the
+real request fails, cc-lb does not resume the old snapshot. Completion-sequence
+fencing prevents an older completion from replacing a newer request.
+
+Ordering metadata is retained only while its session exists or a request-owner
+protection window remains open. Issuance records the last issuance time and
+protection deadline in the existing ticket write. The window is the configured
+upstream total timeout plus one additional timeout as a safety margin.
+Housekeeping may remove orphan metadata after the latest protection deadline.
+Payload and evidence retention remain unchanged.
+
+Each ticket also carries its own deadline and namespace epoch. Expired tickets
+cannot mutate keep-alive state, and a recreated namespace receives a new epoch.
+A delayed callback therefore cannot claim a later owner even if its numeric
+ticket sequence repeats after cleanup.
+Malformed or unrecognized metadata is retained and cannot authorize a leased
+completion; housekeeping does not recycle an identity it cannot validate.
+
+New writers store leased ownership under `keepalive_order_v2:<session>`.
+The old `keepalive_order:<session>` key remains a numeric legacy counter.
+The first allocation in a new namespace reads its legacy issued floor, but
+does not import its applied owner or epoch. New writers never rewrite that
+legacy key; later allocations in an existing v2 namespace ignore legacy changes.
+Housekeeping handles both namespaces with their respective retention rules.
+
+Rolling ownership upgrades are supported from the latest published 2.2.x line
+and current master. A provisional marker temporarily stores its protection
+deadline plus one in raw `first_scheduled_at`, so those versions' ticketed
+replacement fence declines rather than reviving it. New readers use the real
+start in `running_since`; finalization and reactivation restore a real
+first-scheduled anchor. Active renewal-duration limits are unchanged.
+An old enqueue declined by this fence is a no-op, not a failed client request.
+A later old-node cache anchor can resume legacy scheduling after protection
+expires. These comparisons use the existing UTC lease clock; keep pod clocks
+synchronized.
+
+Rolling directly from 2.1.x or older can transiently revive an in-request marker
+during the overlap because those writers use different replacement predicates.
+Drain and stop those old pods before starting new writers, or upgrade to 2.2.x
+first. Normal client requests still succeed, but ignoring this recommendation
+can schedule unnecessary renewals from an older snapshot.
+
+If failover changes or removes a threadless request's eligible cache identity,
+completion retires the original marker with `session_identity_changed` using
+its original owner ticket. A final eligible identity receives a normal fresh
+completion, never a ticket borrowed from the original identity. Without a
+final eligible identity, completion only retires the original owner.
+An unscoped main request also retires the generic subagent owner captured at
+start, independently of whether a newer request superseded its primary owner.
+Neither retirement re-observes or replaces a newer owner.
+
+Completed requests that cannot produce a safe renewal snapshot finalize their
+captured primary and sibling owners with `completed_not_renewable`: “Cancelled:
+request completed, renewal not possible”. This includes configuration changes,
+missing or invalid snapshot metadata, raw-passthrough shaping fallbacks,
+undecodable completed responses, and responses rejected by affinity binding.
+Captured ownership survives even when no safe snapshot was captured. Fully
+collected HTTP error responses and protocol-terminal provider errors, refusals,
+or context-window stops also finalize as `completed_not_renewable`.
+A streamed stop hint alone is not terminal proof. Transport failures, incomplete
+streams, and aborts before a terminal response still use the neutral deadline
+fallback. Dropping an unconsumed completion context only logs at debug level;
+that diagnostic Drop never invents completion or writes a final state.
+
+For stream EOF to establish completion, decoding must finish and no partial
+event may remain. An already received native terminal or error event is
+independent proof, even if a later proxy step fails. Fully received buffered
+responses rejected by body limits or response transformation also finalize
+their captured owners without renewal.
+
+If SSE response transformation fails open before emitting output, keep-alive
+continues observing the original raw events, including terminal events split
+across chunks. Eligible responses retain their renewal snapshot. Transformed
+output alone never establishes upstream terminal proof.
+
+The proxy waits for the request-start fence before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
-if cancellation cannot be persisted.
+if the fence cannot be persisted.
 
 Successful real-request cancellations persist a nullable `cancel_reason`:
-`new_request`, `user_turn_detected`, `snapshot_too_large`,
-`cached_prefix_too_small`, or `zero_token_renewal_unsupported`. Older rows
+`new_request`, `user_turn_detected`, `ambiguous_turn`, `retention_recorded`,
+`renewal_not_beneficial`, `session_identity_changed`, `completed_not_renewable`,
+`snapshot_too_large`, `cached_prefix_too_small`, or
+`zero_token_renewal_unsupported`. Older rows
 remain null; their display must say only “Cancelled”, without guessing a cause.
 
 Scheduling is anchored to cache creation / response begin:
@@ -116,8 +201,10 @@ The initial schedule subtracts the existing cache anchor age. After a
 cache-hit renewal, the next schedule uses the full configured `ttl - lead_time`
 interval from the synthetic response's cache anchor; it does not reuse the
 initial shortened delay. Session caps retain the original duration anchor.
-When another renewal is permitted, rescheduling increments `refresh_count`.
-A final capped renewal does not increment `refresh_count`. New real requests
+Rescheduling increments `refresh_count`. The final successful renewal that
+reaches the refresh cap also increments it. That final hit advances the durable generation
+and is immediately terminalized without enqueuing another renewal. Its turn
+and evidence retain the generation that actually dispatched. New real requests
 reset `refresh_count` and `first_scheduled_at`.
 
 Both caps are checked before provider dispatch. A renewal scheduled at or after
@@ -228,6 +315,8 @@ lifetime total and do not imply that a session is still active.
   the latest renewal whose TTL window contains the first positive-cache-read
   follow-up whose effective prefix evidence matches one of the renewal's
   candidate prefixes.
+  Evidence retention uses that same full TTL window, including long-retention
+  renewals; housekeeping does not shorten it to five minutes.
   Avoided value is `renewal tokens × (cache-creation price − cache-read price)`:
   the follow-up still pays for its cache read.
 - Missing, legacy, malformed, or ambiguous evidence is reported as
@@ -242,10 +331,45 @@ lifetime total and do not imply that a session is still active.
   session. When keep-alive is disabled, the Admin Web card does not poll the
   summary endpoint.
 
-The base status remains one of Renewed, Scheduled, Capped, Expired, or Not
-tracked. Errors are orthogonal: a terminal dispatch/decrypt/provider error
-does not become a live Scheduled or Renewed row, and `error` is displayed
-alongside the terminal base state.
+The base status is one of Renewed, Scheduled, In request, Capped, Expired,
+Cancelled, Failed, or Not tracked. In request uses a neutral badge and explains
+that real traffic has paused renewal. The `in_request` API status filter selects
+that state; `visible` and `tracked` include it. The `renewed` filter selects only
+active renewal sessions, not requests currently in flight. The sessions drawer
+keeps its existing horizon control and server-side visibility filter.
+Cancelled sessions show Cancelled only when the selected horizon contains a
+renewal turn. Otherwise they show Not tracked. List filters, group counts, and
+the selected session's detail state use the same horizon.
+The detail renewal table and rail cover all cycles inside that horizon. Each
+table row carries its cycle ID; legacy rows without an owned cycle remain
+unknown. `total_renewals_current_cycle` and pending status describe only the
+current cycle, so a newly replaced cycle can show zero current renewals while
+retaining earlier cycles in the table and rail.
+
+The detail header uses `follow_up_outcomes` to count observed follow-ups,
+pending gaps, closed gaps with no follow-up, and unknown gaps separately.
+Each rail gap contributes exactly once, including an empty waiting gap as
+pending. These counts preserve mixed historical outcomes; the existing
+`evidence_status` keeps its conservative semantics for list and filter consumers.
+
+Renewal scheduling and pending follow-up evidence are separate. An In request
+cycle remains inactive and has no Next renewal, but a paid renewal can still
+be waiting for follow-up while its TTL window is open. That window ends at
+the last renewal's anchor plus its TTL, not the request marker's deadline or
+the first renewal's timestamp. Matching follow-up evidence resolves the cycle
+as observed. Pausing renewals, or reaching an incomplete-request deadline,
+does not by itself turn the cycle into a closed no-follow-up loss.
+An active scheduling row does not extend an expired paid renewal's follow-up
+window either; an overdue scheduled job is not evidence of a live cache.
+
+Errors are orthogonal: a terminal dispatch/decrypt/provider error does not
+become a live Scheduled or Renewed row, and `error` is displayed alongside the
+terminal base state. An expired request marker projects as Expired without an
+invented error. Its deadline explanation remains visible alongside retained
+renewal history; without renewal history in the selected horizon, normal
+cancelled-session visibility rules hide it.
+Completion uses the request's original durable start ticket to resolve its own
+marker. Cache-anchor timestamps do not grant ownership of a newer request's marker.
 
 
 Renewal request events retain the originating `thread_id` for thread-scoped
@@ -263,9 +387,11 @@ An existing snapshot retains the key order of its stored body; an upgrade cannot
 recover ordering already lost by an older writer. A new eligible real request
 captures a fresh snapshot in that request's shaped-body order.
 
-Drain and stop all old workers and request-serving replicas before starting any
-new writer. Old binaries cannot read the new format. Mixed-version operation is
-unsupported; do not downgrade while active sessions contain new-format payloads.
+When crossing an incompatible payload-format boundary, drain and stop old
+workers and request-serving replicas before starting new writers. Binaries
+that cannot read the framed format must not overlap its writers; do not
+downgrade while active sessions contain unsupported payloads. Ownership-only
+rollouts between payload-compatible versions follow the support policy above.
 
 ## Configuration
 
@@ -337,6 +463,11 @@ The keep-alive Prometheus surface includes these counters:
   - `user_turn_detected`: a response-derived compaction boundary with no
     current cache breakpoint. Ordinary `UserTurn` and `Ambiguous` classifier
     decisions do not increment this cancellation counter.
+  - `session_identity_changed`: failover changed or removed the final eligible
+    cache identity, or a completed unscoped main request retired its captured
+    generic subagent owner.
+  - `completed_not_renewable`: a completed request could not produce a safe
+    renewal snapshot; its captured owner was finalized without rescheduling.
   - `snapshot_too_large`: the captured, trimmed shaped body exceeded the
     principal's `snapshot_max_bytes`.
   - `cached_prefix_too_small`: an `AgentInTurn` response reported fewer than

@@ -24,6 +24,7 @@ pub enum CacheKeepaliveSessionFilter {
     Visible,
     Renewed,
     Scheduled,
+    InRequest,
     Tracked,
     Capped,
     Cancelled,
@@ -40,6 +41,7 @@ impl CacheKeepaliveSessionFilter {
             Self::Visible => "visible",
             Self::Renewed => "renewed",
             Self::Scheduled => "scheduled",
+            Self::InRequest => "in_request",
             Self::Tracked => "tracked",
             Self::Capped => "capped",
             Self::Cancelled => "cancelled",
@@ -115,11 +117,18 @@ pub struct CacheKeepaliveSessionListItem {
     pub ttl: CacheTtl,
     pub generation: u64,
     pub refresh_count: Option<u32>,
+    /// Whether an actual renewal turn exists in the read's selected horizon.
+    /// All-time refresh counters do not establish horizon-local cancellation.
+    #[serde(default)]
+    pub has_renewal_in_horizon: bool,
     pub status: Option<CacheKeepaliveSessionStatus>,
     pub enqueue_state: Option<CacheKeepaliveEnqueueState>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
     #[serde(default)]
     pub cancel_reason: Option<String>,
+    /// An expired provisional request marker, not a known renewal failure.
+    #[serde(default)]
+    pub request_incomplete: bool,
     pub decision: Option<String>,
     pub reason: String,
     #[serde(default)]

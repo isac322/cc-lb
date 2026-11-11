@@ -70,6 +70,7 @@ import {
   type CacheKeepaliveDetail,
   type CacheKeepaliveHorizon,
   type CacheKeepaliveListResponse,
+  type CacheKeepaliveRow,
   type CacheKeepaliveSessionsFilters,
   getCacheKeepaliveSessionDetail,
   getCacheKeepaliveSessions,
@@ -2291,6 +2292,7 @@ export function useCacheKeepaliveSessionDetail(
   sessionId: string | null,
   horizon: CacheKeepaliveHorizon = 'all',
   rowFingerprint: string | null = null,
+  rowLifecycle?: Pick<CacheKeepaliveRow, 'generation' | 'state' | 'is_active'>,
 ) {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
@@ -2309,10 +2311,18 @@ export function useCacheKeepaliveSessionDetail(
       Boolean(sessionId) &&
       !isMissing(query.state.error),
     meta: { inlineError: true },
-    // Keep showing the same session while its row fingerprint or horizon
-    // changes; a different session starts from the loading state.
+    // Preserve harmless economics refreshes, never a previous lifecycle's
+    // live-only UI while the replacement detail is loading.
     placeholderData: (previousData, previousQuery) => {
       const previousKey = previousQuery?.queryKey;
+      if (
+        rowLifecycle &&
+        previousData &&
+        (previousData.generation !== rowLifecycle.generation ||
+          previousData.state !== rowLifecycle.state ||
+          previousData.is_active !== rowLifecycle.is_active)
+      )
+        return undefined;
       return previousKey?.[2] === principalId && previousKey[3] === sessionId
         ? previousData
         : undefined;
@@ -2324,7 +2334,9 @@ export function useCacheKeepaliveSessionDetail(
     refetchInterval: (query) => {
       if (isHidden || isMissing(query.state.error)) return false;
       const detail = query.state.data as CacheKeepaliveDetail | undefined;
-      return detail?.is_active === true || detail?.evidence_status === 'pending'
+      return detail?.is_active === true ||
+        detail?.state === 'in_request' ||
+        detail?.evidence_status === 'pending'
         ? POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS
         : false;
     },

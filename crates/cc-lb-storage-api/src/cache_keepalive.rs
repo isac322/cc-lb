@@ -251,6 +251,32 @@ impl CacheTtl {
     }
 }
 
+/// SQL milliseconds for a persisted cache TTL, with the same five-minute
+/// fallback as legacy evidence. Expands to a string literal so adapters can
+/// compose queries with `concat!` without allocating SQL at runtime.
+///
+/// ```
+/// const SQL: &str = concat!(
+///     "SELECT ",
+///     cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+///     " FROM cache_keepalive_evidence AS r",
+/// );
+/// ```
+#[macro_export]
+macro_rules! cache_keepalive_ttl_millis_sql {
+    ($ttl_column:literal) => {
+        concat!(
+            "CASE ",
+            $ttl_column,
+            " WHEN '5m' THEN 300000",
+            " WHEN '1h' THEN 3600000",
+            " WHEN '30m' THEN 1800000",
+            " WHEN '12h' THEN 43200000",
+            " ELSE 300000 END"
+        )
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

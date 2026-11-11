@@ -175,6 +175,7 @@ fn parse_filter(
         "tracked" => CacheKeepaliveSessionFilter::Tracked,
         "renewed" => CacheKeepaliveSessionFilter::Renewed,
         "scheduled" => CacheKeepaliveSessionFilter::Scheduled,
+        "in_request" => CacheKeepaliveSessionFilter::InRequest,
         "capped" => CacheKeepaliveSessionFilter::Capped,
         "cancelled" => CacheKeepaliveSessionFilter::Cancelled,
         "failed" => CacheKeepaliveSessionFilter::Failed,
@@ -210,6 +211,97 @@ mod tests {
     use super::*;
 
     const NOW_MS: u64 = 1_730_000_100_000;
+
+    #[test]
+    fn state_and_filter_vocabularies_match_shared_web_contract() {
+        use crate::cache_keepalive_view::status::CacheKeepaliveViewState;
+
+        let states = [
+            CacheKeepaliveViewState::Renewed,
+            CacheKeepaliveViewState::Scheduled,
+            CacheKeepaliveViewState::InRequest,
+            CacheKeepaliveViewState::Capped,
+            CacheKeepaliveViewState::Cancelled,
+            CacheKeepaliveViewState::Failed,
+            CacheKeepaliveViewState::Expired,
+            CacheKeepaliveViewState::NotTracked,
+        ];
+        let filters = [
+            CacheKeepaliveSessionFilter::All,
+            CacheKeepaliveSessionFilter::Visible,
+            CacheKeepaliveSessionFilter::Renewed,
+            CacheKeepaliveSessionFilter::Scheduled,
+            CacheKeepaliveSessionFilter::InRequest,
+            CacheKeepaliveSessionFilter::Tracked,
+            CacheKeepaliveSessionFilter::Capped,
+            CacheKeepaliveSessionFilter::Cancelled,
+            CacheKeepaliveSessionFilter::Failed,
+            CacheKeepaliveSessionFilter::Expired,
+            CacheKeepaliveSessionFilter::NotTracked,
+            CacheKeepaliveSessionFilter::Error,
+        ];
+        // Keep fixture enumeration exhaustive without a test-only public API.
+        for (name, source, enumerated) in [
+            (
+                "CacheKeepaliveViewState",
+                include_str!("../../cache_keepalive_view/status.rs"),
+                states
+                    .iter()
+                    .map(|state| format!("{state:?}"))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "CacheKeepaliveSessionFilter",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../cc-lb-storage-api/src/cache_keepalive_sessions/reads.rs"
+                )),
+                filters
+                    .iter()
+                    .map(|filter| format!("{filter:?}"))
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let marker = format!("pub enum {name} {{");
+            let declaration = source
+                .split_once(marker.as_str())
+                .expect("canonical enum declaration")
+                .1
+                .split_once('}')
+                .expect("unit enum closing brace")
+                .0;
+            let declared: Vec<&str> = declaration
+                .lines()
+                .map(str::trim)
+                .filter_map(|line| line.strip_suffix(','))
+                .collect();
+            assert_eq!(enumerated, declared, "enumerate every {name} variant");
+        }
+
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../web/src/lib/__contract__/cache_keepalive_vocabulary.json"
+        ))
+        .expect("shared keepalive vocabulary JSON");
+        assert_eq!(
+            serde_json::to_value(states).expect("serialize states"),
+            contract["states"]
+        );
+        assert_eq!(
+            serde_json::to_value(filters).expect("serialize filters"),
+            contract["status_filters"]
+        );
+        for filter in filters {
+            let parsed =
+                parse_filter(Some(filter.as_str()), None).expect("canonical filter parses");
+            assert_eq!(parsed, filter);
+            assert_eq!(
+                serde_json::to_value(filter).expect("serialize filter"),
+                filter.as_str()
+            );
+        }
+        assert!(parse_filter(Some("InRequest"), None).is_err());
+        assert!(parse_filter(Some("unknown_filter"), None).is_err());
+    }
 
     fn raw_query(horizon: Option<&str>, cursor: Option<String>) -> RawCacheKeepaliveQuery {
         RawCacheKeepaliveQuery {

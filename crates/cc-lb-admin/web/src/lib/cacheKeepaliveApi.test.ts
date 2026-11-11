@@ -1,6 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cacheKeepaliveRows } from '../components/principals/cache-keepalive/__fixtures__/cacheKeepaliveFixtures';
+import vocabulary from './__contract__/cache_keepalive_vocabulary.json';
 import {
+  CACHE_KEEPALIVE_STATES,
+  CACHE_KEEPALIVE_STATUS_FILTERS,
+  CacheKeepaliveCancelReasonSchema,
   CacheKeepaliveDetailSchema,
   CacheKeepaliveGapSchema,
   CacheKeepaliveHorizonSchema,
@@ -19,6 +24,135 @@ import {
   cacheKeepaliveSummaryFixture,
   cacheKeepaliveSummaryOnlyResponseFixture,
 } from './test-utils/cacheKeepalive-fixtures';
+
+const CANCEL_REASON_PARAGRAPH =
+  /Successful real-request cancellations persist a nullable `cancel_reason`:\s*([\s\S]*?)(?:\n\n|$)/;
+
+describe('Cache keepalive canonical wire vocabulary', () => {
+  it('accepts exactly the canonical Rust cancellation reasons', () => {
+    expect(CacheKeepaliveCancelReasonSchema.options).toEqual(
+      vocabulary.cancel_reasons,
+    );
+  });
+
+  it('decodes completed requests that cannot renew as cancelled without changing the server label', () => {
+    const row = {
+      ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+      state: 'cancelled',
+      is_active: false,
+      cancel_reason: 'completed_not_renewable',
+      reason: 'Cancelled: request completed, renewal not possible',
+      error: null,
+    };
+    const list = CacheKeepaliveListResponseSchema.parse({
+      summary: null,
+      groups: null,
+      rows: [row],
+      next_cursor: null,
+    });
+    const detail = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      ...row,
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        status: 'terminal',
+      },
+    });
+
+    for (const decoded of [list.rows[0], detail]) {
+      expect(decoded.state).toBe('cancelled');
+      expect(decoded.is_active).toBe(false);
+      expect(decoded.cancel_reason).toBe('completed_not_renewable');
+      expect(decoded.reason).toBe(
+        'Cancelled: request completed, renewal not possible',
+      );
+      expect(decoded.error).toBeNull();
+    }
+  });
+
+  it('keeps state and filter sets equal to the server contract', () => {
+    expect([...CACHE_KEEPALIVE_STATES].sort()).toEqual(
+      [...vocabulary.states].sort(),
+    );
+    expect([...CACHE_KEEPALIVE_STATUS_FILTERS].sort()).toEqual(
+      [...vocabulary.status_filters].sort(),
+    );
+  });
+
+  it('documents every canonical cancellation reason in the operator reason list', () => {
+    const guide = readFileSync(
+      new URL(
+        '../../../../../docs/cache-keepalive-operator.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    const paragraph = guide.match(CANCEL_REASON_PARAGRAPH)?.[1];
+    expect(paragraph).toBeDefined();
+    for (const reason of vocabulary.cancel_reasons) {
+      expect(paragraph).toContain(`\`${reason}\``);
+    }
+  });
+
+  it.each(vocabulary.cancel_reasons)(
+    'decodes %s in list and detail wire payloads',
+    (cancelReason) => {
+      const row = {
+        ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+        state: 'cancelled',
+        is_active: false,
+        cancel_reason: cancelReason,
+        reason: `Cancelled: ${cancelReason.replaceAll('_', ' ')}`,
+      };
+      const listWire = JSON.parse(
+        JSON.stringify({
+          summary: null,
+          groups: null,
+          rows: [row],
+          next_cursor: null,
+        }),
+      );
+      const detailWire = JSON.parse(
+        JSON.stringify({
+          ...cacheKeepaliveRenewedDetailFixture,
+          ...row,
+          raw_record: {
+            ...cacheKeepaliveRenewedDetailFixture.raw_record,
+            status: 'terminal',
+          },
+        }),
+      );
+
+      expect(
+        CacheKeepaliveListResponseSchema.parse(listWire).rows[0].cancel_reason,
+      ).toBe(cancelReason);
+      expect(CacheKeepaliveDetailSchema.parse(detailWire).cancel_reason).toBe(
+        cancelReason,
+      );
+    },
+  );
+
+  it('still rejects an unknown cancellation reason on both endpoints', () => {
+    const row = {
+      ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+      cancel_reason: 'unknown_reason',
+    };
+    expect(
+      CacheKeepaliveListResponseSchema.safeParse({
+        summary: null,
+        groups: null,
+        rows: [row],
+        next_cursor: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      CacheKeepaliveDetailSchema.safeParse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        ...row,
+      }).success,
+    ).toBe(false);
+  });
+});
 
 describe('CacheKeepaliveSummarySchema', () => {
   it('decodes the four card metrics', () => {
@@ -215,6 +349,115 @@ describe('CacheKeepaliveDetailSchema', () => {
     expect(parsed.is_last_pending).toBe(true);
   });
 
+  it('preserves known and unknown cycles across the selected-horizon renewal table', () => {
+    const cycles = [
+      '00000000-0000-0000-0000-000000000032',
+      '00000000-0000-0000-0000-000000000031',
+      null,
+    ];
+    const parsed = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      total_renewals_current_cycle: 0,
+      is_last_pending: false,
+      turns: cacheKeepaliveRenewedDetailFixture.turns.map((turn, index) => ({
+        ...turn,
+        cycle_id: cycles[index],
+        turn_number: 1,
+        pending: false,
+      })),
+    });
+    expect(parsed.turns.map((turn) => turn.cycle_id)).toEqual(cycles);
+    expect(parsed.turns.map((turn) => turn.turn_number)).toEqual([1, 1, 1]);
+    expect(parsed.total_renewals_current_cycle).toBe(0);
+    expect(parsed.is_last_pending).toBe(false);
+  });
+
+  it('preserves mixed gap outcome counts without replacing the legacy evidence status', () => {
+    const endings = [
+      'followup_hit',
+      'followup_hit',
+      ...Array.from({ length: 8 }, () => 'ttl_expired_no_followup' as const),
+      'followup_unknown',
+    ] as const;
+    const gaps = endings.map((ending_kind, index) => ({
+      cycle_id: `00000000-0000-0000-0000-${(index + 1).toString(16).padStart(12, '0')}`,
+      pause_at_ms: 1_700_000_000_000 + index * 300_000,
+      cached_tokens: 20_000,
+      pulses: [
+        {
+          pulse_number: 1,
+          time_ms: 1_700_000_270_000 + index * 300_000,
+          offset_sec: 270,
+          since_prev_renewal_sec: null,
+          spent_usd: 0.001,
+          hit: true,
+        },
+      ],
+      ending_kind,
+      ending_at_ms: 1_700_000_300_000 + index * 300_000,
+      total_duration_sec: 300,
+      since_last_renewal_sec: 30,
+      spent_usd: 0.001,
+      avoided_usd: null,
+      net_pnl_usd: null,
+    }));
+    const parsed = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: 'cancelled',
+      is_active: false,
+      evidence_status: 'unknown',
+      total_spent: 0.011,
+      total_avoided: null,
+      net_pnl: null,
+      total_renewals_current_cycle: 0,
+      is_last_pending: false,
+      gaps,
+      turns: gaps.map((gap) => ({
+        cycle_id: gap.cycle_id,
+        turn_number: 1,
+        renewals: 1,
+        followed_up:
+          gap.ending_kind === 'followup_unknown'
+            ? null
+            : gap.ending_kind === 'followup_hit',
+        label: 'agent-in-turn',
+        time_ms: gap.pulses[0].time_ms,
+        pnl: null,
+        pending: false,
+        evidence_status:
+          gap.ending_kind === 'followup_unknown' ? 'unknown' : 'observed',
+      })),
+      follow_up_outcomes: {
+        observed: 2,
+        pending: 0,
+        no_follow_up: 8,
+        unknown: 1,
+      },
+    });
+    expect(parsed.follow_up_outcomes).toEqual({
+      observed: 2,
+      pending: 0,
+      no_follow_up: 8,
+      unknown: 1,
+    });
+    expect(
+      Object.values(parsed.follow_up_outcomes).reduce(
+        (sum, count) => sum + count,
+        0,
+      ),
+    ).toBe(parsed.gaps?.length);
+    expect(parsed.evidence_status).toBe('unknown');
+  });
+
+  it('requires explicit detail outcome counts instead of inferring a header summary', () => {
+    expect(
+      CacheKeepaliveDetailSchema.safeParse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        follow_up_outcomes: undefined,
+      }).success,
+    ).toBe(false);
+  });
+
   it('decodes a not_tracked detail with a null turn P&L', () => {
     const parsed = CacheKeepaliveDetailSchema.parse(
       cacheKeepaliveNotTrackedDetailFixture,
@@ -288,6 +531,7 @@ describe('CacheKeepaliveDetailSchema', () => {
       is_last_pending: scenario.pending,
       turns: [
         {
+          cycle_id: null,
           turn_number: 1,
           renewals: scenario.renewals,
           followed_up: scenario.followedUp,
@@ -383,6 +627,12 @@ describe('cacheKeepaliveSessionsPath', () => {
     );
   });
 
+  it('encodes the in-request status filter without treating it as scheduled', () => {
+    expect(cacheKeepaliveSessionsPath('p1', { status: 'in_request' })).toBe(
+      '/admin/v1/principals/p1/cache-keepalive?status=in_request',
+    );
+  });
+
   it('encodes the tracked-only default status filter', () => {
     expect(
       cacheKeepaliveSessionsPath('p1', {
@@ -427,6 +677,7 @@ describe('cache keepalive filter enums', () => {
       'tracked',
       'renewed',
       'scheduled',
+      'in_request',
       'capped',
       'expired',
       'cancelled',
@@ -449,6 +700,51 @@ describe('cache keepalive filter enums', () => {
   });
 });
 describe('cache keepalive wire additions', () => {
+  it('decodes an in-request row and detail independently of the stored terminal marker', () => {
+    const detail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: 'in_request',
+      is_active: false,
+      cancel_reason: null,
+      reason: 'A real request is in progress',
+      error: null,
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        status: 'terminal',
+      },
+    };
+    expect(CacheKeepaliveRowSchema.parse(detail)).toMatchObject({
+      state: 'in_request',
+      is_active: false,
+      cancel_reason: null,
+      error: null,
+    });
+    expect(CacheKeepaliveDetailSchema.parse(detail).raw_record?.status).toBe(
+      'terminal',
+    );
+    expect(
+      CacheKeepaliveListResponseSchema.parse({
+        ...cacheKeepaliveListResponseFixture,
+        rows: [detail],
+      }).rows[0].state,
+    ).toBe('in_request');
+  });
+
+  it('retains the neutral incomplete-request reason on an expired projection', () => {
+    const row = CacheKeepaliveRowSchema.parse({
+      ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+      state: 'expired',
+      is_active: false,
+      cancel_reason: null,
+      reason: 'Request did not complete before its deadline',
+      error: null,
+    });
+    expect(row.state).toBe('expired');
+    expect(row.reason).toBe('Request did not complete before its deadline');
+    expect(row.error).toBeNull();
+    expect(row.cancel_reason).toBeNull();
+  });
+
   it('accepts cancelled and failed row states', () => {
     const row = apiRowFromFixture(cacheKeepaliveRows[0], 0);
     expect(
@@ -459,22 +755,23 @@ describe('cache keepalive wire additions', () => {
     ).toBe('failed');
   });
 
-  it('accepts followup_unknown gap endings', () => {
-    const gap = {
-      cycle_id: null,
-      pause_at_ms: 1,
-      cached_tokens: 1,
-      pulses: [],
-      ending_kind: 'followup_unknown',
-      ending_at_ms: 2,
-      total_duration_sec: 1,
-      since_last_renewal_sec: null,
-      spent_usd: 0.01,
-      avoided_usd: 0,
-      net_pnl_usd: -0.01,
-    };
-    expect(CacheKeepaliveGapSchema.parse(gap).ending_kind).toBe(
-      'followup_unknown',
-    );
-  });
+  it.each(['followup_unknown', 'followup_pending'])(
+    'accepts %s gap endings',
+    (ending) => {
+      const gap = {
+        cycle_id: null,
+        pause_at_ms: 1,
+        cached_tokens: 1,
+        pulses: [],
+        ending_kind: ending,
+        ending_at_ms: 2,
+        total_duration_sec: 1,
+        since_last_renewal_sec: null,
+        spent_usd: 0.01,
+        avoided_usd: 0,
+        net_pnl_usd: -0.01,
+      };
+      expect(CacheKeepaliveGapSchema.parse(gap).ending_kind).toBe(ending);
+    },
+  );
 });

@@ -413,7 +413,7 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn counts_overlapping_keepalive_cleanup_and_removes_deleted_order_metadata()
+    async fn counts_overlapping_keepalive_cleanup_and_reclaims_legacy_orphan_metadata()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         ApalisSqliteStorage::setup(&pool).await?;

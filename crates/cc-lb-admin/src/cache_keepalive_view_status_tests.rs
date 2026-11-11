@@ -26,10 +26,12 @@ fn item(
         ttl: CacheTtl::Ttl5m,
         generation: 42,
         refresh_count,
+        has_renewal_in_horizon: refresh_count.is_some_and(|count| count > 0),
         status,
         enqueue_state: None,
         terminal_reason,
         cancel_reason: None,
+        request_incomplete: false,
         decision: None,
         reason: "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned(),
         display_reason: None,
@@ -159,4 +161,69 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     assert_eq!(turn_action(false, true), "waiting for follow-up");
     assert_eq!(turn_action(true, false), "cache used by follow-up");
     assert_eq!(turn_action(false, false), "no follow-up (loss)");
+}
+
+#[test]
+fn request_markers_have_neutral_states_and_no_renewal_schedule() {
+    for refresh_count in [0, 2] {
+        let fresh = item(
+            CacheKeepaliveSessionEntrySource::Session,
+            Some(CacheKeepaliveSessionStatus::InRequest),
+            Some(refresh_count),
+            None,
+        );
+        assert_eq!(state_from_item(&fresh), CacheKeepaliveViewState::InRequest);
+        assert_eq!(
+            next_renewal_display(state_from_item(&fresh), 300_000, 0),
+            None
+        );
+        let mut expired = item(
+            CacheKeepaliveSessionEntrySource::Session,
+            Some(CacheKeepaliveSessionStatus::Terminal),
+            Some(refresh_count),
+            Some(CacheKeepaliveTerminalReason::Stale),
+        );
+        expired.request_incomplete = true;
+        assert_eq!(state_from_item(&expired), CacheKeepaliveViewState::Expired);
+        assert_eq!(
+            next_renewal_display(state_from_item(&expired), 300_000, 0),
+            None
+        );
+        expired.request_incomplete = false;
+        assert_eq!(state_from_item(&expired), CacheKeepaliveViewState::Failed);
+    }
+}
+
+#[test]
+fn cancellation_requires_a_horizon_turn_independent_of_all_time_count() {
+    for refresh_count in [0, 1, 12] {
+        for has_turn in [false, true] {
+            let mut cancelled = item(
+                CacheKeepaliveSessionEntrySource::Session,
+                Some(CacheKeepaliveSessionStatus::Terminal),
+                Some(refresh_count),
+                Some(CacheKeepaliveTerminalReason::Cancelled),
+            );
+            cancelled.has_renewal_in_horizon = has_turn;
+            assert_eq!(
+                state_from_item(&cancelled),
+                if has_turn {
+                    CacheKeepaliveViewState::Cancelled
+                } else {
+                    CacheKeepaliveViewState::NotTracked
+                }
+            );
+            cancelled.status = Some(CacheKeepaliveSessionStatus::InRequest);
+            assert_eq!(
+                state_from_item(&cancelled),
+                CacheKeepaliveViewState::InRequest
+            );
+            cancelled.status = Some(CacheKeepaliveSessionStatus::Terminal);
+            cancelled.request_incomplete = true;
+            assert_eq!(
+                state_from_item(&cancelled),
+                CacheKeepaliveViewState::Expired
+            );
+        }
+    }
 }

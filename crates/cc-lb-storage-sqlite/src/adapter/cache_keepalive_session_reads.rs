@@ -17,6 +17,11 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 const SESSION_HASH_BATCH_SIZE: usize = 900;
 const EVIDENCE_ID_BATCH_SIZE: usize = 4_000;
 
+// The timestamp distinguishes provisional markers from legacy final cancellations.
+const REQUEST_MARKER_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL)";
+const REQUEST_FRESH_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > CAST(strftime('%s', 'now') AS INTEGER))";
+const REQUEST_INCOMPLETE_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at <= CAST(strftime('%s', 'now') AS INTEGER))";
+
 const SESSION_ENTRY_SELECT: &str = "
 SELECT
     'session' AS entry_source,
@@ -29,18 +34,41 @@ SELECT
     ttl,
     generation,
     refresh_count,
-    status,
-    enqueue_state,
-    terminal_reason,
-    cancel_reason,
+    CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
+          AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
+          AND run_at > CAST(strftime('%s', 'now') AS INTEGER)
+         THEN 'in_request' ELSE status END AS status,
+    CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
+          AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
+         THEN NULL ELSE enqueue_state END AS enqueue_state,
+    CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
+          AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
+         THEN CASE WHEN run_at > CAST(strftime('%s', 'now') AS INTEGER) THEN NULL ELSE 'stale' END
+         ELSE terminal_reason END AS terminal_reason,
+    CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
+          AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
+         THEN NULL ELSE cancel_reason END AS cancel_reason,
+    (status = 'terminal' AND terminal_reason = 'cancelled'
+     AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL
+     AND run_at <= CAST(strftime('%s', 'now') AS INTEGER)) AS request_incomplete,
     NULL AS decision,
-    CASE terminal_reason
+    CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
+          AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
+         THEN CASE WHEN run_at > CAST(strftime('%s', 'now') AS INTEGER)
+                   THEN 'In request'
+                   ELSE 'Request did not complete before its deadline' END
+         ELSE CASE terminal_reason
         WHEN 'cancelled' THEN CASE cancel_reason
             WHEN 'new_request' THEN 'Cancelled: a new request arrived'
             WHEN 'user_turn_detected' THEN 'Cancelled: the agent is waiting for the user'
             WHEN 'snapshot_too_large' THEN 'Cancelled: the request snapshot is too large'
             WHEN 'cached_prefix_too_small' THEN 'Cancelled: the cached prefix is too small'
             WHEN 'zero_token_renewal_unsupported' THEN 'Cancelled: zero-token renewals are unsupported'
+            WHEN 'ambiguous_turn' THEN 'Cancelled: the agent turn could not be determined'
+            WHEN 'retention_recorded' THEN 'Retention recorded without renewal'
+            WHEN 'renewal_not_beneficial' THEN 'Refresh expected value is unknown or non-positive'
+            WHEN 'session_identity_changed' THEN 'Cancelled: the request completed under a different cache identity'
+            WHEN 'completed_not_renewable' THEN 'Cancelled: request completed, renewal not possible'
             ELSE 'Cancelled'
         END
         WHEN 'max_refreshes' THEN 'max renewals reached'
@@ -52,12 +80,12 @@ SELECT
         WHEN 'unsupported_provider' THEN 'renewals are unsupported for this provider'
         WHEN 'stale' THEN 'renewal attempt became stale'
         ELSE CASE WHEN status = 'terminal' THEN 'Renewal stopped' ELSE display_reason END
-    END AS reason,
+    END END AS reason,
     display_reason,
     error,
     config_snapshot";
 
-const SESSION_WITH_PURGED_TURNS_SQL: &str = "
+const SESSION_WITH_PURGED_TURNS_SQL: &str = concat!("
 (
     SELECT
         session_key_hash,
@@ -72,6 +100,8 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
         enqueue_state,
         terminal_reason,
         cancel_reason,
+        run_at,
+        running_since_unix_secs,
         display_reason,
         error,
         config_snapshot
@@ -155,12 +185,9 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
-                 AND f.request_start_ms <= r.request_start_ms + CASE r.ttl
-                     WHEN '1h' THEN 3600000
-                     WHEN '30m' THEN 1800000
-                     WHEN '12h' THEN 43200000
-                     ELSE 300000
-                 END
+                 AND f.request_start_ms <= r.request_start_ms + ",
+    cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+    "
                 WHERE r.principal_id = t.principal_id
                   AND r.evidence_kind = 'renewal'
                   AND r.event_ref = (
@@ -207,6 +234,8 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
             ELSE 'expired'
         END AS terminal_reason,
         NULL AS cancel_reason,
+        NULL AS run_at,
+        NULL AS running_since_unix_secs,
         COALESCE(
             (
                 SELECT NULLIF(t2.display_reason, '')
@@ -249,16 +278,28 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
           AND e.evidence_kind = 'renewal'
     )
     GROUP BY t.principal_id, t.session_key_hash
-) AS cache_keepalive_sessions";
+) AS cache_keepalive_sessions");
 
-fn push_cancelled_without_turns(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
-    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash");
+fn push_renewal_in_horizon(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
+    builder.push("EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash");
     if let Some(start_ms) = horizon_start_ms {
         builder
             .push(" AND turn_row.ts * 1000 >= ")
             .push_bind(start_ms);
     }
-    builder.push("))");
+    builder.push(")");
+}
+
+fn push_cancelled_without_turns(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
+    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND NOT ");
+    push_renewal_in_horizon(builder, horizon_start_ms);
+    builder.push(")");
+}
+
+fn push_session_entry_select(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
+    builder.push(SESSION_ENTRY_SELECT).push(", ");
+    push_renewal_in_horizon(builder, horizon_start_ms);
+    builder.push(" AS has_renewal_in_horizon");
 }
 
 const DECISION_ENTRY_SELECT: &str = "
@@ -277,11 +318,13 @@ SELECT
     NULL AS enqueue_state,
     NULL AS terminal_reason,
     NULL AS cancel_reason,
+    0 AS request_incomplete,
     decision,
     reason,
     reason AS display_reason,
     error,
-    config_snapshot
+    config_snapshot,
+    0 AS has_renewal_in_horizon
 FROM cache_keepalive_decisions";
 
 #[async_trait]
@@ -408,7 +451,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             "cache_keepalive_summary_cutoff_ms",
             "value exceeds i64::MAX",
         )?;
-        let mut sessions_query = QueryBuilder::<Sqlite>::new(SESSION_ENTRY_SELECT);
+        let mut sessions_query = QueryBuilder::<Sqlite>::new("");
+        push_session_entry_select(&mut sessions_query, None);
         sessions_query
             .push(" FROM cache_keepalive_sessions WHERE principal_id = ")
             .push_bind(principal_id)
@@ -450,8 +494,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         id: &str,
     ) -> StorageResult<Option<cc_lb_storage_api::CacheKeepaliveSessionListItem>> {
         let mut builder = QueryBuilder::<Sqlite>::new("WITH candidates AS (");
+        push_session_entry_select(&mut builder, None);
         builder
-            .push(SESSION_ENTRY_SELECT)
             .push(" FROM ")
             .push(SESSION_WITH_PURGED_TURNS_SQL)
             .push(" WHERE principal_id = ")
@@ -745,8 +789,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             "cache_keepalive_summary_cutoff_ms",
             "value exceeds i64::MAX",
         )?;
-        let row = sqlx::query(
-            "WITH active_current_turns AS (
+        let row = sqlx::query(concat!(
+            "WITH current_cycle_turns AS (
                 SELECT s.principal_id, s.session_key_hash, s.cycle_id, t.source_ref_id,
                        t.upstream_id, t.model,
                        ROW_NUMBER() OVER (
@@ -769,17 +813,21 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                                AND e.event_ref = t.source_ref_id
                                AND e.upstream_id = t.upstream_id
                                AND e.model = t.model
-                               AND (e.cycle_id IS NULL OR e.cycle_id = s.cycle_id)
+                               AND e.cycle_id = s.cycle_id
                          )
                      )
                  )
-                WHERE s.principal_id = ? AND s.status = 'active' AND s.cycle_id IS NOT NULL
+                WHERE s.principal_id = ? AND s.cycle_id IS NOT NULL
+                  AND (s.status = 'active' OR (
+                      s.status = 'terminal' AND s.terminal_reason = 'cancelled'
+                      AND s.cancel_reason = 'new_request' AND s.running_since_unix_secs IS NOT NULL
+                  ))
                   AND (? IS NULL OR t.ts * 1000 >= ?)
             ),
             current_renewals AS (
                 SELECT a.principal_id, a.session_key_hash, a.source_ref_id,
                        e.cycle_id, e.upstream_id, e.model
-                FROM active_current_turns a
+                FROM current_cycle_turns a
                 JOIN cache_keepalive_evidence e
                   ON e.principal_id = a.principal_id
                  AND e.evidence_kind = 'renewal'
@@ -791,6 +839,10 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND e.prefix_policy_version IS NOT NULL
                  AND e.prefix_schema_version IS NOT NULL
                 WHERE a.rn = 1
+                  AND CAST(strftime('%s', 'now') AS INTEGER) * 1000
+                      < e.request_start_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("e.ttl"),
+            "
             ),
             attributed_follow_ups AS (
                 SELECT a.principal_id, a.session_key_hash, r.event_ref,
@@ -818,12 +870,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
             ),
             pending_current AS (
                 SELECT a.principal_id, a.source_ref_id
@@ -840,7 +889,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             SELECT
                 (SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND status = 'active') AS renewing_now,
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?
-                    AND (status <> 'terminal' OR COALESCE(terminal_reason, '') <> 'cancelled' OR EXISTS (
+                    AND (status <> 'terminal' OR COALESCE(terminal_reason, '') <> 'cancelled'
+                        OR (cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > CAST(strftime('%s', 'now') AS INTEGER))
+                        OR EXISTS (
                         SELECT 1 FROM cache_keepalive_turns t_recent
                         WHERE t_recent.principal_id = cache_keepalive_sessions.principal_id
                           AND t_recent.session_key_hash = cache_keepalive_sessions.session_key_hash
@@ -896,7 +947,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                      AND t.source_ref_id = e_summary.event_ref
                      AND t.ts * 1000 >= ?
                ))",
-        )
+        ))
         .bind(principal_id)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
@@ -962,7 +1013,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             .map_err(|_| StorageError::Corrupted {
                 message: "negative cache keepalive observed evidence count".to_owned(),
             })?;
-        let group_rows = sqlx::query(
+        let group_rows = sqlx::query(concat!(
 "WITH renewals AS (
                 SELECT *
                 FROM cache_keepalive_evidence
@@ -992,12 +1043,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
              ),
              selected_follow_ups AS (
                 SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
@@ -1020,12 +1068,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.follow_up_request_start_ms > r.request_start_ms
                  AND f.follow_up_request_start_ms <= r.request_start_ms
-                     + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
-                       END
+                     + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            "
              )
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0) AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
@@ -1033,7 +1078,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
              WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
              GROUP BY r.model, r.ttl, r.cache_read_input_tokens
              ORDER BY r.model, r.ttl, r.cache_read_input_tokens",
-        )
+        ))
         .bind(principal_id)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
@@ -1252,8 +1297,8 @@ fn push_session_branch(
     cursor_last_message_at_ms: Option<i64>,
     limit: i64,
 ) {
+    push_session_entry_select(builder, horizon_start_ms);
     builder
-        .push(SESSION_ENTRY_SELECT)
         .push(" FROM ")
         .push(SESSION_WITH_PURGED_TURNS_SQL)
         .push(" WHERE principal_id = ")
@@ -1267,19 +1312,22 @@ fn push_session_branch(
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
-        CacheKeepaliveSessionFilter::Visible => {
-            builder.push(" AND NOT ");
+        CacheKeepaliveSessionFilter::Visible | CacheKeepaliveSessionFilter::Tracked => {
+            builder.push(" AND (");
+            builder.push(REQUEST_FRESH_SQL);
+            builder.push(" OR NOT ");
             push_cancelled_without_turns(builder, horizon_start_ms);
-        }
-        CacheKeepaliveSessionFilter::Tracked => {
-            builder.push(" AND NOT ");
-            push_cancelled_without_turns(builder, horizon_start_ms);
+            builder.push(")");
         }
         CacheKeepaliveSessionFilter::Renewed => {
             builder.push(" AND status = 'active' AND refresh_count > 0");
         }
         CacheKeepaliveSessionFilter::Scheduled => {
             builder.push(" AND status = 'active' AND refresh_count = 0");
+        }
+        CacheKeepaliveSessionFilter::InRequest => {
+            builder.push(" AND ");
+            builder.push(REQUEST_FRESH_SQL);
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
@@ -1288,17 +1336,25 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Cancelled => {
             builder.push(" AND status = 'terminal' AND terminal_reason = 'cancelled' AND NOT ");
+            builder.push(REQUEST_MARKER_SQL);
+            builder.push(" AND NOT ");
             push_cancelled_without_turns(builder, horizon_start_ms);
         }
         CacheKeepaliveSessionFilter::Failed => {
             builder.push(" AND status = 'terminal' AND terminal_reason IN ('dispatch_error', 'decrypt_failed', 'unsupported_provider', 'stale')");
+            builder.push(" AND NOT ");
+            builder.push(REQUEST_MARKER_SQL);
         }
         CacheKeepaliveSessionFilter::Expired => {
-            builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
+            builder.push(" AND (terminal_reason IN ('expired', 'cache_miss') OR ");
+            builder.push(REQUEST_INCOMPLETE_SQL);
+            builder.push(")");
         }
         CacheKeepaliveSessionFilter::NotTracked => {
             builder.push(" AND ");
             push_cancelled_without_turns(builder, horizon_start_ms);
+            builder.push(" AND NOT ");
+            builder.push(REQUEST_MARKER_SQL);
         }
     }
     if matches!(query.filter, CacheKeepaliveSessionFilter::Error) {
@@ -1359,6 +1415,7 @@ fn push_decision_branch(
         CacheKeepaliveSessionFilter::Tracked
         | CacheKeepaliveSessionFilter::Renewed
         | CacheKeepaliveSessionFilter::Scheduled
+        | CacheKeepaliveSessionFilter::InRequest
         | CacheKeepaliveSessionFilter::Capped
         | CacheKeepaliveSessionFilter::Cancelled
         | CacheKeepaliveSessionFilter::Failed

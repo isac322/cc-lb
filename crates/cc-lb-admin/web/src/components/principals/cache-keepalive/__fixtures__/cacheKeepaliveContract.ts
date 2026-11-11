@@ -1,6 +1,7 @@
 export const CACHE_KEEPALIVE_STATES = [
   'renewed',
   'scheduled',
+  'in_request',
   'capped',
   'expired',
   'cancelled',
@@ -39,6 +40,7 @@ export const cacheKeepaliveDrawerCopy = {
     'All statuses',
     'Renewed',
     'Scheduled',
+    'In request',
     'Capped',
     'Expired',
     'Cancelled',

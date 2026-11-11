@@ -1,0 +1,38 @@
+{
+  "cancel_reasons": [
+    "new_request",
+    "user_turn_detected",
+    "ambiguous_turn",
+    "retention_recorded",
+    "renewal_not_beneficial",
+    "session_identity_changed",
+    "snapshot_too_large",
+    "cached_prefix_too_small",
+    "zero_token_renewal_unsupported",
+    "completed_not_renewable"
+  ],
+  "states": [
+    "renewed",
+    "scheduled",
+    "in_request",
+    "capped",
+    "cancelled",
+    "failed",
+    "expired",
+    "not_tracked"
+  ],
+  "status_filters": [
+    "all",
+    "visible",
+    "renewed",
+    "scheduled",
+    "in_request",
+    "tracked",
+    "capped",
+    "cancelled",
+    "failed",
+    "expired",
+    "not_tracked",
+    "error"
+  ]
+}
