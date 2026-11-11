@@ -364,8 +364,32 @@ impl SchedulerDispatch {
     ) -> SchedulerResult<JobOutcome> {
         let now = unix_secs(self.clock.now());
         if record.refresh_count.saturating_add(1) >= job.max_refreshes {
+            // Use the same generation-fenced hit mutation as nonterminal
+            // renewals so the paid final hit is counted on both adapters.
+            // Do not enqueue the resulting generation: immediately retire it.
+            let updated = CacheKeepaliveSessionStore::reschedule_after_cache_hit(
+                self.storage.as_ref(),
+                &CacheKeepaliveHitRefreshRequest {
+                    session_key_hash: job.session_key_hash.clone(),
+                    generation: job.generation,
+                    cache_anchor_at_unix_secs: record.cache_anchor_at_unix_secs,
+                    run_at_unix_secs: record.run_at_unix_secs,
+                    expires_at_unix_secs: record.expires_at_unix_secs,
+                    encrypted_payload: None,
+                    now_unix_secs: now,
+                },
+            )
+            .await
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+            let Some(updated) = updated else {
+                return Ok(JobOutcome::Noop);
+            };
+            let terminal_job = CacheKeepaliveJob {
+                generation: updated.generation,
+                ..job
+            };
             self.mark_cache_keepalive_terminal(
-                &job,
+                &terminal_job,
                 CacheKeepaliveTerminalReason::MaxRefreshes,
                 None,
             )

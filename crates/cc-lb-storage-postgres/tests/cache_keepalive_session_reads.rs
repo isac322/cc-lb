@@ -15,6 +15,14 @@ use uuid::Uuid;
 const PRINCIPAL_ID: &str = "principal-a";
 const UPSTREAM_ID: Uuid = Uuid::from_u128(7);
 
+fn live_evidence_base_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs()
+        - 10
+}
+
 fn run_postgres_case<F, Fut>(name: &str, test: F)
 where
     F: FnOnce(String) -> Fut,
@@ -1885,14 +1893,15 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending_c
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    let now = live_evidence_base_secs();
     for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
         let session_key_hash = format!("active-{outcome}");
         let cycle_id = Uuid::from_u128(1_074 + index);
-        let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
+        let mut replace = request(&session_key_hash, now, "agent-in-turn");
         replace.cycle_id = cycle_id;
         let session = storage.replace_from_real_request(&replace).await?;
         let source_ref_id = format!("active-{outcome}-renewal");
-        let ts = 1_001 + index as u64;
+        let ts = now + 1 + index as u64;
         let mut projection =
             economics_projection(&source_ref_id, Some(cycle_id), ts, outcome, cost);
         projection
@@ -2103,8 +2112,9 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_077);
-    let mut replace = request("active-multi-turn", 1_000, "agent-in-turn");
+    let mut replace = request("active-multi-turn", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage.replace_from_real_request(&replace).await?;
     append_economics_turn(
@@ -2113,7 +2123,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
             session_key_hash: "active-multi-turn",
             cycle_id,
             source_ref_id: "active-multi-turn-old",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -2127,7 +2137,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
             session_key_hash: "active-multi-turn",
             cycle_id,
             source_ref_id: "active-multi-turn-latest",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "miss",
             cost_micros: 15_000,
             renewal_tokens: 20_000,
@@ -2159,8 +2169,9 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_078);
-    let mut replace = request("active-multiple-follow-ups", 1_000, "agent-in-turn");
+    let mut replace = request("active-multiple-follow-ups", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage.replace_from_real_request(&replace).await?;
     // Each follow-up carries its renewal's prefix hash; the cycle-wide group
@@ -2171,7 +2182,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
             session_key_hash: "active-multiple-follow-ups",
             cycle_id,
             source_ref_id: "active-multiple-follow-ups-first",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 10_000,
@@ -2185,7 +2196,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
             session_key_hash: "active-multiple-follow-ups",
             cycle_id,
             source_ref_id: "active-multiple-follow-ups-latest",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 30_000,
@@ -2213,9 +2224,10 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    let now = live_evidence_base_secs();
     let cycle_id = Uuid::from_u128(1_082);
     let session_key_hash = "active-two-follow-ups";
-    let mut replace = request(session_key_hash, 1_000, "agent-in-turn");
+    let mut replace = request(session_key_hash, now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage.replace_from_real_request(&replace).await?;
 
@@ -2227,7 +2239,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
             session_key_hash,
             cycle_id,
             source_ref_id: "active-two-follow-ups-r1",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -2241,7 +2253,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
             session_key_hash,
             cycle_id,
             source_ref_id: "active-two-follow-ups-r2",
-            ts: 1_002,
+            ts: now + 2,
             hit_miss: "miss",
             cost_micros: 15_000,
             renewal_tokens: 20_000,
@@ -2269,9 +2281,10 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    let now = live_evidence_base_secs();
     let historical_cycle_id = Uuid::from_u128(1_079);
     let current_cycle_id = Uuid::from_u128(1_080);
-    let mut historical = request("historical-active-pending", 1_000, "agent-in-turn");
+    let mut historical = request("historical-active-pending", now, "agent-in-turn");
     historical.cycle_id = historical_cycle_id;
     storage.replace_from_real_request(&historical).await?;
     append_economics_turn(
@@ -2280,7 +2293,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
             session_key_hash: "historical-active-pending",
             cycle_id: historical_cycle_id,
             source_ref_id: "historical-active-pending-old",
-            ts: 1_001,
+            ts: now + 1,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -2289,7 +2302,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     )
     .await?;
 
-    let mut current = request("historical-active-pending", 1_005, "agent-in-turn");
+    let mut current = request("historical-active-pending", now + 5, "agent-in-turn");
     current.cycle_id = current_cycle_id;
     storage.replace_from_real_request(&current).await?;
     append_economics_turn(
@@ -2298,7 +2311,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
             session_key_hash: "historical-active-pending",
             cycle_id: current_cycle_id,
             source_ref_id: "historical-active-pending-current",
-            ts: 1_006,
+            ts: now + 6,
             hit_miss: "hit",
             cost_micros: 6_000,
             renewal_tokens: 20_000,
@@ -2753,6 +2766,10 @@ fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
             (
                 Some("zero_token_renewal_unsupported"),
                 "Cancelled: zero-token renewals are unsupported",
+            ),
+            (
+                Some("completed_not_renewable"),
+                "Cancelled: request completed, renewal not possible",
             ),
             (None, "Cancelled"),
         ] {

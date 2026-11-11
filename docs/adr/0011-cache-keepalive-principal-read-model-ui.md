@@ -35,13 +35,13 @@ The Principal-detail surfaces stay live through the existing admin-web React Que
 
 - The session sheet polls only the first page. Later loaded pages refresh once when row/session state-bearing summary fields or groups change, when the first-page boundary changes (the last row's id or message timestamp, or whether another page exists), or when the sheet reopens. The clock-driven `sessions_last_5m` field does not trigger a tail refresh. Cursor tokens are opaque: a rolling horizon changes their embedded horizon start without necessarily moving the page boundary. A state change on a later page can remain stale until one of those refresh conditions occurs; this is the accepted trade-off for one-request polling. Polling and "Load more sessions" share a serialization queue, and queued page loads are dropped if the selected query key changes.
 - While the sheet is open the card pauses its own summary poll; when the sheet shows the 24h horizon it writes its overview summary into the card's query.
-- The open session detail polls only while the session is active or its follow-up evidence is pending, and refetches when the selected row's generation or active state changes in the list.
+- The open session detail polls while the session is active, In request, or its follow-up evidence is pending, and refetches when the selected row's generation, state, or economics changes in the list.
 
 A pure client-side merge dedupes rows by id, and a FLIP transition animates a row that rises. This reuses an established pattern and adds no new transport abstraction.
 
 ### Explicit state model with an orthogonal error flag
 
-Sessions are displayed as exactly one base state — Renewed, Scheduled, Capped, Expired, Cancelled, Failed, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Capped means only the renewal or duration cap; Failed covers dispatch, decrypt, unsupported-provider, and stale terminals. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not an extra base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip. When keep-alive is disabled for the principal, the sheet lists with the `all` status so retained decisions stay visible.
+Sessions are displayed as exactly one base state — Renewed, Scheduled, In request, Capped, Expired, Cancelled, Failed, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Capped means only the renewal or duration cap; Failed covers dispatch, decrypt, unsupported-provider, and stale renewal terminals. An expired real-request marker instead projects as Expired with the neutral reason “Request did not complete before its deadline”. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not an extra base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip. When keep-alive is disabled for the principal, the sheet lists with the `all` status so retained decisions stay visible.
 ### Durable cycle/evidence projection
 
 Renewal attribution is backed by a retention-managed evidence projection
@@ -110,6 +110,17 @@ no cause say `Cancelled`; they never infer why the session stopped. Terminal
 rows do not advertise a scheduled first or next renewal. Trigger grouping
 continues to use the original schedule-time descriptor.
 
+Before a real request dispatches, its fenced provisional record retains the
+durable `terminal/cancelled/new_request` representation and adds a request-start
+timestamp plus a deadline derived from the server's configured request timeout.
+Before that deadline, the read model projects `in_request` with a neutral
+“In request” badge and a paused-renewal explanation. It is tracked and visible
+without retained renewal turns, but is neither scheduled nor renewed and does
+not contribute to `renewing_now`. Completion replaces or resolves the marker.
+An expired marker is terminal/stale and projects as Expired, without claiming
+a known abort or error. Legacy `new_request` rows without a request-start marker
+remain Cancelled. The `in_request` API filter selects only fresh request markers.
+
 
 ### Stable ordering and cursor pagination
 
@@ -120,7 +131,7 @@ The list is ordered `last_message_at_ms DESC` with a stable tiebreak on the opaq
 - Pricing lives in one place; the dashboard cannot silently disagree with real cost, and the frozen examples are regression-locked.
 - The read model is a thin additive projection: migrations and writes touch only display fields, so renewal/accounting behavior (ADR 0009) is provably unchanged, at the cost of a few denormalized columns to maintain when the display contract changes.
 - Polling is simpler and safe but not instantaneous; updates appear within the poll interval rather than the moment a renewal lands. Making updates truly push would require giving the event stream session/cache identity — a future transport change, out of scope here.
-- The five-state-plus-error model and stable cursor are shared contract between the storage adapters, the admin view-model, and the typed web client; changing a state or the sort key requires updating all three together (they are covered by parity tests).
+- The explicit base-state-plus-error model and stable cursor are shared contracts between the storage adapters, the admin view-model, and the typed web client; changing a state or the sort key requires updating all three together (they are covered by parity tests).
 
 ## Verification
 

@@ -265,3 +265,153 @@ for (const key of ['Enter', 'Space', 'hover']) {
     await expect(page.getByRole('dialog', { name: 'Request detail' })).not.toBeVisible();
   });
 }
+
+const sessionStates = [
+  ['renewed', 'Renewed'],
+  ['scheduled', 'Scheduled'],
+  ['in_request', 'In request'],
+  ['capped', 'Capped'],
+  ['expired', 'Expired'],
+  ['cancelled', 'Cancelled'],
+  ['failed', 'Failed'],
+  ['not_tracked', 'Not tracked'],
+] as const;
+
+async function installCycleFixtures(page: Page) {
+  await installFixtures(page);
+  await page.addInitScript(() => localStorage.setItem('cclb.timezone', 'UTC'));
+  const base = Date.parse('2026-11-10T23:58:00Z');
+  const rows = sessionStates.map(([state], index) => ({
+    id: `${PRINCIPAL_ID}/thread:${index < 2 ? `01a1c484-${index}-${index === 0 ? 'aaaaaa' : 'bbbbbb'}` : `session-${index}`}`,
+    state,
+    is_active: state === 'scheduled' || state === 'renewed',
+    last_message_at_ms: base + (8 - index) * 60_000,
+    ttl: '5m',
+    attempts: 1,
+    retained_renewals: 3,
+    max_attempts: 12,
+    reason: state === 'cancelled' ? 'Cancelled: new request' : state,
+    cancel_reason: state === 'cancelled' ? 'new_request' : null,
+    generation: 3,
+    upstream: 'Fixture upstream',
+    error: state === 'failed' ? 'Renewal unavailable' : null,
+    net_pnl: 0.1,
+    total_spent: 0.03,
+    total_avoided: 0.13,
+    evidence_status: 'observed',
+    session_key_hash: `session-${index}`,
+    group_key: 'Agent in-turn',
+    group_label: 'Agent in-turn',
+    group_kind: 'state',
+  }));
+  const gap = (cycleId: string, pauseMs: number) => ({
+    cycle_id: cycleId,
+    pause_at_ms: pauseMs,
+    cached_tokens: 20_000,
+    pulses: [{
+      pulse_number: 1, time_ms: pauseMs + 270_000, offset_sec: 270,
+      since_prev_renewal_sec: null, spent_usd: 0.01, hit: true,
+    }],
+    ending_kind: 'followup_hit',
+    ending_at_ms: pauseMs + 290_000,
+    total_duration_sec: 290,
+    since_last_renewal_sec: 20,
+    spent_usd: 0.01,
+    avoided_usd: 0.06,
+    net_pnl_usd: 0.05,
+  });
+  const turns = [
+    { cycle_id: 'current-cycle', time_ms: base + 870_000, pnl: null, renewals: 0, followed_up: null, evidence_status: 'unknown' },
+    { cycle_id: null, time_ms: base + 570_000, pnl: 0.03, renewals: 1, followed_up: true, evidence_status: 'observed' },
+    { cycle_id: 'previous-cycle', time_ms: base + 270_000, pnl: 0.05, renewals: 1, followed_up: true, evidence_status: 'observed' },
+  ].map((turn) => ({ ...turn, turn_number: 1, label: 'agent-in-turn', pending: false }));
+  await page.route('**/admin/v1/principals/*/cache-keepalive**', (route) => {
+    const url = new URL(route.request().url());
+    const row = rows.find((entry) => entry.id === url.searchParams.get('session_id')) ?? rows[0];
+    const body = url.pathname.endsWith('/detail') ? {
+      ...row,
+      follow_up_outcomes: { observed: 1, pending: row.state === 'scheduled' ? 1 : 0, no_follow_up: 0, unknown: row.state === 'scheduled' ? 0 : 1 },
+      renewal_tokens: 20_000, total_renewals_current_cycle: row.state === 'scheduled' ? 0 : 1,
+      is_last_pending: false, config_snapshot: null,
+      raw_record: {
+        session_key_hash: row.session_key_hash, principal_id: PRINCIPAL_ID,
+        upstream_id: 'fixture', generation: 3, renewal_count: 1,
+        ttl: '5m', status: row.state, enqueue_state: null,
+      },
+      gaps: [gap('previous-cycle', base), { ...gap('current-cycle', base + 600_000), pulses: row.state === 'scheduled' ? [] : gap('current-cycle', base + 600_000).pulses, ending_kind: row.state === 'scheduled' ? 'scheduled_waiting' : 'followup_unknown', net_pnl_usd: null }],
+      turns: row.state === 'scheduled' ? turns.filter((turn) => turn.cycle_id !== 'current-cycle') : turns,
+    } : {
+      summary,
+      groups: [{ key: 'Agent in-turn', label: 'Agent in-turn', kind: 'state', sessions: rows.length, net_pnl: 0.8, total_spent: 0.24, total_avoided: 1.04 }],
+      rows: url.searchParams.get('limit') === '0' ? [] : rows,
+      next_cursor: null,
+    };
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  return { rows };
+}
+
+for (const width of [390, 1440]) {
+  test(`keepalive states and all cycle renewals remain visible at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.clock.install({ time: new Date('2026-11-11T12:00:00Z') });
+    await installCycleFixtures(page);
+    await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click();
+    for (const [, label] of sessionStates) {
+      await expect(page.getByRole('status', { name: `Session state: ${label}`, exact: true })).toBeVisible();
+    }
+    await expect(page.locator('[data-session-id]').nth(0)).toContainText('01a1c484…aaaaaa');
+    await expect(page.locator('[data-session-id]').nth(1)).toContainText('01a1c484…bbbbbb');
+    for (let index = 2; index < sessionStates.length; index += 1) {
+      await expect(page.locator('[data-session-id]').nth(index)).toContainText(`session-${index}`);
+      await expect(page.locator('[data-session-id]').nth(index)).not.toContainText('…');
+    }
+    await page.screenshot({ path: testInfo.outputPath(`states-${width}.png`), animations: 'disabled' });
+    await page.locator('[data-session-id]').first().click();
+    await expect(page.getByRole('region', { name: 'Cycle 1 timeline' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Cycle 2 timeline' })).toBeVisible();
+    await expect(page.getByText('11-10 23:58:00', { exact: true })).toBeVisible();
+    await expect(page.getByText('11-11 00:02:50', { exact: true })).toBeVisible();
+    await expect(page.getByRole('table', { name: 'Cycle 1 renewals' }).getByText('11-11 00:02:30', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Follow-up outcomes')).toHaveText('Observed 1 · No follow-up 0 · Unknown 1 · Pending 0');
+    for (const label of ['Cycle 1', 'Cycle 2', 'Unknown cycle']) {
+      const table = page.getByRole('table', { name: `${label} renewals`, exact: true });
+      await expect(table).toBeVisible();
+      await expect(table.getByRole('row')).toHaveCount(2);
+    }
+    await expect(page.getByRole('table', { name: 'Cycle 2 renewals' }).getByText('Miss', { exact: true })).toBeVisible();
+    await expect(page.locator('html')).toHaveJSProperty('scrollWidth', width);
+    await page.screenshot({ path: testInfo.outputPath(`cycles-${width}.png`), animations: 'disabled' });
+  });
+}
+
+for (const width of [390, 1440]) {
+  test(`lifecycle change clears stale live detail at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.clock.install({ time: new Date('2026-11-11T12:00:00Z') });
+    const fixture = await installCycleFixtures(page);
+    fixture.rows[0].state = 'scheduled';
+    await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click();
+    await page.locator('[data-session-id]').first().click();
+    await expect(page.getByText(/Next renewal at/)).toBeVisible();
+    const resume = Promise.withResolvers<void>();
+    await page.route('**/cache-keepalive/detail**', async (route) => {
+      await resume.promise;
+      await route.fallback();
+    });
+    fixture.rows[0].state = 'cancelled';
+    fixture.rows[0].is_active = false;
+    fixture.rows[0].cancel_reason = 'new_request';
+    fixture.rows[0].reason = 'Cancelled: new request';
+    await page.clock.fastForward(5_000);
+    await expect(page.getByTestId('session-detail-loading')).toBeVisible();
+    await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`lifecycle-loading-${width}.png`), animations: 'disabled' });
+    resume.resolve();
+    await expect(page.getByText('Cancelled: new request', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`lifecycle-cancelled-${width}.png`), animations: 'disabled' });
+  });
+}

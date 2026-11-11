@@ -17,7 +17,7 @@ use url::Url;
 use uuid::Uuid;
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
+use cc_lb_storage_api::{CacheKeepaliveCompletionTicket, CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
 use crate::usage_parser::ParsedSseEvent;
@@ -33,7 +33,8 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub accounting_key_id: Option<String>,
     pub cycle_id: Uuid,
     pub cache_anchor_age: Duration,
-    pub expected_generation: Option<u64>,
+    /// Ticket for this identity, acquired at start or ordinary completion.
+    pub expected_generation: Option<CacheKeepaliveCompletionTicket>,
     pub params: super::ScheduleParams,
     pub display_reason: String,
     pub config_snapshot: CacheKeepaliveConfigSnapshot,
@@ -44,7 +45,8 @@ pub struct CacheKeepaliveEnqueueRequest {
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
     pub reason: CancelReason,
-    pub expected_generation: Option<u64>,
+    /// Request-start ticket for owned completions; no new completion ticket.
+    pub expected_generation: Option<CacheKeepaliveCompletionTicket>,
     pub cache_anchor_age: Duration,
 }
 
@@ -96,26 +98,159 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
     async fn observe_session_generation(
         &self,
         session_key_hash: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         let _ = session_key_hash;
         Ok(None)
     }
 }
 
-#[derive(Clone)]
+/// Ownership acquired before dispatch, valid only for its original cache identity.
+#[derive(Clone, Debug)]
+pub(crate) struct RequestStartOrder {
+    session_key: SessionKey,
+    sequence: u64,
+    expected_generation: Option<CacheKeepaliveCompletionTicket>,
+    sibling_generation: Option<CacheKeepaliveCompletionTicket>,
+}
+
+enum CompletionDisposition {
+    Handled(CancelReason),
+    NotRenewable,
+}
+
+struct UnconsumedRequestOwner(Option<RequestStartOrder>);
+
+impl Drop for UnconsumedRequestOwner {
+    fn drop(&mut self) {
+        if let Some(order) = self.0.as_ref() {
+            tracing::debug!(
+                target: "cache_keepalive",
+                session_key_hash = %order.session_key,
+                completion_seq = order.sequence,
+                "completion owner dropped without a terminal outcome; retaining neutral deadline"
+            );
+        }
+    }
+}
+
 pub(crate) struct LifecycleKeepaliveContext {
-    pub(crate) principal: Principal,
-    pub(crate) accounting_key_id: String,
-    pub(crate) cache_metadata: RequestCacheMetadata,
-    pub(crate) upstream_id: Uuid,
-    pub(crate) shaped_body: Bytes,
-    pub(crate) original_body: Bytes,
-    pub(crate) downstream_headers: HeaderMap,
+    principal: Principal,
     pub(crate) request_dispatched_at: Instant,
+    request_start_order: UnconsumedRequestOwner,
+    renewal: Option<LifecycleKeepaliveRenewal>,
+    compaction_candidate: Option<(SessionKey, bool)>,
+}
+
+struct LifecycleKeepaliveRenewal {
+    accounting_key_id: String,
+    cache_metadata: RequestCacheMetadata,
+    upstream_id: Uuid,
+    shaped_body: Bytes,
+    original_body: Bytes,
+    downstream_headers: HeaderMap,
+}
+
+impl LifecycleKeepaliveContext {
+    pub(crate) fn new(
+        principal: Principal,
+        request_dispatched_at: Instant,
+        request_start_order: Option<RequestStartOrder>,
+    ) -> Self {
+        Self {
+            principal,
+            request_dispatched_at,
+            request_start_order: UnconsumedRequestOwner(request_start_order),
+            renewal: None,
+            compaction_candidate: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_renewal(
+        mut self,
+        accounting_key_id: String,
+        cache_metadata: RequestCacheMetadata,
+        upstream_id: Uuid,
+        shaped_body: Bytes,
+        original_body: Bytes,
+        downstream_headers: HeaderMap,
+    ) -> Self {
+        self.renewal = Some(LifecycleKeepaliveRenewal {
+            accounting_key_id,
+            cache_metadata,
+            upstream_id,
+            shaped_body,
+            original_body,
+            downstream_headers,
+        });
+        self
+    }
+
+    pub(crate) fn with_compaction_candidate(mut self, metadata: &RequestCacheMetadata) -> Self {
+        if !metadata.explicit_auxiliary
+            && is_keepalive_eligible_request_kind(metadata.request_kind.as_deref())
+        {
+            self.compaction_candidate = cache_keepalive_session_key(&self.principal, metadata)
+                .map(|key| (key, allows_sibling_backstop(metadata)));
+        }
+        self
+    }
+
+    pub(crate) fn response_observer(&self) -> Option<StreamingKeepaliveResponse> {
+        self.observes_response()
+            .then(|| StreamingKeepaliveResponse {
+                compaction_only: self.renewal.is_none(),
+                ..StreamingKeepaliveResponse::default()
+            })
+    }
+
+    pub(crate) fn observes_response(&self) -> bool {
+        self.renewal.is_some() || self.compaction_candidate.is_some()
+    }
+
+    pub(crate) fn complete(
+        mut self,
+        keepalive: &LifecycleKeepalive,
+        response: Option<&Value>,
+        cache_anchor_age: Duration,
+        cached_tokens: u64,
+    ) {
+        let request_start_order = self.request_start_order.0.take();
+        if let (Some(renewal), Some(response)) = (self.renewal, response) {
+            keepalive.on_response_completed(
+                response,
+                &self.principal,
+                renewal.accounting_key_id,
+                &renewal.cache_metadata,
+                renewal.upstream_id,
+                renewal.shaped_body,
+                renewal.original_body,
+                &renewal.downstream_headers,
+                cache_anchor_age,
+                cached_tokens,
+                request_start_order,
+            );
+        } else if let Some(order) = request_start_order {
+            keepalive.on_completed_not_renewable(self.principal, order, cache_anchor_age);
+        } else if let Some((session_key, allow_sibling_backstop)) = self.compaction_candidate
+            && response.is_some_and(HeuristicClassifier::is_compaction_boundary)
+        {
+            keepalive.on_compaction_completed(
+                self.principal,
+                session_key,
+                allow_sibling_backstop,
+                cache_anchor_age,
+            );
+        }
+    }
 }
 
 const SESSION_SHARD_COUNT: usize = 64;
 const MAX_TRACKED_SESSIONS_PER_SHARD: usize = 512;
+
+#[cfg(test)]
+#[path = "lifecycle_glue/completed_not_renewable_tests.rs"]
+mod completed_not_renewable_tests;
 
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepalive {
@@ -232,40 +367,32 @@ impl LifecycleKeepalive {
         _authenticated: &crate::authn_rail::Authenticated,
         principal: &Principal,
         cache_metadata: &RequestCacheMetadata,
-    ) {
-        let Some(enqueuer) = self.enqueuer.as_ref() else {
-            return;
-        };
+    ) -> Option<RequestStartOrder> {
+        let enqueuer = self.enqueuer.as_ref()?;
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
             || (cache_metadata.cache_breakpoints.is_empty()
                 && cache_metadata.cache_keepalive_surface.is_none())
         {
-            return;
+            return None;
         }
         let view = self.dynamic_view.load();
-        let Some(config) = view
+        let config = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
-            .filter(|config| config.enabled)
-        else {
-            return;
-        };
+            .filter(|config| config.enabled)?;
         if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
             && !config.classifier.openai_responses_enabled
         {
-            return;
+            return None;
         }
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
-        };
+        let session_key = cache_keepalive_session_key(principal, cache_metadata)?;
         let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.record_issued_seq(&session_key, sequence);
-        let mut shard = self.session_shard(&session_key).lock().await;
-        // Freshness suppresses stale completions, never a real request's fence:
-        // a newer waiter may be dropped before it performs its durable write.
-        let _ = self.claim_completion_seq(&mut shard, &session_key, sequence);
+        let _shard = self.session_shard(&session_key).lock().await;
+        // Issuance fences older completions, but only completion claims this
+        // ordinal: the request must retain it until its response completes.
         let expected_generation = match enqueuer
             .observe_session_generation(&session_key.to_string())
             .await
@@ -278,18 +405,27 @@ impl LifecycleKeepalive {
                     %error,
                     "skipping cache keep-alive request fence: failed to observe session generation"
                 );
-                return;
+                return None;
             }
         };
-        self.cancel_session(
-            &session_key,
-            principal,
-            CancelReason::NewRequest,
+        let sibling_generation = self
+            .cancel_session(
+                &session_key,
+                principal,
+                CancelReason::NewRequest,
+                expected_generation,
+                Duration::ZERO,
+                allows_sibling_backstop(cache_metadata),
+                None,
+            )
+            .await;
+        drop(_shard);
+        Some(RequestStartOrder {
+            session_key,
+            sequence,
             expected_generation,
-            Duration::ZERO,
-            allows_sibling_backstop(cache_metadata),
-        )
-        .await;
+            sibling_generation,
+        })
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
@@ -309,6 +445,7 @@ impl LifecycleKeepalive {
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
+        request_start_order: Option<RequestStartOrder>,
     ) {
         if self.enqueuer.is_none() {
             return;
@@ -316,6 +453,9 @@ impl LifecycleKeepalive {
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
         {
+            if let Some(order) = request_start_order {
+                self.on_completed_not_renewable(principal.clone(), order, cache_anchor_age);
+            }
             return;
         }
         let view = self.dynamic_view.load();
@@ -325,49 +465,259 @@ impl LifecycleKeepalive {
             .and_then(|cached| cached.cache_keepalive())
             .filter(|config| config.enabled)
         else {
+            if let Some(order) = request_start_order {
+                self.on_completed_not_renewable(principal.clone(), order, cache_anchor_age);
+            }
             return;
         };
         if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
             && !config.classifier.openai_responses_enabled
         {
+            if let Some(order) = request_start_order {
+                self.on_completed_not_renewable(principal.clone(), order, cache_anchor_age);
+            }
             return;
         }
         let compaction_boundary =
             super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if cache_metadata.cache_breakpoints.is_empty()
-            && !compaction_boundary
-            && cache_metadata.cache_keepalive_surface.is_none()
-        {
-            return;
-        }
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+        let session_key = cache_keepalive_session_key(principal, cache_metadata).filter(|_| {
+            !cache_metadata.cache_breakpoints.is_empty()
+                || compaction_boundary
+                || cache_metadata.cache_keepalive_surface.is_some()
+        });
+        let (request_start_order, changed_identity_order) = match request_start_order {
+            Some(order) if Some(&order.session_key) != session_key.as_ref() => (None, Some(order)),
+            order => (order, None),
+        };
+        let completion_seq = session_key.as_ref().map(|session_key| {
+            request_start_order.as_ref().map_or_else(
+                || {
+                    let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                    self.record_issued_seq(session_key, sequence);
+                    sequence
+                },
+                |order| order.sequence,
+            )
+        });
+        let Some(completion_seq) = completion_seq else {
+            if let Some(order) = changed_identity_order {
+                let this = self.clone();
+                let principal = principal.clone();
+                tokio::spawn(async move {
+                    this.retire_completed_owners(
+                        &principal,
+                        &order,
+                        cache_anchor_age,
+                        CancelReason::SessionIdentityChanged,
+                    )
+                    .await;
+                });
+            }
             return;
         };
-        let completion_seq = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.record_issued_seq(&session_key, completion_seq);
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
         let cache_metadata = cache_metadata.clone();
         let downstream_headers = downstream_headers.clone();
         tokio::spawn(async move {
-            this.persist_completion(
-                completion_seq,
-                &response_body_json,
+            if let Some(order) = changed_identity_order {
+                this.retire_completed_owners(
+                    &principal,
+                    &order,
+                    cache_anchor_age,
+                    CancelReason::SessionIdentityChanged,
+                )
+                .await;
+            }
+            let disposition = this
+                .persist_completion(
+                    completion_seq,
+                    &response_body_json,
+                    &principal,
+                    accounting_key_id,
+                    &cache_metadata,
+                    upstream_id,
+                    shaped_body,
+                    original_body,
+                    &downstream_headers,
+                    cache_anchor_age,
+                    cached_tokens,
+                    request_start_order.as_ref(),
+                )
+                .await;
+            let Some(order) = request_start_order.as_ref() else {
+                return;
+            };
+            let CompletionDisposition::Handled(sibling_reason) = disposition else {
+                this.retire_completed_owners(
+                    &principal,
+                    order,
+                    cache_anchor_age,
+                    CancelReason::CompletedNotRenewable,
+                )
+                .await;
+                return;
+            };
+            // Primary and sibling ownership have independent freshness fences.
+            if this
+                .cancel_sibling_session(
+                    &order.session_key,
+                    &principal,
+                    sibling_reason,
+                    cache_anchor_age,
+                    true,
+                    Some(order),
+                )
+                .await
+                .is_some()
+                && sibling_reason == CancelReason::SessionIdentityChanged
+            {
+                super::record_cancelled(&principal.id, sibling_reason);
+            }
+        });
+    }
+
+    pub(crate) fn on_completed_not_renewable(
+        &self,
+        principal: Principal,
+        order: RequestStartOrder,
+        cache_anchor_age: Duration,
+    ) {
+        if self.enqueuer.is_none() {
+            return;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.retire_completed_owners(
                 &principal,
-                accounting_key_id,
-                &cache_metadata,
-                upstream_id,
-                shaped_body,
-                original_body,
-                &downstream_headers,
+                &order,
                 cache_anchor_age,
-                cached_tokens,
+                CancelReason::CompletedNotRenewable,
             )
             .await;
         });
     }
 
+    async fn retire_completed_owners(
+        &self,
+        principal: &Principal,
+        order: &RequestStartOrder,
+        cache_anchor_age: Duration,
+        reason: CancelReason,
+    ) {
+        // The completed attempt no longer owns a renewable identity here.
+        // Its retained ticket must never fence a replacement identity.
+        let _shard = self.session_shard(&order.session_key).lock().await;
+        let _ = self
+            .cancel_session(
+                &order.session_key,
+                principal,
+                reason,
+                order.expected_generation,
+                cache_anchor_age,
+                true,
+                Some(order),
+            )
+            .await;
+        super::record_cancelled(&principal.id, reason);
+    }
+
+    fn on_compaction_completed(
+        &self,
+        principal: Principal,
+        session_key: SessionKey,
+        allow_sibling_backstop: bool,
+        cache_anchor_age: Duration,
+    ) {
+        if self.enqueuer.is_none()
+            || !self
+                .dynamic_view
+                .load()
+                .principal_view
+                .get(&principal.id)
+                .and_then(|cached| cached.cache_keepalive())
+                .is_some_and(|config| config.enabled)
+        {
+            return;
+        }
+        let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.record_issued_seq(&session_key, sequence);
+        let this = self.clone();
+        tokio::spawn(async move {
+            if this
+                .dynamic_view
+                .load()
+                .principal_view
+                .get(&principal.id)
+                .and_then(|cached| cached.cache_keepalive())
+                .is_some_and(|config| config.enabled)
+            {
+                this.persist_compaction_boundary(
+                    &principal,
+                    &session_key,
+                    sequence,
+                    cache_anchor_age,
+                    allow_sibling_backstop,
+                    None,
+                )
+                .await;
+            }
+        });
+    }
+
+    async fn persist_compaction_boundary(
+        &self,
+        principal: &Principal,
+        session_key: &SessionKey,
+        completion_seq: u64,
+        cache_anchor_age: Duration,
+        allow_sibling_backstop: bool,
+        request_start_order: Option<&RequestStartOrder>,
+    ) -> CompletionDisposition {
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return CompletionDisposition::NotRenewable;
+        };
+        let mut shard = self.session_shard(session_key).lock().await;
+        let is_latest = self.claim_completion_seq(&mut shard, session_key, completion_seq);
+        if request_start_order.is_some() && !is_latest {
+            return CompletionDisposition::Handled(CancelReason::SessionIdentityChanged);
+        }
+        let expected_generation = if let Some(order) = request_start_order {
+            order.expected_generation
+        } else {
+            match enqueuer
+                .observe_session_generation(&session_key.to_string())
+                .await
+            {
+                Ok(expected) => expected,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive compaction fence: failed to observe session generation"
+                    );
+                    return CompletionDisposition::NotRenewable;
+                }
+            }
+        };
+        if is_latest {
+            let _ = self
+                .cancel_session(
+                    session_key,
+                    principal,
+                    CancelReason::UserTurnDetected,
+                    expected_generation,
+                    cache_anchor_age,
+                    allow_sibling_backstop,
+                    request_start_order,
+                )
+                .await;
+            super::record_cancelled(&principal.id, CancelReason::UserTurnDetected);
+        }
+        CompletionDisposition::Handled(CancelReason::UserTurnDetected)
+    }
     #[allow(clippy::too_many_arguments)]
     async fn persist_completion(
         &self,
@@ -382,66 +732,47 @@ impl LifecycleKeepalive {
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
-    ) {
+        request_start_order: Option<&RequestStartOrder>,
+    ) -> CompletionDisposition {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
-            return;
+            return CompletionDisposition::NotRenewable;
         };
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
         {
-            return;
+            return CompletionDisposition::NotRenewable;
         }
         let view = self.dynamic_view.load();
         let Some(cached) = view.principal_view.get(&principal.id) else {
-            return;
+            return CompletionDisposition::NotRenewable;
         };
         let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
-            return;
+            return CompletionDisposition::NotRenewable;
         };
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
+            return CompletionDisposition::NotRenewable;
         };
-        let allow_sibling_backstop = allows_sibling_backstop(cache_metadata);
+        // Captured siblings are retired once at the detached completion boundary.
+        let allow_sibling_backstop =
+            request_start_order.is_none() && allows_sibling_backstop(cache_metadata);
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
         if compaction_boundary
             && cache_metadata.cache_breakpoints.is_empty()
             && cache_metadata.cache_keepalive_surface.is_none()
         {
-            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
-            let session_key_hash = session_key.to_string();
-            let mut shard = self.session_shard(&session_key).lock().await;
-            let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-            let expected_generation = match enqueuer
-                .observe_session_generation(&session_key_hash)
-                .await
-            {
-                Ok(expected) => expected,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "cache_keepalive",
-                        principal_id = principal.id.as_str(),
-                        %error,
-                        "skipping cache keep-alive compaction fence: failed to observe session generation"
-                    );
-                    return;
-                }
-            };
-            if is_latest {
-                self.cancel_session(
-                    &session_key,
+            return self
+                .persist_compaction_boundary(
                     principal,
-                    CancelReason::UserTurnDetected,
-                    expected_generation,
+                    &session_key,
+                    completion_seq,
                     cache_anchor_age,
                     allow_sibling_backstop,
+                    request_start_order,
                 )
                 .await;
-                super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
-            }
-            return;
         }
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
-            return;
+            return CompletionDisposition::NotRenewable;
         };
         let ttl = cache_metadata.cache_keepalive_ttl.unwrap_or_else(|| {
             cache_metadata
@@ -455,17 +786,23 @@ impl LifecycleKeepalive {
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
         let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-        let expected_generation = match enqueuer.observe_session_generation(&session_key_hash).await
-        {
-            Ok(expected) => expected,
-            Err(error) => {
-                tracing::warn!(
-                    target: "cache_keepalive",
-                    principal_id = principal.id.as_str(),
-                    %error,
-                    "skipping cache keep-alive completion: failed to observe session generation"
-                );
-                return;
+        if request_start_order.is_some() && !is_latest {
+            return CompletionDisposition::Handled(CancelReason::SessionIdentityChanged);
+        }
+        let expected_generation = if let Some(order) = request_start_order {
+            order.expected_generation
+        } else {
+            match enqueuer.observe_session_generation(&session_key_hash).await {
+                Ok(expected) => expected,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive completion: failed to observe session generation"
+                    );
+                    return CompletionDisposition::NotRenewable;
+                }
             }
         };
         let renewal_request_json =
@@ -478,7 +815,7 @@ impl LifecycleKeepalive {
                         %error,
                         "skipping cache keep-alive eligibility: shaped body is not valid JSON"
                     );
-                    return;
+                    return CompletionDisposition::NotRenewable;
                 }
             };
         if cache_metadata.cache_keepalive_surface.is_none()
@@ -494,18 +831,20 @@ impl LifecycleKeepalive {
             )
             .await;
             if is_latest {
-                self.cancel_session(
-                    &session_key,
-                    principal,
-                    CancelReason::ZeroTokenRenewalUnsupported,
-                    expected_generation,
-                    cache_anchor_age,
-                    allow_sibling_backstop,
-                )
-                .await;
+                let _ = self
+                    .cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::ZeroTokenRenewalUnsupported,
+                        expected_generation,
+                        cache_anchor_age,
+                        allow_sibling_backstop,
+                        request_start_order,
+                    )
+                    .await;
                 super::record_cancelled(&principal_name, CancelReason::ZeroTokenRenewalUnsupported);
             }
-            return;
+            return CompletionDisposition::Handled(CancelReason::ZeroTokenRenewalUnsupported);
         }
         let snapshot_url = if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
         {
@@ -562,18 +901,20 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::SnapshotTooLarge,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::SnapshotTooLarge,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 }
-                return;
+                return CompletionDisposition::Handled(CancelReason::SnapshotTooLarge);
             }
             Err(error) => {
                 tracing::warn!(
@@ -582,7 +923,7 @@ impl LifecycleKeepalive {
                     %error,
                     "skipping cache keep-alive snapshot capture"
                 );
-                return;
+                return CompletionDisposition::NotRenewable;
             }
         };
         let (fingerprint, hash, policy, schema) = cache_prefix_evidence(cache_metadata);
@@ -615,24 +956,26 @@ impl LifecycleKeepalive {
                     )
                     .await;
                     if is_latest {
-                        self.cancel_session(
-                            &session_key,
-                            principal,
-                            CancelReason::CachedPrefixTooSmall,
-                            expected_generation,
-                            cache_anchor_age,
-                            allow_sibling_backstop,
-                        )
-                        .await;
+                        let _ = self
+                            .cancel_session(
+                                &session_key,
+                                principal,
+                                CancelReason::CachedPrefixTooSmall,
+                                expected_generation,
+                                cache_anchor_age,
+                                allow_sibling_backstop,
+                                request_start_order,
+                            )
+                            .await;
                         super::record_cancelled(
                             &principal_name,
                             CancelReason::CachedPrefixTooSmall,
                         );
                     }
-                    return;
+                    return CompletionDisposition::Handled(CancelReason::CachedPrefixTooSmall);
                 }
                 if !is_latest {
-                    return;
+                    return CompletionDisposition::Handled(CancelReason::SessionIdentityChanged);
                 }
                 if ttl == CacheTtl::Ttl12h {
                     self.record_not_tracked(
@@ -644,7 +987,18 @@ impl LifecycleKeepalive {
                         "openai 12h retention is recorded without read re-anchoring",
                     )
                     .await;
-                    return;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::RetentionRecorded,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
+                    return CompletionDisposition::Handled(CancelReason::RetentionRecorded);
                 }
                 if cache_metadata.cache_keepalive_surface.is_some()
                     && !super::openai::should_schedule_refresh(
@@ -666,7 +1020,18 @@ impl LifecycleKeepalive {
                         "refresh expected value is unknown or non-positive",
                     )
                     .await;
-                    return;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::RenewalNotBeneficial,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
+                    return CompletionDisposition::Handled(CancelReason::RenewalNotBeneficial);
                 }
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
@@ -700,7 +1065,9 @@ impl LifecycleKeepalive {
                         %error,
                         "durable cache keep-alive enqueue failed"
                     );
+                    return CompletionDisposition::NotRenewable;
                 }
+                CompletionDisposition::Handled(CancelReason::SessionIdentityChanged)
             }
             super::TurnDecision::UserTurn => {
                 self.record_not_tracked(
@@ -713,16 +1080,19 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::UserTurnDetected,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::UserTurnDetected,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                 }
+                CompletionDisposition::Handled(CancelReason::UserTurnDetected)
             }
             super::TurnDecision::Ambiguous => {
                 self.record_not_tracked(
@@ -735,32 +1105,35 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::UserTurnDetected,
-                        expected_generation,
-                        cache_anchor_age,
-                        allow_sibling_backstop,
-                    )
-                    .await;
+                    let _ = self
+                        .cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::AmbiguousTurn,
+                            expected_generation,
+                            cache_anchor_age,
+                            allow_sibling_backstop,
+                            request_start_order,
+                        )
+                        .await;
                 }
+                CompletionDisposition::Handled(CancelReason::AmbiguousTurn)
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn cancel_session(
         &self,
         session_key: &SessionKey,
         principal: &Principal,
         reason: CancelReason,
-        expected_generation: Option<u64>,
+        expected_generation: Option<CacheKeepaliveCompletionTicket>,
         cache_anchor_age: Duration,
         allow_sibling_backstop: bool,
-    ) {
-        let Some(enqueuer) = self.enqueuer.as_ref() else {
-            return;
-        };
+        request_start_order: Option<&RequestStartOrder>,
+    ) -> Option<CacheKeepaliveCompletionTicket> {
+        let enqueuer = self.enqueuer.as_ref()?;
         if let Err(error) = enqueuer
             .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                 session_key_hash: session_key.to_string(),
@@ -778,8 +1151,29 @@ impl LifecycleKeepalive {
                 "durable cache keep-alive cancellation failed"
             );
         }
+        self.cancel_sibling_session(
+            session_key,
+            principal,
+            reason,
+            cache_anchor_age,
+            allow_sibling_backstop,
+            request_start_order,
+        )
+        .await
+    }
+
+    async fn cancel_sibling_session(
+        &self,
+        session_key: &SessionKey,
+        principal: &Principal,
+        reason: CancelReason,
+        cache_anchor_age: Duration,
+        allow_sibling_backstop: bool,
+        request_start_order: Option<&RequestStartOrder>,
+    ) -> Option<CacheKeepaliveCompletionTicket> {
+        let enqueuer = self.enqueuer.as_ref()?;
         if !allow_sibling_backstop {
-            return;
+            return None;
         }
         let SessionKey {
             principal_id,
@@ -787,29 +1181,32 @@ impl LifecycleKeepalive {
             agent_scope: None,
         } = session_key
         else {
-            return;
+            return None;
         };
         let sibling_key =
             SessionKey::from_thread_and_agent(*principal_id, thread_id.clone(), "subagent");
-        let sibling_generation = match enqueuer
-            .observe_session_generation(&sibling_key.to_string())
-            .await
-        {
-            Ok(generation) => generation,
-            Err(error) => {
-                tracing::warn!(
-                    target: "cache_keepalive",
-                    principal_id = principal.id.as_str(),
-                    reason = reason.as_str(),
-                    %error,
-                    "durable subagent cache keep-alive generation lookup failed"
-                );
-                None
+        let sibling_generation = if let Some(order) = request_start_order {
+            // A captured absence is not permission to acquire a new owner.
+            order.sibling_generation
+        } else {
+            match enqueuer
+                .observe_session_generation(&sibling_key.to_string())
+                .await
+            {
+                Ok(generation) => generation,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        reason = reason.as_str(),
+                        %error,
+                        "durable subagent cache keep-alive generation lookup failed"
+                    );
+                    None
+                }
             }
         };
-        let Some(sibling_generation) = sibling_generation else {
-            return;
-        };
+        let sibling_generation = sibling_generation?;
         if let Err(error) = enqueuer
             .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                 session_key_hash: sibling_key.to_string(),
@@ -827,6 +1224,7 @@ impl LifecycleKeepalive {
                 "durable subagent cache keep-alive cancellation failed"
             );
         }
+        Some(sibling_generation)
     }
 
     async fn record_not_tracked(
@@ -876,48 +1274,85 @@ pub(crate) struct StreamingKeepaliveResponse {
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
     sse_observation_disabled: bool,
+    compaction_only: bool,
+    compaction_observed: bool,
 }
 
 impl StreamingKeepaliveResponse {
-    pub(crate) fn observe_emitted(&mut self, bytes: &[u8], max_pending_sse_bytes: usize) {
+    pub(crate) fn control_only() -> Self {
+        Self {
+            compaction_only: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn observe_emitted(
+        &mut self,
+        bytes: &[u8],
+        max_pending_sse_bytes: usize,
+        mut observe_event: impl FnMut(&ParsedSseEvent<'_>),
+    ) {
         if self.sse_observation_disabled {
             return;
         }
-        if self.pending_sse_bytes.is_empty() {
-            let mut offset = 0;
-            while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
-                let end = offset + end;
-                self.observe(&crate::usage_parser::parse_sse_event(&bytes[offset..end]));
-                offset = end;
-            }
-            if offset < bytes.len() {
-                let pending = &bytes[offset..];
-                if pending.len() > max_pending_sse_bytes {
+        let mut bytes = bytes;
+        if !self.pending_sse_bytes.is_empty() {
+            // The longest event delimiter is CRLF CRLF. Check its possible
+            // boundary overlap before scanning the incoming chunk directly.
+            let suffix_len = self.pending_sse_bytes.len().min(3);
+            let prefix_len = bytes.len().min(3);
+            let mut boundary = [0_u8; 6];
+            boundary[..suffix_len].copy_from_slice(
+                &self.pending_sse_bytes[self.pending_sse_bytes.len() - suffix_len..],
+            );
+            boundary[suffix_len..suffix_len + prefix_len].copy_from_slice(&bytes[..prefix_len]);
+            let completing_len =
+                crate::usage_parser::find_sse_event_end(&boundary[..suffix_len + prefix_len])
+                    .filter(|end| *end > suffix_len)
+                    .map(|end| end - suffix_len)
+                    .or_else(|| crate::usage_parser::find_sse_event_end(bytes));
+            let Some(completing_len) = completing_len else {
+                if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes
+                {
+                    self.pending_sse_bytes.clear();
                     self.sse_observation_disabled = true;
                 } else {
-                    self.pending_sse_bytes.extend_from_slice(pending);
+                    self.pending_sse_bytes.extend_from_slice(bytes);
                 }
+                return;
+            };
+
+            // Join only the split event, not the rest of a potentially large
+            // batch. Complete events are observed before budgeting the tail.
+            let mut event_bytes = std::mem::take(&mut self.pending_sse_bytes);
+            event_bytes.extend_from_slice(&bytes[..completing_len]);
+            {
+                let event = crate::usage_parser::parse_sse_event(&event_bytes);
+                observe_event(&event);
+                self.observe(&event);
             }
-            return;
+            if event_bytes.capacity() <= max_pending_sse_bytes {
+                event_bytes.clear();
+                self.pending_sse_bytes = event_bytes;
+            }
+            bytes = &bytes[completing_len..];
         }
 
-        if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes {
-            self.pending_sse_bytes.clear();
-            self.sse_observation_disabled = true;
-            return;
-        }
-        self.pending_sse_bytes.extend_from_slice(bytes);
         let mut offset = 0;
-        while let Some(relative_end) =
-            crate::usage_parser::find_sse_event_end(&self.pending_sse_bytes[offset..])
-        {
-            let end = offset + relative_end;
-            let event_bytes = self.pending_sse_bytes[offset..end].to_vec();
-            self.observe(&crate::usage_parser::parse_sse_event(&event_bytes));
+        while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
+            let end = offset + end;
+            let event = crate::usage_parser::parse_sse_event(&bytes[offset..end]);
+            observe_event(&event);
+            self.observe(&event);
             offset = end;
         }
-        if offset > 0 {
-            self.pending_sse_bytes.drain(..offset);
+        if offset < bytes.len() {
+            let pending = &bytes[offset..];
+            if pending.len() > max_pending_sse_bytes {
+                self.sse_observation_disabled = true;
+            } else {
+                self.pending_sse_bytes.extend_from_slice(pending);
+            }
         }
     }
 
@@ -925,6 +1360,23 @@ impl StreamingKeepaliveResponse {
         let Ok(Some(value)) = event.value() else {
             return;
         };
+        if self.compaction_only {
+            self.compaction_observed |= HeuristicClassifier::is_compaction_boundary(value)
+                || value
+                    .get("message")
+                    .is_some_and(HeuristicClassifier::is_compaction_boundary)
+                || value
+                    .get("content_block")
+                    .and_then(|block| block.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("compaction")
+                || value
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    == Some("compaction");
+            return;
+        }
         if matches!(
             value.get("type").and_then(Value::as_str),
             Some("response.completed" | "response.incomplete")
@@ -975,6 +1427,11 @@ impl StreamingKeepaliveResponse {
     }
 
     pub(crate) fn into_value(self) -> Option<Value> {
+        if self.compaction_only {
+            return self
+                .compaction_observed
+                .then(|| serde_json::json!({"stop_reason": "compaction"}));
+        }
         if self.openai_response.is_some() {
             return self.openai_response;
         }
@@ -1207,12 +1664,66 @@ mod tests {
     };
     use http::HeaderValue;
 
+    #[test]
+    fn compaction_only_stream_observer_retains_no_renewal_snapshot() {
+        for terminal in [
+            b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"compaction\"}}\n\n".as_slice(),
+            b"event: content_block_start\ndata: {\"content_block\":{\"type\":\"compaction\",\"content\":\"summary\"}}\n\n".as_slice(),
+        ] {
+            for emitted in [false, true] {
+                let mut response = StreamingKeepaliveResponse {
+                    compaction_only: true,
+                    ..StreamingKeepaliveResponse::default()
+                };
+                response.observe(&crate::usage_parser::parse_sse_event(
+                    b"event: message_start\ndata: {\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"large response\"}],\"usage\":{\"input_tokens\":12}}}\n\n",
+                ));
+                if emitted {
+                    let split = terminal.len() / 2;
+                    response.observe_emitted(&terminal[..split], 1024, |_| {});
+                    response.observe_emitted(&terminal[split..], 1024, |_| {});
+                } else {
+                    response.observe(&crate::usage_parser::parse_sse_event(terminal));
+                }
+                assert!(response.message.is_none());
+                assert!(response.openai_response.is_none());
+                assert!(response.content_blocks.is_empty());
+                assert!(response.stop_reason.is_none());
+                assert_eq!(response.into_value(), Some(serde_json::json!({"stop_reason": "compaction"})));
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_only_stream_observer_ignores_normal_tool_completion() {
+        let mut response = StreamingKeepaliveResponse {
+            compaction_only: true,
+            ..StreamingKeepaliveResponse::default()
+        };
+        response.observe_emitted(
+            b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"Bash\"}}\n\n\
+              event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
+            |_| {},
+        );
+        assert!(response.into_value().is_none());
+    }
+
+    fn completion_ticket(sequence: u64) -> CacheKeepaliveCompletionTicket {
+        CacheKeepaliveCompletionTicket {
+            epoch: Uuid::from_u128(1),
+            sequence,
+            valid_until_unix_secs: u64::MAX,
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum OrderedCompletion {
         Observe(String),
-        Enqueue(String, Option<u64>),
+        Enqueue(String, Option<CacheKeepaliveCompletionTicket>),
         NotTracked(String),
-        Cancel(String, Option<u64>),
+        Cancel(String, Option<CacheKeepaliveCompletionTicket>),
     }
 
     struct OrderedCompletionEnqueuer {
@@ -1224,11 +1735,11 @@ mod tests {
         async fn observe_session_generation(
             &self,
             key: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             self.events
                 .send(OrderedCompletion::Observe(key.to_owned()))
                 .expect("observer receiver");
-            Ok(Some(41))
+            Ok(Some(completion_ticket(41)))
         }
 
         async fn enqueue_cache_keepalive(
@@ -1248,7 +1759,10 @@ mod tests {
             &self,
             request: CacheKeepaliveCancelRequest,
         ) -> Result<(), CacheKeepaliveEnqueueError> {
-            assert_eq!(request.reason, CancelReason::UserTurnDetected);
+            assert!(matches!(
+                request.reason,
+                CancelReason::UserTurnDetected | CancelReason::SessionIdentityChanged
+            ));
             self.events
                 .send(OrderedCompletion::Cancel(
                     request.session_key_hash,
@@ -1271,8 +1785,8 @@ mod tests {
     }
     #[derive(Default)]
     struct BackstopState {
-        generations: std::sync::Mutex<HashMap<String, Option<u64>>>,
-        cancellations: std::sync::Mutex<Vec<(String, Option<u64>)>>,
+        generations: std::sync::Mutex<HashMap<String, Option<CacheKeepaliveCompletionTicket>>>,
+        cancellations: std::sync::Mutex<Vec<(String, Option<CacheKeepaliveCompletionTicket>)>>,
         fail_primary: bool,
     }
 
@@ -1321,7 +1835,7 @@ mod tests {
         async fn observe_session_generation(
             &self,
             session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             Ok(self
                 .state
                 .generations
@@ -1357,9 +1871,9 @@ mod tests {
             .generations
             .lock()
             .expect("generation state")
-            .insert(sibling.to_string(), Some(9));
+            .insert(sibling.to_string(), Some(completion_ticket(9)));
         let keepalive = backstop_keepalive(Arc::clone(&state));
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1367,17 +1881,101 @@ mod tests {
                     kind: cc_lb_domain::PrincipalKind::InternalKey,
                 },
                 CancelReason::UserTurnDetected,
-                Some(3),
+                Some(completion_ticket(3)),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
             vec![
-                (primary.to_string(), Some(3)),
-                (sibling.to_string(), Some(9))
+                (primary.to_string(), Some(completion_ticket(3))),
+                (sibling.to_string(), Some(completion_ticket(9)))
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_completion_reuses_sibling_start_ticket_after_newer_sibling_start() {
+        let state = Arc::new(BackstopState::default());
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let principal_id = cache_keepalive_principal_uuid(&principal.id);
+        let primary = SessionKey::from_thread_id(principal_id, "owned-sibling");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "owned-sibling", "subagent");
+        state
+            .generations
+            .lock()
+            .expect("generations")
+            .insert(sibling.to_string(), Some(completion_ticket(9)));
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        let sibling_generation = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::NewRequest,
+                Some(completion_ticket(3)),
+                Duration::ZERO,
+                true,
+                None,
+            )
+            .await;
+        assert_eq!(sibling_generation, Some(completion_ticket(9)));
+        state
+            .generations
+            .lock()
+            .expect("generations")
+            .insert(sibling.to_string(), Some(completion_ticket(10)));
+        let _ = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::UserTurnDetected,
+                Some(completion_ticket(3)),
+                Duration::ZERO,
+                true,
+                Some(&RequestStartOrder {
+                    session_key: primary.clone(),
+                    sequence: 1,
+                    expected_generation: Some(completion_ticket(3)),
+                    sibling_generation,
+                }),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellations"),
+            vec![
+                (primary.to_string(), Some(completion_ticket(3))),
+                (sibling.to_string(), Some(completion_ticket(9))),
+                (primary.to_string(), Some(completion_ticket(3))),
+                (sibling.to_string(), Some(completion_ticket(9))),
+            ],
+            "completion cannot acquire sibling ticket 10 after dispatch"
+        );
+        state.cancellations.lock().expect("cancellations").clear();
+        let _ = keepalive
+            .cancel_session(
+                &primary,
+                &principal,
+                CancelReason::UserTurnDetected,
+                Some(completion_ticket(3)),
+                Duration::ZERO,
+                true,
+                Some(&RequestStartOrder {
+                    session_key: primary.clone(),
+                    sequence: 1,
+                    expected_generation: Some(completion_ticket(3)),
+                    sibling_generation: None,
+                }),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellations"),
+            vec![(primary.to_string(), Some(completion_ticket(3)))],
+            "an uncaptured sibling must not acquire ticket 10 at completion"
         );
     }
 
@@ -1388,7 +1986,7 @@ mod tests {
         let primary = SessionKey::from_thread_id(principal_id, "thread-2");
         let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-2", "subagent");
         let keepalive = backstop_keepalive(Arc::clone(&state));
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1399,6 +1997,7 @@ mod tests {
                 None,
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
@@ -1410,9 +2009,9 @@ mod tests {
             .generations
             .lock()
             .expect("generation state")
-            .insert(sibling.to_string(), Some(12));
+            .insert(sibling.to_string(), Some(completion_ticket(12)));
         let scoped = SessionKey::from_thread_and_agent(principal_id, "thread-2", "advisor");
-        backstop_keepalive(Arc::clone(&state))
+        let _ = backstop_keepalive(Arc::clone(&state))
             .cancel_session(
                 &scoped,
                 &Principal {
@@ -1420,18 +2019,22 @@ mod tests {
                     kind: cc_lb_domain::PrincipalKind::InternalKey,
                 },
                 CancelReason::NewRequest,
-                Some(4),
+                Some(completion_ticket(4)),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
-            vec![(primary.to_string(), None), (scoped.to_string(), Some(4)),]
+            vec![
+                (primary.to_string(), None),
+                (scoped.to_string(), Some(completion_ticket(4))),
+            ]
         );
 
         let restarted = backstop_keepalive(Arc::clone(&state));
-        restarted
+        let _ = restarted
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1439,18 +2042,19 @@ mod tests {
                     kind: cc_lb_domain::PrincipalKind::InternalKey,
                 },
                 CancelReason::NewRequest,
-                Some(5),
+                Some(completion_ticket(5)),
                 Duration::ZERO,
                 true,
+                None,
             )
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
             vec![
                 (primary.to_string(), None),
-                (scoped.to_string(), Some(4)),
-                (primary.to_string(), Some(5)),
-                (sibling.to_string(), Some(12)),
+                (scoped.to_string(), Some(completion_ticket(4))),
+                (primary.to_string(), Some(completion_ticket(5))),
+                (sibling.to_string(), Some(completion_ticket(12))),
             ]
         );
     }
@@ -1465,11 +2069,11 @@ mod tests {
             .generations
             .lock()
             .expect("generation state")
-            .insert(sibling.to_string(), Some(7));
+            .insert(sibling.to_string(), Some(completion_ticket(7)));
         let keepalive = backstop_keepalive(Arc::clone(&state));
         let mut metadata = RequestCacheMetadata::default();
         metadata.claude_agent_id = Some("main".to_owned());
-        keepalive
+        let _ = keepalive
             .cancel_session(
                 &primary,
                 &Principal {
@@ -1477,14 +2081,15 @@ mod tests {
                     kind: cc_lb_domain::PrincipalKind::InternalKey,
                 },
                 CancelReason::NewRequest,
-                Some(4),
+                Some(completion_ticket(4)),
                 Duration::ZERO,
                 allows_sibling_backstop(&metadata),
+                None,
             )
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
-            vec![(primary.to_string(), Some(4))]
+            vec![(primary.to_string(), Some(completion_ticket(4)))]
         );
     }
 
@@ -1541,6 +2146,7 @@ mod tests {
                         &headers,
                         Duration::ZERO,
                         12_000,
+                        None,
                     )
                     .await;
                 assert!(
@@ -1560,6 +2166,7 @@ mod tests {
                 &headers,
                 Duration::ZERO,
                 12_000,
+                None,
             );
             if !detached_gate {
                 keepalive.on_response_completed(
@@ -1573,6 +2180,7 @@ mod tests {
                     &headers,
                     Duration::ZERO,
                     12_000,
+                    None,
                 );
             }
             drop(shard);
@@ -1596,12 +2204,12 @@ mod tests {
                 vec![
                     OrderedCompletion::Observe(expected_key.clone()),
                     OrderedCompletion::NotTracked(expected_key.clone()),
-                    OrderedCompletion::Cancel(expected_key.clone(), Some(41)),
+                    OrderedCompletion::Cancel(expected_key.clone(), Some(completion_ticket(41))),
                 ]
             } else {
                 vec![
                     OrderedCompletion::Observe(expected_key.clone()),
-                    OrderedCompletion::Enqueue(expected_key, Some(41)),
+                    OrderedCompletion::Enqueue(expected_key, Some(completion_ticket(41))),
                 ]
             };
             assert_eq!(
@@ -1629,22 +2237,11 @@ mod tests {
             ordinary.thread_id = legitimate.thread_id.clone();
             let headers = HeaderMap::new();
             let shard = keepalive.session_shard(&key).lock().await;
-            keepalive.on_response_completed(
-                &serde_json::json!({
-                    "type": "message",
-                    "content": [{"type": "tool_use", "id": "toolu_pending", "name": "Bash", "input": {}}],
-                    "stop_reason": "tool_use"
-                }),
-                &principal,
-                "accounting-key".to_owned(),
-                &legitimate,
-                Uuid::nil(),
-                body.clone(),
-                body.clone(),
-                &headers,
-                Duration::ZERO,
-                12_000,
-            );
+            keepalive.on_response_completed(&serde_json::json!({
+                "type": "message",
+                "content": [{"type": "tool_use", "id": "toolu_pending", "name": "Bash", "input": {}}],
+                "stop_reason": "tool_use"
+            }), &principal, "accounting-key".to_owned(), &legitimate, Uuid::nil(), body.clone(), body.clone(), &headers, Duration::ZERO, 12_000, None);
             keepalive.on_response_completed(
                 &ordinary_response,
                 &principal,
@@ -1656,6 +2253,7 @@ mod tests {
                 &headers,
                 Duration::ZERO,
                 12_000,
+                None,
             );
             drop(shard);
             let operations = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1675,7 +2273,7 @@ mod tests {
                 operations,
                 vec![
                     OrderedCompletion::Observe(expected_key.clone()),
-                    OrderedCompletion::Enqueue(expected_key, Some(41)),
+                    OrderedCompletion::Enqueue(expected_key, Some(completion_ticket(41))),
                 ]
             );
         }
@@ -1901,8 +2499,9 @@ mod tests {
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"ask\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
             1024,
+            |_| {},
         );
-        response.observe_emitted(b"", 1024);
+        response.observe_emitted(b"", 1024, |_| {});
         let value = response.into_value().expect("emitted message");
         assert_eq!(
             value["content"],
@@ -1920,11 +2519,13 @@ mod tests {
             b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"que",
             1024,
+            |_| {},
         );
         response.observe_emitted(
             b"stion\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
             1024,
+            |_| {},
         );
 
         let value = response
@@ -1937,8 +2538,8 @@ mod tests {
     #[test]
     fn emitted_sse_partial_buffer_disables_observation_at_budget() {
         let mut response = StreamingKeepaliveResponse::default();
-        response.observe_emitted(b"data: ", 4);
-        response.observe_emitted(b"xxxxx", 4);
+        response.observe_emitted(b"data: ", 4, |_| {});
+        response.observe_emitted(b"xxxxx", 4, |_| {});
 
         assert!(response.sse_observation_disabled);
         assert!(response.pending_sse_bytes.is_empty());
@@ -2096,6 +2697,129 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn changed_identity_gets_fresh_local_order_and_yields_to_newer_completion() {
+        for newer_completion in [false, true] {
+            let record = StoragePrincipalRecord {
+                id: Uuid::from_u128(99),
+                name: "identity-order".to_owned(),
+                kind: StoragePrincipalKind::Machine,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                enabled: true,
+                deleted_at_unix_secs: None,
+                revision: 1,
+                created_at_unix_secs: 0,
+                updated_at_unix_secs: 0,
+                router_terminal_strategy: Default::default(),
+                cache_keepalive: Some(CacheKeepaliveConfig {
+                    enabled: true,
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                    min_cache_tokens: 10_000,
+                    classifier: ClassifierConfig::default(),
+                }),
+            };
+            let view = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(TestSignerFactory))
+                .principal_view(Arc::new(PrincipalView::from_db(&[record], HashMap::new())))
+                .build();
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let keepalive = LifecycleKeepalive::new(
+                Some(Arc::new(OrderedCompletionEnqueuer { events })),
+                Arc::new(DynamicViewHolder::new(view)),
+            );
+            let principal = Principal {
+                id: "identity-order".to_owned(),
+                kind: cc_lb_domain::PrincipalKind::InternalKey,
+            };
+            let k1 = SessionKey::from_cache_prefix_hash(
+                cache_keepalive_principal_uuid(&principal.id),
+                "official",
+            );
+            let k2 = SessionKey::from_cache_prefix_hash(
+                cache_keepalive_principal_uuid(&principal.id),
+                "custom",
+            );
+            let request_json = serde_json::json!({
+                "model":"claude-test","max_tokens":32,
+                "system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}],
+                "messages":[{"role":"user","content":"hello"}]
+            });
+            let body = Bytes::from(serde_json::to_vec(&request_json).unwrap());
+            let mut metadata = RequestCacheMetadata::default();
+            metadata.cache_prefix_hash = Some("custom".to_owned());
+            metadata.request_json = Some(request_json);
+            metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+                block_index: 0,
+                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                path: "system[0]".to_owned(),
+                message_index: None,
+                ttl: Some("5m".to_owned()),
+                prefix_hash: "custom".to_owned(),
+                prefix_token_count: 12_000,
+                lookback_prefixes: Vec::new(),
+                token_estimate_source: None,
+            }];
+            // K1's start was ordinal 1; K2 already completed ordinal 2.
+            keepalive.next_completion_seq.store(2, Ordering::Relaxed);
+            keepalive.record_issued_seq(&k1, 1);
+            keepalive.record_issued_seq(&k2, 2);
+            let mut shard = keepalive.session_shard(&k2).lock().await;
+            assert!(keepalive.claim_completion_seq(&mut shard, &k2, 2));
+            keepalive.on_response_completed(
+                &serde_json::json!({
+                    "type":"message","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}],
+                    "stop_reason":"tool_use"
+                }),
+                &principal, "key".to_owned(), &metadata, Uuid::nil(),
+                body.clone(), body, &HeaderMap::new(), Duration::ZERO, 12_000,
+                Some(RequestStartOrder {
+                    session_key: k1.clone(), sequence: 1,
+                    expected_generation: Some(completion_ticket(7)), sibling_generation: None,
+                }),
+            );
+            assert_eq!(
+                keepalive.latest_issued_seq(&k2),
+                3,
+                "K1's old ordinal cannot be reused for K2's fresh completion"
+            );
+            if newer_completion {
+                keepalive.record_issued_seq(&k2, 4);
+                assert!(keepalive.claim_completion_seq(&mut shard, &k2, 4));
+            }
+            drop(shard);
+            let cancel = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                cancel,
+                OrderedCompletion::Cancel(k1.to_string(), Some(completion_ticket(7)))
+            );
+            let observe = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(observe, OrderedCompletion::Observe(k2.to_string()));
+            // Acquiring the shard after Observe waits until persistence has
+            // either enqueued or rejected the older K2 completion.
+            let _settled = keepalive.session_shard(&k2).lock().await;
+            if newer_completion {
+                assert!(received.try_recv().is_err(), "newer K2 owner must survive");
+            } else {
+                assert_eq!(
+                    received.try_recv().unwrap(),
+                    OrderedCompletion::Enqueue(k2.to_string(), Some(completion_ticket(41)))
+                );
+            }
+        }
+    }
+
     #[test]
     fn advance_session_seq_rejects_stale_or_duplicate_completions() {
         let mut shard = HashMap::new();
@@ -2251,7 +2975,8 @@ mod tests {
             async fn observe_session_generation(
                 &self,
                 key: &str,
-            ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError>
+            {
                 self.ordered.observe_session_generation(key).await
             }
 
@@ -2267,7 +2992,7 @@ mod tests {
                 request: CacheKeepaliveCancelRequest,
             ) -> Result<(), CacheKeepaliveEnqueueError> {
                 assert_eq!(request.reason, CancelReason::NewRequest);
-                assert_eq!(request.expected_generation, Some(41));
+                assert_eq!(request.expected_generation, Some(completion_ticket(41)));
                 self.active_generation.store(false, Ordering::SeqCst);
                 self.ordered
                     .events
@@ -2438,7 +3163,7 @@ mod tests {
             drop(newer.take());
         }
         drop(held_shard);
-        first.await;
+        let first_order = first.await;
         assert!(
             !enqueuer.active_generation.load(Ordering::SeqCst),
             "returning to actual dispatch must fence the queued generation even when a newer request issued a sequence"
@@ -2449,11 +3174,29 @@ mod tests {
         );
         assert_eq!(
             received.try_recv().expect("durable cancellation"),
-            OrderedCompletion::Cancel(key.to_string(), Some(41))
+            OrderedCompletion::Cancel(key.to_string(), Some(completion_ticket(41)))
         );
         if let Some(newer) = newer {
-            newer.await;
+            let _ = newer.await;
         }
+        keepalive.on_response_completed(
+            &serde_json::json!({"stop_reason": "end_turn", "content": []}),
+            &principal,
+            "request-owner-key".to_owned(),
+            &metadata,
+            Uuid::nil(),
+            Bytes::new(),
+            Bytes::new(),
+            &HeaderMap::new(),
+            Duration::ZERO,
+            12_000,
+            first_order,
+        );
+        assert_eq!(
+            keepalive.latest_issued_seq(&key),
+            first_sequence + 1,
+            "A's response must not advance local issuance past the newer B start"
+        );
     }
 
     #[tokio::test]
@@ -2590,6 +3333,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         keepalive
@@ -2605,6 +3349,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         assert_eq!(
@@ -2643,6 +3388,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         keepalive
@@ -2658,6 +3404,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::from_secs(1),
                 60_000,
+                None,
             )
             .await;
         assert_eq!(
@@ -2698,6 +3445,7 @@ mod tests {
                 &HeaderMap::new(),
                 Duration::ZERO,
                 0,
+                None,
             )
             .await;
         assert_eq!(

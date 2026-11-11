@@ -13,6 +13,11 @@ pub trait ConformanceBackend: Send + Sync + 'static {
 
     async fn create_fixture(&self) -> Result<Self::Fixture>;
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage>;
+    /// Opens an adapter without sharing process-local connection-pool state.
+    /// Backends whose `open` already creates a pool may use the default.
+    async fn open_independent(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
+        self.open(fixture).await
+    }
     async fn teardown(&self, fixture: Self::Fixture) -> Result<()>;
     fn kind(&self) -> BackendKind;
 

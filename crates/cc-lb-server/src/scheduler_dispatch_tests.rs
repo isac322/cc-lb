@@ -2867,7 +2867,8 @@ async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
         .await
         .expect("load session")
         .expect("session exists");
-    assert_eq!(record.generation, 1);
+    assert_eq!(record.generation, 2);
+    assert_eq!(record.refresh_count, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
     assert!(record.running_since_unix_secs.is_none());
@@ -2878,6 +2879,153 @@ async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
     );
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
     assert_eq!(requests.len(), 1);
+}
+
+#[derive(Default)]
+struct FourHourDispatchProbe(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl KeepaliveDispatcher for FourHourDispatchProbe {
+    async fn dispatch(
+        &self,
+        _snapshot: &RequestSnapshot,
+        _context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DispatchOutcome::Error("four-hour guard unexpectedly dispatched".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_four_hour_budget_survives_in_request_rollout_fence() {
+    let fixture = Fixture::new().await;
+    assert_four_hour_budget_survives_request_fence(&fixture, fixture.storage.clone()).await;
+}
+
+async fn assert_four_hour_budget_survives_request_fence(
+    fixture: &Fixture,
+    storage: Arc<dyn Storage>,
+) {
+    const BUDGET_SECS: u64 = 4 * 60 * 60;
+    const MAX_REFRESHES: u32 = 1_000;
+    let key = "four-hour-rollout";
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer_with_storage(storage.clone(), pusher.clone());
+    let mut request = fixture.enqueue_request();
+    request.session_key_hash = key.to_owned();
+    request.cache_anchor_age = Duration::from_secs(30);
+    request.params.max_total_duration_secs = BUDGET_SECS;
+    request.params.max_refreshes = MAX_REFRESHES;
+    request.config_snapshot.max_total_duration_secs = BUDGET_SECS;
+    request.config_snapshot.max_refreshes_per_session = MAX_REFRESHES;
+    enqueuer
+        .enqueue_cache_keepalive(request.clone())
+        .await
+        .expect("seed old cycle");
+    let ticket = enqueuer
+        .observe_session_generation(key)
+        .await
+        .expect("observe owner");
+    enqueuer
+        .cancel_cache_keepalive(cc_lb_engine::cache_keepalive::CacheKeepaliveCancelRequest {
+            session_key_hash: key.to_owned(),
+            reason: cc_lb_engine::cache_keepalive::CancelReason::NewRequest,
+            expected_generation: ticket,
+            cache_anchor_age: Duration::ZERO,
+        })
+        .await
+        .expect("install request marker");
+    let marker = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        marker.first_scheduled_at_unix_secs,
+        marker.running_since_unix_secs.unwrap()
+    );
+    let probe = Arc::new(FourHourDispatchProbe::default());
+    let mut dispatch = fixture.dispatch(pusher);
+    dispatch.storage = storage.clone();
+    dispatch.keepalive_dispatcher = probe.clone();
+    let job_for = |record: &cc_lb_storage_api::CacheKeepaliveSessionRecord| {
+        cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob {
+            session_key_hash: record.session_key_hash.clone(),
+            generation: record.generation,
+            principal_id: record.principal_id.clone(),
+            upstream_id: record.upstream_id,
+            ttl: record.ttl,
+            cache_anchor_at_unix_secs: record.cache_anchor_at_unix_secs,
+            expires_at_unix_secs: record.expires_at_unix_secs,
+            refresh_delay_secs: 270,
+            max_refreshes: MAX_REFRESHES,
+            max_total_duration_secs: BUDGET_SECS,
+            traceparent: None,
+        }
+    };
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job_for(&marker))
+            .await
+            .unwrap(),
+        JobOutcome::Noop
+    ));
+    request.expected_generation = ticket;
+    request.cycle_id = Uuid::new_v4();
+    request.cache_anchor_age = Duration::ZERO;
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("reactivate with real anchor");
+    let mut record = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    let real_anchor = record.cache_anchor_at_unix_secs;
+    assert_eq!(record.first_scheduled_at_unix_secs, real_anchor);
+    for offset in (270..BUDGET_SECS).step_by(270) {
+        let hit_at = real_anchor + offset;
+        record = storage
+            .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
+                session_key_hash: key.to_owned(),
+                generation: record.generation,
+                cache_anchor_at_unix_secs: hit_at,
+                run_at_unix_secs: hit_at + 270,
+                expires_at_unix_secs: hit_at + record.ttl.as_secs(),
+                encrypted_payload: None,
+                now_unix_secs: hit_at,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.first_scheduled_at_unix_secs, real_anchor);
+    }
+    let deadline = real_anchor + BUDGET_SECS;
+    assert!(
+        record.expires_at_unix_secs > deadline,
+        "isolate duration, not TTL expiry"
+    );
+    dispatch.clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(deadline));
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job_for(&record))
+            .await
+            .unwrap(),
+        JobOutcome::Done
+    ));
+    let terminal = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::MaxDuration)
+    );
+    assert_eq!(terminal.first_scheduled_at_unix_secs, real_anchor);
+    assert_eq!(probe.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -3295,6 +3443,8 @@ async fn worker_dispatches_published_job_before_producer_marks_enqueued() {
                     Some(CacheKeepaliveTerminalReason::MaxRefreshes)
                 );
                 assert_eq!(terminal.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+                assert_eq!(terminal.generation, before.generation + 1);
+                assert_eq!(terminal.refresh_count, 1);
 
                 resume.notify_one();
                 marked.notified().await;
@@ -3310,7 +3460,9 @@ async fn worker_dispatches_published_job_before_producer_marks_enqueued() {
                     after.terminal_reason,
                     Some(CacheKeepaliveTerminalReason::MaxRefreshes)
                 );
-                assert_eq!(after.generation, before.generation);
+                // The final paid hit advances the fence before the producer
+                // resumes; its stale pending-only mark must change nothing.
+                assert_eq!(after, terminal);
                 assert_eq!(
                     fixture.http.requests.lock().expect("requests lock").len(),
                     1
@@ -3893,7 +4045,7 @@ async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_ev
         assert_recreated_keepalive_cycle(&fixture, storage.clone()).await;
         assert_keepalive_dispatch_caps(&fixture, storage.clone()).await;
         assert_partial_keepalive_preservation(&fixture, storage.clone()).await;
-        assert_legacy_null_cycle_identity_upgrade(&fixture, storage, async {
+        assert_legacy_null_cycle_identity_upgrade(&fixture, storage.clone(), async {
             sqlx::query(
                 "UPDATE cache_keepalive_sessions SET cycle_id = NULL WHERE session_key_hash = $1",
             )
@@ -3903,6 +4055,9 @@ async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_ev
             .expect("legacy NULL cycle");
         })
         .await;
+        assert_keepalive_terminal_cap_counts_all_dispatched_renewals(&fixture, storage.clone())
+            .await;
+        assert_four_hour_budget_survives_request_fence(&fixture, storage).await;
     })
     .catch_unwind()
     .await;
@@ -4462,4 +4617,191 @@ async fn assert_legacy_null_cycle_identity_upgrade(
     );
     assert_eq!(legacy_event.cache_read_input_tokens, Some(37));
     assert_eq!(legacy_event.cost_usd_micros, Some(37));
+}
+
+#[tokio::test]
+async fn cache_keepalive_terminal_cap_counts_all_dispatched_renewals() {
+    let fixture = Fixture::new().await;
+    assert_keepalive_terminal_cap_counts_all_dispatched_renewals(&fixture, fixture.storage.clone())
+        .await;
+}
+
+async fn assert_keepalive_terminal_cap_counts_all_dispatched_renewals(
+    fixture: &Fixture,
+    storage: Arc<dyn Storage>,
+) {
+    storage
+        .purge_cache_keepalive_expired(i64::MAX as u64)
+        .await
+        .expect("clear prior sessions");
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    request.cycle_id = Uuid::new_v4();
+    let cycle_id = request.cycle_id;
+    request.params.max_refreshes = 3;
+    request.params.max_total_duration_secs = 3_600;
+    request.config_snapshot.max_refreshes_per_session = 3;
+    request.config_snapshot.max_total_duration_secs = 3_600;
+    fixture
+        .enqueuer_with_storage(storage.clone(), pusher.clone())
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue");
+    let mut dispatch = fixture.dispatch(pusher);
+    dispatch.storage = storage.clone();
+    let calls_before = fixture.http.requests.lock().expect("HTTP requests").len();
+    fixture.http.return_cache_hit_usage(0, 0, 10);
+    for generation in 1..=3 {
+        let mut job = fixture.pending_keepalive_job(generation).await;
+        job.max_refreshes = 3;
+        job.max_total_duration_secs = 3_600;
+        assert!(matches!(
+            dispatch
+                .dispatch_cache_keepalive(job.clone())
+                .await
+                .expect("dispatch renewal"),
+            JobOutcome::Done
+        ));
+        let record = storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load session")
+            .expect("session");
+        assert_eq!(
+            record.refresh_count, generation as u32,
+            "every dispatched renewal, including the terminal one, is counted"
+        );
+        if generation < 3 {
+            assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+        } else {
+            assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+            assert_eq!(
+                record.terminal_reason,
+                Some(CacheKeepaliveTerminalReason::MaxRefreshes)
+            );
+            assert!(matches!(
+                dispatch
+                    .dispatch_cache_keepalive(job)
+                    .await
+                    .expect("duplicate capped job"),
+                JobOutcome::Noop
+            ));
+        }
+    }
+    assert_eq!(
+        fixture.http.requests.lock().expect("HTTP requests").len() - calls_before,
+        3
+    );
+    let turns = storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("turns");
+    assert_eq!(
+        turns
+            .iter()
+            .filter(|turn| turn.cycle_id == Some(cycle_id))
+            .count(),
+        3
+    );
+    let terminal = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("terminal record")
+        .expect("session");
+    assert_eq!(
+        terminal.generation, 4,
+        "generation fences the unscheduled terminal transition"
+    );
+    let item = storage
+        .get_cache_keepalive_list_item("principal", "session-hash")
+        .await
+        .expect("detail item")
+        .expect("session detail");
+    assert_eq!(item.generation, 4);
+    assert_eq!(item.refresh_count, Some(3));
+    let sources = turns
+        .iter()
+        .map(|turn| turn.source_ref_id.clone())
+        .collect::<Vec<_>>();
+    let evidence = storage
+        .list_cache_keepalive_evidence_for_activity(
+            "principal",
+            &[cycle_id],
+            &sources,
+            0,
+            i64::MAX as u64,
+        )
+        .await
+        .expect("renewal evidence");
+    let final_source = format!("keepalive-v2:session-hash:{cycle_id}:3");
+    let final_turn = turns
+        .iter()
+        .find(|turn| turn.source_ref_id == final_source)
+        .expect("final dispatched turn uses generation 3");
+    let final_evidence = evidence
+        .iter()
+        .find(|row| {
+            row.evidence_kind == "renewal"
+                && row.event_ref.as_deref() == Some(final_source.as_str())
+        })
+        .expect("final turn and evidence still join before terminal generation bump");
+    assert_eq!(final_evidence.cycle_id, final_turn.cycle_id);
+    let event = storage
+        .get_request_event(&format!("renewal:{final_source}"))
+        .await
+        .expect("final request event")
+        .expect("event");
+    assert_eq!(event.source_ref_id.as_deref(), Some(final_source.as_str()));
+    let view = cc_lb_admin::cache_keepalive_view::derive_activity_view(
+        cc_lb_admin::cache_keepalive_view::CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&terminal),
+            turns: &turns,
+            evidence: &evidence,
+            now_ms: terminal.updated_at_unix_secs.saturating_mul(1_000),
+            horizon_start_ms: None,
+        },
+        cc_lb_pricing::global_catalog().as_ref(),
+    );
+    assert_eq!(
+        view.state,
+        cc_lb_admin::cache_keepalive_view::status::CacheKeepaliveViewState::Capped
+    );
+    assert_eq!(
+        (view.generation, view.attempts, view.max_attempts),
+        (4, Some(3), Some(3))
+    );
+    assert!(!view.is_active);
+    assert!(view.next_renewal.is_none());
+    assert_eq!(
+        view.turns
+            .iter()
+            .filter(|turn| turn.cycle_id == Some(cycle_id))
+            .count(),
+        3
+    );
+    assert_eq!(
+        storage
+            .recover_cache_keepalive_stale_running(
+                terminal.updated_at_unix_secs.saturating_add(1),
+                terminal.updated_at_unix_secs
+            )
+            .await
+            .expect("terminal rows excluded from stale-running recovery"),
+        0
+    );
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_stale_pending(terminal.updated_at_unix_secs.saturating_add(1))
+            .await
+            .expect("terminal rows excluded from pending purge"),
+        0
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("retained terminal"),
+        Some(terminal)
+    );
 }

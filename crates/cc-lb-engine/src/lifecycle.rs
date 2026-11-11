@@ -470,7 +470,7 @@ fn scrubbed_upstream_error_body(signer: &dyn Signer, bytes: &[u8], truncated: bo
 /// `stop_reason` (`refusal`, `model_context_window_exceeded`): `category=<..>;
 /// <explanation>` when `stop_details` is present, else the bare stop reason.
 /// Bounded with the same helper used for upstream error bodies.
-fn abnormal_stop_error_message(stop: &usage_parser::AbnormalStop) -> String {
+pub(crate) fn abnormal_stop_error_message(stop: &usage_parser::AbnormalStop) -> String {
     let message = match (&stop.category, &stop.explanation) {
         (Some(category), Some(explanation)) => {
             format!("category={category}; {explanation}")
@@ -3573,6 +3573,73 @@ pub(crate) fn sse_event_completes_response(
     }
 }
 
+pub(crate) fn keepalive_event_reaches_upstream_terminal(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+) -> bool {
+    if event.value().ok().flatten().is_some_and(|value| {
+        if value.get("object").and_then(Value::as_str) == Some("response")
+            && value.get("status").and_then(Value::as_str) == Some("failed")
+        {
+            return true;
+        }
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.failed") => value
+                .get("response")
+                .filter(|response| response.is_object())
+                .is_some_and(|response| {
+                    response.get("error").is_none_or(|error| {
+                        error.is_null()
+                            || (error.get("code").is_some_and(Value::is_string)
+                                && error.get("message").is_some_and(Value::is_string))
+                    })
+                }),
+            Some("error") => {
+                !matches!(
+                    capability,
+                    ProviderCapability::OpenaiResponses
+                        | ProviderCapability::OpenaiResponsesCompact
+                ) || (value.get("message").is_some_and(Value::is_string)
+                    && value
+                        .get("code")
+                        .is_none_or(|code| code.is_null() || code.is_string()))
+            }
+            _ => false,
+        }
+    }) {
+        return true;
+    }
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::OpenaiChatCompletions
+        | crate::provider_capability::UsageShape::OpenaiCompletions => event.is_done(),
+        _ => sse_event_completes_response(capability, event, false),
+    }
+}
+
+fn keepalive_http_end_is_terminal(
+    capability: ProviderCapability,
+    upstream_is_sse: bool,
+    status: StatusCode,
+    finished_choices_seen: bool,
+) -> bool {
+    !status.is_success()
+        || !upstream_is_sse
+        || (matches!(
+            capability.usage_shape(),
+            crate::provider_capability::UsageShape::OpenaiChatCompletions
+                | crate::provider_capability::UsageShape::OpenaiCompletions
+        ) && finished_choices_seen)
+        || matches!(
+            capability.usage_shape(),
+            crate::provider_capability::UsageShape::GeminiGenerateContent
+                | crate::provider_capability::UsageShape::GeminiEmbed
+                | crate::provider_capability::UsageShape::OpenaiEmbeddings
+                | crate::provider_capability::UsageShape::OpenaiAudio
+                | crate::provider_capability::UsageShape::OpenaiImages
+                | crate::provider_capability::UsageShape::None
+        )
+}
+
 /// JSON `type` of the provider's terminal success SSE event, used by the #663
 /// accept-with-warning path. Gemini streams have no terminal event.
 const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<&'static str> {
@@ -5493,9 +5560,6 @@ impl Lifecycle {
             && (cache_metadata.cache_keepalive_surface.is_some()
                 || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
-        if track_keepalive_response {
-            cache_metadata.request_json = body_view.value().cloned();
-        }
 
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
@@ -6182,25 +6246,41 @@ impl Lifecycle {
         cache_metadata.cache_control_message_indices.sort_unstable();
         cache_metadata.cache_control_message_indices.dedup();
         let status = response.status();
-        let keepalive_shaped_body = if track_keepalive_response {
-            keepalive_shaped_body
-        } else if keepalive_response_enabled {
-            Some(ctx.body_bytes.clone())
-        } else {
-            None
-        };
-        let keepalive_completion = keepalive_shaped_body.map(|shaped_body| {
-            crate::cache_keepalive::LifecycleKeepaliveContext {
-                principal: principal.clone(),
-                accounting_key_id: success.key_id.clone(),
-                cache_metadata: cache_metadata.clone(),
-                upstream_id: resolved_upstream_id,
-                shaped_body,
-                original_body: ctx.body_bytes.clone(),
-                downstream_headers: ctx.downstream_headers.clone(),
-                request_dispatched_at: keepalive_request_dispatched_at.unwrap_or(dispatch_started),
-            }
-        });
+        // Renewal capture is optional; ownership acquired at dispatch is not.
+        // In particular, shaping fallback or a dynamic config change can leave
+        // an owner even when the initial response-tracking decision was false.
+        let compaction_response_enabled = keepalive_response_enabled && !track_keepalive_response;
+        let keepalive_shaped_body = keepalive_shaped_body.filter(|_| track_keepalive_response);
+        let (request_dispatched_at, request_start_order) =
+            keepalive_request_dispatched_at.unwrap_or((dispatch_started, None));
+        let keepalive_completion = (request_start_order.is_some()
+            || keepalive_shaped_body.is_some()
+            || compaction_response_enabled)
+            .then(|| {
+                let context = crate::cache_keepalive::LifecycleKeepaliveContext::new(
+                    principal.clone(),
+                    request_dispatched_at,
+                    request_start_order,
+                );
+                if let Some(shaped_body) = keepalive_shaped_body {
+                    let mut metadata = cache_metadata.clone();
+                    if track_keepalive_response {
+                        metadata.request_json = body_view.value().cloned();
+                    }
+                    context.with_renewal(
+                        success.key_id.clone(),
+                        metadata,
+                        resolved_upstream_id,
+                        shaped_body,
+                        ctx.body_bytes.clone(),
+                        ctx.downstream_headers.clone(),
+                    )
+                } else if compaction_response_enabled {
+                    context.with_compaction_candidate(&cache_metadata)
+                } else {
+                    context
+                }
+            });
         let response_affinity_context = ResponseAffinityContext {
             capability: request_capability,
             store: self.upstream_affinity_store.clone(),
@@ -6480,6 +6560,7 @@ impl Lifecycle {
             usize::MAX
         };
         let mut body_collect_failed = false;
+        let mut body_limit_terminal = false;
         while let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await {
             match frame {
                 Ok(frame) => {
@@ -6497,6 +6578,7 @@ impl Lifecycle {
                         body_chunk_count = body_chunk_count.saturating_add(1);
                         if data.len() > body_cap.saturating_sub(body_buf.len()) {
                             body_collect_failed = true;
+                            body_limit_terminal = body.is_end_stream();
                             break;
                         }
                         body_buf.extend_from_slice(&data);
@@ -6590,14 +6672,22 @@ impl Lifecycle {
             .as_ref()
             .and_then(usage_parser::detect_abnormal_stop_non_stream);
         let usage = observation.usage;
+        let native_response_failed = response_body_json.as_ref().is_some_and(|value| {
+            value.get("object").and_then(Value::as_str) == Some("response")
+                && value.get("status").and_then(Value::as_str) == Some("failed")
+        });
+        let declared_provider_error = matches!(
+            response_body_json
+                .as_ref()
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str),
+            Some("error" | "response.failed")
+        );
         let canonical_upstream_error = if status.is_client_error() || status.is_server_error() {
             response_body_json
                 .as_ref()
                 .and_then(usage_parser::observe_http_error_value)
-        } else if response_body_json.as_ref().is_some_and(|value| {
-            value.get("object").and_then(Value::as_str) == Some("response")
-                && value.get("status").and_then(Value::as_str) == Some("failed")
-        }) {
+        } else if native_response_failed {
             observation.canonical_error
         } else {
             None
@@ -6678,7 +6768,9 @@ impl Lifecycle {
                 body: semantic_body.clone(),
             }) {
                 Ok(result) => {
-                    if keepalive_completion.is_some()
+                    if keepalive_completion
+                        .as_ref()
+                        .is_some_and(|context| context.observes_response())
                         && let cc_lb_upstream::TransformResponseResult::Replace {
                             body: Some(body),
                             ..
@@ -6775,22 +6867,34 @@ impl Lifecycle {
         } else {
             response_body_json.as_ref()
         };
-        if !affinity_bind_failed
-            && let (Some(context), Some(response_json)) =
-                (keepalive_completion, keepalive_response_json)
+        if let Some(context) = keepalive_completion
+            && (!body_collect_failed || body_limit_terminal)
         {
-            self.cache_keepalive.on_response_completed(
-                response_json,
-                &context.principal,
-                context.accounting_key_id,
-                &context.cache_metadata,
-                context.upstream_id,
-                context.shaped_body,
-                context.original_body,
-                &context.downstream_headers,
-                first_body_chunk_at
-                    .unwrap_or(context.request_dispatched_at)
-                    .elapsed(),
+            let cache_anchor_age = first_body_chunk_at
+                .unwrap_or(context.request_dispatched_at)
+                .elapsed();
+            let can_renew_response = !body_collect_failed
+                && status.is_success()
+                && !non_error_status_response_failed
+                && !native_response_failed
+                && !declared_provider_error
+                && abnormal_stop.is_none()
+                && !affinity_bind_failed
+                && buffered_transform_error.is_none()
+                && !(keepalive_body_replaced
+                    && keepalive_response_json.is_some_and(|value| {
+                        matches!(
+                            value.get("type").and_then(Value::as_str),
+                            Some("error" | "response.failed")
+                        ) || (value.get("object").and_then(Value::as_str) == Some("response")
+                            && value.get("status").and_then(Value::as_str) == Some("failed"))
+                    }));
+            context.complete(
+                &self.cache_keepalive,
+                can_renew_response
+                    .then_some(keepalive_response_json)
+                    .flatten(),
+                cache_anchor_age,
                 usage
                     .cache_read_input_tokens
                     .saturating_add(usage.cache_creation_input_tokens),
@@ -6987,7 +7091,10 @@ impl Lifecycle {
         attempt_timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<Instant>,
+        keepalive_request_dispatched_at: &mut Option<(
+            Instant,
+            Option<crate::cache_keepalive::RequestStartOrder>,
+        )>,
     ) -> Result<Response<Body>, AttemptFailure> {
         let attempt_scope = match reserved {
             Some(reserved) => reserved.begin_attempt(),
@@ -7226,7 +7333,10 @@ impl Lifecycle {
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<Instant>,
+        keepalive_request_dispatched_at: &mut Option<(
+            Instant,
+            Option<crate::cache_keepalive::RequestStartOrder>,
+        )>,
     ) -> Result<Response<Body>, AttemptFailure> {
         tracing::Span::current().record(
             "cc_lb.upstream.id",
@@ -7315,10 +7425,11 @@ impl Lifecycle {
         );
 
         if keepalive_request_dispatched_at.is_none() {
-            self.cache_keepalive
+            let order = self
+                .cache_keepalive
                 .on_request_started(authenticated, principal, cache_metadata)
                 .await;
-            *keepalive_request_dispatched_at = Some(Instant::now());
+            *keepalive_request_dispatched_at = Some((Instant::now(), order));
         }
 
         let dispatch_start = Instant::now();
@@ -7948,6 +8059,12 @@ impl Lifecycle {
                                         .cache_read_input_tokens
                                         .saturating_add(usage.cache_creation_input_tokens),
                                 );
+                                if keepalive_event_reaches_upstream_terminal(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                ) {
+                                    downstream_drop_guard.mark_upstream_terminal();
+                                }
                                 let mut provider_error_in_event = false;
                                 if let Some(err) =
                                     usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
@@ -8149,7 +8266,7 @@ impl Lifecycle {
                                     break 'upstream;
                                 }
                                 if !sse_transform_active
-                                    && downstream_drop_guard.has_keepalive_completion()
+                                    && downstream_drop_guard.observes_keepalive_response()
                                 {
                                     downstream_drop_guard.observe_keepalive(&parsed_event);
                                 }
@@ -8335,7 +8452,7 @@ impl Lifecycle {
                                                 }
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
-                                                if downstream_drop_guard.has_keepalive_completion() {
+                                                if downstream_drop_guard.observes_keepalive_response() {
                                                     downstream_drop_guard
                                                         .observe_keepalive_emitted(
                                                             &bytes,
@@ -8395,9 +8512,10 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                    downstream_drop_guard.observe_keepalive_raw(
                                                         &raw,
                                                         incomplete_sse_event_budget_bytes,
+                                                        response_affinity_context.capability,
                                                     );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
@@ -8460,9 +8578,10 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                    downstream_drop_guard.observe_keepalive_raw(
                                                         &raw,
                                                         incomplete_sse_event_budget_bytes,
+                                                        response_affinity_context.capability,
                                                     );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
@@ -8673,9 +8792,10 @@ impl Lifecycle {
                                     keepalive_raw_passthrough_active = true;
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        downstream_drop_guard.observe_keepalive_emitted(
+                                        downstream_drop_guard.observe_keepalive_raw(
                                             &raw,
                                             incomplete_sse_event_budget_bytes,
+                                            response_affinity_context.capability,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
@@ -8688,9 +8808,10 @@ impl Lifecycle {
                                     if upstream_is_sse && downstream_stream_is_identity {
                                         if keepalive_raw_passthrough_active {
                                             downstream_drop_guard
-                                                .observe_keepalive_emitted(
+                                                .observe_keepalive_raw(
                                                     &data,
                                                     incomplete_sse_event_budget_bytes,
+                                                    response_affinity_context.capability,
                                                 );
                                         }
                                         downstream_sse_boundary.observe(&data);
@@ -8834,8 +8955,10 @@ impl Lifecycle {
                     }
                 }
             }
+            let mut keepalive_decode_complete = false;
             match usage_decoder.finish() {
                 Ok(tail) if !tail.is_empty() => {
+                    keepalive_decode_complete = true;
                     if upstream_error_status {
                         append_bounded_upstream_error_body(
                             &mut upstream_error_body,
@@ -8875,6 +8998,12 @@ impl Lifecycle {
                                     .cache_read_input_tokens
                                     .saturating_add(usage.cache_creation_input_tokens),
                             );
+                            if keepalive_event_reaches_upstream_terminal(
+                                response_affinity_context.capability,
+                                &parsed_event,
+                            ) {
+                                downstream_drop_guard.mark_upstream_terminal();
+                            }
                             let mut affinity_persist_failed = false;
                             let affinity_binding = if success_sse_affinity_gate {
                                 let response_keys = match
@@ -9009,7 +9138,7 @@ impl Lifecycle {
                                 break;
                             }
                             if !sse_transform_active
-                                && downstream_drop_guard.has_keepalive_completion()
+                                && downstream_drop_guard.observes_keepalive_response()
                             {
                                 downstream_drop_guard.observe_keepalive(&parsed_event);
                             }
@@ -9145,7 +9274,7 @@ impl Lifecycle {
                                                 outgoing_provider_error = output.emitted_error;
                                                 outgoing_completes_response = output.completes_response;
                                             }
-                                            if downstream_drop_guard.has_keepalive_completion() {
+                                            if downstream_drop_guard.observes_keepalive_response() {
                                                 downstream_drop_guard
                                                     .observe_keepalive_emitted(
                                                         &bytes,
@@ -9274,9 +9403,10 @@ impl Lifecycle {
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        downstream_drop_guard.observe_keepalive_emitted(
+                                        downstream_drop_guard.observe_keepalive_raw(
                                             &raw,
                                             incomplete_sse_event_budget_bytes,
+                                            response_affinity_context.capability,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
@@ -9286,7 +9416,7 @@ impl Lifecycle {
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => keepalive_decode_complete = true,
                 Err(error) => {
                     upstream_error_body_decode_failed = true;
                     let upstream_decode_failed = is_upstream_response_decode_error(&error);
@@ -9475,6 +9605,7 @@ impl Lifecycle {
                 batch_index = batch_index.saturating_add(1);
                 yield Ok::<Bytes, Infallible>(buffer.split().freeze());
             }
+            let mut keepalive_framing_complete = true;
             if upstream_is_sse
                 && (!upstream_error_status || sse_transform_active)
                 && parse_sse_events_active
@@ -9487,6 +9618,7 @@ impl Lifecycle {
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
             {
+                keepalive_framing_complete = false;
                 let error_message = if transformed_output_started {
                     "upstream SSE response ended with an incomplete event after transform output"
                         .to_owned()
@@ -9617,6 +9749,24 @@ impl Lifecycle {
                     // on this error frame, using the existing final flush.
                     deferred_terminal_chunks.push(frame);
                 }
+            }
+            // EOF is evidence only after codec trailers and complete event
+            // framing have been validated. Error flags alone never prove it.
+            if upstream_body_eof
+                && keepalive_decode_complete
+                && !upstream_error_body_decode_failed
+                && transform_decode_supported
+                && keepalive_framing_complete
+                && sse_buffer_is_blank(&buffer)
+                && (!upstream_is_sse || parse_sse_events_active)
+                && keepalive_http_end_is_terminal(
+                    response_affinity_context.capability,
+                    upstream_is_sse,
+                    status,
+                    semantic_completion_observed,
+                )
+            {
+                downstream_drop_guard.mark_upstream_terminal();
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()
@@ -21495,5 +21645,135 @@ mod tests {
         }
         assert!(!latch.observe(keys[0].clone(), false));
         assert!(latch.observe(keys[1].clone(), false));
+    }
+}
+
+#[cfg(test)]
+mod keepalive_terminal_proof_tests {
+    use super::{
+        ProviderCapability, StatusCode, keepalive_event_reaches_upstream_terminal,
+        keepalive_http_end_is_terminal,
+    };
+    use crate::usage_parser::parse_sse_event;
+
+    #[test]
+    fn explicit_provider_failures_are_terminal_without_success() {
+        assert!(keepalive_event_reaches_upstream_terminal(
+            ProviderCapability::AnthropicMessages,
+            &parse_sse_event(b"event: error\ndata: {\"type\":\"error\",\"error\":null}\n\n"),
+        ));
+        for raw in [
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n".as_slice(),
+            b"data: {\"object\":\"response\",\"status\":\"failed\",\"error\":null}\n\n",
+            b"event: error\ndata: {\"type\":\"error\",\"message\":\"native error\",\"code\":null}\n\n",
+        ] {
+            assert!(keepalive_event_reaches_upstream_terminal(
+                ProviderCapability::OpenaiResponses,
+                &parse_sse_event(raw),
+            ));
+        }
+    }
+
+    #[test]
+    fn abnormal_hints_and_error_lookalikes_do_not_prove_completion() {
+        for raw in [
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n".as_slice(),
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"model_context_window_exceeded\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"error\":{\"type\":\"api_error\",\"message\":\"not a terminal declaration\"}}\n\n",
+            b"event: response.failed\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ordinary text\"}\n\n",
+            b"event: error\ndata: {\"type\":\"message_delta\",\"delta\":{\"text\":\"ordinary text\"}}\n\n",
+            b"event: error\ndata: \"ordinary text\"\n\n",
+            b"event: error\ndata: {\"type\":\"error\"\n\n",
+        ] {
+            assert!(!keepalive_event_reaches_upstream_terminal(
+                ProviderCapability::AnthropicMessages,
+                &parse_sse_event(raw),
+            ));
+        }
+        assert!(keepalive_event_reaches_upstream_terminal(
+            ProviderCapability::AnthropicMessages,
+            &parse_sse_event(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        ));
+    }
+
+    #[test]
+    fn responses_error_proof_requires_native_payload_fields() {
+        for raw in [
+            b"event: error\ndata: {\"type\":\"error\"}\n\n".as_slice(),
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"test\",\"message\":\"nested\"}}\n\n",
+            b"event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n",
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":42}\n\n",
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":42}}\n\n",
+        ] {
+            assert!(!keepalive_event_reaches_upstream_terminal(
+                ProviderCapability::OpenaiResponses, &parse_sse_event(raw),
+            ));
+        }
+    }
+
+    #[test]
+    fn finished_chat_choice_requires_http_end_but_done_does_not() {
+        let choice =
+            parse_sse_event(b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n");
+        assert!(!keepalive_event_reaches_upstream_terminal(
+            ProviderCapability::OpenaiChatCompletions,
+            &choice,
+        ));
+        assert!(keepalive_http_end_is_terminal(
+            ProviderCapability::OpenaiChatCompletions,
+            true,
+            StatusCode::OK,
+            true,
+        ));
+        assert!(keepalive_event_reaches_upstream_terminal(
+            ProviderCapability::OpenaiChatCompletions,
+            &parse_sse_event(b"data: [DONE]\n\n"),
+        ));
+    }
+
+    #[test]
+    fn clean_http_end_only_completes_formats_with_an_eof_boundary() {
+        assert!(!keepalive_http_end_is_terminal(
+            ProviderCapability::AnthropicMessages,
+            true,
+            StatusCode::OK,
+            false,
+        ));
+        assert!(!keepalive_http_end_is_terminal(
+            ProviderCapability::OpenaiResponses,
+            true,
+            StatusCode::OK,
+            false,
+        ));
+        assert!(!keepalive_http_end_is_terminal(
+            ProviderCapability::OpenaiChatCompletions,
+            true,
+            StatusCode::OK,
+            false,
+        ));
+        assert!(keepalive_http_end_is_terminal(
+            ProviderCapability::AnthropicMessages,
+            true,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+        ));
+        assert!(keepalive_http_end_is_terminal(
+            ProviderCapability::AnthropicMessages,
+            true,
+            StatusCode::TEMPORARY_REDIRECT,
+            false,
+        ));
+        assert!(keepalive_http_end_is_terminal(
+            ProviderCapability::AnthropicMessages,
+            false,
+            StatusCode::OK,
+            false,
+        ));
+        assert!(keepalive_http_end_is_terminal(
+            ProviderCapability::OpenaiAudio,
+            true,
+            StatusCode::OK,
+            false,
+        ));
     }
 }

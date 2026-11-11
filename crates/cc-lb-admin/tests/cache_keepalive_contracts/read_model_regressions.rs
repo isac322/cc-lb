@@ -15,13 +15,36 @@ use uuid::Uuid;
 use crate::config_admin_common::{app, authed_json};
 
 use super::fixtures::{cache_keepalive_decision, cache_keepalive_replace_request};
-use super::{NOW_UNIX_SECS, create_principal_id, keepalive_detail_uri};
+use super::{create_principal_id as create_fixed_principal_id, keepalive_detail_uri};
 
 const UPSTREAM_ID: Uuid = Uuid::from_u128(0xa11ce);
 const MODEL: &str = "claude-sonnet-4-5";
 const CYCLE_ONE: Uuid = Uuid::from_u128(1);
 const CYCLE_TWO: Uuid = Uuid::from_u128(2);
 const CHILD_ENV: &str = "CC_LB_ADMIN_READ_MODEL_REGRESSION";
+
+// Summary SQL observes database wall time; keep the HTTP clock and persisted
+// fixture timeline on the same live epoch without changing relative scenarios.
+fn now_unix_secs() -> u64 {
+    static NOW: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock")
+            .as_secs()
+    });
+    *NOW
+}
+
+async fn create_principal_id() -> (
+    tempfile::TempDir,
+    std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    cc_lb_admin::AdminState,
+    String,
+) {
+    let (directory, storage, mut state, principal) = create_fixed_principal_id().await;
+    state.clock = std::sync::Arc::new(cc_lb_clock::TestClock::new_at_secs(now_unix_secs()));
+    (directory, storage, state, principal)
+}
 
 fn install_regression_catalog() {
     let mut models = HashMap::new();
@@ -84,8 +107,8 @@ async fn seed_session(
     let mut request = cache_keepalive_replace_request(
         principal_id,
         session_key_hash,
-        NOW_UNIX_SECS,
-        NOW_UNIX_SECS + 300,
+        now_unix_secs(),
+        now_unix_secs() + 300,
     );
     request.cycle_id = cycle_id;
     storage
@@ -100,7 +123,7 @@ async fn seed_session(
                     1,
                     CacheKeepaliveTerminalReason::MaxRefreshes,
                     None,
-                    NOW_UNIX_SECS + 1,
+                    now_unix_secs() + 1,
                 )
                 .await
                 .expect("terminalize cache keepalive regression session")
@@ -242,6 +265,75 @@ fn run_isolated(test_name: &str) {
 }
 
 #[test]
+fn unowned_legacy_turn_http_preserves_owned_pending_cycle() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::unowned_legacy_turn_http_preserves_owned_pending_cycle";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("isolated runtime")
+            .block_on(unowned_legacy_turn_http_preserves_owned_pending_cycle_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn unowned_legacy_turn_http_preserves_owned_pending_cycle_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal) = create_principal_id().await;
+    let id = "owned-with-unowned-history";
+    seed_session(&storage, &principal, id, CYCLE_ONE, false).await;
+    for (source_ref_id, ts, cost_micros) in [
+        ("owned-legacy", now_unix_secs(), 6_000),
+        ("unowned-latest", now_unix_secs() + 1, 1_000),
+    ] {
+        append_turn(
+            &storage,
+            AppendTurnParams {
+                principal_id: &principal,
+                session_key_hash: id,
+                cycle_id: CYCLE_ONE,
+                source_ref_id,
+                ts,
+                cache_read_input_tokens: 20_000,
+                cost_micros,
+                hit_miss: "hit",
+                with_follow_up: false,
+            },
+        )
+        .await;
+        sqlx::query("UPDATE cache_keepalive_turns SET cycle_id = NULL WHERE source_ref_id = ?")
+            .bind(source_ref_id)
+            .execute(storage.pool())
+            .await
+            .expect("legacy null-cycle turn");
+    }
+    // Only the owned legacy turn retains renewal evidence carrying CYCLE_ONE.
+    delete_turn_evidence(&storage, "unowned-latest").await;
+    let (status, detail) = get_json(&state, &keepalive_detail_uri(&principal, id)).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["total_renewals_current_cycle"], 1, "{detail}");
+    assert_eq!(detail["retained_renewals"], 2);
+    assert_eq!(detail["turns"].as_array().unwrap().len(), 2);
+    assert_eq!(detail["turns"][0]["pending"], false);
+    assert_eq!(detail["turns"][1]["pending"], true);
+    assert_eq!(detail["turns"][1]["cycle_id"], CYCLE_ONE.to_string());
+    assert_eq!(detail["is_last_pending"], true);
+    assert_eq!(detail["evidence_status"], "unknown");
+    assert_json_dollars(&detail["total_spent"], 7_000);
+    let gaps = detail["gaps"].as_array().unwrap();
+    assert!(
+        gaps.iter()
+            .any(|gap| gap["cycle_id"].is_null() && gap["ending_kind"] == "followup_unknown")
+    );
+    assert!(
+        gaps.iter()
+            .any(|gap| gap["cycle_id"] == CYCLE_ONE.to_string()
+                && gap["ending_kind"] == "scheduled_waiting")
+    );
+}
+
+#[test]
 fn terminal_unfollowed_hit_and_miss_preserve_observed_loss() {
     const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::terminal_unfollowed_hit_and_miss_preserve_observed_loss";
     if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
@@ -273,7 +365,7 @@ async fn terminal_unfollowed_hit_and_miss_preserve_observed_loss_case() {
             session_key_hash: "terminal-hit-miss",
             cycle_id: CYCLE_ONE,
             source_ref_id: "terminal-hit",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -288,7 +380,7 @@ async fn terminal_unfollowed_hit_and_miss_preserve_observed_loss_case() {
             session_key_hash: "terminal-hit-miss",
             cycle_id: CYCLE_ONE,
             source_ref_id: "terminal-miss",
-            ts: NOW_UNIX_SECS + 1,
+            ts: now_unix_secs() + 1,
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -357,7 +449,7 @@ async fn terminal_unfollowed_hit_only_preserves_observed_loss_case() {
             session_key_hash: "terminal-hit-only",
             cycle_id: CYCLE_ONE,
             source_ref_id: "terminal-hit-only",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -424,7 +516,7 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
             session_key_hash: "replaced-c1-c2",
             cycle_id: CYCLE_ONE,
             source_ref_id: "c1-turn",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 21_000,
             hit_miss: "hit",
@@ -435,8 +527,8 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     let mut replacement = cache_keepalive_replace_request(
         &principal_id,
         "replaced-c1-c2",
-        NOW_UNIX_SECS + 2,
-        NOW_UNIX_SECS + 302,
+        now_unix_secs() + 2,
+        now_unix_secs() + 302,
     );
     replacement.cycle_id = CYCLE_TWO;
     storage
@@ -472,7 +564,18 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     assert_eq!(detail["net_pnl"], json!(0.048));
     assert_eq!(detail["total_renewals_current_cycle"], 0);
     assert_eq!(detail["is_last_pending"], false);
-    assert_eq!(detail["turns"], json!([]));
+    assert_eq!(detail["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["turns"][0]["cycle_id"], json!(CYCLE_ONE.to_string()));
+    assert_eq!(detail["turns"][0]["pending"], false);
+    assert_eq!(
+        detail["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|gap| gap["pulses"].as_array().unwrap().len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]
@@ -507,7 +610,7 @@ async fn persisted_zero_cost_is_real_zero_spend_in_http_pnl_case() {
             session_key_hash: "persisted-zero-cost",
             cycle_id: CYCLE_ONE,
             source_ref_id: "zero-cost-turn",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 0,
             hit_miss: "hit",
@@ -573,7 +676,7 @@ async fn miss_attempt_is_not_counted_as_successful_renewal_case() {
             session_key_hash: "miss-only-session",
             cycle_id: CYCLE_ONE,
             source_ref_id: "miss-only-turn",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -602,6 +705,123 @@ async fn miss_attempt_is_not_counted_as_successful_renewal_case() {
     assert_eq!(detail["turns"][0]["renewals"], 0);
     assert_eq!(detail["turns"][0]["followed_up"], false);
     assert_json_dollars(&detail["turns"][0]["pnl"], -15_000);
+}
+
+#[test]
+fn paused_current_cycle_pending_http_contract() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::paused_current_cycle_pending_http_contract";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("isolated runtime")
+            .block_on(paused_current_cycle_pending_http_contract_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn paused_current_cycle_pending_http_contract_case() {
+    install_regression_catalog();
+    let (_directory, storage, mut state, principal) = create_principal_id().await;
+    let wall_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    state.clock = std::sync::Arc::new(cc_lb_clock::TestClock::new_at_secs(wall_now));
+    let id = "paused-paid-cycle";
+    let mut request = cache_keepalive_replace_request(&principal, id, wall_now, wall_now + 300);
+    request.cycle_id = CYCLE_ONE;
+    storage
+        .replace_from_real_request(&request)
+        .await
+        .expect("seed current cycle");
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal,
+            session_key_hash: id,
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "paused-paid",
+            ts: wall_now - 100,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced(id, None, wall_now, wall_now + 60)
+            .await
+            .expect("pause current cycle")
+    );
+    let (status, detail) = get_json(&state, &keepalive_detail_uri(&principal, id)).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["state"], "in_request");
+    assert_eq!(detail["is_active"], false);
+    assert_eq!(
+        detail["gaps"][0]["ending_kind"], "followup_pending",
+        "{detail}"
+    );
+    assert_eq!(
+        detail["follow_up_outcomes"],
+        json!({
+            "observed": 0, "pending": 1, "no_follow_up": 0, "unknown": 0
+        })
+    );
+    assert_eq!(detail["is_last_pending"], true);
+    assert_eq!(detail["turns"][0]["pending"], true);
+    assert_eq!(detail["evidence_status"], "pending");
+    assert_json_dollars(&detail["total_spent"], 6_000);
+    let (status, list) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["summary"]["evidence_status"], "pending", "{list}");
+    assert_eq!(list["summary"]["renewing_now"], 0);
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: wall_now,
+                ts_ms: Some(wall_now * 1_000),
+                request_id: "paused-follow-up-request".to_owned(),
+                event_id: Some("paused-follow-up-event".to_owned()),
+                principal_id: Some(principal.clone()),
+                ..RequestEvent::default()
+            },
+            &[CacheKeepaliveEvidenceRow {
+                evidence_id: "paused-matching-followup".to_owned(),
+                cycle_id: None,
+                evidence_kind: "follow_up".to_owned(),
+                request_start_ms: (wall_now - 1) * 1_000,
+                prefix_fingerprint: Some("fingerprint".to_owned()),
+                prefix_hash: Some("prefix".to_owned()),
+                prefix_policy_version: Some("policy".to_owned()),
+                prefix_schema_version: Some("schema".to_owned()),
+                principal_id: principal.clone(),
+                upstream_id: UPSTREAM_ID,
+                model: MODEL.to_owned(),
+                ttl: CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(20_000),
+                cost_micros: None,
+                request_ref: Some("paused-follow-up-request".to_owned()),
+                event_ref: None,
+            }],
+        )
+        .await
+        .expect("record matching follow-up");
+    let (_, observed) = get_json(&state, &keepalive_detail_uri(&principal, id)).await;
+    assert_eq!(observed["gaps"][0]["ending_kind"], "followup_hit");
+    assert_eq!(observed["is_last_pending"], false);
+    assert_eq!(observed["turns"][0]["pending"], false);
+    assert_eq!(observed["evidence_status"], "observed");
+    assert_eq!(observed["follow_up_outcomes"]["observed"], 1);
+    assert_json_dollars(&observed["total_avoided"], 69_000);
 }
 
 #[test]
@@ -638,7 +858,7 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
             session_key_hash: "active-unfollowed-hit",
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-unfollowed-hit",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -661,7 +881,7 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
             session_key_hash: "active-unfollowed-miss",
             cycle_id: CYCLE_TWO,
             source_ref_id: "active-unfollowed-miss",
-            ts: NOW_UNIX_SECS + 1,
+            ts: now_unix_secs() + 1,
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -701,7 +921,7 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
             session_key_hash: "active-followup",
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-followup",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -724,7 +944,7 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
             session_key_hash: "active-followup-miss",
             cycle_id: CYCLE_TWO,
             source_ref_id: "active-followup-miss",
-            ts: NOW_UNIX_SECS + 1,
+            ts: now_unix_secs() + 1,
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -790,7 +1010,7 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
             session_key_hash,
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-same-cycle-hit",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -805,7 +1025,7 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
             session_key_hash,
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-same-cycle-miss",
-            ts: NOW_UNIX_SECS + 1,
+            ts: now_unix_secs() + 1,
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -901,7 +1121,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
             session_key_hash,
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-two-follow-ups-r1",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -916,7 +1136,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
             session_key_hash,
             cycle_id: CYCLE_ONE,
             source_ref_id: "active-two-follow-ups-r2",
-            ts: NOW_UNIX_SECS + 1,
+            ts: now_unix_secs() + 1,
             cache_read_input_tokens: 20_000,
             cost_micros: 15_000,
             hit_miss: "miss",
@@ -966,13 +1186,13 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
         .as_array()
         .expect("two-follow-up detail turns");
     assert_eq!(turns.len(), 2);
-    assert_eq!(turns[0]["time_ms"], json!((NOW_UNIX_SECS + 1) * 1_000));
+    assert_eq!(turns[0]["time_ms"], json!((now_unix_secs() + 1) * 1_000));
     assert_eq!(turns[0]["label"], "waiting for follow-up");
     assert_eq!(turns[0]["evidence_status"], "pending");
     assert_eq!(turns[0]["pending"], true);
     assert_eq!(turns[0]["followed_up"], false);
     assert_json_dollars(&turns[0]["pnl"], -15_000);
-    assert_eq!(turns[1]["time_ms"], json!(NOW_UNIX_SECS * 1_000));
+    assert_eq!(turns[1]["time_ms"], json!(now_unix_secs() * 1_000));
     assert_eq!(turns[1]["label"], "cache used by follow-up");
     assert_eq!(turns[1]["followed_up"], true);
     assert_eq!(turns[1]["evidence_status"], "observed");
@@ -1008,10 +1228,10 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     )
     .await;
     for (source_ref_id, ts, hit_miss, cost_micros) in [
-        ("active-multi-turn-old", NOW_UNIX_SECS, "hit", 6_000),
+        ("active-multi-turn-old", now_unix_secs(), "hit", 6_000),
         (
             "active-multi-turn-latest",
-            NOW_UNIX_SECS + 1,
+            now_unix_secs() + 1,
             "miss",
             15_000,
         ),
@@ -1097,7 +1317,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
             session_key_hash: "historical-active-pending",
             cycle_id: CYCLE_ONE,
             source_ref_id: "historical-active-pending-old",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -1108,8 +1328,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     let mut replacement = cache_keepalive_replace_request(
         &historical_principal_id,
         "historical-active-pending",
-        NOW_UNIX_SECS + 2,
-        NOW_UNIX_SECS + 302,
+        now_unix_secs() + 2,
+        now_unix_secs() + 302,
     );
     replacement.cycle_id = CYCLE_TWO;
     historical_storage
@@ -1123,7 +1343,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
             session_key_hash: "historical-active-pending",
             cycle_id: CYCLE_TWO,
             source_ref_id: "historical-active-pending-current",
-            ts: NOW_UNIX_SECS + 3,
+            ts: now_unix_secs() + 3,
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -1159,8 +1379,9 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_json_dollars(&historical_detail["total_spent"], 12_000);
     assert_json_dollars(&historical_detail["net_pnl"], -12_000);
     assert_json_dollars(&historical_detail["total_avoided"], 0);
-    assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 2);
     assert_eq!(historical_detail["turns"][0]["pending"], true);
+    assert_eq!(historical_detail["turns"][1]["pending"], false);
 
     let (_follow_ups_directory, follow_ups_storage, follow_ups_state, follow_ups_principal_id) =
         create_principal_id().await;
@@ -1173,8 +1394,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     )
     .await;
     for (source_ref_id, ts) in [
-        ("active-multiple-follow-ups-first", NOW_UNIX_SECS),
-        ("active-multiple-follow-ups-latest", NOW_UNIX_SECS + 1),
+        ("active-multiple-follow-ups-first", now_unix_secs()),
+        ("active-multiple-follow-ups-latest", now_unix_secs() + 1),
     ] {
         append_turn(
             &follow_ups_storage,
@@ -1253,11 +1474,11 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
          VALUES ('follow-up-only', NULL, 'follow_up', ?, 'fp', 'prefix', 'policy', 'schema',
                  ?, ?, ?, '5m', 'hit', 20000, 6000, 'req-1', 'ev-1', ?)",
     )
-    .bind(i64::try_from(NOW_UNIX_SECS * 1_000).unwrap())
+    .bind(i64::try_from(now_unix_secs() * 1_000).unwrap())
     .bind(&principal_id)
     .bind(UPSTREAM_ID.to_string())
     .bind(MODEL)
-    .bind(i64::try_from(NOW_UNIX_SECS * 1_000).unwrap())
+    .bind(i64::try_from(now_unix_secs() * 1_000).unwrap())
     .execute(storage.pool())
     .await
     .expect("insert follow-up-only evidence");
@@ -1273,7 +1494,7 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
         "follow_up-only evidence must not populate retained_from_ms: {empty_summary:?}"
     );
 
-    let old_ts = NOW_UNIX_SECS - 3 * 24 * 60 * 60;
+    let old_ts = now_unix_secs() - 3 * 24 * 60 * 60;
     let mut old_decision =
         cache_keepalive_decision(&principal_id, "legacy-old-turn", old_ts * 1_000);
     old_decision.session_key_hash = Some("legacy-session".to_owned());
@@ -1328,7 +1549,7 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
             session_key_hash: "recent-observed",
             cycle_id: CYCLE_ONE,
             source_ref_id: "recent-observed-turn",
-            ts: NOW_UNIX_SECS,
+            ts: now_unix_secs(),
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -1527,7 +1748,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "old-and-new",
             cycle_id: Uuid::from_u128(0x0101),
             source_ref_id: "old-and-new-old-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(3 * 86_400),
+            ts: now_unix_secs().saturating_sub(3 * 86_400),
             cache_read_input_tokens: 20_000,
             cost_micros: 7_000,
             hit_miss: "hit",
@@ -1542,7 +1763,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "old-and-new",
             cycle_id: CYCLE_ONE,
             source_ref_id: "old-and-new-new-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            ts: now_unix_secs().saturating_sub(1_800),
             cache_read_input_tokens: 20_000,
             cost_micros: 11_000,
             hit_miss: "hit",
@@ -1558,7 +1779,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "purged-with-evidence",
             cycle_id: Uuid::from_u128(0x0103),
             source_ref_id: "purged-with-evidence-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(1_200),
+            ts: now_unix_secs().saturating_sub(1_200),
             cache_read_input_tokens: 20_000,
             cost_micros: 13_000,
             hit_miss: "hit",
@@ -1573,7 +1794,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "purged-without-evidence",
             cycle_id: Uuid::from_u128(0x0104),
             source_ref_id: "purged-without-evidence-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(900),
+            ts: now_unix_secs().saturating_sub(900),
             cache_read_input_tokens: 20_000,
             cost_micros: 17_000,
             hit_miss: "hit",
@@ -1598,7 +1819,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "pending-session",
             cycle_id: Uuid::from_u128(0x0105),
             source_ref_id: "pending-session-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(600),
+            ts: now_unix_secs().saturating_sub(600),
             cache_read_input_tokens: 20_000,
             cost_micros: 19_000,
             hit_miss: "hit",
@@ -1622,7 +1843,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
             session_key_hash: "unknown-session",
             cycle_id: Uuid::from_u128(0x0106),
             source_ref_id: "unknown-session-visible",
-            ts: NOW_UNIX_SECS.saturating_sub(300),
+            ts: now_unix_secs().saturating_sub(300),
             cache_read_input_tokens: 20_000,
             cost_micros: 23_000,
             hit_miss: "hit",
@@ -1636,7 +1857,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
         &storage,
         &principal_id,
         "hidden-not-tracked-decision",
-        NOW_UNIX_SECS.saturating_sub(100),
+        now_unix_secs().saturating_sub(100),
         CacheTtl::Ttl5m,
         None,
     )
@@ -1645,7 +1866,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
         &storage,
         &principal_id,
         "visible-12h-clean-decision",
-        NOW_UNIX_SECS.saturating_sub(90),
+        now_unix_secs().saturating_sub(90),
         CacheTtl::Ttl12h,
         None,
     )
@@ -1654,7 +1875,7 @@ async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
         &storage,
         &principal_id,
         "visible-12h-error-decision",
-        NOW_UNIX_SECS.saturating_sub(80),
+        now_unix_secs().saturating_sub(80),
         CacheTtl::Ttl12h,
         Some("decision fixture error"),
     )
@@ -1763,7 +1984,7 @@ async fn header_avoided_rounds_per_renewal_like_rows_case() {
                 session_key_hash: session,
                 cycle_id,
                 source_ref_id: &format!("{session}-turn"),
-                ts: NOW_UNIX_SECS.saturating_sub(60),
+                ts: now_unix_secs().saturating_sub(60),
                 cache_read_input_tokens: 1,
                 cost_micros: 0,
                 hit_miss: "hit",
@@ -1807,7 +2028,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             // belongs to an earlier cycle than the current one.
             cycle_id: Uuid::from_u128(0x0101),
             source_ref_id: "old-and-new-old",
-            ts: NOW_UNIX_SECS.saturating_sub(3 * 86_400),
+            ts: now_unix_secs().saturating_sub(3 * 86_400),
             cache_read_input_tokens: 20_000,
             cost_micros: 7_000,
             hit_miss: "hit",
@@ -1822,7 +2043,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             session_key_hash: "old-and-new",
             cycle_id: CYCLE_ONE,
             source_ref_id: "old-and-new-new",
-            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            ts: now_unix_secs().saturating_sub(1_800),
             cache_read_input_tokens: 20_000,
             cost_micros: 11_000,
             hit_miss: "hit",
@@ -1838,7 +2059,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             session_key_hash: "purged-with-evidence",
             cycle_id: Uuid::from_u128(0x0103),
             source_ref_id: "purged-with-evidence-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(1_200),
+            ts: now_unix_secs().saturating_sub(1_200),
             cache_read_input_tokens: 20_000,
             cost_micros: 13_000,
             hit_miss: "hit",
@@ -1853,7 +2074,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             session_key_hash: "purged-without-evidence",
             cycle_id: Uuid::from_u128(0x0104),
             source_ref_id: "purged-without-evidence-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(900),
+            ts: now_unix_secs().saturating_sub(900),
             cache_read_input_tokens: 20_000,
             cost_micros: 17_000,
             hit_miss: "hit",
@@ -1878,7 +2099,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             session_key_hash: "pending-session",
             cycle_id: Uuid::from_u128(0x0105),
             source_ref_id: "pending-session-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(600),
+            ts: now_unix_secs().saturating_sub(600),
             cache_read_input_tokens: 20_000,
             cost_micros: 19_000,
             hit_miss: "hit",
@@ -1902,7 +2123,7 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
             session_key_hash: "unknown-session",
             cycle_id: Uuid::from_u128(0x0106),
             source_ref_id: "unknown-session-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(300),
+            ts: now_unix_secs().saturating_sub(300),
             cache_read_input_tokens: 20_000,
             cost_micros: 23_000,
             hit_miss: "hit",
@@ -1967,7 +2188,7 @@ async fn q2_q3_horizon_money_and_membership_boundary_case() {
             session_key_hash: "horizon-scoped",
             cycle_id: CYCLE_ONE,
             source_ref_id: "horizon-old",
-            ts: NOW_UNIX_SECS.saturating_sub(2 * 86_400),
+            ts: now_unix_secs().saturating_sub(2 * 86_400),
             cache_read_input_tokens: 20_000,
             cost_micros: 31_000,
             hit_miss: "hit",
@@ -1982,7 +2203,7 @@ async fn q2_q3_horizon_money_and_membership_boundary_case() {
             session_key_hash: "horizon-scoped",
             cycle_id: CYCLE_ONE,
             source_ref_id: "horizon-new",
-            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            ts: now_unix_secs().saturating_sub(1_800),
             cache_read_input_tokens: 20_000,
             cost_micros: 37_000,
             hit_miss: "hit",
@@ -2001,7 +2222,7 @@ async fn q2_q3_horizon_money_and_membership_boundary_case() {
     sqlx::query(
         "UPDATE cache_keepalive_sessions SET last_message_at_ms = ? WHERE session_key_hash = ?",
     )
-    .bind((NOW_UNIX_SECS.saturating_sub(2 * 86_400) * 1_000) as i64)
+    .bind((now_unix_secs().saturating_sub(2 * 86_400) * 1_000) as i64)
     .bind("horizon-scoped")
     .execute(storage.pool())
     .await
@@ -2019,12 +2240,12 @@ async fn q2_q3_horizon_money_and_membership_boundary_case() {
     for (source_ref_id, ts, cost_micros) in [
         (
             "boundary-included",
-            NOW_UNIX_SECS.saturating_sub(3_600),
+            now_unix_secs().saturating_sub(3_600),
             5_000,
         ),
         (
             "boundary-excluded",
-            NOW_UNIX_SECS.saturating_sub(3_601),
+            now_unix_secs().saturating_sub(3_601),
             7_000,
         ),
     ] {
@@ -2082,7 +2303,7 @@ async fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case() {
             session_key_hash: "unknown-label",
             cycle_id: CYCLE_ONE,
             source_ref_id: "unknown-label-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(300),
+            ts: now_unix_secs().saturating_sub(300),
             cache_read_input_tokens: 20_000,
             cost_micros: 41_000,
             hit_miss: "hit",
@@ -2113,7 +2334,7 @@ async fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case() {
             session_key_hash: "pending-label",
             cycle_id: CYCLE_ONE,
             source_ref_id: "pending-label-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(200),
+            ts: now_unix_secs().saturating_sub(200),
             cache_read_input_tokens: 20_000,
             cost_micros: 43_000,
             hit_miss: "hit",
@@ -2181,7 +2402,7 @@ async fn q6_terminal_states_and_status_filters_match_rows_case() {
                     session_key_hash: id,
                     cycle_id: CYCLE_ONE,
                     source_ref_id: id,
-                    ts: NOW_UNIX_SECS.saturating_sub(100),
+                    ts: now_unix_secs().saturating_sub(100),
                     cache_read_input_tokens: 20_000,
                     cost_micros: 1_000,
                     hit_miss: "hit",
@@ -2191,7 +2412,7 @@ async fn q6_terminal_states_and_status_filters_match_rows_case() {
             .await;
         }
         storage
-            .mark_cache_keepalive_terminal(id, 1, reason, None, NOW_UNIX_SECS + 1)
+            .mark_cache_keepalive_terminal(id, 1, reason, None, now_unix_secs() + 1)
             .await
             .expect("terminalize state fixture");
     }
@@ -2212,7 +2433,7 @@ async fn q6_terminal_states_and_status_filters_match_rows_case() {
             session_key_hash: "purged-followed",
             cycle_id: CYCLE_ONE,
             source_ref_id: "purged-followed-turn",
-            ts: NOW_UNIX_SECS.saturating_sub(80),
+            ts: now_unix_secs().saturating_sub(80),
             cache_read_input_tokens: 20_000,
             cost_micros: 1_000,
             hit_miss: "hit",
@@ -2274,8 +2495,8 @@ async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
     let mut request = cache_keepalive_replace_request(
         &principal_id,
         "legacy-cancelled",
-        NOW_UNIX_SECS,
-        NOW_UNIX_SECS + 270,
+        now_unix_secs(),
+        now_unix_secs() + 270,
     );
     request.display_reason =
         "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
@@ -2289,7 +2510,7 @@ async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
             1,
             CacheKeepaliveTerminalReason::Cancelled,
             None,
-            NOW_UNIX_SECS + 1,
+            now_unix_secs() + 1,
         )
         .await
         .expect("cancel legacy session");
@@ -2332,8 +2553,8 @@ async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
         let mut request = cache_keepalive_replace_request(
             &principal_id,
             cause,
-            NOW_UNIX_SECS,
-            NOW_UNIX_SECS + 270,
+            now_unix_secs(),
+            now_unix_secs() + 270,
         );
         request.display_reason =
             "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
@@ -2346,10 +2567,10 @@ async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
                 .cancel_cache_keepalive_fenced(
                     cause,
                     None,
-                    NOW_UNIX_SECS,
+                    now_unix_secs(),
                     CacheKeepaliveTerminalReason::Cancelled,
                     Some(cause),
-                    NOW_UNIX_SECS + 1,
+                    now_unix_secs() + 1,
                 )
                 .await
                 .expect("cancel with cause")
@@ -2394,7 +2615,7 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
                 session_key_hash: session,
                 cycle_id: cycle,
                 source_ref_id: session,
-                ts: NOW_UNIX_SECS - age,
+                ts: now_unix_secs() - age,
                 cache_read_input_tokens: 20_000,
                 cost_micros: 6_000,
                 hit_miss: "hit",
@@ -2408,7 +2629,7 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
                 1,
                 CacheKeepaliveTerminalReason::Cancelled,
                 None,
-                NOW_UNIX_SECS + 1,
+                now_unix_secs() + 1,
             )
             .await
             .expect("cancel session");
@@ -2420,7 +2641,7 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
             1,
             CacheKeepaliveTerminalReason::Cancelled,
             None,
-            NOW_UNIX_SECS + 1,
+            now_unix_secs() + 1,
         )
         .await
         .expect("cancel zero-turn session");
@@ -2433,7 +2654,7 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
             session_key_hash: "deleted-session",
             cycle_id: Uuid::from_u128(0xe102),
             source_ref_id: "deleted-turn",
-            ts: NOW_UNIX_SECS - 60,
+            ts: now_unix_secs() - 60,
             cache_read_input_tokens: 20_000,
             cost_micros: 11_000,
             hit_miss: "hit",
@@ -2467,4 +2688,219 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
             assert_eq!(rows[0]["id"], "recent-cancelled");
         }
     }
+}
+
+#[test]
+fn provisional_requests_remain_visible_without_inventing_final_cancellations() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::provisional_requests_remain_visible_without_inventing_final_cancellations";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build request marker regression runtime")
+            .block_on(
+                provisional_requests_remain_visible_without_inventing_final_cancellations_case(),
+            );
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn provisional_requests_remain_visible_without_inventing_final_cancellations_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for (index, (session, deadline, renewal_cost)) in [
+        ("fresh", 4_000_000_000, None),
+        ("fresh-renewed", 4_000_000_000, Some(6_000)),
+        ("incomplete", 0, None),
+        ("incomplete-renewed", 0, Some(8_000)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cycle = Uuid::from_u128(0xf000 + index as u128);
+        seed_session(&storage, &principal_id, session, cycle, false).await;
+        if let Some(cost_micros) = renewal_cost {
+            append_turn(
+                &storage,
+                AppendTurnParams {
+                    principal_id: &principal_id,
+                    session_key_hash: session,
+                    cycle_id: cycle,
+                    source_ref_id: session,
+                    ts: now_unix_secs(),
+                    cache_read_input_tokens: 20_000,
+                    cost_micros,
+                    hit_miss: "hit",
+                    with_follow_up: false,
+                },
+            )
+            .await;
+            sqlx::query(
+                "UPDATE cache_keepalive_sessions SET refresh_count = 1 WHERE session_key_hash = ?",
+            )
+            .bind(session)
+            .execute(storage.pool())
+            .await
+            .expect("set renewal count");
+        }
+        assert!(
+            storage
+                .begin_cache_keepalive_request_fenced(session, None, now_unix_secs() + 1, deadline,)
+                .await
+                .expect("begin request")
+        );
+    }
+    seed_session(
+        &storage,
+        &principal_id,
+        "legacy",
+        Uuid::from_u128(0xf100),
+        false,
+    )
+    .await;
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "legacy",
+                None,
+                now_unix_secs() + 1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("new_request"),
+                now_unix_secs() + 1,
+            )
+            .await
+            .expect("seed final legacy cancellation")
+    );
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "deleted-session",
+            cycle_id: Uuid::from_u128(0xf200),
+            source_ref_id: "deleted-request-turn",
+            ts: now_unix_secs(),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 11_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "deleted-request-turn").await;
+
+    for horizon in ["24h", "all"] {
+        let (summary, groups, rows) = fetch_visible_pages(&state, &principal_id, horizon, 1).await;
+        assert_eq!(rows.len(), 3, "{horizon}: {rows:?}");
+        assert_eq!(summary["renewing_now"], 0);
+        assert_eq!(summary["sessions_last_5m"], 3);
+        assert_eq!(summary["unlisted_sessions"], 1);
+        assert_json_dollars(&summary["total_spent"], 25_000);
+        assert_json_dollars(&summary["unlisted_spent"], 11_000);
+        assert_json_dollars(
+            &summary["total_spent"],
+            sum_group_micros(&groups, "total_spent").expect("known group spend") + 11_000,
+        );
+        assert_eq!(
+            groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group["sessions"].as_u64().unwrap())
+                .sum::<u64>(),
+            3
+        );
+        for row in rows {
+            let id = row["id"].as_str().unwrap();
+            let fresh = id.starts_with("fresh");
+            assert_eq!(row["state"], if fresh { "in_request" } else { "expired" });
+            assert_eq!(
+                row["reason"],
+                if fresh {
+                    "In request"
+                } else {
+                    "Request did not complete before its deadline"
+                }
+            );
+            assert!(row["cancel_reason"].is_null() && row["error"].is_null());
+            assert_eq!(row["is_active"], false);
+            let (status, detail) = get_json(&state, &keepalive_detail_uri(&principal_id, id)).await;
+            assert_eq!(status, StatusCode::OK, "{detail:?}");
+            assert_eq!(detail["state"], row["state"]);
+            assert_eq!(detail["reason"], row["reason"]);
+            assert!(detail["cancel_reason"].is_null() && detail["error"].is_null());
+            let paid_current_cycle = id.ends_with("-renewed");
+            assert_eq!(detail["is_last_pending"], paid_current_cycle);
+            if paid_current_cycle {
+                assert_eq!(detail["turns"][0]["pending"], true);
+                assert_eq!(detail["gaps"][0]["ending_kind"], "followup_pending");
+                assert_eq!(detail["follow_up_outcomes"]["pending"], 1);
+                assert_eq!(detail["follow_up_outcomes"]["no_follow_up"], 0);
+            } else {
+                assert_eq!(detail["turns"], json!([]));
+                assert_eq!(detail["gaps"], json!([]));
+            }
+        }
+    }
+    for (filter, mut expected) in [
+        (
+            "visible",
+            vec!["fresh", "fresh-renewed", "incomplete-renewed"],
+        ),
+        (
+            "tracked",
+            vec!["fresh", "fresh-renewed", "incomplete-renewed"],
+        ),
+        ("in_request", vec!["fresh", "fresh-renewed"]),
+        ("renewed", vec![]),
+        ("expired", vec!["incomplete", "incomplete-renewed"]),
+        ("scheduled", vec![]),
+        ("cancelled", vec![]),
+        ("failed", vec![]),
+        ("not_tracked", vec!["legacy"]),
+    ] {
+        let (status, body) = get_json(
+            &state,
+            &format!(
+                "/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&status={filter}"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filter}: {body:?}");
+        let mut actual = body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{filter}");
+    }
+    // A true completion replaces the marker's presentation and reason.
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "fresh-renewed",
+                None,
+                now_unix_secs() + 1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("user_turn_detected"),
+                now_unix_secs() + 2,
+            )
+            .await
+            .expect("finish request with a real user-turn cancellation")
+    );
+    let (status, detail) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, "fresh-renewed"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["state"], "cancelled");
+    assert_eq!(detail["cancel_reason"], "user_turn_detected");
+    assert_eq!(
+        detail["reason"],
+        "Cancelled: the agent is waiting for the user"
+    );
 }

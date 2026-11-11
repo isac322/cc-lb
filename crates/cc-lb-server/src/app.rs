@@ -1502,6 +1502,7 @@ async fn build_app_with_storage_inner(
                 pusher: Arc::new(opened_scheduler.backend.clone()),
                 aead: Arc::clone(&aead),
                 clock: clock.clone(),
+                request_timeout: Duration::from_secs(config.timeouts.upstream_total_secs.max(1)),
             },
         ),
     );

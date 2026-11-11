@@ -137,6 +137,7 @@ impl Fixture {
             pusher,
             aead: self.aead.clone(),
             clock: Arc::new(SystemClock),
+            request_timeout: Duration::from_secs(120),
         })
     }
 
@@ -241,6 +242,7 @@ impl Fixture {
             pusher,
             aead: self.aead.clone(),
             clock: Arc::new(SystemClock),
+            request_timeout: Duration::from_secs(120),
         })
     }
 
