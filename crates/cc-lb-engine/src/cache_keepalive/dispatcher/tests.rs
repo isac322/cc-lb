@@ -278,6 +278,7 @@ fn classifies_successful_cache_read_as_hit() {
             assert_eq!(finalization.duration, Duration::from_millis(50));
         }
         DispatchOutcome::CacheMiss { .. }
+        | DispatchOutcome::MaxDuration
         | DispatchOutcome::UnsupportedProvider(_)
         | DispatchOutcome::Error(_) => panic!("expected cache hit"),
     }
@@ -302,6 +303,7 @@ fn classifies_zero_cache_read_as_miss() {
             assert_eq!(finalization.duration, Duration::from_millis(25));
         }
         DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::MaxDuration
         | DispatchOutcome::UnsupportedProvider(_)
         | DispatchOutcome::Error(_) => panic!("expected cache miss"),
     }
@@ -334,6 +336,7 @@ fn nested_anthropic_cache_creation_preserves_one_hour_accounting() {
     let finalization = match outcome {
         DispatchOutcome::CacheMiss { finalization } => finalization,
         DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::MaxDuration
         | DispatchOutcome::UnsupportedProvider(_)
         | DispatchOutcome::Error(_) => panic!("nested cache creation should be a miss"),
     };
@@ -442,6 +445,7 @@ fn classifies_cache_creation_with_canonical_ttl_split() {
         let finalization = match outcome {
             DispatchOutcome::CacheMiss { finalization } => finalization,
             DispatchOutcome::CacheHit { .. }
+            | DispatchOutcome::MaxDuration
             | DispatchOutcome::UnsupportedProvider(_)
             | DispatchOutcome::Error(_) => panic!("{name}: expected cache miss"),
         };
@@ -491,6 +495,7 @@ fn classifies_null_usage_as_zero_usage_miss() {
     let finalization = match outcome {
         DispatchOutcome::CacheMiss { finalization } => finalization,
         DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::MaxDuration
         | DispatchOutcome::UnsupportedProvider(_)
         | DispatchOutcome::Error(_) => panic!("null usage should be a miss"),
     };
@@ -511,7 +516,7 @@ fn classifies_null_usage_as_zero_usage_miss() {
 }
 
 #[test]
-fn classifies_mixed_cache_read_and_creation_as_hit() {
+fn partial_cache_read_and_creation_is_terminal_miss_with_usage_preserved() {
     let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"input_tokens":11,"output_tokens":3,"cache_read_input_tokens":1234,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#;
     let outcome = classify_success_body(
         body,
@@ -520,17 +525,8 @@ fn classifies_mixed_cache_read_and_creation_as_hit() {
         0,
         accounting_guard(),
     );
-    let finalization = match outcome {
-        DispatchOutcome::CacheHit {
-            cache_anchor_age,
-            finalization,
-        } => {
-            assert_eq!(cache_anchor_age, Duration::from_secs(2));
-            finalization
-        }
-        DispatchOutcome::CacheMiss { .. }
-        | DispatchOutcome::UnsupportedProvider(_)
-        | DispatchOutcome::Error(_) => panic!("positive cache read should remain a hit"),
+    let DispatchOutcome::CacheMiss { finalization } = outcome else {
+        panic!("rebuilding any protected cached prefix must stop renewals");
     };
     let usage = &finalization.usage;
     assert_eq!(
@@ -620,6 +616,7 @@ fn classifies_missing_usage_as_miss() {
             assert_eq!(finalization.duration, Duration::from_millis(10));
         }
         DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::MaxDuration
         | DispatchOutcome::UnsupportedProvider(_)
         | DispatchOutcome::Error(_) => panic!("expected cache miss"),
     }
@@ -823,7 +820,7 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
     let outcome = dispatcher
         .dispatch(
             &snapshot,
-            KeepaliveDispatchContext::new(None, "source".to_owned()),
+            KeepaliveDispatchContext::new(None, "source".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
@@ -869,7 +866,7 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
     let outcome = api_key_dispatcher
         .dispatch(
             &snapshot,
-            KeepaliveDispatchContext::new(None, "source".to_owned()),
+            KeepaliveDispatchContext::new(None, "source".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
@@ -1060,7 +1057,7 @@ async fn assert_billing_keepalive_observation(
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "billing-policy-renewal".to_owned()),
+            KeepaliveDispatchContext::new(None, "billing-policy-renewal".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
@@ -1176,7 +1173,7 @@ async fn read_only_keepalive_official_header_only_has_no_eligible_prefix()
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "official-header-only".to_owned()),
+            KeepaliveDispatchContext::new(None, "official-header-only".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
@@ -1205,7 +1202,7 @@ async fn read_only_keepalive_non_anthropic_rejects_without_dispatch_or_observati
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned()),
+            KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
@@ -1233,7 +1230,7 @@ async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "observation-identity".to_owned()),
+            KeepaliveDispatchContext::new(None, "observation-identity".to_owned(), u64::MAX),
         )
         .await;
     let after_dispatch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -1302,7 +1299,7 @@ async fn oauth_keepalive_malformed_unrelated_usage_never_publishes_observation()
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "malformed-unrelated-usage".to_owned()),
+            KeepaliveDispatchContext::new(None, "malformed-unrelated-usage".to_owned(), u64::MAX),
         )
         .await;
 
@@ -1338,7 +1335,7 @@ async fn oauth_keepalive_suffix_cache_creation_evidence_controls_publication()
         .dispatcher
         .dispatch(
             &zero_suffix.snapshot,
-            KeepaliveDispatchContext::new(None, "suffix-zero".to_owned()),
+            KeepaliveDispatchContext::new(None, "suffix-zero".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
@@ -1364,7 +1361,7 @@ async fn oauth_keepalive_suffix_cache_creation_evidence_controls_publication()
             .dispatcher
             .dispatch(
                 &fixture.snapshot,
-                KeepaliveDispatchContext::new(None, name.to_owned()),
+                KeepaliveDispatchContext::new(None, name.to_owned(), u64::MAX),
             )
             .await;
         assert!(
@@ -1415,11 +1412,13 @@ async fn oauth_keepalive_nested_ttl_accounting_preserves_publication_evidence()
             .dispatcher
             .dispatch(
                 &fixture.snapshot,
-                KeepaliveDispatchContext::new(None, name.to_owned()),
+                KeepaliveDispatchContext::new(None, name.to_owned(), u64::MAX),
             )
             .await;
-        let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
-            panic!("{name}: positive reads must remain cache hits");
+        let finalization = match outcome {
+            DispatchOutcome::CacheHit { finalization, .. } if expected_split.0 == 0 => finalization,
+            DispatchOutcome::CacheMiss { finalization } if expected_split.0 > 0 => finalization,
+            _ => panic!("{name}: creation must stop partial preservation"),
         };
         assert_eq!(finalization.usage.cache_read_input_tokens, 1234, "{name}");
         assert_eq!(
@@ -1447,7 +1446,7 @@ async fn oauth_keepalive_ambiguous_usage_preserves_classification_without_public
         (
             "mixed read and creation",
             br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":48}}"#,
-            "hit",
+            "miss",
             1234,
             48,
         ),
@@ -1534,7 +1533,7 @@ async fn oauth_keepalive_ambiguous_usage_preserves_classification_without_public
             .dispatcher
             .dispatch(
                 &fixture.snapshot,
-                KeepaliveDispatchContext::new(None, name.to_owned()),
+                KeepaliveDispatchContext::new(None, name.to_owned(), u64::MAX),
             )
             .await;
         let classification = match &outcome {
@@ -1563,6 +1562,7 @@ async fn oauth_keepalive_ambiguous_usage_preserves_classification_without_public
                 "miss"
             }
             DispatchOutcome::Error(_) => "error",
+            DispatchOutcome::MaxDuration => "capped",
             DispatchOutcome::UnsupportedProvider(_) => "unsupported",
         };
         assert_eq!(classification, expected, "{name}");
@@ -1601,7 +1601,7 @@ async fn oauth_keepalive_provider_errors_never_publish_success_shaped_usage()
             .dispatcher
             .dispatch(
                 &fixture.snapshot,
-                KeepaliveDispatchContext::new(None, "provider-error".to_owned()),
+                KeepaliveDispatchContext::new(None, "provider-error".to_owned(), u64::MAX),
             )
             .await;
         let DispatchOutcome::Error(reason) = outcome else {
@@ -1640,7 +1640,7 @@ async fn keepalive_dispatch_timeout_allows_fifteen_second_provider() {
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "slow".to_owned()),
+            KeepaliveDispatchContext::new(None, "slow".to_owned(), u64::MAX),
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
@@ -1659,7 +1659,7 @@ async fn keepalive_dispatch_timeout_has_distinct_error() {
         .dispatcher
         .dispatch(
             &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "timeout".to_owned()),
+            KeepaliveDispatchContext::new(None, "timeout".to_owned(), u64::MAX),
         )
         .await;
     let DispatchOutcome::Error(error) = outcome else {

@@ -313,6 +313,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         current_job_key: "cache_keepalive:session-hash:4".to_owned(),
         encrypted_payload: vec![1, 2, 3, 4],
         terminal_reason: Some(CacheKeepaliveTerminalReason::CacheMiss),
+        cancel_reason: None,
         expires_at_unix_secs: 1_716_000_500,
         created_at_unix_secs: 1_716_000_100,
         updated_at_unix_secs: 1_716_000_300,

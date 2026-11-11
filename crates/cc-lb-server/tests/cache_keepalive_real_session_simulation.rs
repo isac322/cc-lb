@@ -85,10 +85,11 @@ async fn successful_keepalive_publishes_observation_before_reschedule_cap() {
         observations
     }
 
-    // Both terminal paths run after successful renewal accounting. Neither may
-    // prevent publication merely because there will be no next scheduled job.
+    // The final successful renewal publishes even when no next renewal is allowed.
+    // A job at its deadline must not dispatch, so keep this first job one second
+    // inside the duration cap; its next scheduled renewal would cross the cap.
     for (max_refreshes, max_duration, terminal_reason) in
-        [(1, 1_800, "max_refreshes"), (3, 270, "max_duration")]
+        [(1, 1_800, "max_refreshes"), (3, 271, "max_duration")]
     {
         let harness = Harness::with_options(HarnessOptions {
             keepalive: KeepaliveOptions {

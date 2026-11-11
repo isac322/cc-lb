@@ -337,8 +337,10 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
         (tool_input, "/input/2/output/0/prompt_cache_breakpoint/ttl"),
     ] {
         let fixture = OpenAiFixture::start().await;
+        // The 30m renewal is due at 5s, inside the 8s cap; the next at 10s
+        // is forbidden. A 1s job at a 1s cap must now be skipped before HTTP.
         fixture
-            .configure_keepalive_with_duration(true, true, 1799, 1)
+            .configure_keepalive_with_duration(true, true, 1795, 8)
             .await;
         let pool = pool(&fixture).await;
         let session = "00000000-0000-7000-8000-000000000300";
@@ -397,7 +399,7 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
         }
     })
     .await
-    .expect("first renewal must terminalize at the one-second duration cap");
+    .expect("first renewal must terminalize before another renewal would cross the duration cap");
         assert_eq!(
             fixture.mock.requests().len(),
             2,
@@ -502,8 +504,9 @@ async fn run_openai_scope_case(
     mixed_case: bool,
 ) {
     let fixture = OpenAiFixture::start().await;
+    // Keep one paid native renewal inside the cap; the next cadence crosses it.
     fixture
-        .configure_keepalive_with_duration(true, true, 1799, 1)
+        .configure_keepalive_with_duration(true, true, 1795, 8)
         .await;
     let pool = pool(&fixture).await;
     let session = format!("00000000-0000-7000-8000-{index:012}");

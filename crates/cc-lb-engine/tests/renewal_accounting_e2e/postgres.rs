@@ -106,10 +106,18 @@ fn renewal_event() -> RequestEvent {
     RequestEvent {
         ts: 1_003,
         ts_ms: Some(1_003_000),
-        request_id: "renewal:postgres-renewal-session:1".to_owned(),
-        event_id: Some("renewal:postgres-renewal-session:1".to_owned()),
+        request_id:
+            "renewal:keepalive-v2:postgres-renewal-session:00000000-0000-0000-0000-000000000000:1"
+                .to_owned(),
+        event_id: Some(
+            "renewal:keepalive-v2:postgres-renewal-session:00000000-0000-0000-0000-000000000000:1"
+                .to_owned(),
+        ),
         source_kind: Some("renewal".to_owned()),
-        source_ref_id: Some("postgres-renewal-session:1".to_owned()),
+        source_ref_id: Some(
+            "keepalive-v2:postgres-renewal-session:00000000-0000-0000-0000-000000000000:1"
+                .to_owned(),
+        ),
         principal_id: Some("postgres-renewal-principal".to_owned()),
         upstream_id: Some(Uuid::from_u128(7)),
         model: Some("claude-test".to_owned()),
@@ -123,7 +131,9 @@ fn renewal_event() -> RequestEvent {
 fn renewal_projections() -> RequestEventProjections {
     RequestEventProjections {
         turn: Some(CacheKeepaliveTurnRow {
-            source_ref_id: "postgres-renewal-session:1".to_owned(),
+            source_ref_id:
+                "keepalive-v2:postgres-renewal-session:00000000-0000-0000-0000-000000000000:1"
+                    .to_owned(),
             session_key_hash: "postgres-renewal-session".to_owned(),
             principal_id: "postgres-renewal-principal".to_owned(),
             accounting_key_id: None,
@@ -141,7 +151,9 @@ fn renewal_projections() -> RequestEventProjections {
             ts: 1_003,
         }),
         decision: CacheKeepaliveDecisionRow {
-            source_ref_id: "postgres-renewal-session:1".to_owned(),
+            source_ref_id:
+                "keepalive-v2:postgres-renewal-session:00000000-0000-0000-0000-000000000000:1"
+                    .to_owned(),
             principal_id: "postgres-renewal-principal".to_owned(),
             session_key_hash: Some("postgres-renewal-session".to_owned()),
             upstream_id: Uuid::from_u128(7),

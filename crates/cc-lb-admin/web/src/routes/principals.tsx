@@ -584,13 +584,18 @@ function PrincipalDetail({
   const { PrincipalsActivity } = useDesign();
   const { providers: scopedProviders } = useProviderScope();
   const inventory = useUpstreams();
-  const anthropicInScope =
-    scopedProviders === undefined || scopedProviders.includes('anthropic');
-  const anthropicConfigured =
-    inventory.data?.upstreams.some(
-      (upstream) => providerOf(upstream.kind) === 'anthropic',
-    ) ?? false;
-  const supportsAnthropicFeatures = anthropicInScope && anthropicConfigured;
+  const supportsSubscriptionPreference =
+    inventory.data?.upstreams.some((upstream) => {
+      const inScope =
+        scopedProviders === undefined ||
+        scopedProviders.includes(providerOf(upstream.kind));
+      const allowed =
+        principal.allowed_upstreams.length === 0 ||
+        principal.allowed_upstreams.includes(upstream.id);
+      return (
+        inScope && allowed && capabilitiesOf(upstream.kind).subscriptionQuota
+      );
+    }) ?? false;
   const supportsKeepalive =
     inventory.data?.upstreams.some((upstream) => {
       const provider = providerOf(upstream.kind);
@@ -749,7 +754,7 @@ function PrincipalDetail({
         <RecentRequestsCard principal={principal} />
         <RouterSlotEditor
           principal={principal}
-          showSubscriptionPreference={supportsAnthropicFeatures}
+          showSubscriptionPreference={supportsSubscriptionPreference}
         />
         <ShapeSlotEditor principalId={principal.id} />
         <ApiKeysCard principal={principal} />
@@ -1672,7 +1677,7 @@ export function RouterSlotEditor({
         {
           onSuccess: () =>
             undoToast({
-              message: 'Keep prompt cache warm turned off',
+              message: 'Subscription preference turned off',
               onUndo: () =>
                 insert.mutate(
                   {
@@ -1686,7 +1691,7 @@ export function RouterSlotEditor({
                   },
                   {
                     onSuccess: () =>
-                      toast.success('Keep prompt cache warm restored'),
+                      toast.success('Subscription preference restored'),
                   },
                 ),
             }),
@@ -1707,13 +1712,13 @@ export function RouterSlotEditor({
       {
         onSuccess: (created) =>
           undoToast({
-            message: 'Keep prompt cache warm turned on',
+            message: 'Subscription preference turned on',
             onUndo: () =>
               del.mutate(
                 { id: created.id, revision: created.revision },
                 {
                   onSuccess: () =>
-                    toast.success('Keep prompt cache warm turned off'),
+                    toast.success('Subscription preference turned off'),
                 },
               ),
           }),
@@ -1896,12 +1901,16 @@ export function RouterSlotEditor({
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-body font-medium text-text">
-                    Keep prompt cache warm by reusing upstreams
+                    Prefer subscription upstreams
                   </div>
                   <div className="mt-0.5 text-body text-text-muted">
-                    Requests with similar prompts get routed to the upstream
-                    that already served them, so the prompt cache hits stay
-                    high.
+                    Select using subscription quota and supported cache-cost
+                    evidence, with API keys as fallback.
+                  </div>
+                  <div className="mt-2 text-body-sm text-text-muted">
+                    Provider scope only changes which controls are shown.
+                    Changing this setting affects this principal's router chain
+                    across all providers.
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5 shrink-0">
@@ -1920,7 +1929,7 @@ export function RouterSlotEditor({
                   <ToggleSwitch
                     variant="compact"
                     role="switch"
-                    aria-label="Keep prompt cache warm by reusing upstreams"
+                    aria-label="Prefer subscription upstreams"
                     checked={hasSubscriptionPreference}
                     onChange={toggleSubscriptionPreference}
                     aria-busy={subscriptionPreferencePending || undefined}

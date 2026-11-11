@@ -124,6 +124,9 @@ pub struct CacheKeepaliveSessionRecord {
     pub error: Option<String>,
     pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
+    /// Specific real-request cancellation cause; absent on legacy rows.
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
     pub expires_at_unix_secs: u64,
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
@@ -158,6 +161,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
             .field("error", &self.error)
             .field("config_snapshot", &self.config_snapshot)
             .field("terminal_reason", &self.terminal_reason)
+            .field("cancel_reason", &self.cancel_reason)
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("created_at_unix_secs", &self.created_at_unix_secs)
             .field("updated_at_unix_secs", &self.updated_at_unix_secs)
@@ -272,12 +276,9 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         expected_ticket: Option<u64>,
         cancel_anchor_at_unix_secs: u64,
         reason: CacheKeepaliveTerminalReason,
+        cancel_reason: Option<&str>,
         now_unix_secs: u64,
-    ) -> StorageResult<bool> {
-        let _ = (expected_ticket, cancel_anchor_at_unix_secs);
-        self.mark_latest_cache_keepalive_terminal(session_key_hash, reason, now_unix_secs)
-            .await
-    }
+    ) -> StorageResult<bool>;
     async fn get_cache_keepalive_session(
         &self,
         session_key_hash: &str,
@@ -435,6 +436,7 @@ mod tests {
             error: Some("status=400 body=invalid thinking".to_owned()),
             config_snapshot: None,
             terminal_reason: None,
+            cancel_reason: None,
             expires_at_unix_secs: 310,
             created_at_unix_secs: 10,
             updated_at_unix_secs: 10,

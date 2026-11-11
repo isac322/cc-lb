@@ -46,18 +46,28 @@ pub trait KeepaliveDispatcher: Send + Sync + 'static {
 pub struct KeepaliveDispatchContext {
     reservation: Option<Reservation>,
     source_ref_id: String,
+    dispatch_deadline_unix_secs: u64,
 }
 
 impl KeepaliveDispatchContext {
-    pub fn new(reservation: Option<Reservation>, source_ref_id: String) -> Self {
+    pub fn new(
+        reservation: Option<Reservation>,
+        source_ref_id: String,
+        dispatch_deadline_unix_secs: u64,
+    ) -> Self {
         Self {
             reservation,
             source_ref_id,
+            dispatch_deadline_unix_secs,
         }
     }
 
     pub fn source_ref_id(&self) -> &str {
         &self.source_ref_id
+    }
+
+    pub(crate) fn dispatch_deadline_unix_secs(&self) -> u64 {
+        self.dispatch_deadline_unix_secs
     }
 
     pub(crate) fn into_reservation(self) -> Option<Reservation> {
@@ -73,6 +83,8 @@ pub enum DispatchOutcome {
     CacheMiss {
         finalization: RenewalFinalization,
     },
+    /// The deadline elapsed before HTTP dispatch; no completed-request usage exists.
+    MaxDuration,
     UnsupportedProvider(String),
     Error(String),
 }

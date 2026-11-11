@@ -169,6 +169,7 @@ fn hit_reschedule_keeps_result_owned_when_cancelled() {
                         None,
                         committed.cache_anchor_at_unix_secs,
                         CacheKeepaliveTerminalReason::Cancelled,
+                        None,
                         152,
                     )
                     .await?,

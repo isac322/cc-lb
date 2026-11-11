@@ -93,6 +93,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 Some(cancel_ticket),
                 369,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await
@@ -122,6 +123,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 Some(cancel_ticket),
                 372,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await
@@ -214,6 +216,7 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh() {
                 Some(ticket),
                 370,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await
@@ -246,6 +249,7 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh() {
                 Some(ticket),
                 401,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 401,
             )
             .await
@@ -271,6 +275,7 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
                 Some(cancelled_ticket),
                 100,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 103,
             )
             .await
@@ -352,6 +357,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards()
                 None,
                 370,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await
@@ -381,6 +387,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards()
                 None,
                 371,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 400,
             )
             .await
@@ -821,6 +828,7 @@ async fn fenced_terminal_paths_reset_enqueue_state_and_reschedule_clears_error()
                 None,
                 100,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 103,
             )
             .await
@@ -1412,4 +1420,74 @@ async fn purge_stale_pending_keeps_enqueued_work() {
             .expect("load enqueued after purge")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn cancellation_causes_roundtrip_and_replacement_clears_them() {
+    let (_dir, storage) = storage().await;
+    for (index, reason) in [
+        None,
+        Some("new_request"),
+        Some("user_turn_detected"),
+        Some("snapshot_too_large"),
+        Some("cached_prefix_too_small"),
+        Some("zero_token_renewal_unsupported"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let now = 100 + index as u64 * 10;
+        let active = storage
+            .replace_from_real_request(&replace_request(b"prefix", now))
+            .await
+            .expect("replace");
+        assert_eq!(active.cancel_reason, None);
+        assert!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    "session-hash",
+                    None,
+                    now,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    reason,
+                    now + 1
+                )
+                .await
+                .expect("cancel")
+        );
+        let terminal = storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("get")
+            .expect("session");
+        assert_eq!(terminal.cancel_reason.as_deref(), reason);
+        assert_eq!(
+            terminal.terminal_reason,
+            Some(CacheKeepaliveTerminalReason::Cancelled)
+        );
+        assert!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    "session-hash",
+                    None,
+                    now,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("new_request"),
+                    now + 2
+                )
+                .await
+                .expect("duplicate cancellation")
+        );
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session("session-hash")
+                .await
+                .expect("get")
+                .expect("session")
+                .cancel_reason
+                .as_deref(),
+            reason,
+            "a stale cancellation cannot change the cause"
+        );
+    }
 }

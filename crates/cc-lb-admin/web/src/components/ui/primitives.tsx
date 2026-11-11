@@ -18,6 +18,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -595,12 +596,28 @@ export function Hint({
   const [engaged, setEngaged] = useState(false);
   const [open, setOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const triggerRef = useRef<HTMLElement>(null);
+  const transferFocusRef = useRef(false);
+
+  useLayoutEffect(() => {
+    // Engagement replaces the lightweight trigger. Transfer actual focus only;
+    // a pointer hover must leave the operator's current focus alone.
+    if (engaged && transferFocusRef.current) {
+      transferFocusRef.current = false;
+      triggerRef.current?.focus({ preventScroll: true });
+    }
+  }, [engaged]);
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+  const engage = (trigger: Element) => {
+    transferFocusRef.current = trigger === document.activeElement;
+    setEngaged(true);
+    setOpen(true);
+  };
   if (!label) return children;
 
   if (!engaged) {
@@ -609,10 +626,8 @@ export function Hint({
       return cloneElement(childElement, {
         onPointerEnter: (e) => {
           childElement.props.onPointerEnter?.(e);
-          timerRef.current = setTimeout(() => {
-            setEngaged(true);
-            setOpen(true);
-          }, 200);
+          const trigger = e.currentTarget;
+          timerRef.current = setTimeout(() => engage(trigger), 200);
         },
         onPointerLeave: (e) => {
           childElement.props.onPointerLeave?.(e);
@@ -621,40 +636,34 @@ export function Hint({
         onFocus: (e) => {
           childElement.props.onFocus?.(e);
           if (!openOnFocus) return;
-          setEngaged(true);
-          setOpen(true);
+          engage(e.currentTarget);
         },
         onClick: (e) => {
           if (stopClickPropagation) e.stopPropagation();
           childElement.props.onClick?.(e);
           if (!openOnFocus) {
-            setEngaged(true);
-            setOpen(true);
+            engage(e.currentTarget);
           }
         },
       });
     }
     return (
       <span
-        onPointerEnter={() => {
-          timerRef.current = setTimeout(() => {
-            setEngaged(true);
-            setOpen(true);
-          }, 200);
+        onPointerEnter={(e) => {
+          const trigger = e.currentTarget;
+          timerRef.current = setTimeout(() => engage(trigger), 200);
         }}
         onPointerLeave={() => {
           if (timerRef.current) clearTimeout(timerRef.current);
         }}
-        onFocus={() => {
+        onFocus={(e) => {
           if (!openOnFocus) return;
-          setEngaged(true);
-          setOpen(true);
+          engage(e.currentTarget);
         }}
         onClick={(e) => {
           if (stopClickPropagation) e.stopPropagation();
           if (!openOnFocus) {
-            setEngaged(true);
-            setOpen(true);
+            engage(e.currentTarget);
           }
         }}
       >
@@ -666,7 +675,13 @@ export function Hint({
   return (
     <BasePopover.Root open={open} onOpenChange={setOpen}>
       <BasePopover.Trigger
+        ref={(element: HTMLElement | null) => {
+          triggerRef.current = element;
+        }}
         delay={200}
+        onFocus={() => {
+          if (openOnFocus) setOpen(true);
+        }}
         onClick={(event: React.MouseEvent) => {
           if (stopClickPropagation) event.stopPropagation();
         }}
@@ -678,7 +693,11 @@ export function Hint({
       <BasePopover.Portal>
         <BasePopover.Positioner className="z-50" side={side} sideOffset={4}>
           {/* Tall breakdowns scroll inside the popup instead of running past the viewport edge. */}
-          <BasePopover.Popup className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay">
+          <BasePopover.Popup
+            initialFocus={false}
+            finalFocus={false}
+            className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay"
+          >
             {label}
           </BasePopover.Popup>
         </BasePopover.Positioner>

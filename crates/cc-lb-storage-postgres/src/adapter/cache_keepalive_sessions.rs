@@ -108,6 +108,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               config_snapshot = EXCLUDED.config_snapshot,
               last_message_at_ms = EXCLUDED.last_message_at_ms,
               terminal_reason = NULL,
+              cancel_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
              RETURNING *",
@@ -242,6 +243,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               config_snapshot = EXCLUDED.config_snapshot,
               last_message_at_ms = EXCLUDED.last_message_at_ms,
               terminal_reason = NULL,
+              cancel_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
              WHERE ($18 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
@@ -505,6 +507,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         expected_ticket: Option<u64>,
         cancel_anchor_at_unix_secs: u64,
         reason: CacheKeepaliveTerminalReason,
+        cancel_reason: Option<&str>,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -542,7 +545,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             "cache keepalive terminal expires_at",
         )?;
         let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, cancel_reason = $7, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = ''::bytea,
              expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN GREATEST(expires_at, $6) ELSE expires_at END,
              updated_at = $2,
@@ -559,6 +562,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             "cache keepalive cancel_anchor_at",
         )?)
         .bind(retained_expires_at)
+        .bind(cancel_reason)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -791,6 +795,7 @@ pub(crate) fn row_to_record(row: PgRow) -> StorageResult<CacheKeepaliveSessionRe
             .as_deref()
             .map(terminal_reason_from_db)
             .transpose()?,
+        cancel_reason: row.try_get("cancel_reason").map_err(map_sqlx_error)?,
         expires_at_unix_secs: i64_to_u64(
             row.try_get("expires_at").map_err(map_sqlx_error)?,
             "cache keepalive expires_at",

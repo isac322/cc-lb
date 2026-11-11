@@ -3222,6 +3222,17 @@ fn signer_error_kind(error: &SignerError) -> InternalErrorKind {
 #[async_trait]
 pub trait UpstreamDispatch: Send + Sync {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError>;
+
+    /// Sends only if the deadline still permits HTTP to start. Middleware that
+    /// waits for admission must forward this operation after acquiring capacity.
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &crate::attempt_rail::DispatchDeadline,
+    ) -> Result<Response<Body>, crate::attempt_rail::DispatchBeforeError> {
+        deadline.check()?;
+        self.dispatch(request).await.map_err(Into::into)
+    }
 }
 
 #[async_trait]

@@ -22,7 +22,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
-use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
+use crate::attempt_rail::{
+    AttemptIntent, DispatchBeforeError, DispatchDeadline, ResponseAccountingGuard, Signed,
+};
 use crate::lifecycle::{
     PromptCacheUsage, UpstreamDispatch, decode_prompt_cache_observations_pure,
     prompt_cache_observation_context, prompt_cache_policy_for_upstream,
@@ -106,11 +108,11 @@ impl AnthropicKeepaliveDispatcher {
     async fn dispatch_signed(
         &self,
         signed: Signed<'_>,
-    ) -> Result<(StatusCode, http::HeaderMap, Bytes, Duration), String> {
+        deadline: &DispatchDeadline,
+    ) -> Result<(StatusCode, http::HeaderMap, Bytes, Duration), DispatchBeforeError> {
         let response = signed
-            .dispatch(self.http_client.as_ref())
-            .await
-            .map_err(|source| source.to_string())?;
+            .dispatch_before(self.http_client.as_ref(), deadline)
+            .await?;
         let cache_anchor_at = Instant::now();
         let status = response.status();
         let headers = response.headers().clone();
@@ -118,7 +120,11 @@ impl AnthropicKeepaliveDispatcher {
             .into_body()
             .collect()
             .await
-            .map_err(|source| source.to_string())?
+            .map_err(|source| {
+                DispatchBeforeError::Dispatch(crate::DispatchError::Transport {
+                    source: Box::new(source),
+                })
+            })?
             .to_bytes();
         Ok((status, headers, body, cache_anchor_at.elapsed()))
     }
@@ -152,43 +158,35 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
 
         let dispatch_started = Instant::now();
-        let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs, dispatch_start_ms) =
-            match context.into_reservation() {
-                Some(reservation) => {
-                    let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
-                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
-                    {
-                        Ok(signed) => signed,
-                        Err(error) => return DispatchOutcome::Error(error.to_string()),
-                    };
-                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                    let dispatch_start_ms =
-                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
-                    (
-                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                        reserved.into_response_accounting_guard(),
-                        dispatch_anchor_unix_secs,
-                        dispatch_start_ms,
-                    )
+        let deadline = context.dispatch_deadline_unix_secs();
+        let intent = match context.into_reservation() {
+            Some(reservation) => AttemptIntent::from_reservation(reservation),
+            None => AttemptIntent::observe_only(),
+        };
+        let reserved = intent.into_reserved();
+        let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+            Ok(signed) => signed,
+            Err(error) => return DispatchOutcome::Error(error.to_string()),
+        };
+        // Upstream lookup, signer construction, and OAuth refresh may all await.
+        // Enforce the send boundary after them, while RAII still owns the unsent
+        // reservation and before any completed-request accounting is created.
+        let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
+        if dispatch_anchor_unix_secs >= deadline {
+            return DispatchOutcome::MaxDuration;
+        }
+        let dispatch_start_ms = unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
+        let send_deadline = DispatchDeadline::new(self.clock.clone(), deadline);
+        let dispatch_result =
+            match tokio::time::timeout(self.timeout, self.dispatch_signed(signed, &send_deadline))
+                .await
+            {
+                Ok(Err(DispatchBeforeError::DeadlineElapsed)) => {
+                    return DispatchOutcome::MaxDuration;
                 }
-                None => {
-                    let reserved = AttemptIntent::observe_only().into_reserved();
-                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
-                    {
-                        Ok(signed) => signed,
-                        Err(error) => return DispatchOutcome::Error(error.to_string()),
-                    };
-                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                    let dispatch_start_ms =
-                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
-                    (
-                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                        reserved.into_response_accounting_guard(),
-                        dispatch_anchor_unix_secs,
-                        dispatch_start_ms,
-                    )
-                }
+                result => result,
             };
+        let accounting_guard = reserved.into_response_accounting_guard();
 
         match dispatch_result {
             Ok(Ok((StatusCode::OK, headers, body, cache_anchor_age))) => {
@@ -217,7 +215,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(Ok((status, _headers, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
-            Ok(Err(source)) => DispatchOutcome::Error(source),
+            Ok(Err(source)) => DispatchOutcome::Error(source.to_string()),
             Err(_elapsed) => DispatchOutcome::Error(format!(
                 "renewal timed out after {}s",
                 self.timeout.as_secs()
@@ -582,7 +580,12 @@ fn classify_success_body_with_surface(
                 request_start_ms,
                 accounting_guard,
             };
-            if finalization.usage.cache_read_input_tokens > 0 {
+            // Renewal appends no cache-controlled content. Any cache creation
+            // means a protected prefix was rebuilt rather than fully preserved.
+            // Keep its paid usage, but never perpetuate a partial cache hit.
+            if finalization.usage.cache_read_input_tokens > 0
+                && finalization.usage.cache_creation_input_tokens == 0
+            {
                 DispatchOutcome::CacheHit {
                     cache_anchor_age,
                     finalization,

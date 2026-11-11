@@ -226,7 +226,36 @@ describe('head-only session polling', () => {
     expect(result.current.data?.pages[0].rows[0].generation).toBe(99);
   });
 
-  test.each(['summary', 'groups'] as const)(
+  test('clock-only sessions_last_5m changes update the head without fetching loaded tail pages', async () => {
+    const { result } = renderHook(
+      () => useCacheKeepaliveSessions(PRINCIPAL_ID),
+      { wrapper: makeWrapper(makeClient()) },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const laterPages = result.current.data?.pages.slice(1);
+    requests.length = 0;
+    head = {
+      ...head,
+      summary: {
+        ...cacheKeepaliveSummaryFixture,
+        sessions_last_5m: cacheKeepaliveSummaryFixture.sessions_last_5m + 1,
+      },
+    };
+
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+
+    expect(requests).toEqual(['head', 'head', 'head']);
+    expect(result.current.data?.pages.slice(1)).toEqual(laterPages);
+    expect(result.current.data?.pages[0].summary?.sessions_last_5m).toBe(
+      head.summary?.sessions_last_5m,
+    );
+  });
+
+  test.each(['total_spent', 'renewing_now', 'groups'] as const)(
     'a changed %s refreshes the loaded tail exactly once',
     async (aggregate) => {
       const { result } = renderHook(
@@ -244,10 +273,10 @@ describe('head-only session polling', () => {
       await act(() => vi.advanceTimersByTimeAsync(1));
       requests.length = 0;
       head =
-        aggregate === 'summary'
+        aggregate !== 'groups'
           ? {
               ...head,
-              summary: { ...cacheKeepaliveSummaryFixture, total_spent: 10 },
+              summary: { ...cacheKeepaliveSummaryFixture, [aggregate]: 10 },
             }
           : {
               ...head,

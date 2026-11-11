@@ -228,6 +228,7 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
+    assert_eq!(record.cancel_reason.as_deref(), Some("user_turn_detected"));
     let jobs = backend
         .backend
         .list_keepalive_tasks(&Filter {
@@ -849,4 +850,60 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
         after_inverse_race.status,
         CacheKeepaliveSessionStatus::Terminal
     );
+}
+
+#[tokio::test]
+async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
+    for reason in [
+        CancelReason::NewRequest,
+        CancelReason::UserTurnDetected,
+        CancelReason::SnapshotTooLarge,
+        CancelReason::CachedPrefixTooSmall,
+        CancelReason::ZeroTokenRenewalUnsupported,
+    ] {
+        let fixture = Fixture::new().await;
+        let backend = crate::scheduler_factory::open_scheduler_storage(
+            &StorageConfig::Sqlite {
+                path: fixture.sqlite_path.clone(),
+            },
+            &SchedulerConfig::default(),
+            Arc::new(SystemClock),
+        )
+        .await
+        .expect("scheduler");
+        let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage: fixture.storage.clone(),
+            pusher: Arc::new(backend.backend),
+            aead: fixture.aead.clone(),
+            clock: Arc::new(SystemClock),
+        });
+        enqueuer
+            .enqueue_cache_keepalive(enqueue_request())
+            .await
+            .expect("enqueue");
+        let ticket = enqueuer
+            .observe_session_generation("session-hash")
+            .await
+            .expect("ticket");
+        enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: "session-hash".to_owned(),
+                reason,
+                expected_generation: ticket,
+                cache_anchor_age: std::time::Duration::ZERO,
+            })
+            .await
+            .expect("cancel");
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load")
+            .expect("session");
+        assert_eq!(record.cancel_reason.as_deref(), Some(reason.as_str()));
+        assert_eq!(
+            record.terminal_reason,
+            Some(CacheKeepaliveTerminalReason::Cancelled)
+        );
+    }
 }

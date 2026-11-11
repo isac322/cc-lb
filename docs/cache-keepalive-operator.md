@@ -79,6 +79,12 @@ real response writes a new generation and enqueues a lightweight
 generation before dispatch and again through conditional post-dispatch updates,
 so old queued/running work becomes a stale no-op.
 
+Completed renewal records use `keepalive-v2:<session_key_hash>:<cycle_id>:<generation>`
+as their source identity. The version prefix separates new writes from retained
+legacy identities, including sessions whose old keys contain colons or have no
+cycle UUID. Turns, request events, and renewal evidence share this identity, so
+purging and recreating a session cannot overwrite retained spend.
+
 An authenticated, non-auxiliary, keep-alive-eligible real request retires the
 matching active generation before upstream dispatch. Its queued renewal cannot
 fire while that real request waits for response headers or streams its response.
@@ -90,6 +96,11 @@ The proxy waits for the cancellation attempt before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
 if cancellation cannot be persisted.
 
+Successful real-request cancellations persist a nullable `cancel_reason`:
+`new_request`, `user_turn_detected`, `snapshot_too_large`,
+`cached_prefix_too_small`, or `zero_token_renewal_unsupported`. Older rows
+remain null; their display must say only “Cancelled”, without guessing a cause.
+
 Scheduling is anchored to cache creation / response begin:
 
 - Streaming responses use the Anthropic `message_start` event timestamp.
@@ -98,6 +109,8 @@ Scheduling is anchored to cache creation / response begin:
 - `run_at = cache_anchor_at + ttl - lead_time`; with the default 5-minute TTL
   and 30-second lead, the job fires 270 seconds after `message_start`, not 270
   seconds after final response completion.
+- For mixed Anthropic breakpoints, scheduling uses the shortest protected TTL;
+  a 1-hour system prefix plus a 5-minute message prefix renews on the 5-minute cadence.
 
 The initial schedule subtracts the existing cache anchor age. After a
 cache-hit renewal, the next schedule uses the full configured `ttl - lead_time`
@@ -106,6 +119,21 @@ initial shortened delay. Session caps retain the original duration anchor.
 When another renewal is permitted, rescheduling increments `refresh_count`.
 A final capped renewal does not increment `refresh_count`. New real requests
 reset `refresh_count` and `first_scheduled_at`.
+
+Both caps are checked before provider dispatch. A renewal scheduled at or after
+`first_scheduled_at + max_total_duration_secs` is terminal `max_duration`
+without an HTTP request. A late worker also stops when the current time reaches
+that deadline. The send gate stays attached through signing and bulkhead
+admission, and is checked again after capacity is acquired without bypassing
+the circuit breaker. Once HTTP starts, crossing the cap does not cancel the
+request or discard its paid usage. The post-response cap checks remain in force.
+
+Anthropic rescheduling requires positive cache reads and zero cache creation.
+A renewal that reads one prefix but rebuilds another is terminal `cache_miss`,
+even when its read count is positive. Its entire paid usage and spend remain
+recorded. This uses no deployment-tuned token tolerance: explicit snapshot
+continuations add no cache-controlled content, and automatic-cache snapshots
+replay the captured input unchanged.
 
 An eligible successful read-only renewal attempts observation publication
 through the existing bounded, nonblocking best-effort sink. The shared decoder
@@ -200,6 +228,8 @@ lifetime total and do not imply that a session is still active.
   the latest renewal whose TTL window contains the first positive-cache-read
   follow-up whose effective prefix evidence matches one of the renewal's
   candidate prefixes.
+  Avoided value is `renewal tokens × (cache-creation price − cache-read price)`:
+  the follow-up still pays for its cache read.
 - Missing, legacy, malformed, or ambiguous evidence is reported as
   `unknown`. Avoided savings and net savings are nullable when the evidence or
   pricing is incomplete; the UI must not display a guessed zero.
@@ -288,7 +318,7 @@ upstream response.
 
 ## Metrics
 
-The keep-alive Prometheus surface contains four counters:
+The keep-alive Prometheus surface includes these counters:
 
 - `cc_lb_cache_keepalive_cancel_errors_total` counts cancellation fences that
   failed with a storage error. A fence that finds no active generation is the
@@ -296,6 +326,12 @@ The keep-alive Prometheus surface contains four counters:
 - `cc_lb_cache_keepalive_dispatch_skipped_total{reason}` counts claimed
   renewals skipped before provider dispatch because durable authorization no
   longer held or its storage check failed.
+- `cc_lb_cache_keepalive_follow_up_rejected_total{reason}` counts follow-up
+  prefix candidates rejected by the off-path evidence writer. Reasons are
+  `no_matching_renewal_prefix` (within the retained candidate window),
+  `outside_ttl`, and `not_first_in_cycle`. No additional request-path query
+  is made. Request diagnostics retain at most 32 candidate hashes, with their
+  breakpoint/content-block positions, for investigating missing attribution.
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` counts the
   latest real-response completion's cancellation paths listed below.
   - `user_turn_detected`: a response-derived compaction boundary with no
@@ -441,8 +477,10 @@ Checks, in order:
    session status. Normal `UserTurn` and `Ambiguous` decisions stop renewal;
    the classifier counter is process-wide, not a per-session diagnostic.
    Check `snapshot_too_large` and the configured size cap if capture failed.
-6. Does the latest durable renewal turn report a miss? A miss means the
-   request reached Anthropic but Anthropic did not report a cache read.
+6. Does the latest durable renewal turn report a miss? Inspect both
+   `cache_read_input_tokens` and the cache-creation total and TTL buckets.
+   Anthropic renewals stop on zero cache reads or on partial prefix rebuilding:
+   positive cache reads together with positive cache creation are also a miss.
    Compare the shaped request's prompt blocks and breakpoints with the
    snapshot, and check whether the fire landed within the TTL window.
    A fresh real request can establish a new snapshot; no local counter

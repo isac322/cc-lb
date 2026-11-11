@@ -408,6 +408,8 @@ The **Quota** section's `Reset quota` action (`LimitResetAction`) is always visi
 
 The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys**, and **Access**, each full width. Shape is a plain section, always expanded.
 
+Router Basic shows **Prefer subscription upstreams** when an allowed OAuth upstream in the selected provider scope supports subscription quota. It selects using subscription quota and supported cache-cost evidence, with API keys as fallback. Provider scope controls visibility only; the switch changes the principal's single router chain across providers. API-key-only scopes hide the shortcut while saved entries remain editable in Advanced. The existing switch applies immediately with Undo.
+
 On both detail panes, **Recent requests** shows the feed's tail status as a `FeedLiveStatus` badge in its `DetailSection` action, on the title's line while both fit.
 
 ### Overview
@@ -482,7 +484,7 @@ The audit trail (`routes/audit.tsx`, a `FullPage` console capped at 90rem with 4
 ### Changes that affect the pool
 
 - Enabling or disabling an upstream or principal opens a `ConfirmDialog` that names the object and states the impact before the mutation runs.
-- Other reversible pool-affecting settings (router strategy, cache-warm, keepalive) apply immediately and show `undoToast`, whose Undo re-applies the previous value through the same mutation.
+- Other reversible pool-affecting settings (router strategy, subscription preference, keepalive) apply immediately and show `undoToast`, whose Undo re-applies the previous value through the same mutation.
 - Deletion keeps the destructive `ConfirmDialog`.
 
 ## 6. Motion & Interaction

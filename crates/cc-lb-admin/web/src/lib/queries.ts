@@ -2122,6 +2122,14 @@ function serializeCacheKeepalivePages<T>(
   return result;
 }
 
+function cacheKeepaliveTailSummary(
+  summary: CacheKeepaliveListResponse['summary'],
+) {
+  // This rolling activity count ages on the clock, without changing session
+  // rows. Keep state, economics and retained-evidence changes in the signal.
+  return summary === null ? null : { ...summary, sessions_last_5m: undefined };
+}
+
 export function useCacheKeepaliveSessions(
   principalId: string,
   filters: CacheKeepaliveSessionsFilters = {},
@@ -2167,8 +2175,11 @@ export function useCacheKeepaliveSessions(
         }
 
         const aggregatesChanged =
-          hashKey([head.summary, head.groups]) !==
-          hashKey([previous.pages[0].summary, previous.pages[0].groups]);
+          hashKey([cacheKeepaliveTailSummary(head.summary), head.groups]) !==
+          hashKey([
+            cacheKeepaliveTailSummary(previous.pages[0].summary),
+            previous.pages[0].groups,
+          ]);
         const boundary = head.rows.at(-1);
         const previousHead = previous.pages[0];
         const previousBoundary = previousHead.rows.at(-1);

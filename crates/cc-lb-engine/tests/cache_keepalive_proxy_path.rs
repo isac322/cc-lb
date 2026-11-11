@@ -462,8 +462,8 @@ async fn threadless_keepalive_identity_uses_the_serving_cache_bundle() {
     assert!(
         custom_enqueued
             .iter()
-            .all(|request| request.snapshot.ttl == CacheTtl::Ttl1h),
-        "custom literal completion must retain the serving breakpoint TTL"
+            .all(|request| request.snapshot.ttl == CacheTtl::Ttl5m),
+        "custom literal bundle contains the 1h billing header followed by a 5m stable breakpoint; protect both on the shortest cadence"
     );
 }
 

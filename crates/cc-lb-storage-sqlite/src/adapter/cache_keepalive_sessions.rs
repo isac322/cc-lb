@@ -234,6 +234,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
               config_snapshot = excluded.config_snapshot,
               last_message_at_ms = excluded.last_message_at_ms,
               terminal_reason = NULL,
+              cancel_reason = NULL,
               expires_at = excluded.expires_at,
               updated_at = excluded.updated_at",
         )
@@ -497,6 +498,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         expected_ticket: Option<u64>,
         cancel_anchor_at_unix_secs: u64,
         reason: CacheKeepaliveTerminalReason,
+        cancel_reason: Option<&str>,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let mut tx = self.begin_immediate().await?;
@@ -534,7 +536,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             "cache keepalive terminal expires_at",
         )?;
         let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, cancel_reason = ?, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = X'',
              expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
              updated_at = ?,
@@ -543,6 +545,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?",
         )
         .bind(reason.as_str())
+        .bind(cancel_reason)
         .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(expected_ticket.is_some())
@@ -791,6 +794,7 @@ pub(crate) fn row_to_record(
             .as_deref()
             .map(terminal_reason_from_db)
             .transpose()?,
+        cancel_reason: row.try_get("cancel_reason").map_err(map_sqlx_error)?,
         expires_at_unix_secs: i64_to_u64(
             row.try_get("expires_at").map_err(map_sqlx_error)?,
             "cache keepalive expires_at",

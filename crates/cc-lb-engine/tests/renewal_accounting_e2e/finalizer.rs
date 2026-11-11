@@ -33,8 +33,10 @@ pub(crate) struct FinalizeInput<'a> {
 
 pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion {
     let source_ref_id = format!(
-        "{}:{}",
-        input.session.session_key_hash, input.session.generation
+        "keepalive-v2:{}:{}:{}",
+        input.session.session_key_hash,
+        input.session.cycle_id.unwrap_or_default(),
+        input.session.generation
     );
     let event_id = format!("renewal:{source_ref_id}");
     let cost = virtual_cost_micros_full(
