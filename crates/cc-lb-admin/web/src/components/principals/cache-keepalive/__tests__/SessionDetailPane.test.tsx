@@ -5,6 +5,7 @@ import { ApiError } from '../../../../lib/api';
 import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveRenewedDetailFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
+import { successQuery } from '../../../../lib/test-utils/hook-results';
 import type { PolledDataResult } from '../../../../lib/usePolledData';
 import { SessionDetailPane } from '../SessionDetailPane';
 
@@ -387,8 +388,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   ] as const)(
     'shows cancellation cause %s instead of a stale scheduling reason',
     (cancelReason, expected) => {
-      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
-        data: {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
           ...cacheKeepaliveRenewedDetailFixture,
           state: 'cancelled',
           is_active: false,
@@ -397,10 +398,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ? expected
             : 'agent-in-turn — first renewal in 4m 30s',
           gaps: [],
-        },
-        isLoading: false,
-        isError: false,
-      } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+        }),
+      );
 
       renderWithProviders(
         <SessionDetailPane
@@ -416,8 +415,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   );
 
   it('keeps the cancellation cause visible alongside retained renewal history', () => {
-    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
-      data: {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
         ...cacheKeepaliveRenewedDetailFixture,
         state: 'cancelled',
         is_active: false,
@@ -438,10 +437,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             net_pnl_usd: null,
           },
         ],
-      },
-      isLoading: false,
-      isError: false,
-    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+      }),
+    );
 
     renderWithProviders(
       <SessionDetailPane

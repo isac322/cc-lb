@@ -18,6 +18,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -595,6 +596,17 @@ export function Hint({
   const [engaged, setEngaged] = useState(false);
   const [open, setOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const triggerRef = useRef<HTMLElement>(null);
+  const transferFocusRef = useRef(false);
+
+  useLayoutEffect(() => {
+    // Engagement replaces the lightweight trigger. Transfer actual focus only;
+    // a pointer hover must leave the operator's current focus alone.
+    if (engaged && transferFocusRef.current) {
+      transferFocusRef.current = false;
+      triggerRef.current?.focus({ preventScroll: true });
+    }
+  }, [engaged]);
 
   useEffect(() => {
     return () => {
@@ -621,6 +633,7 @@ export function Hint({
         onFocus: (e) => {
           childElement.props.onFocus?.(e);
           if (!openOnFocus) return;
+          transferFocusRef.current = e.currentTarget === document.activeElement;
           setEngaged(true);
           setOpen(true);
         },
@@ -645,8 +658,9 @@ export function Hint({
         onPointerLeave={() => {
           if (timerRef.current) clearTimeout(timerRef.current);
         }}
-        onFocus={() => {
+        onFocus={(e) => {
           if (!openOnFocus) return;
+          transferFocusRef.current = e.currentTarget === document.activeElement;
           setEngaged(true);
           setOpen(true);
         }}
@@ -666,6 +680,9 @@ export function Hint({
   return (
     <BasePopover.Root open={open} onOpenChange={setOpen}>
       <BasePopover.Trigger
+        ref={(element: HTMLElement | null) => {
+          triggerRef.current = element;
+        }}
         delay={200}
         onFocus={() => {
           if (openOnFocus) setOpen(true);

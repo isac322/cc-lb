@@ -39,9 +39,10 @@ describe('Hint', () => {
     expect(screen.queryByTestId('hint-content')).toBeNull();
     act(() => vi.advanceTimersByTime(1));
     expect(screen.getByTestId('hint-content')).toBeDefined();
+    expect(document.activeElement).not.toBe(screen.getByTestId('hint-trigger'));
   });
 
-  it('opens immediately on focus', () => {
+  it('keeps the first keyboard activation focused and Escape leaves focus on the trigger', () => {
     render(
       <Hint label={<span data-testid="hint-content">Tooltip Content</span>}>
         <button data-testid="hint-trigger" type="button">
@@ -50,8 +51,14 @@ describe('Hint', () => {
       </Hint>,
     );
 
-    fireEvent.focus(screen.getByTestId('hint-trigger'));
+    act(() => screen.getByTestId('hint-trigger').focus());
     expect(screen.getByTestId('hint-content')).toBeDefined();
+    expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByTestId('hint-content')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('hint-trigger'));
   });
 
   it.each([true, false])(

@@ -175,6 +175,13 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
     );
     await expect(helpText).not.toBeVisible();
     const help = page.getByRole('button', { name: 'Cache keepalive help' });
+    await page.getByRole('button', { name: 'Sessions', exact: true }).focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(helpText).toBeVisible();
+    await expect(help).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(helpText).not.toBeVisible();
+    await expect(help).toBeFocused();
     await help.hover();
     await expect(helpText).toBeVisible();
     await page.mouse.move(0, 0);
