@@ -179,7 +179,7 @@ impl SchedulerDispatch {
             .keepalive_dispatcher
             .dispatch(
                 &snapshot,
-                KeepaliveDispatchContext::new(reservation, source_ref_id),
+                KeepaliveDispatchContext::new(reservation, source_ref_id, deadline),
             )
             .await;
         let authorized_after_dispatch = self.cache_keepalive_still_authorized(&record);
@@ -196,6 +196,15 @@ impl SchedulerDispatch {
         }
 
         match outcome {
+            DispatchOutcome::MaxDuration => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::MaxDuration,
+                    None,
+                )
+                .await?;
+                Ok(JobOutcome::Done)
+            }
             DispatchOutcome::CacheHit {
                 cache_anchor_age,
                 finalization,

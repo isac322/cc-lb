@@ -472,8 +472,10 @@ Checks, in order:
    session status. Normal `UserTurn` and `Ambiguous` decisions stop renewal;
    the classifier counter is process-wide, not a per-session diagnostic.
    Check `snapshot_too_large` and the configured size cap if capture failed.
-6. Does the latest durable renewal turn report a miss? A miss means the
-   request reached Anthropic but Anthropic did not report a cache read.
+6. Does the latest durable renewal turn report a miss? Inspect both
+   `cache_read_input_tokens` and the cache-creation total and TTL buckets.
+   Anthropic renewals stop on zero cache reads or on partial prefix rebuilding:
+   positive cache reads together with positive cache creation are also a miss.
    Compare the shaped request's prompt blocks and breakpoints with the
    snapshot, and check whether the fire landed within the TTL window.
    A fresh real request can establish a new snapshot; no local counter

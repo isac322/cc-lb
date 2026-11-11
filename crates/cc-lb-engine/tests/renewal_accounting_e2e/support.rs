@@ -139,12 +139,13 @@ impl RenewalAccountingScenario {
             .dispatcher
             .dispatch(
                 &self.fixture.snapshot,
-                KeepaliveDispatchContext::new(reservation, source_ref_id),
+                KeepaliveDispatchContext::new(reservation, source_ref_id, u64::MAX),
             )
             .await;
         match outcome {
             DispatchOutcome::CacheHit { finalization, .. } => finalization,
             DispatchOutcome::CacheMiss { .. }
+            | DispatchOutcome::MaxDuration
             | DispatchOutcome::UnsupportedProvider(_)
             | DispatchOutcome::Error(_) => panic!("renewal fixture must produce a cache hit"),
         }

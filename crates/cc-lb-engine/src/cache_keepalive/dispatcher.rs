@@ -152,43 +152,27 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
 
         let dispatch_started = Instant::now();
-        let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs, dispatch_start_ms) =
-            match context.into_reservation() {
-                Some(reservation) => {
-                    let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
-                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
-                    {
-                        Ok(signed) => signed,
-                        Err(error) => return DispatchOutcome::Error(error.to_string()),
-                    };
-                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                    let dispatch_start_ms =
-                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
-                    (
-                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                        reserved.into_response_accounting_guard(),
-                        dispatch_anchor_unix_secs,
-                        dispatch_start_ms,
-                    )
-                }
-                None => {
-                    let reserved = AttemptIntent::observe_only().into_reserved();
-                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
-                    {
-                        Ok(signed) => signed,
-                        Err(error) => return DispatchOutcome::Error(error.to_string()),
-                    };
-                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                    let dispatch_start_ms =
-                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
-                    (
-                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                        reserved.into_response_accounting_guard(),
-                        dispatch_anchor_unix_secs,
-                        dispatch_start_ms,
-                    )
-                }
-            };
+        let deadline = context.dispatch_deadline_unix_secs();
+        let intent = match context.into_reservation() {
+            Some(reservation) => AttemptIntent::from_reservation(reservation),
+            None => AttemptIntent::observe_only(),
+        };
+        let reserved = intent.into_reserved();
+        let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+            Ok(signed) => signed,
+            Err(error) => return DispatchOutcome::Error(error.to_string()),
+        };
+        // Upstream lookup, signer construction, and OAuth refresh may all await.
+        // Enforce the send boundary after them, while RAII still owns the unsent
+        // reservation and before any completed-request accounting is created.
+        let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
+        if dispatch_anchor_unix_secs >= deadline {
+            return DispatchOutcome::MaxDuration;
+        }
+        let dispatch_start_ms = unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
+        let dispatch_result =
+            tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await;
+        let accounting_guard = reserved.into_response_accounting_guard();
 
         match dispatch_result {
             Ok(Ok((StatusCode::OK, headers, body, cache_anchor_age))) => {

@@ -3892,3 +3892,178 @@ async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_ev
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn keepalive_signing_delay_rechecks_deadline_before_http_and_refunds_unsent_reservation() {
+    use cc_lb_control::dynamic_view::DynamicViewBuilder;
+    use cc_lb_engine::cache_keepalive::AnthropicKeepaliveDispatcher;
+    use cc_lb_upstream::{
+        RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+        SigningCapability, UpstreamError,
+    };
+    use tokio::sync::Notify;
+
+    struct GatedSigner {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    impl cc_lb_engine::ApiKeyAwareSignerFactory for GatedSigner {
+        fn with_router_choice(&self, _: String) -> Arc<dyn SignerFactory> {
+            Arc::new(Self {
+                entered: self.entered.clone(),
+                release: self.release.clone(),
+            })
+        }
+    }
+    #[async_trait]
+    impl SignerFactory for GatedSigner {
+        async fn build(&self, _: &cc_lb_domain::Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(Self {
+                entered: self.entered.clone(),
+                release: self.release.clone(),
+            }))
+        }
+    }
+    #[async_trait]
+    impl Signer for GatedSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+        async fn on_unauthorized(&self, _: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    for (signing_secs, expected_calls) in [(9, 1), (10, 0), (11, 0)] {
+        for accounted in [false, true] {
+            let fixture = Fixture::new().await;
+            fixture.http.return_cache_hit_usage(100, 0, 10);
+            let key_id = if accounted {
+                Some(create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await)
+            } else {
+                None
+            };
+            let pusher: Arc<dyn CacheKeepaliveTaskPusher> =
+                Arc::new(fixture.backend.backend.clone());
+            let mut request = fixture.enqueue_request();
+            request.accounting_key_id = key_id.clone();
+            request.params.max_total_duration_secs = 10;
+            fixture
+                .enqueuer(pusher.clone())
+                .enqueue_cache_keepalive(request)
+                .await
+                .expect("enqueue");
+            let record = fixture
+                .storage
+                .get_cache_keepalive_session("session-hash")
+                .await
+                .expect("load")
+                .expect("session");
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(
+                record.first_scheduled_at_unix_secs,
+            ));
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let view = fixture.dynamic_view();
+            view.store(
+                DynamicViewBuilder::from_view(&view.load())
+                    .signer_factory(Arc::new(GatedSigner {
+                        entered: entered.clone(),
+                        release: release.clone(),
+                    }))
+                    .build(),
+            );
+            let limit_engine =
+                LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+            let dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
+                view.clone(),
+                fixture.storage.clone(),
+                fixture.http.clone(),
+                clock.clone(),
+            ));
+            let mut dispatch = fixture.dispatch_with_limit_engine_and_keepalive_dispatcher(
+                pusher,
+                limit_engine.clone(),
+                dispatcher,
+            );
+            dispatch.clock = clock.clone();
+            let job = fixture.pending_keepalive_job(1).await;
+            let pending = tokio::spawn(async move { dispatch.dispatch_cache_keepalive(job).await });
+            tokio::time::timeout(Duration::from_secs(10), entered.notified())
+                .await
+                .expect("signer entered");
+            clock.advance_secs(signing_secs);
+            release.notify_one();
+            let outcome = pending
+                .await
+                .expect("dispatch task")
+                .expect("dispatch result");
+            assert!(matches!(outcome, JobOutcome::Done));
+            assert_eq!(
+                fixture.http.requests.lock().expect("HTTP calls").len(),
+                expected_calls,
+                "signing={signing_secs}s, accounted={accounted}"
+            );
+            let terminal = fixture
+                .storage
+                .get_cache_keepalive_session("session-hash")
+                .await
+                .expect("load")
+                .expect("session");
+            assert_eq!(
+                terminal.terminal_reason,
+                Some(CacheKeepaliveTerminalReason::MaxDuration)
+            );
+            assert_eq!(request_event_count(&fixture).await, expected_calls as i64);
+            let turns =
+                cc_lb_storage_api::CacheKeepaliveSessionReadStore::list_cache_keepalive_turns(
+                    fixture.storage.as_ref(),
+                    "principal",
+                    "session-hash",
+                )
+                .await
+                .expect("turns");
+            assert_eq!(turns.len(), expected_calls);
+            if let Some(key_id) = key_id {
+                let key = KeyStore::new(fixture.storage.clone())
+                    .get("principal", &key_id)
+                    .await
+                    .expect("key lookup")
+                    .expect("key");
+                let remaining = if expected_calls == 0 { 4_000 } else { 3_900 };
+                let current = view.load();
+                let verifier = limit_engine
+                    .reserve(
+                        current.principal_view.as_ref(),
+                        &key,
+                        "principal",
+                        "claude-test",
+                        Some(0),
+                        remaining,
+                        None,
+                    )
+                    .expect("unsent renewal refunds fully; sent renewal settles actual usage");
+                assert!(
+                    limit_engine
+                        .reserve(
+                            current.principal_view.as_ref(),
+                            &key,
+                            "principal",
+                            "claude-test",
+                            Some(0),
+                            1,
+                            None
+                        )
+                        .is_err()
+                );
+                drop(verifier);
+            }
+        }
+    }
+}
