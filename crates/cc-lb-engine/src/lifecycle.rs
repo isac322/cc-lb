@@ -8441,6 +8441,9 @@ impl Lifecycle {
                                                     _ => unreachable!("matched emit outcome"),
                                                 };
                                                 if transformed {
+                                                    // Rewritten output is committed: raw JSON
+                                                    // must not follow it (ADR 0007).
+                                                    error_body_class = ErrorBodyClass::Sse;
                                                     let output = responses_error_context
                                                         .observe_transformed_output(
                                                             &bytes,
@@ -8462,6 +8465,7 @@ impl Lifecycle {
                                                 bytes
                                             }
                                             SseTransformOutcome::Drop => {
+                                                error_body_class = ErrorBodyClass::Sse;
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 continue;
@@ -9588,7 +9592,9 @@ impl Lifecycle {
             // A held error body that is complete, valid JSON is the provider's
             // error response: relay it unchanged. A candidate that fails
             // validation stays in `buffer` and reaches the framing error below.
-            // Any blank events before it already took the normal SSE path.
+            // Any blank events before it already passed through unchanged.
+            // The body is the response's last bytes, so it joins the final
+            // flush after the terminal proof below, like other final frames.
             if error_body_class == ErrorBodyClass::JsonCandidate
                 && upstream_body_eof
                 && parse_sse_events_active
@@ -9603,7 +9609,7 @@ impl Lifecycle {
                 raw_before_transform_output.clear();
                 stream_provider_error_forwarded = true;
                 batch_index = batch_index.saturating_add(1);
-                yield Ok::<Bytes, Infallible>(buffer.split().freeze());
+                deferred_terminal_chunks.push(buffer.split().freeze());
             }
             let mut keepalive_framing_complete = true;
             if upstream_is_sse
@@ -13248,9 +13254,11 @@ enum ErrorBodyClass {
 
 /// Advances the error-body class before the next SSE event is split.
 ///
-/// While `Pending`, blank events are parsed normally. Unconsumed bytes that
-/// start with `{` or `[` become a JSON candidate; any other first byte, or a
-/// next complete event that is not blank, makes the body SSE. A candidate is
+/// While `Pending`, completed blank events are parsed normally. After them,
+/// unconsumed bytes whose first non-whitespace byte is `{` or `[` become a
+/// JSON candidate (leading whitespace included); any other byte makes the
+/// body SSE. A rewritten or dropped event also makes it SSE, so raw JSON
+/// never follows transformed output. A candidate is
 /// held only while it remains a valid JSON prefix: the first byte that breaks
 /// JSON syntax (`[trace: x`, `{"extension:` followed by a raw newline)
 /// returns it to SSE parsing before any event is split, so genuine SSE keeps
@@ -13261,14 +13269,21 @@ fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
             None => return ErrorBodyClass::Pending,
             Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
             Some(byte) if !byte.is_ascii_whitespace() => return ErrorBodyClass::Sse,
-            Some(_) => {
-                return match usage_parser::find_sse_event_end(buffer) {
-                    Some(end) if !buffer[..end].iter().all(u8::is_ascii_whitespace) => {
-                        ErrorBodyClass::Sse
-                    }
-                    _ => ErrorBodyClass::Pending,
-                };
-            }
+            Some(_) => match usage_parser::find_sse_event_end(buffer) {
+                // A completed blank event is split and passed through normally.
+                Some(end) if buffer[..end].iter().all(u8::is_ascii_whitespace) => {
+                    return ErrorBodyClass::Pending;
+                }
+                // Otherwise the first non-whitespace byte decides (` {`,
+                // `\n{`, ` {\n\n`). A held candidate keeps its leading
+                // whitespace and goes back to SSE parsing untouched if it
+                // breaks JSON.
+                _ => match buffer.iter().find(|byte| !byte.is_ascii_whitespace()) {
+                    None => return ErrorBodyClass::Pending,
+                    Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
+                    Some(_) => return ErrorBodyClass::Sse,
+                },
+            },
         },
         class => class,
     };

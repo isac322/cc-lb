@@ -1449,6 +1449,7 @@ enum CompletionFallbackResponse {
     SseHttpErrorPartialEof,
     SseHttpErrorTruncatedGzipEof,
     HttpErrorStreamBodyEof,
+    SseTransformedHttpErrorJsonDrop,
     SseProviderErrorIncomplete,
     SseRedirectTerminal,
     BufferedHookProviderError,
@@ -1570,6 +1571,7 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
             | CompletionFallbackResponse::AffinityRejected
             | CompletionFallbackResponse::HttpFailure
             | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
             | CompletionFallbackResponse::ProviderErrorEnvelope
             | CompletionFallbackResponse::ProviderFailedEnvelope
             | CompletionFallbackResponse::ProviderErrorWithoutDetails
@@ -1602,6 +1604,7 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
                 | CompletionFallbackResponse::ShapeFallbackSse
                 | CompletionFallbackResponse::DynamicStartSse
                 | CompletionFallbackResponse::ShapeFallbackTransformedSse
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
                 | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
                 | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
         ) {
@@ -1617,6 +1620,7 @@ impl UpstreamDispatch for CompletionFallbackDispatch {
                 | CompletionFallbackResponse::SseHttpErrorPartialEof
                 | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
                 | CompletionFallbackResponse::HttpErrorStreamBodyEof
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
         ) {
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
         }
@@ -1899,6 +1903,7 @@ async fn completion_fallback_stream_provider_terminal_and_http_error_eof_retire_
         CompletionFallbackResponse::SseProviderFailed,
         CompletionFallbackResponse::SseHttpErrorEof,
         CompletionFallbackResponse::HttpErrorStreamBodyEof,
+        CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop,
     ] {
         for replace in [false, true] {
             violations.extend(assert_completion_fallback(response, replace, true).await);
@@ -2147,7 +2152,8 @@ async fn assert_completion_fallback(
         }
         CompletionFallbackResponse::ProviderErrorEnvelope
         | CompletionFallbackResponse::HttpFailure
-        | CompletionFallbackResponse::HttpErrorStreamBodyEof => {
+        | CompletionFallbackResponse::HttpErrorStreamBodyEof
+        | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop => {
             message = json!({
                 "type": "error",
                 "error": {"type": "api_error", "message": "fixture provider failed"}
@@ -2196,6 +2202,7 @@ async fn assert_completion_fallback(
         transform_sse: matches!(
             response,
             CompletionFallbackResponse::ShapeFallbackTransformedSse
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
         ),
         on_shape: Mutex::new(None),
         buffered_transform: matches!(
@@ -2213,6 +2220,7 @@ async fn assert_completion_fallback(
         CompletionFallbackResponse::ShapeFallbackBuffered
             | CompletionFallbackResponse::ShapeFallbackSse
             | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
             | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
             | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
             | CompletionFallbackResponse::ShapeFallbackBodyFailure
@@ -2295,6 +2303,7 @@ async fn assert_completion_fallback(
     let request_body = if matches!(
         response,
         CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
             | CompletionFallbackResponse::BufferedCapFinalFrame
             | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
     ) {
@@ -2353,6 +2362,7 @@ async fn assert_completion_fallback(
             CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
                 | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
                 | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
         ) {
             use http_body_util::BodyExt as _;
             let status = response_body.status();
@@ -2360,8 +2370,18 @@ async fn assert_completion_fallback(
             let mut downstream = response_body.into_body();
             let after_terminal = matches!(
                 response,
-                CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal,
+                CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                    | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop,
             );
+            // A JSON error under an SSE content type ends with its own body.
+            let marker: &[u8] = if matches!(
+                response,
+                CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            ) {
+                b"fixture provider failed"
+            } else {
+                b"message_stop"
+            };
             let body = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let mut body = Vec::new();
                 loop {
@@ -2373,9 +2393,7 @@ async fn assert_completion_fallback(
                         .into_data()
                         .expect("data frame");
                     body.extend_from_slice(&frame);
-                    let terminal = body
-                        .windows(b"message_stop".len())
-                        .any(|window| window == b"message_stop");
+                    let terminal = body.windows(marker.len()).any(|window| window == marker);
                     if terminal || !after_terminal {
                         assert_eq!(
                             terminal, after_terminal,
@@ -2432,7 +2450,8 @@ async fn assert_completion_fallback(
                 assert_eq!(body, dispatch.pending.body);
             }
             CompletionFallbackResponse::HttpFailure
-            | CompletionFallbackResponse::HttpErrorStreamBodyEof => {
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop => {
                 assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(
                     body, dispatch.pending.body,
@@ -2689,6 +2708,7 @@ async fn assert_completion_fallback(
             | CompletionFallbackResponse::SseHttpErrorPartialEof
             | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
             | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
             | CompletionFallbackResponse::SseProviderErrorIncomplete
             | CompletionFallbackResponse::SseRedirectTerminal
             | CompletionFallbackResponse::BufferedHookProviderError

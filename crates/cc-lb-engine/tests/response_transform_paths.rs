@@ -670,13 +670,22 @@ async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
 }
 
 async fn gemini_oauth_stream_error(chunks: &[&'static [u8]]) -> (StatusCode, Bytes) {
-    let lifecycle = with_test_limit_subject(lifecycle_with_record(
+    gemini_oauth_stream_error_with_hook(chunks, None).await
+}
+
+async fn gemini_oauth_stream_error_with_hook(
+    chunks: &[&'static [u8]],
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+) -> (StatusCode, Bytes) {
+    let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
         None,
+        sse_transform,
         Arc::new(ChunkedDispatch {
             status: StatusCode::TOO_MANY_REQUESTS,
             headers: sse_headers(),
             chunks: chunks.iter().copied().map(Bytes::from_static).collect(),
         }),
+        LifecycleConfig::default(),
         upstream_record(
             StorageUpstreamKind::GeminiOauth,
             "https://cloudcode-pa.googleapis.com/v1internal",
@@ -701,9 +710,14 @@ async fn gemini_oauth_stream_error(chunks: &[&'static [u8]]) -> (StatusCode, Byt
 /// when the JSON carries blank lines that SSE splitting would consume.
 async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
     let compact: &[u8] = br#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#;
-    let cases: [&[&'static [u8]]; 5] = [
+    let cases: [&[&'static [u8]]; 10] = [
         &[compact],
         &[b"\n\n", compact],
+        // Leading whitespace with no event terminator, in one chunk or apart.
+        &[b" ", compact],
+        &[b"\n", compact],
+        &[b"\t{\"error\":{\"code\":429}}"],
+        &[b" {\n\n  \"error\": {\"code\": 429}\n}\n"],
         &[
             b"{\n  \"error\": {\n\n    \"code\": 429,\n",
             b"    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
@@ -716,12 +730,27 @@ async fn gemini_oauth_stream_json_error_reaches_client_unchanged() {
             b"3}}",
         ],
         &[b"[{\"error\":{\"code\":429}}]\n\n"],
+        &[b"\r\n\r\n", b"\t", compact],
     ];
     for chunks in cases {
         let (status, received) = gemini_oauth_stream_error(chunks).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(received, Bytes::from(chunks.concat()));
     }
+}
+
+/// A custom hook that rewrites a leading blank event commits the stream to
+/// transformed SSE; the JSON that follows must not be appended raw.
+async fn gemini_oauth_stream_json_error_after_rewritten_event_stays_sse() {
+    let (status, received) = gemini_oauth_stream_error_with_hook(
+        &[b"\n\n", br#"{"error":{"code":429}}"#],
+        Some(Arc::new(GeminiSseMarkerTransform::default())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(!received.ends_with(br#"{"error":{"code":429}}"#));
+    let text = std::str::from_utf8(&received).expect("SSE output is utf8");
+    assert!(text.contains("incomplete event after transform output"));
 }
 
 /// SSE whose first field happens to read like JSON keeps SSE semantics: an
@@ -4775,6 +4804,7 @@ async fn response_transform_paths_suite_part_1() {
     gemini_json_array_stream_is_transformed_once_as_a_whole().await;
     gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
     gemini_oauth_stream_sse_error_starting_with_brace_stays_sse().await;
+    gemini_oauth_stream_json_error_after_rewritten_event_stays_sse().await;
     gemini_oauth_stream_json_error_reaches_client_unchanged().await;
     ingress_cap_does_not_limit_existing_response_paths().await;
     audio_json_response_preserves_the_ordinary_buffered_path().await;
