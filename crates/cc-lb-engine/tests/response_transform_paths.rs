@@ -786,6 +786,59 @@ async fn gemini_oauth_stream_gzip_json_error_is_relayed_decoded() {
     assert_eq!(received, Bytes::from_static(ERROR));
 }
 
+async fn gemini_oauth_gzip_stream_error(plain: &'static [u8], split: usize) -> (StatusCode, Bytes) {
+    let compressed = gzip_bytes(&Bytes::from_static(plain));
+    let split = split.min(compressed.len());
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let lifecycle = with_test_limit_subject(lifecycle_with_record(
+        None,
+        Arc::new(ChunkedDispatch {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            headers,
+            chunks: vec![compressed.slice(..split), compressed.slice(split..)],
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    ));
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[]}"#))
+        .expect("Gemini OAuth streaming request builds");
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles compressed Gemini OAuth stream error");
+    let (status, _headers, received) = collect_body(response).await;
+    (status, received)
+}
+
+/// Compressed bodies that are not one JSON document keep master's SSE
+/// handling wherever the decoder releases their bytes: completed events are
+/// relayed, and an unfinished remainder is a framing error.
+async fn gemini_oauth_gzip_stream_non_json_error_stays_sse() {
+    for (plain, relayed, framed) in [
+        (&b"{\"a\":1\n\n"[..], &b"{\"a\":1\n\n"[..], false),
+        (b"{\n\n", b"{\n\n", false),
+        (b"{\"a\":\n\n-", b"{\"a\":\n\n", true),
+    ] {
+        for split in [usize::MAX, 12, 20] {
+            let (status, received) = gemini_oauth_gzip_stream_error(plain, split).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            if framed {
+                assert!(received.starts_with(relayed));
+                let text = std::str::from_utf8(&received).expect("SSE output is utf8");
+                assert!(text.contains("incomplete event after transform output"));
+            } else {
+                assert_eq!(received, Bytes::from_static(relayed));
+            }
+        }
+    }
+}
+
 /// SSE whose first field happens to read like JSON keeps SSE semantics: an
 /// unterminated event is a framing error, and complete events are relayed
 /// byte-for-byte, as on a body that never looked like JSON.
@@ -4842,6 +4895,7 @@ async fn response_transform_paths_suite_part_1() {
     gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
     gemini_oauth_stream_sse_error_starting_with_brace_stays_sse().await;
     gemini_oauth_stream_json_error_after_rewritten_event_stays_sse().await;
+    gemini_oauth_gzip_stream_non_json_error_stays_sse().await;
     gemini_oauth_stream_gzip_json_error_is_relayed_decoded().await;
     gemini_oauth_stream_json_error_reaches_client_unchanged().await;
     ingress_cap_does_not_limit_existing_response_paths().await;
