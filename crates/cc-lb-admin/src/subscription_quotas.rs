@@ -1074,25 +1074,26 @@ async fn build_cc_lb_aggregate_response_for_provider(
         }
     }
     // Equal-weighted pool usage is pool history's per-account current whole
-    // observation, so pace takes its population from the same selection.
-    let pace_populations = (weighting == "equal").then(|| {
+    // observation, so pace and reset come from that same observation.
+    let observed_timings = (weighting == "equal").then(|| {
         windows
             .iter()
-            .map(|window| {
-                let mut population = PacePopulation::default();
+            .filter_map(|window| Some((*window, window_secs(*window)?)))
+            .map(|(window, secs)| {
+                let mut timing = ObservedPoolTiming::default();
                 for upstream in &upstreams {
-                    population.insert(
-                        upstream.id,
+                    timing.insert(
+                        secs,
                         provider_pool_observation(
                             durable_latest.iter().filter(|sample| {
                                 sample.upstream_id == upstream.id
-                                    && sample.window == *window
+                                    && sample.window == window
                                     && allowed_sources.contains(&sample.source)
                             }),
                             latest_candidates
                                 .iter()
                                 .find(|(id, candidate_window, _, _)| {
-                                    *id == upstream.id && candidate_window == window
+                                    *id == upstream.id && *candidate_window == window
                                 })
                                 .map(|(_, _, snapshot, _)| snapshot),
                             now_unix_millis,
@@ -1102,7 +1103,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
                         max_staleness_secs,
                     );
                 }
-                (*window, population)
+                (window, timing)
             })
             .collect::<HashMap<_, _>>()
     });
@@ -1400,9 +1401,9 @@ async fn build_cc_lb_aggregate_response_for_provider(
             used_tokens,
             now_unix_secs,
             weighting,
-            pace_populations
+            observed_timings
                 .as_ref()
-                .and_then(|populations| populations.get(&window)),
+                .and_then(|timings| timings.get(&window)),
         );
         response.eligible_upstreams = upstreams.len().saturating_sub(ineligible_upstreams);
         aggregate_windows.push(response);
@@ -1495,6 +1496,8 @@ pub fn pool_quota_snapshots_from_aggregate(
 struct ProviderPoolObservation {
     observed_at_unix_millis: u64,
     utilization: Option<f64>,
+    /// Provider-reported reset of this observation's own window.
+    resets_at_unix_secs: Option<u64>,
     absent: bool,
     api: bool,
 }
@@ -1522,6 +1525,7 @@ fn provider_pool_observation<'a>(
     let durable = durable.map(|sample| ProviderPoolObservation {
         observed_at_unix_millis: sample.observed_at_unix_millis,
         utilization: sample.utilization,
+        resets_at_unix_secs: sample.resets_at_unix_secs,
         absent: sample.sample_kind == SubscriptionQuotaSampleKind::Absent,
         api: sample.source == SubscriptionQuotaSource::Api,
     });
@@ -1531,6 +1535,7 @@ fn provider_pool_observation<'a>(
             Some(ProviderPoolObservation {
                 observed_at_unix_millis: snapshot.observed_at_unix_millis?,
                 utilization: snapshot.utilization,
+                resets_at_unix_secs: snapshot.resets_at_unix_secs,
                 absent: snapshot.state == SubscriptionQuotaDataState::Absent,
                 api: snapshot.source.as_deref() == Some("api"),
             })
@@ -1538,29 +1543,6 @@ fn provider_pool_observation<'a>(
     // Select a whole observation: newer absence or missing utilization must
     // never borrow an older numeric value and its apparent freshness.
     durable.chain(cached).max_by_key(rank)
-}
-
-impl PacePopulation {
-    /// Adds one account's current whole observation of the window, with the
-    /// same absent / stale / missing-value rules as provider pool history.
-    fn insert(
-        &mut self,
-        upstream_id: Uuid,
-        observation: Option<ProviderPoolObservation>,
-        now_unix_millis: u64,
-        max_staleness_secs: u64,
-    ) {
-        let Some(observation) = observation else {
-            return;
-        };
-        if observation.absent {
-            self.absent.insert(upstream_id.to_string());
-        } else if observation.is_fresh(now_unix_millis, max_staleness_secs)
-            && observation.utilization.is_some()
-        {
-            self.contributing.insert(upstream_id.to_string());
-        }
-    }
 }
 
 struct ProviderPoolSnapshot {
@@ -1803,16 +1785,56 @@ fn should_record_pool_quota_snapshot(
         && record.policy_version == latest.policy_version)
 }
 
-/// Accounts behind one window's equal-weighted (OpenAI/Gemini) pool usage,
-/// classified from each account's current whole observation exactly as pool
-/// history counts them. Stored lots can outlive that observation: a window
-/// that turned absent keeps its older numeric checkpoint as a lot.
+/// Pace and next reset of one window's equal-weighted (OpenAI/Gemini) pool,
+/// taken from each account's current whole observation: the same selection
+/// pool history uses for the displayed usage. Stored lots cannot stand in for
+/// it: a lot can come from another source's window or outlive a window that
+/// turned absent.
 #[derive(Debug, Default)]
-struct PacePopulation {
-    /// Present, fresh, numeric: these accounts supply the displayed usage.
-    contributing: HashSet<String>,
-    /// The provider currently reports the window absent; old resets are void.
-    absent: HashSet<String>,
+struct ObservedPoolTiming {
+    elapsed_sum: f64,
+    contributing: u32,
+    next_reset_unix_secs: Option<u64>,
+}
+
+impl ObservedPoolTiming {
+    /// Adds one account's selected observation. Present accounts with a
+    /// provider-reported reset inside an open window set the next reset,
+    /// stale ones included; only fresh numeric observations add pace.
+    fn insert(
+        &mut self,
+        window_secs: u64,
+        observation: Option<ProviderPoolObservation>,
+        now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) {
+        let Some(observation) = observation else {
+            return;
+        };
+        if observation.absent || observation.utilization.is_none() {
+            return;
+        }
+        let Some(reset) = observation.resets_at_unix_secs else {
+            return;
+        };
+        let now_unix_secs = now_unix_millis / 1_000;
+        let start = reset.saturating_sub(window_secs);
+        if window_secs == 0 || now_unix_secs < start || now_unix_secs >= reset {
+            return;
+        }
+        self.next_reset_unix_secs = Some(
+            self.next_reset_unix_secs
+                .map_or(reset, |next| next.min(reset)),
+        );
+        if observation.is_fresh(now_unix_millis, max_staleness_secs) {
+            self.elapsed_sum += (now_unix_secs - start) as f64 / window_secs as f64;
+            self.contributing += 1;
+        }
+    }
+
+    fn pace_fraction(&self) -> Option<f64> {
+        (self.contributing > 0).then(|| self.elapsed_sum / f64::from(self.contributing))
+    }
 }
 
 fn build_aggregate_window_response(
@@ -1821,48 +1843,13 @@ fn build_aggregate_window_response(
     used_tokens: u64,
     now_unix_secs: u64,
     weighting: &str,
-    pace_population: Option<&PacePopulation>,
+    observed_timing: Option<&ObservedPoolTiming>,
 ) -> AggregateWindowResponse {
     let latest_lots = latest_lot_per_upstream(lots);
-    let mut weighted_elapsed_sum = 0.0;
-    let mut pace_weight_sum = 0.0;
-    let mut next_reset_unix_secs = None;
-    for lot in &latest_lots {
-        if lot.utilization.is_none() || lot.state == "absent" || !lot.provider_reset_observed {
-            continue;
-        }
-        if pace_population.is_some_and(|population| population.absent.contains(&lot.upstream_id)) {
-            continue;
-        }
-        let (Some(start), Some(reset)) =
-            (lot.provider_start_unix_secs, lot.provider_reset_unix_secs)
-        else {
-            continue;
-        };
-        if start >= reset || now_unix_secs < start || now_unix_secs >= reset {
-            continue;
-        }
-        next_reset_unix_secs =
-            Some(next_reset_unix_secs.map_or(reset, |next: u64| next.min(reset)));
-        // Pace describes the accounts behind the displayed usage. Plan-weighted
-        // (Anthropic) usage takes every account's latest lot; equal-weighted
-        // usage counts only the population's contributing accounts.
-        if pace_population
-            .is_some_and(|population| !population.contributing.contains(&lot.upstream_id))
-        {
-            continue;
-        }
-        let elapsed = ((now_unix_secs - start) as f64 / (reset - start) as f64).clamp(0.0, 1.0);
-        let weight = if weighting == "plan" {
-            lot.capacity_ratio
-        } else {
-            1.0
-        };
-        weighted_elapsed_sum += weight * elapsed;
-        pace_weight_sum += weight;
-    }
-    let pool_pace_fraction =
-        (pace_weight_sum > 0.0).then(|| weighted_elapsed_sum / pace_weight_sum);
+    let (pool_pace_fraction, next_reset_unix_secs) = match observed_timing {
+        Some(timing) => (timing.pace_fraction(), timing.next_reset_unix_secs),
+        None => latest_lot_pool_timing(&latest_lots, now_unix_secs, weighting),
+    };
     let (cc_start, cc_reset) = window_secs(window)
         .map(|secs| cc_window_bounds(now_unix_secs, secs))
         .unwrap_or((0, 0));
@@ -2004,6 +1991,44 @@ fn build_aggregate_window_response(
         provider_lots: latest_lots,
         caveats,
     }
+}
+
+/// Pace and next reset from each account's latest lot. Plan-weighted
+/// (Anthropic) pool usage is built from these lots, so its timing is too.
+fn latest_lot_pool_timing(
+    latest_lots: &[AggregateProviderLotResponse],
+    now_unix_secs: u64,
+    weighting: &str,
+) -> (Option<f64>, Option<u64>) {
+    let mut weighted_elapsed_sum = 0.0;
+    let mut pace_weight_sum = 0.0;
+    let mut next_reset_unix_secs = None;
+    for lot in latest_lots {
+        if lot.utilization.is_none() || lot.state == "absent" || !lot.provider_reset_observed {
+            continue;
+        }
+        let (Some(start), Some(reset)) =
+            (lot.provider_start_unix_secs, lot.provider_reset_unix_secs)
+        else {
+            continue;
+        };
+        if start >= reset || now_unix_secs < start || now_unix_secs >= reset {
+            continue;
+        }
+        next_reset_unix_secs =
+            Some(next_reset_unix_secs.map_or(reset, |next: u64| next.min(reset)));
+        let elapsed = ((now_unix_secs - start) as f64 / (reset - start) as f64).clamp(0.0, 1.0);
+        let weight = if weighting == "plan" {
+            lot.capacity_ratio
+        } else {
+            1.0
+        };
+        weighted_elapsed_sum += weight * elapsed;
+        pace_weight_sum += weight;
+    }
+    let pool_pace_fraction =
+        (pace_weight_sum > 0.0).then(|| weighted_elapsed_sum / pace_weight_sum);
+    (pool_pace_fraction, next_reset_unix_secs)
 }
 
 /// Collapse a series of provider lots (one per observation) to the latest lot per upstream
@@ -3416,21 +3441,26 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_equal_pool_pace_counts_only_accounts_behind_displayed_usage() {
-        const NOW_SECS: u64 = 10_000;
+    fn aggregate_equal_pool_timing_follows_each_accounts_selected_observation() {
+        const NOW_SECS: u64 = 1_000_000;
+        const FIVE_HOURS: u64 = 5 * 3_600;
         const MAX_STALENESS_SECS: u64 = 300;
         let now_millis = NOW_SECS * 1_000;
-        let current =
-            |upstream_id: Uuid, observed_at_unix_millis: u64, kind| SubscriptionQuotaSample {
+        let sample =
+            |upstream_id: Uuid,
+             source: SubscriptionQuotaSource,
+             kind: SubscriptionQuotaSampleKind,
+             observed_at_unix_secs: u64,
+             resets_at_unix_secs: Option<u64>| SubscriptionQuotaSample {
                 upstream_id,
                 window: SubscriptionQuotaWindow::FiveHour,
-                source: SubscriptionQuotaSource::Api,
+                source,
                 sample_kind: kind,
-                observed_at_unix_millis,
+                observed_at_unix_millis: observed_at_unix_secs * 1_000,
                 sample_id: Uuid::new_v4(),
                 utilization: (kind == SubscriptionQuotaSampleKind::Sample).then_some(0.5),
                 status: None,
-                resets_at_unix_secs: None,
+                resets_at_unix_secs,
                 surpassed_threshold: None,
                 representative_claim: None,
                 fallback_percentage: None,
@@ -3443,29 +3473,31 @@ mod tests {
                 extra_usage_monthly_limit: None,
                 extra_usage_used_credits: None,
                 credits: None,
-                ingested_at_unix_millis: observed_at_unix_millis,
+                ingested_at_unix_millis: observed_at_unix_secs * 1_000,
             };
-        let (fresh, now_absent, stale) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        // Each account's current latest record, as pool history selects it.
-        // `now_absent` turned absent; only its older numeric checkpoint
-        // survives as a stored lot, still labelled fresh.
+        let (two_source, now_absent, stale) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        use SubscriptionQuotaSampleKind::{Absent, Sample};
+        use SubscriptionQuotaSource::{Api, Header};
+        // Each account's latest record per source, as pool history reads them.
         let durable = [
-            current(fresh, now_millis, SubscriptionQuotaSampleKind::Sample),
-            current(now_absent, now_millis, SubscriptionQuotaSampleKind::Absent),
-            current(
-                stale,
-                now_millis - 600_000,
-                SubscriptionQuotaSampleKind::Sample,
-            ),
+            // An unchanged API poll just now (window 10% elapsed) beside a newer
+            // header checkpoint from another window (90% elapsed).
+            sample(two_source, Api, Sample, NOW_SECS, Some(1_016_200)),
+            sample(two_source, Header, Sample, 999_400, Some(1_001_800)),
+            // The window turned absent; its older numeric checkpoint is gone
+            // from the latest record but can still survive as a stored lot.
+            sample(now_absent, Api, Absent, NOW_SECS, None),
+            // Ten minutes old: a real reset, but not part of current usage.
+            sample(stale, Api, Sample, NOW_SECS - 600, Some(1_005_000)),
         ];
-        let mut population = PacePopulation::default();
-        for upstream_id in [fresh, now_absent, stale] {
-            population.insert(
-                upstream_id,
+        let mut timing = ObservedPoolTiming::default();
+        for upstream_id in [two_source, now_absent, stale] {
+            timing.insert(
+                FIVE_HOURS,
                 provider_pool_observation(
                     durable
                         .iter()
-                        .filter(|sample| sample.upstream_id == upstream_id),
+                        .filter(|record| record.upstream_id == upstream_id),
                     None,
                     now_millis,
                     MAX_STALENESS_SECS,
@@ -3474,44 +3506,29 @@ mod tests {
                 MAX_STALENESS_SECS,
             );
         }
-        // Stored lots: 10%, 90% and 50% into their own windows.
-        let lots = [
-            (fresh, 9_990, 10_090),
-            (now_absent, 9_910, 10_010),
-            (stale, 9_950, 10_050),
-        ]
-        .map(|(upstream_id, start, reset)| {
-            let mut lot = lot("lot", Some(0.5), Some(1_000), None, None);
-            lot.upstream_id = upstream_id.to_string();
-            lot.provider_start_unix_secs = Some(start);
-            lot.provider_reset_unix_secs = Some(reset);
-            lot
-        });
+        // Stored lots that disagree with the selected observations: the header
+        // window for `two_source` and the absent account's old checkpoint.
+        let lots =
+            [(two_source, 1_001_800), (now_absent, 1_000_500)].map(|(upstream_id, reset)| {
+                let mut lot = lot("lot", Some(0.5), Some(1_000), None, None);
+                lot.upstream_id = upstream_id.to_string();
+                lot.provider_start_unix_secs = Some(reset - FIVE_HOURS);
+                lot.provider_reset_unix_secs = Some(reset);
+                lot
+            });
 
-        let equal = build_aggregate_window_response(
+        let response = build_aggregate_window_response(
             SubscriptionQuotaWindow::FiveHour,
             &lots,
             0,
             NOW_SECS,
             "equal",
-            Some(&population),
+            Some(&timing),
         );
-        // Only the fresh account supplies OpenAI/Gemini usage: 10% elapsed.
-        assert_eq!(equal.pool_pace_fraction, Some(0.1));
-        // The stale account's observed reset is real; the absent window's is void.
-        assert_eq!(equal.next_reset_unix_secs, Some(10_050));
-
-        // Plan-weighted (Anthropic) usage takes every latest lot; pace matches it.
-        let plan = build_aggregate_window_response(
-            SubscriptionQuotaWindow::FiveHour,
-            &lots,
-            0,
-            NOW_SECS,
-            "plan",
-            None,
-        );
-        assert_eq!(plan.next_reset_unix_secs, Some(10_010));
-        assert!((plan.pool_pace_fraction.unwrap() - 0.5).abs() < 1e-9);
+        // Only the selected API observation supplies usage: 1,800 of 18,000 s.
+        assert_eq!(response.pool_pace_fraction, Some(0.1));
+        // The stale account's reset is real; the absent and header windows are not current.
+        assert_eq!(response.next_reset_unix_secs, Some(1_005_000));
     }
 
     #[test]
