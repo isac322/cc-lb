@@ -239,6 +239,8 @@ For equal-weighted provider pools, `latest` is computed at read time from each m
 
 The history series contains persisted snapshots only, including null intervals when no fresh contributor was available. Recovery with unchanged utilization restores the current reading without replacing those intervals. Chart projection preserves a null-containing bucket as a gap for equal-weighted pools, including a null left anchor; healthy buckets retain their peak. Plan-weighted pool aggregation and chart sampling are unchanged.
 
+On PostgreSQL, plan-weighted pools continue reading and writing `pool_subscription_quota_history_v1`. Equal-weighted provider snapshots begin in the empty `pool_subscription_quota_history_v2` table; the upgrade creates its indexes without copying or rebuilding existing plan-weighted history. Each provider reads one table. Retention applies one batch budget across both tables while preserving the anchor for each provider and window. SQLite retains its single provider-scoped history table.
+
 Clients can request server-relative history with `relative_range_secs` and optional `window_quantum_secs`. The server resolves these bounds from the same clock used for `now_unix_secs`; equal-weighted provider cards use this mode so browser clock skew cannot move an old range anchor into the display. The relative range must be positive and cannot be combined with explicit `since_unix_secs` or `until_unix_secs`. An omitted or zero quantum leaves the upper bound unquantized. Existing absolute bounds and default queries remain supported.
 
 ## Writing tests against this contract

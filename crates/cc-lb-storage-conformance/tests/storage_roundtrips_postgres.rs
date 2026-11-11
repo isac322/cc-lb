@@ -96,6 +96,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
                  cache_keepalive_turns, config_draft_v1, config_history_v1, \
                  metadata_tier_mapping_override_v1, oauth_pkce_flows_v1, organization_metadata_v1, \
                  overview_excluded_error_rollups_v1, pool_subscription_quota_history_v1, \
+                 pool_subscription_quota_history_v2, \
                  price_catalog_snapshots_v1, principals_v1, prompt_cache_observations, \
                  provider_native_cache_observations, request_events_v1, \
                  upstream_plan_tier_history_v1, upstream_rate_limit_state_v1, \

@@ -6,34 +6,44 @@ use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 
-use super::pool_quota_history::provider_key;
+use super::pool_quota_history::{history_read, provider_key};
 
 // The left anchor carries the last observation into an otherwise idle range.
 macro_rules! range_points {
-    () => { r#"WITH anchors AS (
+    ($table:literal) => {
+        concat!(
+            r#"WITH anchors AS (
     SELECT h.*
     FROM UNNEST($1::text[]) AS w("quota_window")
     CROSS JOIN LATERAL (
         SELECT *
-        FROM pool_subscription_quota_history_v1 h
+        FROM "#,
+            $table,
+            r#" h
         WHERE h.provider = $4 AND h."quota_window" = w."quota_window"
           AND h.snapshot_at_unix_secs < $2
         ORDER BY h.snapshot_at_unix_secs DESC
         LIMIT 1
     ) h
     WHERE NOT EXISTS (
-        SELECT 1 FROM pool_subscription_quota_history_v1 boundary
+        SELECT 1 FROM "#,
+            $table,
+            r#" boundary
         WHERE boundary.provider = $4 AND boundary."quota_window" = h."quota_window"
           AND boundary.snapshot_at_unix_secs = $2
     )
 ), points AS (
     SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-    FROM pool_subscription_quota_history_v1
+    FROM "#,
+            $table,
+            r#"
     WHERE provider = $4 AND "quota_window" = ANY($1) AND snapshot_at_unix_secs BETWEEN $2 AND $3
     UNION ALL
     SELECT $2 AS snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
     FROM anchors
-) "# };
+) "#,
+        )
+    };
 }
 
 pub(super) async fn list_latest(
@@ -48,27 +58,32 @@ pub(super) async fn list_latest(
         .iter()
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"SELECT h.snapshot_at_unix_secs, h."quota_window", h.utilization, h.weighted_utilization_sum,
-                  h.capacity_ratio_sum, h.eligible_upstreams, h.contributing_upstreams,
-                  h.stale_upstreams, h.missing_observation_upstreams, h.missing_metadata_upstreams,
-                  h.header_contributing_upstreams, h.api_contributing_upstreams,
-                  h.max_observed_at_unix_millis, h.computed_at_unix_millis, h.policy_version
-           FROM UNNEST($1::text[]) AS w("quota_window")
-           CROSS JOIN LATERAL (
-               SELECT *
-               FROM pool_subscription_quota_history_v1
-               WHERE provider = $2 AND "quota_window" = w."quota_window"
-               ORDER BY snapshot_at_unix_secs DESC
-               LIMIT 1
-           ) h
-       ORDER BY h."quota_window""#,
-    )
-    .bind(&windows)
-    .bind(provider_key(provider))
-    .fetch_all(storage.pool())
-    .await
-    .map_err(map_sqlx_error)?;
+    macro_rules! query {
+        ($table:literal) => {
+            concat!(
+                r#"SELECT h.snapshot_at_unix_secs, h."quota_window", h.utilization, h.weighted_utilization_sum,
+                          h.capacity_ratio_sum, h.eligible_upstreams, h.contributing_upstreams,
+                          h.stale_upstreams, h.missing_observation_upstreams, h.missing_metadata_upstreams,
+                          h.header_contributing_upstreams, h.api_contributing_upstreams,
+                          h.max_observed_at_unix_millis, h.computed_at_unix_millis, h.policy_version
+                   FROM UNNEST($1::text[]) AS w("quota_window")
+                   CROSS JOIN LATERAL (
+                       SELECT * FROM "#,
+                $table,
+                r#"
+                       WHERE provider = $2 AND "quota_window" = w."quota_window"
+                       ORDER BY snapshot_at_unix_secs DESC LIMIT 1
+                   ) h
+                   ORDER BY h."quota_window""#,
+            )
+        };
+    }
+    let rows = sqlx::query(history_read!(provider, query))
+        .bind(&windows)
+        .bind(provider_key(provider))
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
     rows.into_iter()
         .map(|row| row_to_summary(row, provider))
         .collect()
@@ -88,17 +103,22 @@ pub(super) async fn list_range(
         .iter()
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
-    let rows = sqlx::query(concat!(
-        range_points!(),
-        "SELECT * FROM points ORDER BY \"quota_window\" DESC, snapshot_at_unix_secs ASC",
-    ))
-    .bind(&windows)
-    .bind(since_unix_secs)
-    .bind(until_unix_secs)
-    .bind(provider_key(provider))
-    .fetch_all(storage.pool())
-    .await
-    .map_err(map_sqlx_error)?;
+    macro_rules! query {
+        ($table:literal) => {
+            concat!(
+                range_points!($table),
+                "SELECT * FROM points ORDER BY \"quota_window\" DESC, snapshot_at_unix_secs ASC",
+            )
+        };
+    }
+    let rows = sqlx::query(history_read!(provider, query))
+        .bind(&windows)
+        .bind(since_unix_secs)
+        .bind(until_unix_secs)
+        .bind(provider_key(provider))
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
     rows.into_iter()
         .map(|row| row_to_summary(row, provider))
         .collect()
@@ -124,24 +144,44 @@ pub(super) async fn list_chart_range(
         .iter()
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
+    macro_rules! query {
+        ($table:literal, bucketed) => {
+            concat!(range_points!($table),
+                r#"
+                SELECT snapshot_at_unix_secs - MOD(MOD(snapshot_at_unix_secs, $5) + $5, $5) AS snapshot_at_unix_secs,
+                       "quota_window", CASE WHEN $4 <> 'anthropic' AND COUNT(*) <> COUNT(utilization)
+                           THEN NULL ELSE MAX(utilization) END AS utilization
+                FROM points
+                GROUP BY "quota_window", 1
+                ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
+            )
+        };
+        ($table:literal, raw) => {
+            concat!(
+                range_points!($table),
+                r#"SELECT snapshot_at_unix_secs, "quota_window", utilization
+                   FROM points ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
+            )
+        };
+    }
     let rows = match bucket_secs {
-        Some(bucket_secs) => sqlx::query(concat!(range_points!(),
-            r#"
-               SELECT snapshot_at_unix_secs - MOD(MOD(snapshot_at_unix_secs, $5) + $5, $5) AS snapshot_at_unix_secs,
-                      "quota_window", CASE WHEN $4 <> 'anthropic' AND COUNT(*) <> COUNT(utilization)
-                          THEN NULL ELSE MAX(utilization) END AS utilization
-               FROM points
-               GROUP BY "quota_window", 1
-               ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
-        ))
-        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(provider_key(provider)).bind(bucket_secs)
-        .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
-        None => sqlx::query(concat!(range_points!(),
-            r#" SELECT snapshot_at_unix_secs, "quota_window", utilization
-               FROM points ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
-        ))
-        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(provider_key(provider))
-        .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
+        Some(bucket_secs) => sqlx::query(history_read!(provider, query, bucketed))
+            .bind(&windows)
+            .bind(since_unix_secs)
+            .bind(until_unix_secs)
+            .bind(provider_key(provider))
+            .bind(bucket_secs)
+            .fetch_all(storage.pool())
+            .await
+            .map_err(map_sqlx_error)?,
+        None => sqlx::query(history_read!(provider, query, raw))
+            .bind(&windows)
+            .bind(since_unix_secs)
+            .bind(until_unix_secs)
+            .bind(provider_key(provider))
+            .fetch_all(storage.pool())
+            .await
+            .map_err(map_sqlx_error)?,
     };
     rows.into_iter()
         .map(|row| row_to_chart_point(row, provider))
