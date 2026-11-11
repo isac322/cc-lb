@@ -10,6 +10,8 @@ mod empty;
 mod evidence_scope;
 #[path = "cache_keepalive_contracts/fixtures.rs"]
 mod fixtures;
+#[path = "cache_keepalive_contracts/horizon_state.rs"]
+mod horizon_state;
 #[path = "cache_keepalive_contracts/read_equivalence.rs"]
 mod read_equivalence;
 #[path = "cache_keepalive_contracts/read_model_regressions.rs"]

@@ -1582,6 +1582,120 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof() {
 }
 
 #[tokio::test]
+async fn canonical_ttl_sql_matches_cache_ttl_seconds() {
+    let (_dir, storage) = storage("cache-keepalive-canonical-ttl-sql.sqlite").await;
+    for (persisted, ttl) in [
+        ("5m", CacheTtl::Ttl5m),
+        ("1h", CacheTtl::Ttl1h),
+        ("30m", CacheTtl::Ttl30m),
+        ("12h", CacheTtl::Ttl12h),
+        ("unknown", CacheTtl::Ttl5m),
+    ] {
+        let millis: i64 = sqlx::query_scalar(concat!(
+            "SELECT ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            " FROM (SELECT ? AS ttl) AS r",
+        ))
+        .bind(persisted)
+        .fetch_one(storage.pool())
+        .await
+        .expect("evaluate canonical TTL SQL");
+        assert_eq!(millis as u64, ttl.as_secs() * 1000, "{persisted}");
+    }
+}
+
+#[tokio::test]
+async fn purge_expired_preserves_canonical_ttl_windows_and_deduplicates_siblings() {
+    let (_dir, storage) = storage("cache-keepalive-canonical-ttl-purge.sqlite").await;
+    let start_ms = 1_000_000_i64;
+    let mut expected = Vec::new();
+    for (index, (ttl, within_ms, ttl_ms)) in [
+        ("5m", 300_000_i64, 300_000_i64),
+        ("1h", 3_600_000, 3_600_000),
+        ("30m", 600_000, 1_800_000),
+        ("12h", 7_200_000, 43_200_000),
+        ("unknown", 300_000, 300_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (case, offset_ms) in [
+            ("within", within_ms),
+            ("boundary", ttl_ms),
+            ("beyond", ttl_ms + 1),
+        ] {
+            let cycle = Uuid::from_u128(
+                100 + index as u128 * 3
+                    + match case {
+                        "within" => 0,
+                        "boundary" => 1,
+                        _ => 2,
+                    },
+            );
+            let prefix_a = format!("{ttl}-{case}-a");
+            let prefix_b = format!("{ttl}-{case}-b");
+            for (suffix, kind, at, prefix) in [
+                ("renewal-a", "renewal", start_ms, &prefix_a),
+                ("renewal-b", "renewal", start_ms, &prefix_b),
+                ("a-earliest", "follow_up", start_ms + offset_ms, &prefix_a),
+                ("z-duplicate", "follow_up", start_ms + offset_ms, &prefix_b),
+            ] {
+                let id = format!("{ttl}-{case}-{suffix}");
+                sqlx::query(
+                    "INSERT INTO cache_keepalive_evidence
+                     (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+                      prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+                      upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+                      request_ref, event_ref, created_at_ms)
+                     VALUES (?, ?, ?, ?, 'fingerprint', ?, 'policy', 'schema', 'principal',
+                             ?, 'model', ?, 'hit', 1, 1, ?, ?, ?)",
+                )
+                .bind(&id)
+                .bind((kind == "renewal").then(|| cycle.to_string()))
+                .bind(kind)
+                .bind(at)
+                .bind(prefix)
+                .bind(Uuid::from_u128(7).to_string())
+                .bind(ttl)
+                .bind(&id)
+                .bind(&id)
+                .bind(at)
+                .execute(storage.pool())
+                .await
+                .expect("seed retained TTL matching and deduplication evidence");
+                if kind == "renewal" || (suffix == "a-earliest" && case != "beyond") {
+                    expected.push(id);
+                }
+            }
+        }
+    }
+    let retained_from_ms: Option<i64> =
+        sqlx::query_scalar("SELECT MIN(request_start_ms) FROM cache_keepalive_evidence")
+            .fetch_one(storage.pool())
+            .await
+            .expect("read populated evidence retention boundary");
+    assert_eq!(retained_from_ms, Some(start_ms));
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(100_000)
+            .await
+            .expect("purge evidence"),
+        0,
+        "evidence pruning does not change the expired-session count"
+    );
+    let actual: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await
+            .expect("read retained TTL evidence");
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "inclusive TTL windows retain only the earliest matching proof per cycle"
+    );
+}
+
+#[tokio::test]
 async fn purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_count() {
     let (_dir, storage) = storage("cache-keepalive-evidence-purge.sqlite").await;
     let upstream_id = Uuid::from_u128(7);

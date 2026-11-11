@@ -75,12 +75,64 @@ pub(crate) struct CacheKeepaliveDetailResponse {
     pub(crate) is_last_pending: bool,
     pub(crate) turns: Vec<CacheKeepaliveTurnResponse>,
     pub(crate) gaps: Vec<CacheKeepaliveGapResponse>,
+    pub(crate) follow_up_outcomes: CacheKeepaliveFollowUpOutcomesResponse,
     pub(crate) config_snapshot: Option<CacheKeepaliveConfigSnapshotResponse>,
     pub(crate) raw_record: CacheKeepaliveRawRecordResponse,
 }
 
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct CacheKeepaliveFollowUpOutcomesResponse {
+    pub(crate) observed: u64,
+    pub(crate) pending: u64,
+    pub(crate) no_follow_up: u64,
+    pub(crate) unknown: u64,
+}
+
+impl CacheKeepaliveFollowUpOutcomesResponse {
+    pub(super) fn from_endings(endings: impl IntoIterator<Item = &'static str>) -> Self {
+        let mut counts = Self::default();
+        for ending in endings {
+            let count = match ending {
+                "followup_hit" => &mut counts.observed,
+                "scheduled_waiting" | "followup_pending" => &mut counts.pending,
+                "capped_no_followup" | "ttl_expired_no_followup" => &mut counts.no_follow_up,
+                _ => &mut counts.unknown,
+            };
+            *count = count.saturating_add(1);
+        }
+        counts
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn gap_outcome_counts_preserve_every_ending_and_unknown() {
+    assert_eq!(
+        CacheKeepaliveFollowUpOutcomesResponse::from_endings([
+            "followup_hit",
+            "scheduled_waiting",
+            "followup_pending",
+            "capped_no_followup",
+            "ttl_expired_no_followup",
+            "followup_unknown",
+            "future_unrecognized_ending",
+        ]),
+        CacheKeepaliveFollowUpOutcomesResponse {
+            observed: 1,
+            pending: 2,
+            no_follow_up: 2,
+            unknown: 2,
+        }
+    );
+    assert_eq!(
+        CacheKeepaliveFollowUpOutcomesResponse::from_endings([]),
+        CacheKeepaliveFollowUpOutcomesResponse::default()
+    );
+}
+
 #[derive(Serialize)]
 pub(crate) struct CacheKeepaliveTurnResponse {
+    pub(crate) cycle_id: Option<String>,
     pub(crate) turn_number: u32,
     pub(crate) renewals: u32,
     pub(crate) followed_up: Option<bool>,

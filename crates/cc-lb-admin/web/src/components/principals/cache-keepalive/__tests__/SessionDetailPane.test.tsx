@@ -1,8 +1,18 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../../../lib/api';
-import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
+import {
+  type CacheKeepaliveDetail,
+  CacheKeepaliveDetailSchema,
+} from '../../../../lib/cacheKeepaliveApi';
+import * as locale from '../../../../lib/locale';
 import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveRenewedDetailFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import { successQuery } from '../../../../lib/test-utils/hook-results';
@@ -76,6 +86,12 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   it('renders D3 time-rail with blue bg-accent pulse ticks and English hover tooltips', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
+        follow_up_outcomes: {
+          observed: 1,
+          pending: 0,
+          no_follow_up: 0,
+          unknown: 0,
+        },
         id: 'p-123/thread:3c5cd0f1-4d8e-4be7-b0ec-7fd81793fede',
         last_message_at_ms: 1_700_000_323_000,
         state: 'renewed',
@@ -173,6 +189,12 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
 
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
+        follow_up_outcomes: {
+          observed: 0,
+          pending: 0,
+          no_follow_up: 1,
+          unknown: 0,
+        },
         id: 'p-123/thread:capped',
         last_message_at_ms: 1_700_003_250_000,
         state: 'capped',
@@ -251,6 +273,12 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   it('uses the 30m renewal window for OpenAI Responses sessions', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
+        follow_up_outcomes: {
+          observed: 0,
+          pending: 1,
+          no_follow_up: 0,
+          unknown: 0,
+        },
         id: 'openai-30m',
         last_message_at_ms: 1_700_000_323_000,
         state: 'scheduled',
@@ -310,6 +338,12 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   it('labels 12h retention without rendering a periodic renewal rail', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
+        follow_up_outcomes: {
+          observed: 0,
+          pending: 0,
+          no_follow_up: 0,
+          unknown: 0,
+        },
         id: 'openai-12h',
         last_message_at_ms: 1_700_000_323_000,
         state: 'not_tracked',
@@ -375,13 +409,302 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   });
 
   it.each([
+    ['scheduled', true, 'scheduled_waiting', true],
+    ['renewed', true, 'scheduled_waiting', true],
+    ['renewed', true, 'followup_hit', false],
+    ['scheduled', false, 'scheduled_waiting', false],
+    ['in_request', false, 'scheduled_waiting', false],
+    ['expired', false, 'scheduled_waiting', false],
+    ['in_request', false, 'followup_pending', false],
+    ['expired', false, 'followup_pending', false],
+    ['cancelled', false, 'scheduled_waiting', false],
+    ['failed', false, 'scheduled_waiting', false],
+    ['capped', false, 'scheduled_waiting', false],
+    ['not_tracked', false, 'scheduled_waiting', false],
+  ] as const)(
+    'only advertises a next renewal for an active waiting rail (%s, active=%s, ending=%s)',
+    (state, isActive, endingKind, expectsNextRenewal) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state,
+          is_active: isActive,
+          net_pnl: 0.12,
+          total_spent: 0.03,
+          total_avoided: 0.15,
+          turns: [],
+          gaps: [
+            {
+              cycle_id: 'retained-cycle',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: endingKind,
+              ending_at_ms: 1_700_000_300_000,
+              total_duration_sec: 300,
+              since_last_renewal_sec: null,
+              spent_usd: 0,
+              avoided_usd: 0.12,
+              net_pnl_usd: 0.12,
+            },
+          ],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="zero-renewal-history"
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+      expect(screen.queryByText(/Next renewal/) !== null).toBe(
+        expectsNextRenewal,
+      );
+      if (!expectsNextRenewal) {
+        expect(screen.getByText('0 renewals')).toBeDefined();
+      }
+      expect(screen.getByText('Net +$0.12')).toBeDefined();
+    },
+  );
+
+  it.each([false, true])(
+    'explains an in-request session without claiming cancellation (retained history: %s)',
+    (withHistory) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'in_request',
+          is_active: false,
+          cancel_reason: null,
+          reason: 'A real request is in progress',
+          turns: [],
+          gaps: withHistory
+            ? [
+                {
+                  cycle_id: 'retained-cycle',
+                  pause_at_ms: 1_700_000_000_000,
+                  cached_tokens: 20_000,
+                  pulses: [],
+                  ending_kind: 'followup_hit',
+                  ending_at_ms: 1_700_000_300_000,
+                  total_duration_sec: 300,
+                  since_last_renewal_sec: null,
+                  spent_usd: 0,
+                  avoided_usd: 0.12,
+                  net_pnl_usd: 0.12,
+                },
+              ]
+            : [],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="request-session"
+          onClose={() => {}}
+        />,
+      );
+
+      const badge = screen.getByText('In request');
+      expect(badge.className).toContain('bg-overlay-5');
+      expect(badge.className).toContain('text-text-muted');
+      expect(
+        screen.getByText(
+          'A real request is in progress. Keepalive renewals are paused until it completes.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.queryByText(/Cancelled|Failed|Next renewal|first renewal in/),
+      ).toBeNull();
+      expect(screen.queryByTestId('session-detail-time-rail') !== null).toBe(
+        withHistory,
+      );
+    },
+  );
+
+  it.each(['in_request', 'expired'] as const)(
+    'keeps %s follow-up evidence pending without a terminal rail segment',
+    (state) => {
+      const detail = CacheKeepaliveDetailSchema.parse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        state,
+        is_active: false,
+        is_last_pending: true,
+        evidence_status: 'pending',
+        follow_up_outcomes: {
+          observed: 0,
+          pending: 1,
+          no_follow_up: 0,
+          unknown: 0,
+        },
+        gaps: [
+          {
+            cycle_id: 'paused-cycle',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: 1_700_000_270_000,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.006,
+                hit: true,
+              },
+            ],
+            ending_kind: 'followup_pending',
+            ending_at_ms: 1_700_000_370_000,
+            total_duration_sec: 370,
+            since_last_renewal_sec: 100,
+            spent_usd: 0.006,
+            avoided_usd: 0,
+            net_pnl_usd: -0.006,
+          },
+        ],
+        turns: [],
+      });
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery(detail),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="paused-cycle"
+          onClose={() => {}}
+        />,
+      );
+      const rail = screen.getByTestId('session-detail-time-rail');
+      expect(within(rail).getByText(/Follow-up pending/)).toBeDefined();
+      expect(within(rail).queryByText(/No follow-up/)).toBeNull();
+      expect(screen.queryByText(/Next renewal/)).toBeNull();
+      const endpoint = within(rail).getByRole('button', {
+        name: /Waiting for follow-up evidence/,
+      });
+      fireEvent.focus(endpoint);
+      expect(screen.getByRole('tooltip').textContent).toContain(
+        'Waiting for follow-up evidence',
+      );
+      expect(screen.getByRole('tooltip').textContent).not.toContain(
+        'No follow-up',
+      );
+    },
+  );
+
+  it('shows an expired paid evidence window even while renewal scheduling remains active', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery(
+        CacheKeepaliveDetailSchema.parse({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'renewed',
+          is_active: true,
+          is_last_pending: false,
+          evidence_status: 'observed',
+          follow_up_outcomes: {
+            observed: 0,
+            pending: 0,
+            no_follow_up: 1,
+            unknown: 0,
+          },
+          gaps: [
+            {
+              cycle_id: 'overdue-active',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [
+                {
+                  pulse_number: 1,
+                  time_ms: 1_700_000_270_000,
+                  offset_sec: 270,
+                  since_prev_renewal_sec: null,
+                  spent_usd: 0.006,
+                  hit: true,
+                },
+              ],
+              ending_kind: 'ttl_expired_no_followup',
+              ending_at_ms: 1_700_000_570_000,
+              total_duration_sec: 570,
+              since_last_renewal_sec: 300,
+              spent_usd: 0.006,
+              avoided_usd: 0,
+              net_pnl_usd: -0.006,
+            },
+          ],
+          turns: [],
+        }),
+      ),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="overdue-active"
+        onClose={() => {}}
+      />,
+    );
+    const rail = screen.getByTestId('session-detail-time-rail');
+    expect(within(rail).getByText(/No follow-up/)).toBeDefined();
+    expect(within(rail).queryByText(/Follow-up pending|Waiting/)).toBeNull();
+    expect(
+      within(rail).getByRole('button', { name: /No follow-up.*TTL expired/ }),
+    ).toBeDefined();
+  });
+
+  it.each([false, true])(
+    'shows the expired request deadline neutrally (retained history: %s)',
+    (withHistory) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'expired',
+          is_active: false,
+          cancel_reason: null,
+          reason: 'Request did not complete before its deadline',
+          error: null,
+          turns: withHistory ? cacheKeepaliveRenewedDetailFixture.turns : [],
+          gaps: [],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="expired-request"
+          onClose={() => {}}
+        />,
+      );
+
+      const reason = screen.getByText(
+        'Request did not complete before its deadline',
+      );
+      expect(reason.className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(
+        screen.queryByText(/Cancelled|Failed|aborted|Next renewal/),
+      ).toBeNull();
+      expect(screen.queryByTestId('session-detail-time-rail') !== null).toBe(
+        withHistory,
+      );
+    },
+  );
+
+  it.each([
     ['new_request', 'Cancelled: new request'],
     ['user_turn_detected', 'Cancelled: user turn detected'],
+    ['ambiguous_turn', 'Cancelled: ambiguous turn'],
+    ['retention_recorded', 'Cancelled: retention recorded'],
+    ['renewal_not_beneficial', 'Cancelled: renewal not beneficial'],
     ['snapshot_too_large', 'Cancelled: snapshot too large'],
     ['cached_prefix_too_small', 'Cancelled: cached prefix too small'],
     [
       'zero_token_renewal_unsupported',
       'Cancelled: zero-token renewal unsupported',
+    ],
+    [
+      'completed_not_renewable',
+      'Cancelled: request completed, renewal not possible',
     ],
     [null, 'Cancelled'],
     [undefined, 'Cancelled'],
@@ -389,16 +712,18 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     'shows cancellation cause %s instead of a stale scheduling reason',
     (cancelReason, expected) => {
       vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
-        successQuery<CacheKeepaliveDetail>({
-          ...cacheKeepaliveRenewedDetailFixture,
-          state: 'cancelled',
-          is_active: false,
-          cancel_reason: cancelReason,
-          reason: cancelReason
-            ? expected
-            : 'agent-in-turn — first renewal in 4m 30s',
-          gaps: [],
-        }),
+        successQuery<CacheKeepaliveDetail>(
+          CacheKeepaliveDetailSchema.parse({
+            ...cacheKeepaliveRenewedDetailFixture,
+            state: 'cancelled',
+            is_active: false,
+            cancel_reason: cancelReason,
+            reason: cancelReason
+              ? expected
+              : 'agent-in-turn — first renewal in 4m 30s',
+            gaps: [],
+          }),
+        ),
       );
 
       renderWithProviders(
@@ -411,31 +736,115 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
 
       expect(screen.getByText(expected)).toBeDefined();
       expect(screen.queryByText(/first renewal in/)).toBeNull();
+      expect(screen.getByText(expected).className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('Failed')).toBeNull();
     },
   );
 
-  it('keeps the cancellation cause visible alongside retained renewal history', () => {
+  it.each([
+    ['new_request', 'Cancelled: new request'],
+    [
+      'completed_not_renewable',
+      'Cancelled: request completed, renewal not possible',
+    ],
+  ] as const)(
+    'keeps %s visible alongside retained renewal history',
+    (cancelReason, expected) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'cancelled',
+          is_active: false,
+          cancel_reason: cancelReason,
+          reason: expected,
+          gaps: [
+            {
+              cycle_id: 'retained-cycle',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: 'ttl_expired_no_followup',
+              ending_at_ms: 1_700_000_300_000,
+              total_duration_sec: 300,
+              since_last_renewal_sec: null,
+              spent_usd: 0,
+              avoided_usd: null,
+              net_pnl_usd: null,
+            },
+          ],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="cancelled-session"
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText(expected)).toBeDefined();
+      expect(screen.getByText(expected).className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('Failed')).toBeNull();
+      expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+      expect(screen.queryByText(/first renewal in/)).toBeNull();
+    },
+  );
+
+  it('shows every horizon cycle in the renewal table and matches the timeline cycle labels', () => {
+    const base = 1_700_000_000_000;
+    const turn = (
+      cycleId: string | null,
+      timeMs: number,
+      hit: boolean,
+      pnl: number | null,
+    ) => ({
+      cycle_id: cycleId,
+      turn_number: 1,
+      time_ms: timeMs,
+      renewals: hit ? 1 : 0,
+      followed_up: hit ? true : null,
+      label: 'agent-in-turn',
+      pnl,
+      pending: false,
+      evidence_status: hit ? ('observed' as const) : ('unknown' as const),
+    });
+    const gap = (cycleId: string, pauseMs: number) => ({
+      cycle_id: cycleId,
+      pause_at_ms: pauseMs,
+      cached_tokens: 20_000,
+      pulses: [
+        {
+          pulse_number: 1,
+          time_ms: pauseMs + 270_000,
+          offset_sec: 270,
+          since_prev_renewal_sec: null,
+          spent_usd: 0.02,
+          hit: true,
+        },
+      ],
+      ending_kind: 'followup_hit' as const,
+      ending_at_ms: pauseMs + 290_000,
+      total_duration_sec: 290,
+      since_last_renewal_sec: 20,
+      spent_usd: 0.02,
+      avoided_usd: 0.12,
+      net_pnl_usd: 0.1,
+    });
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
       successQuery<CacheKeepaliveDetail>({
         ...cacheKeepaliveRenewedDetailFixture,
-        state: 'cancelled',
-        is_active: false,
-        cancel_reason: 'new_request',
-        reason: 'Cancelled: new request',
+        total_renewals_current_cycle: 1,
+        turns: [
+          turn('current-cycle', base + 870_000, false, null),
+          turn(null, base + 570_000, true, 0.03),
+          turn('previous-cycle', base + 270_000, true, 0.1),
+        ],
         gaps: [
-          {
-            cycle_id: 'retained-cycle',
-            pause_at_ms: 1_700_000_000_000,
-            cached_tokens: 20_000,
-            pulses: [],
-            ending_kind: 'ttl_expired_no_followup',
-            ending_at_ms: 1_700_000_300_000,
-            total_duration_sec: 300,
-            since_last_renewal_sec: null,
-            spent_usd: 0,
-            avoided_usd: null,
-            net_pnl_usd: null,
-          },
+          gap('previous-cycle', base),
+          gap('current-cycle', base + 600_000),
         ],
       }),
     );
@@ -443,13 +852,189 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     renderWithProviders(
       <SessionDetailPane
         principalId="p-123"
-        sessionId="cancelled-session"
+        sessionId="multi-cycle"
         onClose={() => {}}
       />,
     );
 
-    expect(screen.getByText('Cancelled: new request')).toBeDefined();
+    expect(
+      screen.getByRole('region', { name: 'Cycle 1 timeline' }),
+    ).toBeDefined();
+    expect(
+      screen.getByRole('region', { name: 'Cycle 2 timeline' }),
+    ).toBeDefined();
+    const tables = screen.getAllByRole('table');
+    expect(tables.map((table) => table.getAttribute('aria-label'))).toEqual([
+      'Cycle 1 renewals',
+      'Cycle 2 renewals',
+      'Unknown cycle renewals',
+    ]);
+    for (const table of tables) {
+      expect(within(table).getAllByRole('row')).toHaveLength(2);
+      expect(within(table).getByText('#1')).toBeDefined();
+    }
+    expect(within(tables[0]).getByText('Hit')).toBeDefined();
+    expect(within(tables[0]).getByText('+$0.1')).toBeDefined();
+    expect(within(tables[1]).getByText('Miss')).toBeDefined();
+    expect(within(tables[1]).getByText('Unknown')).toBeDefined();
+    expect(within(tables[1]).getByText('—')).toBeDefined();
+    expect(within(tables[2]).getByText('+$0.03')).toBeDefined();
+  });
+
+  it('does not invent renewal table rows from a zero-turn scheduled timeline', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        state: 'scheduled',
+        turns: [],
+        gaps: [],
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="scheduled-only"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('table')).toBeNull();
     expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
-    expect(screen.queryByText(/first renewal in/)).toBeNull();
+  });
+  it.each([
+    ['UTC', '2026-11-10T23:58:00Z', '2026-11-11T00:02:00Z'],
+    ['Asia/Seoul', '2026-11-10T14:58:00Z', '2026-11-10T15:02:00Z'],
+  ])(
+    'includes local calendar dates across midnight in %s',
+    (timeZone, pause, end) => {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-11T12:00:00Z'));
+      vi.spyOn(locale, 'useTimezone').mockReturnValue({
+        timezone: timeZone,
+        effective: timeZone,
+        setTimezone: vi.fn(),
+      });
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          turns: [
+            {
+              ...cacheKeepaliveRenewedDetailFixture.turns[0],
+              cycle_id: 'midnight',
+              turn_number: 1,
+              time_ms: Date.parse(pause) + 30_000,
+            },
+            {
+              ...cacheKeepaliveRenewedDetailFixture.turns[0],
+              cycle_id: 'midnight',
+              turn_number: 2,
+              time_ms: Date.parse(end) - 30_000,
+            },
+          ],
+          gaps: [
+            {
+              cycle_id: 'midnight',
+              pause_at_ms: Date.parse(pause),
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: 'followup_hit',
+              ending_at_ms: Date.parse(end),
+              total_duration_sec: 240,
+              since_last_renewal_sec: null,
+              spent_usd: 0,
+              avoided_usd: 0,
+              net_pnl_usd: 0,
+            },
+          ],
+        }),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="midnight"
+          onClose={() => {}}
+        />,
+      );
+      expect(screen.getByText('11-10 23:58:00')).toBeDefined();
+      expect(screen.getByText('11-11 00:02:00')).toBeDefined();
+      const table = screen.getByRole('table', { name: 'Cycle 1 renewals' });
+      expect(within(table).getByText('11-10 23:58:30')).toBeDefined();
+      expect(within(table).getByText('11-11 00:01:30')).toBeDefined();
+    },
+  );
+
+  it('keeps same-day local timestamps compact', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-11T12:00:00Z'));
+    vi.spyOn(locale, 'useTimezone').mockReturnValue({
+      timezone: 'UTC',
+      effective: 'UTC',
+      setTimezone: vi.fn(),
+    });
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        turns: [
+          {
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: 'today',
+            time_ms: Date.parse('2026-11-11T09:02:00Z'),
+          },
+        ],
+        gaps: [
+          {
+            cycle_id: 'today',
+            pause_at_ms: Date.parse('2026-11-11T09:00:00Z'),
+            cached_tokens: 20_000,
+            pulses: [],
+            ending_kind: 'followup_hit',
+            ending_at_ms: Date.parse('2026-11-11T09:04:00Z'),
+            total_duration_sec: 240,
+            since_last_renewal_sec: null,
+            spent_usd: 0,
+            avoided_usd: 0,
+            net_pnl_usd: 0,
+          },
+        ],
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="today"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('09:00:00')).toBeDefined();
+    expect(screen.getByText('09:04:00')).toBeDefined();
+    expect(
+      within(screen.getByRole('table', { name: 'Cycle 1 renewals' })).getByText(
+        '09:02:00',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText(/11-11 /)).toBeNull();
+  });
+
+  it('shows server outcome counts instead of flattening mixed cycles to unknown', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        evidence_status: 'unknown',
+        follow_up_outcomes: {
+          observed: 0,
+          no_follow_up: 10,
+          unknown: 1,
+          pending: 2,
+        },
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="mixed-outcomes"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText('Follow-up outcomes').textContent).toBe(
+      'Observed 0 · No follow-up 10 · Unknown 1 · Pending 2',
+    );
+    expect(screen.queryByText('Follow-up unknown ·')).toBeNull();
   });
 });

@@ -13,12 +13,20 @@ use cc_lb_engine::cache_keepalive::{
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
-use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+use cc_lb_storage_api::{CacheKeepaliveCompletionTicket, CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use serde_json::json;
 
 use common::{TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle};
+
+fn completion_ticket(sequence: u64) -> CacheKeepaliveCompletionTicket {
+    CacheKeepaliveCompletionTicket {
+        epoch: uuid::Uuid::from_u128(1),
+        sequence,
+        valid_until_unix_secs: u64::MAX,
+    }
+}
 
 #[tokio::test]
 async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_sse() {
@@ -171,6 +179,20 @@ async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
 
 #[tokio::test]
 async fn compaction_response_without_current_breakpoint_fences_generation_json_and_sse() {
+    assert_no_breakpoint_compaction(false, &[false, true]).await;
+}
+
+#[tokio::test]
+async fn shape_fallback_without_breakpoint_buffered_compaction_fences_generation() {
+    assert_no_breakpoint_compaction(true, &[false]).await;
+}
+
+#[tokio::test]
+async fn shape_fallback_without_breakpoint_sse_compaction_fences_generation() {
+    assert_no_breakpoint_compaction(true, &[true]).await;
+}
+
+async fn assert_no_breakpoint_compaction(shape_fallback: bool, streaming_modes: &[bool]) {
     for (stop_reason, content) in [
         (
             "compaction",
@@ -184,7 +206,7 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
             ]),
         ),
     ] {
-        for streaming in [false, true] {
+        for &streaming in streaming_modes {
             let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
             let principal = principal_with_keepalive();
             let main_headers = [("x-claude-code-session-id", "no-breakpoint")];
@@ -206,13 +228,14 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
                 .expect("response JSON"),
             );
             let expected_body = response_body.clone();
-            let (response, _) = observed_keepalive_response(
+            let (response, _) = observed_keepalive_response_with_shape(
                 response_body,
                 Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
                 principal,
                 no_breakpoint_request(),
                 &main_headers,
                 streaming,
+                shape_fallback,
             )
             .await;
             assert_keepalive_response_fidelity(response, &expected_body, streaming).await;
@@ -316,8 +339,8 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
         async fn observe_session_generation(
             &self,
             _session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
-            Ok(Some(42))
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
+            Ok(Some(completion_ticket(42)))
         }
     }
 
@@ -370,7 +393,7 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
         assert!(
             completion_cancellations
                 .iter()
-                .all(|request| request.expected_generation == Some(42))
+                .all(|request| request.expected_generation == Some(completion_ticket(42)))
         );
     }
 
@@ -388,14 +411,14 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
 
     let enqueued = enqueuer.enqueued.lock().expect("enqueued lock");
     assert_eq!(enqueued.len(), 2);
-    assert_eq!(enqueued[0].expected_generation, Some(42));
-    assert_eq!(enqueued[1].expected_generation, Some(42));
+    assert_eq!(enqueued[0].expected_generation, Some(completion_ticket(42)));
+    assert_eq!(enqueued[1].expected_generation, Some(completion_ticket(42)));
 }
 
 #[tokio::test]
 async fn compaction_fence_retains_unrelated_agent_scope_state() {
     struct ScopedEnqueuer {
-        active: Mutex<HashMap<String, u64>>,
+        active: Mutex<HashMap<String, CacheKeepaliveCompletionTicket>>,
         cancelled: Mutex<Vec<String>>,
     }
 
@@ -407,7 +430,9 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
         ) -> Result<(), CacheKeepaliveEnqueueError> {
             self.active.lock().expect("active sessions lock").insert(
                 request.session_key_hash,
-                request.expected_generation.unwrap_or(1),
+                request
+                    .expected_generation
+                    .unwrap_or_else(|| completion_ticket(1)),
             );
             Ok(())
         }
@@ -437,7 +462,7 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
         async fn observe_session_generation(
             &self,
             session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             Ok(self
                 .active
                 .lock()
@@ -535,22 +560,28 @@ async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
 
 #[tokio::test]
 async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let response = handle_keepalive_response(
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
         Bytes::from_static(
             br#"{"type":"message","id":"msg_ambiguous","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","usage":{"input_tokens":10,"output_tokens":2}}"#,
         ),
-        Arc::new(RecordingCancelEnqueuer {
-            calls: Arc::clone(&calls),
-        }),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "ambiguous-turn")],
+        false,
     )
     .await;
 
     let (status, _headers, body) = collect_body(response).await;
-    settle().await;
+    enqueuer.wait_for_completion().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_ambiguous"));
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(enqueuer.completion_cancellations().len(), 1);
+    assert_eq!(
+        enqueuer.completion_cancellations()[0].reason,
+        CancelReason::AmbiguousTurn
+    );
 }
 
 #[tokio::test]
@@ -1088,15 +1119,18 @@ async fn cache_keepalive_shared_lifecycle_serializes_buffered_and_streaming_comp
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum KeepaliveOperation {
-    Observe(String, Option<u64>),
-    Enqueue(String, Option<u64>),
-    Cancel(String, Option<u64>, CancelReason),
+    Observe(String, Option<CacheKeepaliveCompletionTicket>),
+    Enqueue(String, Option<CacheKeepaliveCompletionTicket>),
+    Cancel(String, Option<CacheKeepaliveCompletionTicket>, CancelReason),
     NotTracked(String, String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ScopedKeepaliveState {
-    generations: std::collections::BTreeMap<String, u64>,
+    generations: std::collections::BTreeMap<String, CacheKeepaliveCompletionTicket>,
+    request_owners: std::collections::BTreeMap<String, Option<CacheKeepaliveCompletionTicket>>,
+    cancellations:
+        std::collections::BTreeMap<String, (Option<CacheKeepaliveCompletionTicket>, CancelReason)>,
     operations: Vec<KeepaliveOperation>,
     next_generation: u64,
 }
@@ -1131,7 +1165,7 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     async fn observe_session_generation(
         &self,
         key: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let generation = state.generations.get(key).copied();
         state
@@ -1146,16 +1180,18 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let key = request.session_key_hash;
-        assert_eq!(
-            request.expected_generation,
-            state.generations.get(&key).copied()
-        );
+        let expected_owner = state
+            .request_owners
+            .remove(&key)
+            .unwrap_or_else(|| state.generations.get(&key).copied());
+        assert_eq!(request.expected_generation, expected_owner);
         state.operations.push(KeepaliveOperation::Enqueue(
             key.clone(),
             request.expected_generation,
         ));
         state.next_generation += 1;
-        let generation = state.next_generation;
+        let generation = completion_ticket(state.next_generation);
+        state.cancellations.remove(&key);
         state.generations.insert(key, generation);
         self.enqueued.notify_one();
         self.completed.notify_one();
@@ -1168,15 +1204,40 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let key = request.session_key_hash;
-        assert_eq!(
-            request.expected_generation,
+        let expected_owner = if request.reason == CancelReason::NewRequest {
             state.generations.get(&key).copied()
-        );
+        } else {
+            state
+                .request_owners
+                .get(&key)
+                .copied()
+                .unwrap_or_else(|| state.generations.get(&key).copied())
+        };
         state.operations.push(KeepaliveOperation::Cancel(
             key.clone(),
             request.expected_generation,
             request.reason,
         ));
+        if request.expected_generation != expected_owner {
+            // Storage rejects an older captured ticket after a new owner has
+            // replaced the provisional marker; recording the attempt is useful
+            // for checking that completion did not re-observe that newer owner.
+            assert_ne!(request.reason, CancelReason::NewRequest);
+            self.completed.notify_one();
+            return Ok(());
+        }
+        if request.reason == CancelReason::NewRequest {
+            state
+                .request_owners
+                .insert(key.clone(), request.expected_generation);
+        } else {
+            state.request_owners.remove(&key);
+        }
+        // The real store retains a terminal NewRequest marker, including its
+        // owner, until a real completion replaces its reason or enqueues it.
+        state
+            .cancellations
+            .insert(key.clone(), (request.expected_generation, request.reason));
         state.generations.remove(&key);
         if request.reason.as_str() != "new_request" {
             self.completed.notify_one();
@@ -1208,11 +1269,52 @@ async fn observed_keepalive_response(
     request_headers: &[(&str, &str)],
     streaming: bool,
 ) -> (Response<Body>, Option<String>) {
+    observed_keepalive_response_with_shape(
+        upstream_body,
+        enqueuer,
+        principal,
+        request_body,
+        request_headers,
+        streaming,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observed_keepalive_response_with_shape(
+    upstream_body: Bytes,
+    enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
+    principal: PrincipalRecord,
+    request_body: Bytes,
+    request_headers: &[(&str, &str)],
+    streaming: bool,
+    shape_fallback: bool,
+) -> (Response<Body>, Option<String>) {
     let principal_name = principal.name.clone();
-    let principal_view = Arc::new(PrincipalView::from_db(
-        &[principal],
-        std::collections::HashMap::new(),
-    ));
+    let mut chains = HashMap::new();
+    if shape_fallback {
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, RouterPipelineCache, ShapePluginCache,
+        };
+        chains.insert(
+            principal_name.clone(),
+            (
+                Some(Arc::new(RouterPipelineCache::empty(
+                    cc_lb_domain::TerminalStrategy::FirstPick,
+                ))),
+                DialectCache::Explicit(ShapePluginCache {
+                    dialect: Arc::new(FailingKeepaliveShape {
+                        fail: true,
+                        transform_sse: false,
+                        on_shape: Mutex::new(None),
+                        buffered_transform: None,
+                    }),
+                }),
+            ),
+        );
+    }
+    let principal_view = Arc::new(PrincipalView::from_db(&[principal], chains));
     let mut authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
     authn.authn = common::managed_authn(&principal_name);
     let dispatch: Arc<dyn UpstreamDispatch> = if streaming {
@@ -1308,6 +1410,1629 @@ async fn establish_scoped_keepalive(
     assert_keepalive_response_fidelity(response, &body, false).await;
     enqueuer.wait_for_completion().await;
     enqueuer.wait_for_enqueue().await;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompletionFallbackResponse {
+    InvalidJson,
+    Empty,
+    InvalidGzip,
+    UnsupportedEncoding,
+    AffinityRejected,
+    SseTerminalOnly,
+    ShapeFallbackBuffered,
+    ShapeFallbackSse,
+    ShapeFallbackTransformedSse,
+    ShapeFallbackSseDropAfterTerminal,
+    ShapeFallbackSseAbortBeforeTerminal,
+    ShapeFallbackBodyFailure,
+    ShapeFallbackTransportFailure,
+    ShapeFallbackAbort,
+    DynamicStartBuffered,
+    DynamicStartSse,
+    SseEmpty,
+    SseAffinityRejected,
+    HttpFailure,
+    ProviderErrorEnvelope,
+    ProviderFailedEnvelope,
+    ProviderErrorWithoutDetails,
+    ProviderFailedWithoutDetails,
+    ContextWindowExceeded,
+    SseRefusal,
+    SseContextWindowExceeded,
+    SseRefusalWithoutTerminal,
+    SseContextWindowExceededWithoutTerminal,
+    SseRefusalAbortBeforeTerminal,
+    SseProviderError,
+    SseProviderFailed,
+    SseHttpErrorEof,
+    SseHttpErrorPartialEof,
+    SseHttpErrorTruncatedGzipEof,
+    HttpErrorStreamBodyEof,
+    SseTransformedHttpErrorJsonDrop,
+    SseProviderErrorIncomplete,
+    SseRedirectTerminal,
+    BufferedHookProviderError,
+    BufferedHookFailure,
+    BufferedCapFinalFrame,
+    BufferedCapBeforeFinalFrame,
+    AbnormalStop,
+    BodyFailure,
+    TransportFailure,
+    ClientAbort,
+}
+
+struct CompletionFallbackDispatch {
+    pending: PendingFollowupDispatch,
+    response: CompletionFallbackResponse,
+}
+
+#[async_trait]
+impl UpstreamDispatch for CompletionFallbackDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let mut response = self.pending.dispatch(request).await?;
+        let body = match self.response {
+            CompletionFallbackResponse::InvalidJson => Bytes::from_static(b"not completion JSON"),
+            CompletionFallbackResponse::Empty | CompletionFallbackResponse::SseEmpty => {
+                Bytes::new()
+            }
+            CompletionFallbackResponse::InvalidGzip => {
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("gzip"),
+                );
+                Bytes::from_static(b"not a gzip member")
+            }
+            CompletionFallbackResponse::UnsupportedEncoding => {
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("unsupported-test-encoding"),
+                );
+                self.pending.body.clone()
+            }
+            CompletionFallbackResponse::SseTerminalOnly => {
+                Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            }
+            CompletionFallbackResponse::SseAffinityRejected => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::SseProviderError => Bytes::from_static(
+                b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fixture provider failed\"}}\n\n",
+            ),
+            CompletionFallbackResponse::SseProviderFailed => Bytes::from_static(
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"fixture provider failed\"}}}\n\n",
+            ),
+            CompletionFallbackResponse::SseHttpErrorEof => Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\n",
+            ),
+            CompletionFallbackResponse::SseHttpErrorPartialEof => Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":",
+            ),
+            CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof => {
+                use std::io::{Read as _, Write as _};
+                let plaintext = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_http_error\",\"type\":\"message\",\"content\":[]}}\n\n";
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(plaintext).expect("gzip fixture writes");
+                let mut compressed = encoder.finish().expect("gzip fixture finishes");
+                compressed.truncate(compressed.len() - 8);
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(compressed.as_slice())
+                    .read_to_end(&mut decoded)
+                    .expect_err("missing CRC32/ISIZE trailer is a decode failure");
+                assert_eq!(decoded, plaintext, "nonterminal event decodes before trailer failure");
+                response.headers_mut().insert(
+                    http::header::CONTENT_ENCODING,
+                    http::HeaderValue::from_static("gzip"),
+                );
+                Bytes::from(compressed)
+            }
+            CompletionFallbackResponse::SseProviderErrorIncomplete => Bytes::from_static(
+                b"event: error\ndata: {\"type\":\"error\",\"error\":",
+            ),
+            CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRedirectTerminal => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+                let body = streaming_body_from_message(&self.pending.body);
+                let terminal = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                assert!(body.ends_with(terminal), "fixture must remove only message_stop");
+                body.slice(..body.len() - terminal.len())
+            }
+            CompletionFallbackResponse::BodyFailure
+            | CompletionFallbackResponse::ShapeFallbackBodyFailure => {
+                let partial = self.pending.body.clone();
+                *response.body_mut() = Body::from_stream(async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(partial);
+                    yield Err(std::io::Error::other("fixture upstream body reset"));
+                });
+                return Ok(response);
+            }
+            CompletionFallbackResponse::TransportFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure => {
+                return Err(DispatchError::Transport {
+                    source: Box::new(std::io::Error::other("fixture upstream connection reset")),
+                });
+            }
+            CompletionFallbackResponse::ShapeFallbackSse
+            | CompletionFallbackResponse::DynamicStartSse
+            | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+            | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal => {
+                streaming_body_from_message(&self.pending.body)
+            }
+            CompletionFallbackResponse::ShapeFallbackBuffered
+            | CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::ShapeFallbackAbort
+            | CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            | CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+            | CompletionFallbackResponse::ContextWindowExceeded
+            | CompletionFallbackResponse::AbnormalStop
+            | CompletionFallbackResponse::ClientAbort => self.pending.body.clone(),
+        };
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::SseTerminalOnly
+                | CompletionFallbackResponse::SseEmpty
+                | CompletionFallbackResponse::SseAffinityRejected
+                | CompletionFallbackResponse::SseRefusal
+                | CompletionFallbackResponse::SseContextWindowExceeded
+                | CompletionFallbackResponse::SseRefusalWithoutTerminal
+                | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::SseProviderError
+                | CompletionFallbackResponse::SseProviderFailed
+                | CompletionFallbackResponse::SseHttpErrorEof
+                | CompletionFallbackResponse::SseHttpErrorPartialEof
+                | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+                | CompletionFallbackResponse::SseProviderErrorIncomplete
+                | CompletionFallbackResponse::SseRedirectTerminal
+                | CompletionFallbackResponse::ShapeFallbackSse
+                | CompletionFallbackResponse::DynamicStartSse
+                | CompletionFallbackResponse::ShapeFallbackTransformedSse
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+                | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+        ) {
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/event-stream"),
+            );
+        }
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::HttpFailure
+                | CompletionFallbackResponse::SseHttpErrorEof
+                | CompletionFallbackResponse::SseHttpErrorPartialEof
+                | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+                | CompletionFallbackResponse::HttpErrorStreamBodyEof
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+        ) {
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::SseRedirectTerminal
+        ) {
+            *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+        }
+        if matches!(
+            self.response,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+        ) {
+            let body = if matches!(
+                self.response,
+                CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+            ) {
+                Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"content\":[]}}\n\n")
+            } else {
+                body
+            };
+            *response.body_mut() = Body::from_stream(async_stream::stream! {
+                yield Ok::<Bytes, std::io::Error>(body);
+                std::future::pending::<()>().await;
+            });
+        } else {
+            *response.body_mut() = Body::from(body);
+        }
+        Ok(response)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_undecodable_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::InvalidJson,
+        CompletionFallbackResponse::Empty,
+        CompletionFallbackResponse::InvalidGzip,
+        CompletionFallbackResponse::UnsupportedEncoding,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_affinity_rejection_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(CompletionFallbackResponse::AffinityRejected, replace, true)
+                .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_sse_terminal_without_snapshot_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(CompletionFallbackResponse::SseTerminalOnly, replace, true)
+                .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_incomplete_transport_body_and_abort_remain_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseEmpty,
+        CompletionFallbackResponse::SseAffinityRejected,
+        CompletionFallbackResponse::SseRefusalWithoutTerminal,
+        CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal,
+        CompletionFallbackResponse::SseRefusalAbortBeforeTerminal,
+        CompletionFallbackResponse::BodyFailure,
+        CompletionFallbackResponse::TransportFailure,
+        CompletionFallbackResponse::ClientAbort,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_buffered_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::ShapeFallbackBuffered,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_sse_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        for response in [
+            CompletionFallbackResponse::ShapeFallbackSse,
+            CompletionFallbackResponse::ShapeFallbackTransformedSse,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal,
+        ] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_shape_failure_incomplete_remains_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ShapeFallbackBodyFailure,
+        CompletionFallbackResponse::ShapeFallbackTransportFailure,
+        CompletionFallbackResponse::ShapeFallbackAbort,
+        CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_dynamic_start_without_initial_tracking_retires_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::DynamicStartBuffered,
+        CompletionFallbackResponse::DynamicStartSse,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_http_failure_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [CompletionFallbackResponse::HttpFailure] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_abnormal_stop_retires_captured_owners() {
+    let mut violations = Vec::new();
+    // R6's refusal-neutral expectation confused an unsuccessful outcome with
+    // absence of terminal evidence. Fully collected messages are terminal.
+    for response in [
+        CompletionFallbackResponse::AbnormalStop,
+        CompletionFallbackResponse::ContextWindowExceeded,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_provider_error_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ProviderErrorEnvelope,
+        CompletionFallbackResponse::ProviderFailedEnvelope,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_declared_terminal_without_details_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::ProviderErrorWithoutDetails,
+        CompletionFallbackResponse::ProviderFailedWithoutDetails,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_declared_terminal_lookalike_content_remains_renewable() {
+    for lookalike in [
+        json!({"type": "error", "error": null}),
+        json!({"object": "response", "status": "failed", "error": null}),
+    ] {
+        let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+        let principal = principal_with_keepalive();
+        let headers = [
+            ("x-claude-code-session-id", "terminal-envelope-lookalike"),
+            ("x-claude-code-agent-id", "main"),
+        ];
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+        let before = enqueuer.snapshot();
+        let mut message: serde_json::Value =
+            serde_json::from_slice(&agent_turn_body("msg_error_lookalike", "Bash", 12_000))
+                .expect("ordinary renewable message");
+        message["content"]
+            .as_array_mut()
+            .expect("message content")
+            .push(json!({"type": "text", "text": lookalike.to_string()}));
+        let body = Bytes::from(serde_json::to_vec(&message).expect("lookalike JSON"));
+        let (response, _) = observed_keepalive_response(
+            body.clone(),
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal,
+            standard_keepalive_request(),
+            &headers,
+            false,
+        )
+        .await;
+        assert_keepalive_response_fidelity(response, &body, false).await;
+        enqueuer.wait_for_enqueue().await;
+        let after = enqueuer.snapshot();
+        let operations = &after.operations[before.operations.len()..];
+        assert!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, KeepaliveOperation::Enqueue(_, _))),
+            "error-shaped text is not a declared terminal error: {operations:?}"
+        );
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation,
+                KeepaliveOperation::Cancel(_, _, reason) if reason.as_str() == "completed_not_renewable"
+            )),
+            "ordinary success with error-shaped content remains renewable: {operations:?}"
+        );
+        assert_ne!(after.generations, before.generations);
+        eprintln!("lookalike content remains renewable: {lookalike}, operations={operations:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_sse_abnormal_terminal_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseRefusal,
+        CompletionFallbackResponse::SseContextWindowExceeded,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_provider_terminal_and_http_error_eof_retire_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseProviderError,
+        CompletionFallbackResponse::SseProviderFailed,
+        CompletionFallbackResponse::SseHttpErrorEof,
+        CompletionFallbackResponse::HttpErrorStreamBodyEof,
+        CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_redirect_terminal_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::SseRedirectTerminal,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_stream_provider_terminal_incomplete_controls_remain_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseProviderErrorIncomplete,
+        CompletionFallbackResponse::SseRefusalWithoutTerminal,
+        CompletionFallbackResponse::SseAffinityRejected,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_http_error_sse_unvalidated_eof_remains_neutral() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::SseHttpErrorPartialEof,
+        CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, false).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_hook_failure_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for response in [
+        CompletionFallbackResponse::BufferedHookProviderError,
+        CompletionFallbackResponse::BufferedHookFailure,
+    ] {
+        for replace in [false, true] {
+            violations.extend(assert_completion_fallback(response, replace, true).await);
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_cap_final_frame_retires_captured_owners() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::BufferedCapFinalFrame,
+                replace,
+                true,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_fallback_buffered_cap_before_final_frame_remains_neutral() {
+    let mut violations = Vec::new();
+    for replace in [false, true] {
+        violations.extend(
+            assert_completion_fallback(
+                CompletionFallbackResponse::BufferedCapBeforeFinalFrame,
+                replace,
+                false,
+            )
+            .await,
+        );
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+struct FailingKeepaliveShape {
+    fail: bool,
+    transform_sse: bool,
+    on_shape: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    buffered_transform: Option<CompletionFallbackResponse>,
+}
+
+impl cc_lb_upstream::UpstreamDialect for FailingKeepaliveShape {
+    fn shape(
+        &self,
+        context: &cc_lb_upstream::DialectShapeContext,
+        _upstream: &cc_lb_domain::Upstream,
+        _principal: &cc_lb_domain::Principal,
+        builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+    ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+        if let Some(on_shape) = self.on_shape.lock().expect("shape callback").take() {
+            on_shape();
+        }
+        if self.fail {
+            return Err(cc_lb_upstream::DialectError::UnsupportedRequest {
+                reason: "fixture shape failure exercises raw passthrough".to_owned(),
+            });
+        }
+        Ok(builder.shaped_request(
+            url::Url::parse("http://upstream.local/v1/messages").expect("fixture URL"),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
+        ))
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn cc_lb_upstream::SseEventTransformHook> {
+        self.transform_sse.then_some(self)
+    }
+
+    fn response_transform_hook(&self) -> Option<&dyn cc_lb_upstream::ResponseTransformHook> {
+        self.buffered_transform
+            .map(|_| self as &dyn cc_lb_upstream::ResponseTransformHook)
+    }
+}
+
+impl cc_lb_upstream::SseEventTransformHook for FailingKeepaliveShape {
+    fn transform_sse_event(
+        &self,
+        _request: cc_lb_upstream::TransformSseEventRequest,
+    ) -> Result<cc_lb_upstream::TransformSseEventResult, cc_lb_upstream::ResponseTransformError>
+    {
+        Ok(cc_lb_upstream::TransformSseEventResult::Unchanged)
+    }
+}
+
+impl cc_lb_upstream::ResponseTransformHook for FailingKeepaliveShape {
+    fn transform_response(
+        &self,
+        request: cc_lb_upstream::TransformResponseRequest,
+    ) -> Result<cc_lb_upstream::TransformResponseResult, cc_lb_upstream::ResponseTransformError>
+    {
+        let upstream: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("hook receives fully collected JSON");
+        assert_eq!(request.response_status, StatusCode::OK);
+        assert_eq!(upstream["type"], "message");
+        assert_eq!(upstream["stop_reason"], "tool_use");
+        match self.buffered_transform {
+            Some(CompletionFallbackResponse::BufferedHookProviderError) => {
+                Ok(cc_lb_upstream::TransformResponseResult::Replace {
+                    status: None,
+                    headers: None,
+                    body: Some(Bytes::from_static(
+                        br#"{"type":"error","error":{"type":"api_error","message":"fixture buffered hook error"}}"#,
+                    )),
+                })
+            }
+            Some(CompletionFallbackResponse::BufferedHookFailure) => {
+                Err(cc_lb_upstream::ResponseTransformError::Trap {
+                    reason: "fixture buffered hook failed after full collection".to_owned(),
+                })
+            }
+            _ => unreachable!("buffered hook is installed only for its declared fixture modes"),
+        }
+    }
+}
+
+async fn assert_completion_fallback(
+    response: CompletionFallbackResponse,
+    replace: bool,
+    should_complete: bool,
+) -> Vec<String> {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let primary_headers = [
+        ("x-claude-code-session-id", "completion-fallback"),
+        ("x-claude-code-agent-id", "main"),
+    ];
+    let sibling_headers = [
+        ("x-claude-code-session-id", "completion-fallback"),
+        ("x-claude-code-request-class", "subagent"),
+    ];
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &primary_headers).await;
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &sibling_headers).await;
+    let captured = enqueuer.snapshot().generations;
+    assert_eq!(
+        captured.len(),
+        2,
+        "fixture must establish primary and sibling"
+    );
+
+    // A successful tool response is renewable unless the real response-affinity
+    // gate rejects its unsolicited provider-owned container.
+    let mut message: serde_json::Value =
+        serde_json::from_slice(&agent_turn_body("msg_fallback", "Bash", 12_000))
+            .expect("completion fixture");
+    if matches!(
+        response,
+        CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        message["container"] = json!({"id": "container-completion-fallback"});
+    }
+    if matches!(response, CompletionFallbackResponse::SseAffinityRejected) {
+        message["content"]
+            .as_array_mut()
+            .expect("content")
+            .push(json!({
+                "type": "web_search_tool_result",
+                "content": [{"encrypted_content": "container-completion-fallback"}]
+            }));
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        // Larger than the response cap, while the request stays below it.
+        message["content"][0]["input"]["padding"] = json!("x".repeat(8_192));
+    }
+    match response {
+        CompletionFallbackResponse::AbnormalStop
+        | CompletionFallbackResponse::SseRefusal
+        | CompletionFallbackResponse::SseRefusalWithoutTerminal
+        | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+            message["stop_reason"] = json!("refusal");
+        }
+        CompletionFallbackResponse::ContextWindowExceeded
+        | CompletionFallbackResponse::SseContextWindowExceeded
+        | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal => {
+            message["stop_reason"] = json!("model_context_window_exceeded");
+        }
+        CompletionFallbackResponse::ProviderErrorEnvelope
+        | CompletionFallbackResponse::HttpFailure
+        | CompletionFallbackResponse::HttpErrorStreamBodyEof
+        | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop => {
+            message = json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": "fixture provider failed"}
+            });
+        }
+        CompletionFallbackResponse::ProviderFailedEnvelope => {
+            message = json!({
+                "id": "resp_failed",
+                "object": "response",
+                "status": "failed",
+                "error": {"type": "server_error", "code": "server_error", "message": "fixture provider failed"}
+            });
+        }
+        CompletionFallbackResponse::ProviderErrorWithoutDetails => {
+            message = json!({"type": "error", "error": null});
+        }
+        CompletionFallbackResponse::ProviderFailedWithoutDetails => {
+            message = json!({"object": "response", "status": "failed", "error": null});
+        }
+        _ => {}
+    }
+    let dispatch = Arc::new(CompletionFallbackDispatch {
+        pending: PendingFollowupDispatch {
+            streaming: false,
+            body: Bytes::from(serde_json::to_vec(&message).expect("completion JSON")),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            calls: AtomicUsize::new(0),
+        },
+        response,
+    });
+    let dynamic_start = matches!(
+        response,
+        CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::DynamicStartSse
+    );
+    let dialect = Arc::new(FailingKeepaliveShape {
+        fail: !dynamic_start
+            && !matches!(
+                response,
+                CompletionFallbackResponse::BufferedHookProviderError
+                    | CompletionFallbackResponse::BufferedHookFailure
+                    | CompletionFallbackResponse::BufferedCapFinalFrame
+                    | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+            ),
+        transform_sse: matches!(
+            response,
+            CompletionFallbackResponse::ShapeFallbackTransformedSse
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+        ),
+        on_shape: Mutex::new(None),
+        buffered_transform: matches!(
+            response,
+            CompletionFallbackResponse::BufferedHookProviderError
+                | CompletionFallbackResponse::BufferedHookFailure
+                | CompletionFallbackResponse::BufferedCapFinalFrame
+                | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+        )
+        .then_some(response),
+    });
+    let mut chains = HashMap::new();
+    if matches!(
+        response,
+        CompletionFallbackResponse::ShapeFallbackBuffered
+            | CompletionFallbackResponse::ShapeFallbackSse
+            | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+            | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+            | CompletionFallbackResponse::ShapeFallbackBodyFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure
+            | CompletionFallbackResponse::ShapeFallbackAbort
+            | CompletionFallbackResponse::DynamicStartBuffered
+            | CompletionFallbackResponse::DynamicStartSse
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        chains.insert(
+            principal.name.clone(),
+            (
+                Some(Arc::new(
+                    cc_lb_control::api_keys::principal_view::RouterPipelineCache::empty(
+                        cc_lb_domain::TerminalStrategy::FirstPick,
+                    ),
+                )),
+                cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                    cc_lb_control::api_keys::principal_view::ShapePluginCache {
+                        dialect: dialect.clone(),
+                    },
+                ),
+            ),
+        );
+    }
+    let initial_principal = if dynamic_start {
+        let mut initial = principal.clone();
+        initial.cache_keepalive = None;
+        initial
+    } else {
+        principal.clone()
+    };
+    let authn = TestAuthn::with_principal_view(
+        TestState::default(),
+        Arc::new(PrincipalView::from_db(&[initial_principal], chains.clone())),
+    );
+    let config = if matches!(
+        response,
+        CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        assert!(dispatch.pending.body.len() > 4_096);
+        assert!(standard_keepalive_request().len() < 4_096);
+        LifecycleConfig {
+            messages_body_cap_bytes: 4_096,
+            ..LifecycleConfig::default()
+        }
+    } else {
+        LifecycleConfig::default()
+    };
+    let mut lifecycle = lifecycle_with_parts(authn, dispatch.clone(), config)
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+    if dynamic_start {
+        let holder = lifecycle.dynamic_view();
+        let enabled = cc_lb_control::DynamicViewBuilder::from_view(&holder.load())
+            .principal_view(Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal),
+                chains,
+            )))
+            .build();
+        *dialect.on_shape.lock().expect("shape callback") = Some(Box::new(move || {
+            holder.store(enabled);
+        }));
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::AffinityRejected
+            | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        let store = Arc::new(crate::upstream_affinity::MemoryAffinityStore::default());
+        store.fail_bind("fixture response-affinity storage unavailable");
+        lifecycle = lifecycle.with_upstream_affinity_store(store);
+    }
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.attach_lifecycle_assembler(128);
+    lifecycle = lifecycle.with_event_bus(bus);
+    let request_body = if matches!(
+        response,
+        CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&standard_keepalive_request()).expect("request fixture");
+        body["stream"] = json!(true);
+        Bytes::from(serde_json::to_vec(&body).expect("stream request"))
+    } else {
+        standard_keepalive_request()
+    };
+    // No class/agent header: request-start must capture the generic sibling as
+    // well as the primary, before upstream headers or body become available.
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "completion-fallback")
+        .body(request_body)
+        .expect("fallback request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("auth");
+    let mut handling = Box::pin(lifecycle.handle(request, &auth));
+    tokio::select! {
+        () = dispatch.pending.entered.notified() => {}
+        _ = &mut handling => panic!("dispatch must wait for the deterministic release"),
+    }
+    let pending = enqueuer.snapshot();
+    for (key, owner) in &captured {
+        assert_eq!(
+            pending.cancellations.get(key),
+            Some(&(Some(*owner), CancelReason::NewRequest)),
+            "fixture must retain each captured owner in its provisional marker"
+        );
+    }
+    if replace {
+        // These are new real completions, not a mutation of the expected result.
+        // Explicit main identity prevents setup from capturing the sibling.
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &primary_headers).await;
+        establish_scoped_keepalive(&enqueuer, principal, &sibling_headers).await;
+    }
+    let before_completion = enqueuer.snapshot();
+    let operations_start = before_completion.operations.len();
+    if matches!(
+        response,
+        CompletionFallbackResponse::ClientAbort | CompletionFallbackResponse::ShapeFallbackAbort
+    ) {
+        drop(handling);
+    } else {
+        dispatch.pending.release.notify_one();
+        let response_body = handling.await.expect("HTTP lifecycle response");
+        let (status, _headers, body) = if matches!(
+            response,
+            CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+                | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+                | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+        ) {
+            use http_body_util::BodyExt as _;
+            let status = response_body.status();
+            let headers = response_body.headers().clone();
+            let mut downstream = response_body.into_body();
+            let after_terminal = matches!(
+                response,
+                CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+                    | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop,
+            );
+            // A JSON error under an SSE content type ends with its own body.
+            let marker: &[u8] = if matches!(
+                response,
+                CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            ) {
+                b"fixture provider failed"
+            } else {
+                b"message_stop"
+            };
+            let body = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut body = Vec::new();
+                loop {
+                    let frame = downstream
+                        .frame()
+                        .await
+                        .expect("SSE frame")
+                        .expect("successful SSE frame")
+                        .into_data()
+                        .expect("data frame");
+                    body.extend_from_slice(&frame);
+                    let terminal = body.windows(marker.len()).any(|window| window == marker);
+                    if terminal || !after_terminal {
+                        assert_eq!(
+                            terminal, after_terminal,
+                            "drop occurs on the intended side of semantic completion"
+                        );
+                        break Bytes::from(body);
+                    }
+                }
+            })
+            .await
+            .expect("semantic terminal is delivered without waiting for EOF");
+            drop(downstream);
+            (status, headers, body)
+        } else {
+            collect_body(response_body).await
+        };
+        match response {
+            CompletionFallbackResponse::AffinityRejected => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert!(!String::from_utf8_lossy(&body).contains("container-completion-fallback"));
+            }
+            CompletionFallbackResponse::ShapeFallbackBodyFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure
+            | CompletionFallbackResponse::BodyFailure
+            | CompletionFallbackResponse::TransportFailure => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+            }
+            CompletionFallbackResponse::SseAffinityRejected => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(String::from_utf8_lossy(&body).contains("event: error"));
+                assert!(!String::from_utf8_lossy(&body).contains("container-completion-fallback"));
+            }
+            CompletionFallbackResponse::SseEmpty => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(
+                    body.is_empty(),
+                    "Anthropic preserves the empty upstream body"
+                );
+            }
+            CompletionFallbackResponse::InvalidJson => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body.as_ref(), b"not completion JSON");
+            }
+            CompletionFallbackResponse::Empty => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(body.is_empty());
+            }
+            CompletionFallbackResponse::InvalidGzip => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body.as_ref(), b"not a gzip member");
+            }
+            CompletionFallbackResponse::UnsupportedEncoding => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body, dispatch.pending.body);
+            }
+            CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "HTTP error body remains truthful"
+                );
+            }
+            CompletionFallbackResponse::SseProviderError
+            | CompletionFallbackResponse::SseProviderFailed => {
+                assert_eq!(status, StatusCode::OK);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("fixture provider failed"),
+                    "native terminal error is delivered"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "provider errors supply their own terminal proof"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("msg_http_error"),
+                    "HTTP error SSE body is fully drained"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "HTTP error EOF is independent terminal proof"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorPartialEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("msg_http_error"),
+                    "complete nonterminal prefix is relayed"
+                );
+                assert!(
+                    body.contains("content_block_delta"),
+                    "trailing partial event is exercised"
+                );
+                assert!(
+                    !body.contains("message_stop"),
+                    "partial stream has no native terminal"
+                );
+            }
+            CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(_headers[http::header::CONTENT_ENCODING], "gzip");
+                use std::io::Read as _;
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(body.as_ref())
+                    .read_to_end(&mut decoded)
+                    .expect_err("downstream retains the truncated upstream gzip member");
+                let decoded = String::from_utf8_lossy(&decoded);
+                assert!(decoded.contains("msg_http_error"));
+                assert!(
+                    !decoded.contains("message_stop"),
+                    "decoded stream has no native terminal"
+                );
+            }
+            CompletionFallbackResponse::SseProviderErrorIncomplete => {
+                assert_eq!(status, StatusCode::OK);
+                assert!(
+                    !String::from_utf8_lossy(&body).contains("fixture provider failed"),
+                    "incomplete declaration never supplied a provider terminal"
+                );
+            }
+            CompletionFallbackResponse::BufferedHookProviderError => {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "hook does not replace upstream status"
+                );
+                assert_eq!(
+                    body.as_ref(),
+                    br#"{"type":"error","error":{"type":"api_error","message":"fixture buffered hook error"}}"#,
+                    "replacement error body is preserved"
+                );
+            }
+            CompletionFallbackResponse::BufferedHookFailure => {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "hook failure preserves fail-open status"
+                );
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "hook failure preserves original body"
+                );
+            }
+            CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                let error: serde_json::Value =
+                    serde_json::from_slice(&body).expect("body-cap failure response JSON");
+                assert_eq!(error["type"], "error");
+                assert_eq!(error["error"]["type"], "api_error");
+                assert_eq!(
+                    error["error"]["message"],
+                    "upstream response body could not be read"
+                );
+            }
+            CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::AbnormalStop
+            | CompletionFallbackResponse::ContextWindowExceeded => {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    body, dispatch.pending.body,
+                    "buffered terminal body is preserved"
+                );
+            }
+            CompletionFallbackResponse::SseRedirectTerminal => {
+                assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+                assert_eq!(body, streaming_body_from_message(&dispatch.pending.body));
+                assert!(
+                    body.ends_with(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+                    "non-success status remains non-renewable despite explicit successful terminal"
+                );
+            }
+            CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal => {
+                assert_eq!(status, StatusCode::OK);
+                let terminal = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                let terminal_seen = body.windows(terminal.len()).any(|part| part == terminal);
+                assert_eq!(
+                    terminal_seen,
+                    matches!(
+                        response,
+                        CompletionFallbackResponse::SseRefusal
+                            | CompletionFallbackResponse::SseContextWindowExceeded
+                    ),
+                    "abnormal stop hint must not stand in for explicit message_stop"
+                );
+                let stop = message["stop_reason"]
+                    .as_str()
+                    .expect("abnormal fixture stop");
+                assert!(
+                    String::from_utf8_lossy(&body).contains(stop),
+                    "the abnormal stop hint must be delivered in both controls and terminals"
+                );
+            }
+            _ => assert_eq!(status, StatusCode::OK),
+        }
+    }
+    // The paused clock advances only after runnable completion work has been
+    // polled. Notify is the existing persistence seam; the five-second bound is
+    // unchanged, and no sleep/yield/re-observation substitutes for completion.
+    let persisted =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = enqueuer.completed.notified();
+                if enqueuer.snapshot().operations[operations_start..]
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    KeepaliveOperation::Cancel(_, _, reason) if reason.as_str() != "new_request"
+                ))
+                .count() >= captured.len()
+            {
+                break;
+            }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok();
+    let after = enqueuer.snapshot();
+    let operations = &after.operations[operations_start..];
+    let mut violations = Vec::new();
+    if should_complete {
+        if !persisted {
+            violations.push(format!("{response:?}, newer={replace}: completed response left captured markers unresolved; operations={operations:?}, cancellations={:?}", after.cancellations));
+        }
+        for (key, owner) in &captured {
+            if !operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    KeepaliveOperation::Cancel(actual_key, Some(actual_owner), reason)
+                        if actual_key == key && actual_owner == owner
+                            && reason.as_str() == "completed_not_renewable"
+                )
+            }) {
+                violations.push(format!("{response:?}, newer={replace}: missing completed_not_renewable for captured {key} owner {owner:?}; operations={operations:?}"));
+            }
+            if !replace
+                && !after
+                    .cancellations
+                    .get(key)
+                    .is_some_and(|(actual_owner, reason)| {
+                        actual_owner == &Some(*owner)
+                            && reason.as_str() == "completed_not_renewable"
+                    })
+            {
+                violations.push(format!(
+                    "{response:?}: provisional marker not retired: {key}"
+                ));
+            }
+        }
+    } else if persisted || after != before_completion {
+        violations.push(format!("{response:?}, newer={replace}: incomplete/aborted response invented completion; before={before_completion:?}, after={after:?}"));
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation,
+            KeepaliveOperation::Enqueue(_, _) | KeepaliveOperation::Observe(_, _)
+        )
+    }) {
+        violations.push(format!("{response:?}, newer={replace}: completion must neither reschedule nor re-observe captured owners: {operations:?}"));
+    }
+    if after.generations != before_completion.generations {
+        violations.push(format!(
+            "{response:?}, newer={replace}: completion changed newer/unrelated active owners"
+        ));
+    }
+    if replace
+        && (after.cancellations != before_completion.cancellations
+            || after.request_owners != before_completion.request_owners)
+    {
+        violations.push(format!(
+            "{response:?}: old completion altered a newer owner's marker"
+        ));
+    }
+    let mut terminal_reason = None;
+    while let Ok(event) = events.try_recv() {
+        if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated { reason, .. } = event {
+            terminal_reason = Some(reason);
+        }
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::ProviderErrorEnvelope
+            | CompletionFallbackResponse::ProviderFailedEnvelope
+            | CompletionFallbackResponse::ProviderErrorWithoutDetails
+            | CompletionFallbackResponse::ProviderFailedWithoutDetails
+            | CompletionFallbackResponse::HttpFailure
+            | CompletionFallbackResponse::AbnormalStop
+            | CompletionFallbackResponse::ContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusal
+            | CompletionFallbackResponse::SseContextWindowExceeded
+            | CompletionFallbackResponse::SseRefusalWithoutTerminal
+            | CompletionFallbackResponse::SseContextWindowExceededWithoutTerminal
+            | CompletionFallbackResponse::SseRefusalAbortBeforeTerminal
+            | CompletionFallbackResponse::SseProviderError
+            | CompletionFallbackResponse::SseProviderFailed
+            | CompletionFallbackResponse::SseHttpErrorEof
+            | CompletionFallbackResponse::SseHttpErrorPartialEof
+            | CompletionFallbackResponse::SseHttpErrorTruncatedGzipEof
+            | CompletionFallbackResponse::HttpErrorStreamBodyEof
+            | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
+            | CompletionFallbackResponse::SseProviderErrorIncomplete
+            | CompletionFallbackResponse::SseRedirectTerminal
+            | CompletionFallbackResponse::BufferedHookProviderError
+            | CompletionFallbackResponse::BufferedHookFailure
+            | CompletionFallbackResponse::BufferedCapFinalFrame
+            | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+    ) {
+        eprintln!(
+            "native terminal: {response:?}, newer={replace}, reason={terminal_reason:?}, operations={operations:?}"
+        );
+        assert!(
+            terminal_reason.is_some(),
+            "real lifecycle must emit its native termination"
+        );
+    }
+    if matches!(response, CompletionFallbackResponse::SseTerminalOnly) {
+        assert_eq!(
+            terminal_reason,
+            Some(cc_lb_lifecycle::TerminationReason::Success),
+            "message_stop-only fixture must be admitted as semantic completion"
+        );
+    }
+    if matches!(
+        response,
+        CompletionFallbackResponse::SseEmpty | CompletionFallbackResponse::SseAffinityRejected
+    ) {
+        assert_eq!(
+            terminal_reason,
+            Some(cc_lb_lifecycle::TerminationReason::ErrorCode(
+                "upstream_stream_error".to_owned()
+            )),
+            "incomplete/affinity-aborted SSE is not semantic completion"
+        );
+    }
+    violations
+}
+
+#[tokio::test]
+async fn agent_completion_retires_captured_generic_subagent_marker() {
+    for streaming in [false, true] {
+        assert_agent_completion_resolves_generic_subagent(streaming, false).await;
+    }
+}
+
+#[tokio::test]
+async fn agent_completion_preserves_newer_generic_subagent_owner_without_reobserve() {
+    for streaming in [false, true] {
+        assert_agent_completion_resolves_generic_subagent(streaming, true).await;
+    }
+}
+
+async fn assert_agent_completion_resolves_generic_subagent(streaming: bool, replace_sibling: bool) {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let sibling_headers = [
+        ("x-claude-code-session-id", "agent-completion-sibling"),
+        ("x-claude-code-request-class", "subagent"),
+    ];
+    // Explicit subagent classification without an agent ID creates the generic
+    // sibling. Renew it through another real eligible response before capture.
+    for _ in 0..2 {
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &sibling_headers).await;
+    }
+    let before = enqueuer.snapshot();
+    let (sibling_key, captured_owner) = before
+        .generations
+        .iter()
+        .find(|(key, _)| key.ends_with("/thread:agent-completion-sibling/agent:subagent"))
+        .expect("explicit subagent without agent ID establishes the generic sibling");
+    let sibling_key = sibling_key.clone();
+    let captured_owner = *captured_owner;
+    let primary_key = sibling_key
+        .strip_suffix("/agent:subagent")
+        .expect("generic sibling suffix")
+        .to_owned();
+    let dispatch = Arc::new(PendingFollowupDispatch {
+        streaming,
+        body: agent_turn_body("msg_agent_completion_sibling", "Bash", 12_000),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        calls: AtomicUsize::new(0),
+    });
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::with_principal_view(
+            TestState::default(),
+            Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal),
+                HashMap::new(),
+            )),
+        ),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+    )
+    .with_cache_keepalive_enqueuer(enqueuer.clone());
+    // Keep the thread header, but omit both request class and agent identity:
+    // this is the plain main/unknown request that enables the sibling backstop.
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "agent-completion-sibling")
+        .body(standard_keepalive_request())
+        .expect("plain followup request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("plain followup authenticates");
+    let completion = async {
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("plain followup handles");
+        assert_keepalive_response_fidelity(response, &dispatch.body, streaming).await;
+    };
+    tokio::pin!(completion);
+    tokio::select! {
+        () = dispatch.entered.notified() => {}
+        () = &mut completion => panic!("followup must remain pending until released"),
+    }
+    let pending = enqueuer.snapshot();
+    assert_eq!(
+        pending.cancellations.get(&sibling_key),
+        Some(&(Some(captured_owner), CancelReason::NewRequest)),
+        "request start must retain the captured sibling's provisional marker"
+    );
+    assert_eq!(
+        pending.request_owners.get(&sibling_key),
+        Some(&Some(captured_owner))
+    );
+    assert!(!pending.generations.contains_key(&sibling_key));
+    let completion_operations_start;
+    let replacement_owner = if replace_sibling {
+        establish_scoped_keepalive(&enqueuer, principal, &sibling_headers).await;
+        let replacement = enqueuer.snapshot();
+        let owner = replacement.generations[&sibling_key];
+        assert_ne!(owner, captured_owner);
+        completion_operations_start = replacement.operations.len();
+        Some(owner)
+    } else {
+        completion_operations_start = pending.operations.len();
+        None
+    };
+    dispatch.release.notify_one();
+    completion.await;
+    enqueuer.wait_for_enqueue().await;
+    let completed = enqueuer.snapshot();
+    assert!(
+        completed.generations.contains_key(&primary_key),
+        "eligible AgentInTurn completion must enqueue the primary identity"
+    );
+    let completion_operations = &completed.operations[completion_operations_start..];
+    assert!(
+        !completion_operations.iter().any(
+            |operation| matches!(operation, KeepaliveOperation::Observe(key, _) if key == &sibling_key)
+        ),
+        "completion must not re-observe the captured sibling"
+    );
+    if let Some(replacement_owner) = replacement_owner {
+        assert_eq!(
+            completed.generations.get(&sibling_key),
+            Some(&replacement_owner),
+            "an older primary completion must not cancel the newer sibling owner"
+        );
+        assert!(!completed.cancellations.contains_key(&sibling_key));
+    } else {
+        assert_eq!(
+            completed.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::SessionIdentityChanged)),
+            "a completed primary response must resolve the sibling marker to a real retirement reason, not NewRequest"
+        );
+        assert!(!completed.request_owners.contains_key(&sibling_key));
+    }
+    assert!(
+        completion_operations.iter().any(|operation| matches!(
+            operation,
+            KeepaliveOperation::Cancel(key, Some(owner), CancelReason::SessionIdentityChanged)
+                if key == &sibling_key && owner == &captured_owner
+        )),
+        "sibling retirement must use its captured start ticket even after a newer sibling takes over"
+    );
+}
+
+#[tokio::test]
+async fn stale_primary_agent_completion_retires_unchanged_captured_sibling() {
+    for streaming in [false, true] {
+        let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+        let principal = principal_with_keepalive();
+        let session = "stale-primary-sibling";
+        establish_scoped_keepalive(
+            &enqueuer,
+            principal.clone(),
+            &[
+                ("x-claude-code-session-id", session),
+                ("x-claude-code-request-class", "subagent"),
+            ],
+        )
+        .await;
+        let established = enqueuer.snapshot();
+        let (sibling_key, captured_owner) = established
+            .generations
+            .iter()
+            .find(|(key, _)| key.ends_with("/thread:stale-primary-sibling/agent:subagent"))
+            .expect("generic sibling established");
+        let sibling_key = sibling_key.clone();
+        let captured_owner = *captured_owner;
+        let primary_key = sibling_key
+            .strip_suffix("/agent:subagent")
+            .expect("generic sibling suffix")
+            .to_owned();
+        let dispatch = Arc::new(OwnedRequestDispatch {
+            calls: AtomicUsize::new(0),
+            entered: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            release: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            old_agent_turn: true,
+            streaming,
+        });
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::with_principal_view(
+                TestState::default(),
+                Arc::new(PrincipalView::from_db(&[principal], HashMap::new())),
+            ),
+            dispatch.clone(),
+            LifecycleConfig::default(),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+        let mut original = followup_request(session, false, true);
+        original.headers_mut().remove("x-claude-code-request-class");
+        let newer = followup_request(session, false, true);
+        let original_auth = lifecycle
+            .authenticate(original.headers())
+            .await
+            .expect("original plain request authenticates");
+        let newer_auth = lifecycle
+            .authenticate(newer.headers())
+            .await
+            .expect("newer explicit-main request authenticates");
+        let original_completion = async {
+            let response = lifecycle
+                .handle(original, &original_auth)
+                .await
+                .expect("original plain response");
+            assert_keepalive_response_fidelity(
+                response,
+                &agent_turn_body("msg_old_owner", "Bash", 12_000),
+                streaming,
+            )
+            .await;
+        };
+        tokio::pin!(original_completion);
+        tokio::select! {
+            () = dispatch.entered[0].notified() => {}
+            () = &mut original_completion => panic!("original response must wait for release"),
+        }
+        let pending = enqueuer.snapshot();
+        assert_eq!(
+            pending.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::NewRequest))
+        );
+        let newer_completion = async {
+            let response = lifecycle
+                .handle(newer, &newer_auth)
+                .await
+                .expect("newer explicit-main response");
+            assert_keepalive_response_fidelity(
+                response,
+                &agent_turn_body("msg_current_owner", "Bash", 12_000),
+                streaming,
+            )
+            .await;
+        };
+        tokio::pin!(newer_completion);
+        tokio::select! {
+            () = dispatch.entered[1].notified() => {}
+            () = &mut newer_completion => panic!("newer response must wait for release"),
+        }
+        dispatch.release[1].notify_one();
+        newer_completion.await;
+        enqueuer.wait_for_enqueue().await;
+        let superseded = enqueuer.snapshot();
+        let newer_primary_owner = superseded.generations[&primary_key];
+        assert_eq!(
+            superseded.cancellations.get(&sibling_key),
+            pending.cancellations.get(&sibling_key),
+            "explicit-main request must supersede only the primary, not the captured sibling"
+        );
+        assert_eq!(
+            superseded.request_owners.get(&sibling_key),
+            Some(&Some(captured_owner))
+        );
+        let completion_operations_start = superseded.operations.len();
+        dispatch.release[0].notify_one();
+        original_completion.await;
+        // Drain the detached completion on this current-thread runtime even
+        // when stale-primary rejection makes no persistence call to notify.
+        settle().await;
+        let completed = enqueuer.snapshot();
+        assert_eq!(
+            completed.generations.get(&primary_key),
+            Some(&newer_primary_owner),
+            "stale primary completion must preserve the newer primary owner"
+        );
+        let completion_operations = &completed.operations[completion_operations_start..];
+        assert!(
+            !completion_operations.iter().any(
+                |operation| matches!(operation, KeepaliveOperation::Observe(key, _) if key == &sibling_key)
+            ),
+            "retirement must not re-observe the already captured sibling"
+        );
+        assert_eq!(
+            completed.cancellations.get(&sibling_key),
+            Some(&(Some(captured_owner), CancelReason::SessionIdentityChanged)),
+            "primary freshness must not gate retirement of its unchanged captured sibling"
+        );
+        assert!(!completed.request_owners.contains_key(&sibling_key));
+        assert!(
+            completion_operations.iter().any(|operation| matches!(
+                operation,
+                KeepaliveOperation::Cancel(key, Some(owner), CancelReason::SessionIdentityChanged)
+                    if key == &sibling_key && owner == &captured_owner
+            )),
+            "stale primary completion must retire the sibling using its captured ticket"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1449,7 +3174,7 @@ async fn explicit_auxiliary_preserves_all_generation_scopes() {
         before
             .generations
             .values()
-            .copied()
+            .map(|ticket| ticket.sequence)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         5
@@ -1720,8 +3445,8 @@ async fn non_auxiliary_turns_preserve_keepalive_lifecycle() {
             );
             assert_eq!(
                 completed.operations.iter().filter(|operation| matches!(
-                    operation, KeepaliveOperation::Cancel(session, None, CancelReason::UserTurnDetected)
-                        if session == key
+                    operation, KeepaliveOperation::Cancel(session, Some(owner), CancelReason::UserTurnDetected)
+                        if session == key && owner == generation
                 )).count(),
                 1
             );
@@ -1842,7 +3567,8 @@ async fn real_followup_fences_queued_generation_before_pending_ttfb_and_sse() {
             completed
                 .generations
                 .get(key)
-                .is_some_and(|generation| generation > old_generation),
+                .is_some_and(|generation| generation.epoch == old_generation.epoch
+                    && generation.sequence > old_generation.sequence),
             "successful agent completion must establish a fresh generation"
         );
         assert_eq!(
@@ -1873,7 +3599,7 @@ async fn real_dispatch_waits_for_durable_request_cancellation() {
         async fn observe_session_generation(
             &self,
             key: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             self.inner.observe_session_generation(key).await
         }
 
@@ -1973,7 +3699,8 @@ async fn real_dispatch_waits_for_durable_request_cancellation() {
         after
             .generations
             .get(key)
-            .is_some_and(|generation| generation > old_generation)
+            .is_some_and(|generation| generation.epoch == old_generation.epoch
+                && generation.sequence > old_generation.sequence)
     );
 }
 
@@ -2113,7 +3840,7 @@ impl CacheKeepaliveEnqueuer for BlockingCompletionEnqueuer {
     async fn observe_session_generation(
         &self,
         key: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         self.inner.observe_session_generation(key).await
     }
 
@@ -2177,6 +3904,238 @@ async fn cache_keepalive_response_completion_does_not_await_generation_persisten
         enqueuer.inner.wait_for_enqueue().await;
         assert_eq!(enqueuer.inner.snapshot().generations.len(), 1);
     }
+}
+
+// The store issues durable ordering tickets, not the current active row's
+// generation. A request's completion must return its dispatch ticket unchanged.
+#[derive(Default)]
+struct RequestOwnerEnqueuer {
+    state: Mutex<RequestOwnerState>,
+    completed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct RequestOwnerState {
+    next_ticket: u64,
+    owner: Option<CacheKeepaliveCompletionTicket>,
+    updated_at: u64,
+    now: u64,
+    completions: Vec<Option<CacheKeepaliveCompletionTicket>>,
+    observations: usize,
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for RequestOwnerEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        _key: &str,
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        state.next_ticket += 1;
+        state.observations += 1;
+        Ok(Some(completion_ticket(state.next_ticket)))
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        if request.reason == CancelReason::NewRequest {
+            state.owner = request.expected_generation;
+            state.updated_at = state.now;
+        } else {
+            state.completions.push(request.expected_generation);
+            // Model the pre-fix monotonic-ticket acceptance rule, so an engine
+            // that invents a fresh completion owner visibly mutates B's marker.
+            if request.expected_generation.map(|ticket| ticket.sequence)
+                >= state.owner.map(|ticket| ticket.sequence)
+            {
+                state.owner = None;
+                state.updated_at = state.now;
+            }
+            self.completed.notify_one();
+        }
+        Ok(())
+    }
+
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("request owner");
+        state.completions.push(request.expected_generation);
+        if request.expected_generation.map(|ticket| ticket.sequence)
+            >= state.owner.map(|ticket| ticket.sequence)
+        {
+            state.owner = request.expected_generation;
+            state.updated_at = state.now;
+        }
+        self.completed.notify_one();
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+}
+
+struct OwnedRequestDispatch {
+    calls: AtomicUsize,
+    entered: [tokio::sync::Notify; 2],
+    release: [tokio::sync::Notify; 2],
+    old_agent_turn: bool,
+    streaming: bool,
+}
+
+#[async_trait]
+impl UpstreamDispatch for OwnedRequestDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered[index].notify_one();
+        self.release[index].notified().await;
+        let body = if index == 0 && !self.old_agent_turn {
+            end_turn_body("msg_old_owner")
+        } else {
+            agent_turn_body(
+                if index == 0 {
+                    "msg_old_owner"
+                } else {
+                    "msg_current_owner"
+                },
+                "Bash",
+                12_000,
+            )
+        };
+        let mut response = Response::new(Body::from(if self.streaming {
+            streaming_body_from_message(&body)
+        } else {
+            body
+        }));
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(if self.streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            }),
+        );
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn request_start_owner_survives_late_first_byte_and_same_second_starts() {
+    let mut violations = Vec::new();
+    for (second_start, old_agent_turn, streaming) in [
+        (105, false, false),
+        (100, false, false),
+        (105, true, false),
+        (100, true, false),
+        (105, false, true),
+        (100, true, true),
+    ] {
+        let enqueuer = Arc::new(RequestOwnerEnqueuer::default());
+        let dispatch = Arc::new(OwnedRequestDispatch {
+            calls: AtomicUsize::new(0),
+            entered: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            release: std::array::from_fn(|_| tokio::sync::Notify::new()),
+            old_agent_turn,
+            streaming,
+        });
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::with_principal_view(
+                TestState::default(),
+                Arc::new(PrincipalView::from_db(
+                    &[principal_with_keepalive()],
+                    HashMap::new(),
+                )),
+            ),
+            dispatch.clone(),
+            LifecycleConfig::default(),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+        let request_a = followup_request("request-owner", false, true);
+        let request_b = followup_request("request-owner", false, true);
+        let auth_a = lifecycle
+            .authenticate(request_a.headers())
+            .await
+            .expect("A authenticates");
+        let auth_b = lifecycle
+            .authenticate(request_b.headers())
+            .await
+            .expect("B authenticates");
+        let completion_a = async {
+            collect_body(
+                lifecycle
+                    .handle(request_a, &auth_a)
+                    .await
+                    .expect("A response"),
+            )
+            .await
+        };
+        let completion_b = async {
+            collect_body(
+                lifecycle
+                    .handle(request_b, &auth_b)
+                    .await
+                    .expect("B response"),
+            )
+            .await
+        };
+        tokio::pin!(completion_a, completion_b);
+        enqueuer.state.lock().expect("request owner").now = 100;
+        tokio::select! {
+            () = dispatch.entered[0].notified() => {}
+            _ = &mut completion_a => panic!("A must wait for its first byte"),
+        }
+        enqueuer.state.lock().expect("request owner").now = second_start;
+        tokio::select! {
+            () = dispatch.entered[1].notified() => {}
+            _ = &mut completion_b => panic!("B must wait for its first byte"),
+        }
+        let owner_b = enqueuer.state.lock().expect("request owner").owner;
+        enqueuer.state.lock().expect("request owner").now = 110;
+        dispatch.release[0].notify_one();
+        assert_eq!(completion_a.await.0, StatusCode::OK);
+        // Let detached completion persistence run before dispatching B's
+        // healthy completion; no wall-clock delay or same-second race.
+        tokio::task::yield_now().await;
+        let stale_persisted = {
+            let state = enqueuer.state.lock().expect("request owner");
+            if (state.owner, state.updated_at, state.observations) != (owner_b, second_start, 2)
+                || !state.completions.is_empty()
+            {
+                violations.push(format!(
+                    "A100/B{second_start}/A-first-byte110: owner={:?}, marker={}, observations={}, completion tickets={:?}; expected owner={owner_b:?}, marker={second_start}, observations=2, no stale persistence; agent={old_agent_turn}, sse={streaming}",
+                    state.owner, state.updated_at, state.observations, state.completions
+                ));
+            }
+            !state.completions.is_empty()
+        };
+        if stale_persisted {
+            enqueuer.completed.notified().await;
+        }
+        dispatch.release[1].notify_one();
+        assert_eq!(completion_b.await.0, StatusCode::OK);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            enqueuer.completed.notified(),
+        )
+        .await
+        .expect("latest healthy completion persists");
+        let state = enqueuer.state.lock().expect("request owner");
+        if state.completions != vec![owner_b] || state.owner != owner_b || state.observations != 2 {
+            violations.push(format!(
+                "latest B completion must reuse {owner_b:?}; completions={:?}, owner={:?}, observations={}",
+                state.completions, state.owner, state.observations
+            ));
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 #[derive(Default)]

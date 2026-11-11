@@ -410,6 +410,30 @@ The **Quota** section's `Reset quota` action (`LimitResetAction`) is always visi
 
 The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys**, and **Access**, each full width. Shape is a plain section, always expanded.
 
+Cache keepalive sessions use a neutral **In request** badge while a real request
+pauses renewal. The detail pane explains the pause even when retained renewal
+history is present; it never labels this provisional state Cancelled. When its
+request deadline passes without recorded completion, the session shows the
+neutral explanation “Request did not complete before its deadline” as Expired,
+without inferring an abort or error. In request stays visible but is not included
+in the Renewing now metric. Existing final cancellation causes remain visible.
+
+Follow-up evidence is separate from renewal scheduling. A paid current cycle
+stays “Follow-up pending” while a request pauses renewal, including when the
+request marker expires before the cache does. Its neutral rail endpoint is the
+observation time, not a scheduled renewal or request deadline. Matching evidence
+resolves it; otherwise the evidence window ends at the last renewal's own TTL.
+In request and expired request markers never advertise a next renewal. Empty
+paused cycles do not invent a renewal or a pending follow-up.
+The same evidence TTL applies when renewal scheduling is still active: an
+overdue job does not keep a paid renewal's follow-up window pending. Scheduling
+state and next-renewal information remain independent of that evidence outcome.
+Retained legacy turns remain visible, but timestamps alone do not assign them to
+the current cycle. A legacy turn needs its own cycle identity or matching renewal
+evidence carrying that identity before it contributes current-cycle pending
+flags or counters. Unidentified historical gaps never inherit the current job's
+scheduled time.
+
 Router Basic shows **Prefer subscription upstreams** when an allowed OAuth upstream in the selected provider scope supports subscription quota. It selects using subscription quota and supported cache-cost evidence, with API keys as fallback. Provider scope controls visibility only; the switch changes the principal's single router chain across providers. API-key-only scopes hide the shortcut while saved entries remain editable in Advanced. The existing switch applies immediately with Undo.
 
 On both detail panes, **Recent requests** shows the feed's tail status as a `FeedLiveStatus` badge in its `DetailSection` action, on the title's line while both fit.

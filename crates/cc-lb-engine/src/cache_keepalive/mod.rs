@@ -27,7 +27,7 @@ pub use lifecycle_glue::{
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 pub(crate) use lifecycle_glue::{
-    LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,
+    LifecycleKeepalive, LifecycleKeepaliveContext, RequestStartOrder, StreamingKeepaliveResponse,
 };
 pub(crate) use metrics::record_cancelled;
 pub use metrics::{CancelReason, record_cancel_error, record_dispatch_skipped};

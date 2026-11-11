@@ -306,7 +306,7 @@ async fn get_cache_keepalive_detail(
         Ok(principal) => principal,
         Err(response) => return response,
     };
-    let item = match CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item(
+    let mut item = match CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item(
         storage,
         &principal_id,
         &query.id,
@@ -338,7 +338,7 @@ async fn get_cache_keepalive_detail(
         max_attempts,
         horizon_start_ms: horizon.start_ms(now_ms),
     };
-    match detail_for_item(&context, &item).await {
+    match detail_for_item(&context, &mut item).await {
         Ok(detail) => Json(detail).into_response(),
         Err(error) => storage_error(error),
     }

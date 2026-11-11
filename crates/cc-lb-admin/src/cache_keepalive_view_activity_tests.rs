@@ -29,10 +29,12 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         ttl: CacheTtl::Ttl5m,
         generation: 42,
         refresh_count: None,
+        has_renewal_in_horizon: false,
         status: None,
         enqueue_state: None,
         terminal_reason: None,
         cancel_reason: None,
+        request_incomplete: false,
         decision: Some("not_tracked".to_owned()),
         reason: "user turn (stop_reason=end_turn)".to_owned(),
         display_reason: None,
@@ -187,6 +189,477 @@ fn follow_up_evidence(
 }
 
 #[test]
+fn unowned_legacy_groups_do_not_inherit_an_unidentified_current_schedule() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    item.last_message_at_ms = 1_000_000;
+    let turns = [
+        turn("legacy-a", 100),
+        turn("legacy-b", 500),
+        turn("legacy-c", 900),
+    ];
+    let mut scheduled = session();
+    scheduled.cache_anchor_at_unix_secs = 1_000;
+    scheduled.run_at_unix_secs = 1_270;
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&scheduled),
+            turns: &turns,
+            evidence: &[],
+            now_ms: 1_010_000,
+            horizon_start_ms: None,
+        },
+        priced_catalog().as_ref(),
+    );
+    assert_eq!(
+        activity
+            .gaps
+            .iter()
+            .filter(|gap| { !gap.pulses.is_empty() && gap.ending_kind == "scheduled_waiting" })
+            .count(),
+        0,
+        "unidentified history cannot inherit the current run_at"
+    );
+    assert_eq!(activity.total_renewals, 0);
+    assert!(!activity.is_last_pending);
+    assert!(activity.turns.iter().all(|turn| !turn.pending));
+    assert_eq!(activity.retained_renewals, 3);
+    assert_eq!(activity.gaps.len(), 4);
+    assert_eq!(
+        activity
+            .gaps
+            .iter()
+            .filter(|gap| gap.pulses.is_empty() && gap.ending_kind == "scheduled_waiting")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn unowned_legacy_turns_never_displace_owned_current_cycle() {
+    let cycle = Uuid::from_u128(78);
+    let catalog = priced_catalog();
+    for status in [
+        CacheKeepaliveSessionStatus::Active,
+        CacheKeepaliveSessionStatus::InRequest,
+    ] {
+        for owned_turn_cycle in [Some(cycle), None] {
+            let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+            item.status = Some(status);
+            item.cycle_id = Some(cycle);
+            item.last_message_at_ms = 1_000_000;
+            let mut owned = turn("owned", 1_000);
+            owned.cycle_id = owned_turn_cycle;
+            owned.cost_micros = Some(6_000);
+            let turns = [
+                owned,
+                turn("unowned-before", 999),
+                turn("unowned-boundary", 1_000),
+                turn("unowned-after", 1_001),
+            ];
+            let evidence = [renewal_evidence(
+                "owned",
+                cycle,
+                1_000_000,
+                CacheTtl::Ttl5m,
+                "hit",
+                "owned-prefix",
+            )];
+            let activity = derive_activity_view(
+                CacheKeepaliveActivitySource {
+                    item: &item,
+                    session: None,
+                    turns: &turns,
+                    evidence: &evidence,
+                    now_ms: 1_050_000,
+                    horizon_start_ms: None,
+                },
+                catalog.as_ref(),
+            );
+            assert_eq!(
+                activity.total_renewals, 1,
+                "status={status:?} owned={owned_turn_cycle:?}"
+            );
+            assert_eq!(activity.retained_renewals, 4);
+            assert_eq!(activity.turns.len(), 4);
+            assert!(activity.is_last_pending);
+            assert!(
+                activity
+                    .turns
+                    .iter()
+                    .find(|turn| turn.source_ref_id == "owned")
+                    .unwrap()
+                    .pending
+            );
+            assert!(
+                activity
+                    .turns
+                    .iter()
+                    .filter(|turn| turn.source_ref_id != "owned")
+                    .all(|turn| !turn.pending)
+            );
+            assert!(
+                activity
+                    .gaps
+                    .iter()
+                    .filter(|gap| gap.cycle_id.is_none())
+                    .all(|gap| gap.ending_kind == "followup_unknown")
+            );
+        }
+    }
+}
+
+#[test]
+fn paused_current_cycle_pending_evidence_is_not_renewal_scheduling() {
+    let cycle_id = Uuid::from_u128(70);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.cycle_id = Some(cycle_id);
+    item.status = Some(CacheKeepaliveSessionStatus::InRequest);
+    item.refresh_count = Some(1);
+    let mut record = turn("paused-paid", 1_730_000_100);
+    record.cycle_id = Some(cycle_id);
+    record.cost_micros = Some(6_000);
+    let evidence = [renewal_evidence(
+        "paused-paid",
+        cycle_id,
+        1_730_000_100_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "prefix",
+    )];
+    let mut session = session();
+    session.cycle_id = Some(cycle_id);
+    // A request marker's scheduling fields are not cache or request deadlines.
+    session.run_at_unix_secs = 1_730_000_150;
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&session),
+            turns: &[record],
+            evidence: &evidence,
+            now_ms: 1_730_000_200_000,
+            horizon_start_ms: None,
+        },
+        priced_catalog().as_ref(),
+    );
+    assert_eq!(activity.gaps[0].ending_kind, "followup_pending");
+    assert_eq!(activity.gaps[0].ending_at_ms, 1_730_000_200_000);
+    assert_eq!(activity.evidence_status, "pending");
+    assert!(activity.is_last_pending);
+    assert!(activity.turns[0].pending);
+    assert!(!activity.is_active);
+    assert_eq!(activity.next_renewal, None);
+    assert_eq!(activity.total_spent_micros, 6_000);
+    assert_eq!(activity.total_avoided_micros, Some(0));
+}
+
+#[test]
+fn overdue_active_paid_renewal_is_not_pending_but_stays_scheduled() {
+    let cycle = Uuid::from_u128(76);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    item.cycle_id = Some(cycle);
+    item.refresh_count = Some(1);
+    let mut paid = turn("overdue-active", 1_730_000_100);
+    paid.cycle_id = Some(cycle);
+    paid.cost_micros = Some(6_000);
+    let evidence = [renewal_evidence(
+        "overdue-active",
+        cycle,
+        1_730_000_100_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "prefix",
+    )];
+    let mut session = session();
+    session.cycle_id = Some(cycle);
+    session.run_at_unix_secs = 1_730_000_370;
+    let derive = |now_ms, evidence: &[CacheKeepaliveEvidenceRecord]| {
+        derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: Some(&session),
+                turns: std::slice::from_ref(&paid),
+                evidence,
+                now_ms,
+                horizon_start_ms: None,
+            },
+            priced_catalog().as_ref(),
+        )
+    };
+    let activity = derive(1_730_000_400_000, &evidence);
+    assert_eq!(activity.evidence_status, "observed");
+    assert!(!activity.is_last_pending);
+    assert!(!activity.turns[0].pending);
+    assert_eq!(activity.gaps[0].ending_kind, "ttl_expired_no_followup");
+    assert_eq!(activity.gaps[0].ending_at_ms, 1_730_000_400_000);
+    assert!(activity.is_active);
+    assert!(activity.next_renewal.is_some());
+    assert_eq!(activity.total_spent_micros, 6_000);
+    let live = derive(1_730_000_399_999, &evidence);
+    assert!(live.is_last_pending);
+    assert_eq!(live.evidence_status, "pending");
+    assert_eq!(live.gaps[0].ending_kind, "scheduled_waiting");
+    let overdue = derive(1_730_000_500_000, &evidence);
+    assert!(!overdue.is_last_pending);
+    assert_eq!(overdue.gaps[0].ending_at_ms, 1_730_000_400_000);
+    let mut observed_evidence = evidence.to_vec();
+    observed_evidence.push(follow_up_evidence(
+        1_730_000_400_000,
+        CacheTtl::Ttl5m,
+        "prefix",
+    ));
+    let observed = derive(1_730_000_500_000, &observed_evidence);
+    assert_eq!(observed.evidence_status, "observed");
+    assert!(observed.turns[0].followed_up);
+    assert_eq!(observed.gaps[0].ending_kind, "followup_hit");
+    let unknown = derive(1_730_000_500_000, &[]);
+    assert_eq!(unknown.evidence_status, "unknown");
+    assert_ne!(unknown.gaps[0].ending_kind, "ttl_expired_no_followup");
+}
+
+#[test]
+fn paused_evidence_lifetime_uses_last_renewal_not_request_marker_or_first_pulse() {
+    let current_cycle = Uuid::from_u128(71);
+    let historical_cycle = Uuid::from_u128(72);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.cycle_id = Some(current_cycle);
+    item.last_message_at_ms = 5_000_000;
+    let mut first = turn("first", 1_000);
+    first.cycle_id = Some(current_cycle);
+    let mut last = turn("last", 1_270);
+    last.cycle_id = Some(current_cycle);
+    let mut historical = turn("historical", 500);
+    historical.cycle_id = Some(historical_cycle);
+    let turns = [first, last, historical];
+    let renewals = vec![
+        renewal_evidence(
+            "first",
+            current_cycle,
+            1_000_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "current",
+        ),
+        renewal_evidence(
+            "last",
+            current_cycle,
+            1_270_000,
+            CacheTtl::Ttl1h,
+            "hit",
+            "current",
+        ),
+        renewal_evidence(
+            "historical",
+            historical_cycle,
+            500_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "old",
+        ),
+    ];
+    let catalog = priced_catalog();
+    for incomplete in [false, true] {
+        item.status = Some(if incomplete {
+            CacheKeepaliveSessionStatus::Terminal
+        } else {
+            CacheKeepaliveSessionStatus::InRequest
+        });
+        item.request_incomplete = incomplete;
+        item.terminal_reason = incomplete.then_some(CacheKeepaliveTerminalReason::Stale);
+        for (now_ms, pending) in [(1_600_000, true), (4_869_999, true), (4_870_000, false)] {
+            let activity = derive_activity_view(
+                CacheKeepaliveActivitySource {
+                    item: &item,
+                    session: None,
+                    turns: &turns,
+                    evidence: &renewals,
+                    now_ms,
+                    horizon_start_ms: None,
+                },
+                catalog.as_ref(),
+            );
+            assert!(!activity.is_active);
+            assert_eq!(activity.next_renewal, None);
+            assert_eq!(
+                activity.is_last_pending, pending,
+                "incomplete={incomplete} now={now_ms}"
+            );
+            assert_eq!(
+                activity.turns.iter().filter(|turn| turn.pending).count(),
+                usize::from(pending)
+            );
+            assert_eq!(
+                activity.evidence_status,
+                if pending { "pending" } else { "observed" }
+            );
+            let current = activity
+                .gaps
+                .iter()
+                .find(|gap| gap.cycle_id == Some(current_cycle))
+                .unwrap();
+            assert_eq!(
+                current.ending_kind,
+                if pending {
+                    "followup_pending"
+                } else {
+                    "ttl_expired_no_followup"
+                }
+            );
+            assert_eq!(
+                current.ending_at_ms,
+                if pending { now_ms } else { 4_870_000 }
+            );
+            let history = activity
+                .gaps
+                .iter()
+                .find(|gap| gap.cycle_id == Some(historical_cycle))
+                .unwrap();
+            assert_eq!(history.ending_kind, "ttl_expired_no_followup");
+            assert_eq!(history.ending_at_ms, 500_000);
+            assert!(
+                !activity
+                    .turns
+                    .iter()
+                    .find(|turn| turn.cycle_id == Some(historical_cycle))
+                    .unwrap()
+                    .pending
+            );
+        }
+        let mut observed_evidence = renewals.clone();
+        observed_evidence.push(follow_up_evidence(1_600_000, CacheTtl::Ttl1h, "current"));
+        let observed = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: None,
+                turns: &turns,
+                evidence: &observed_evidence,
+                now_ms: 1_700_000,
+                horizon_start_ms: None,
+            },
+            catalog.as_ref(),
+        );
+        assert!(!observed.is_last_pending);
+        assert!(observed.turns[0].followed_up);
+        assert_eq!(observed.evidence_status, "observed");
+        assert_eq!(
+            observed
+                .gaps
+                .iter()
+                .find(|gap| gap.cycle_id == Some(current_cycle))
+                .unwrap()
+                .ending_kind,
+            "followup_hit"
+        );
+    }
+}
+
+#[test]
+fn paused_empty_cycle_does_not_borrow_history_or_fabricate_pending_evidence() {
+    let current_cycle = Uuid::from_u128(73);
+    let historical_cycle = Uuid::from_u128(74);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::InRequest);
+    item.cycle_id = Some(current_cycle);
+    item.last_message_at_ms = 1_000_000;
+    let mut old = turn("old", 800);
+    old.cycle_id = Some(historical_cycle);
+    let legacy = turn("legacy-before-request", 900);
+    let evidence = [renewal_evidence(
+        "old",
+        historical_cycle,
+        800_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "old",
+    )];
+    for turns in [&[][..], &[old, legacy][..]] {
+        let activity = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: None,
+                turns,
+                evidence: &evidence,
+                now_ms: 1_010_000,
+                horizon_start_ms: None,
+            },
+            priced_catalog().as_ref(),
+        );
+        assert_eq!(activity.total_renewals, 0);
+        assert!(!activity.is_last_pending);
+        assert!(!activity.is_active);
+        assert_eq!(activity.next_renewal, None);
+        assert!(activity.turns.iter().all(|turn| !turn.pending));
+        assert!(
+            activity
+                .gaps
+                .iter()
+                .all(|gap| gap.ending_kind != "followup_pending"
+                    && gap.ending_kind != "scheduled_waiting")
+        );
+    }
+}
+
+#[test]
+fn paused_legacy_turn_requires_current_cycle_evidence_and_real_terminals_end_pending() {
+    let cycle_id = Uuid::from_u128(75);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.cycle_id = Some(cycle_id);
+    item.last_message_at_ms = 2_000_000;
+    item.status = Some(CacheKeepaliveSessionStatus::InRequest);
+    let legacy = turn("legacy-current", 1_900);
+    let evidence = [renewal_evidence(
+        "legacy-current",
+        cycle_id,
+        1_900_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "current",
+    )];
+    let derive = |item: &CacheKeepaliveSessionListItem,
+                  evidence: &[CacheKeepaliveEvidenceRecord]| {
+        derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item,
+                session: None,
+                turns: std::slice::from_ref(&legacy),
+                evidence,
+                now_ms: 2_010_000,
+                horizon_start_ms: None,
+            },
+            priced_catalog().as_ref(),
+        )
+    };
+    let pending = derive(&item, &evidence);
+    assert_eq!(pending.total_renewals, 1);
+    assert!(pending.is_last_pending);
+    assert!(pending.turns[0].pending);
+    assert_eq!(pending.gaps[0].ending_kind, "followup_pending");
+    let unknown = derive(&item, &[]);
+    assert_eq!(
+        unknown.total_renewals, 0,
+        "unowned pre-request legacy history"
+    );
+    assert!(!unknown.is_last_pending);
+    assert_eq!(unknown.evidence_status, "unknown");
+    assert_eq!(unknown.gaps[0].ending_kind, "followup_unknown");
+    for reason in [
+        CacheKeepaliveTerminalReason::Cancelled,
+        CacheKeepaliveTerminalReason::MaxRefreshes,
+        CacheKeepaliveTerminalReason::MaxDuration,
+        CacheKeepaliveTerminalReason::DispatchError,
+    ] {
+        item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+        item.terminal_reason = Some(reason);
+        let terminal = derive(&item, &evidence);
+        assert!(!terminal.is_last_pending);
+        assert!(!terminal.turns[0].pending);
+        assert_ne!(terminal.gaps[0].ending_kind, "followup_pending");
+    }
+}
+
+#[test]
 fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decision_events() {
     // Given: a decision-only not-tracked row and unordered renewal turn records.
     let decision = item(CacheKeepaliveSessionEntrySource::Decision);
@@ -274,11 +747,15 @@ fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
 fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_turn_pending() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Active);
-    let turns = [
+    item.cycle_id = Some(Uuid::from_u128(79));
+    let mut turns = [
         turn("z-turn", 200),
         turn("a-turn", 200),
         turn("older-turn", 199),
     ];
+    for turn in &mut turns {
+        turn.cycle_id = item.cycle_id;
+    }
     let catalog = PriceCatalog::new_empty();
 
     let activity = derive_activity_view(
@@ -307,7 +784,7 @@ fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_t
             .iter()
             .map(|turn| turn.turn_number)
             .collect::<Vec<_>>(),
-        [3, 2, 1]
+        [2, 3, 1]
     );
 }
 #[test]
@@ -674,12 +1151,12 @@ fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
             .iter()
             .map(|turn| turn.source_ref_id.as_str())
             .collect::<Vec<_>>(),
-        ["legacy-turn"]
+        ["legacy-turn", "c1-turn"]
     );
 }
 
 #[test]
-fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
+fn active_current_cycle_counters_exclude_unowned_legacy_rows() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Active);
     item.cycle_id = Some(Uuid::from_u128(21));
@@ -706,8 +1183,12 @@ fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
             .iter()
             .map(|turn| turn.source_ref_id.as_str())
             .collect::<Vec<_>>(),
-        ["current"]
+        ["current", "legacy"]
     );
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.retained_renewals, 2);
+    assert!(activity.turns[0].pending);
+    assert!(!activity.turns[1].pending);
 }
 
 #[test]
@@ -745,7 +1226,14 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
     assert_eq!(pnl.net_micros, 48_000);
     assert_eq!(activity.total_spent_micros, 21_000);
     assert_eq!(activity.total_avoided_micros, Some(69_000));
-    assert!(activity.turns.is_empty());
+    assert_eq!(
+        activity.turns.len(),
+        1,
+        "retained C1 table rows must match rail pulses"
+    );
+    assert_eq!(activity.turns[0].source_ref_id, "c1-turn");
+    assert_eq!(activity.turns[0].cycle_id, Some(c1));
+    assert_eq!(activity.turns[0].turn_number, 1);
     assert_eq!(activity.total_renewals, 0);
     assert!(!activity.is_last_pending);
     assert_eq!(activity.retained_renewals, 1);
@@ -1048,7 +1536,7 @@ fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
 }
 
 #[test]
-fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or_pnl() {
+fn idle_gaps_and_table_share_all_cycles_without_changing_current_counters_or_pnl() {
     let c1 = Uuid::from_u128(31);
     let c2 = Uuid::from_u128(32);
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
@@ -1093,8 +1581,24 @@ fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or
 
     assert_eq!(activity.retained_renewals, 2);
     assert_eq!(activity.total_renewals, 0);
-    assert_eq!(activity.turns.len(), 1);
-    assert_eq!(activity.turns[0].source_ref_id, "c2");
+    assert_eq!(activity.turns.len(), 3);
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| (
+                turn.source_ref_id.as_str(),
+                turn.cycle_id,
+                turn.turn_number,
+                turn.pending
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("c2", Some(c2), 1, true),
+            ("c1-a", Some(c1), 1, false),
+            ("c1-b", Some(c1), 2, false),
+        ]
+    );
     assert!(activity.is_last_pending);
     let pnl = activity.pnl.expect("retained cycle pnl");
     assert_eq!(pnl.spent_micros, 9_000);
@@ -1282,7 +1786,7 @@ fn null_cycle_gaps_split_by_ttl_or_max_attempts_and_price_unknown_or_pending_tur
             session: None,
             turns: &[pending_turn],
             evidence: &pending_evidence,
-            now_ms: 1_730_000_100_000,
+            now_ms: 200_000,
             horizon_start_ms: None,
         },
         priced_catalog().as_ref(),

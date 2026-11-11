@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest';
+import { CACHE_KEEPALIVE_STATES as API_STATES } from '../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../lib/queries';
 import {
+  CACHE_KEEPALIVE_STATES,
   cacheKeepaliveAnimationContract,
   cacheKeepaliveCardCopy,
   cacheKeepaliveDrawerCopy,
@@ -54,6 +56,12 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
   expect(cacheKeepaliveAnimationContract.riseTransition).toBe(
     'transform 560ms cubic-bezier(0.22, 1, 0.36, 1)',
   );
+});
+
+test('keeps in-request state and status-filter copy aligned with the API', () => {
+  expect(CACHE_KEEPALIVE_STATES).toEqual(API_STATES);
+  expect(API_STATES).toContain('in_request');
+  expect(cacheKeepaliveDrawerCopy.filters).toContain('In request');
 });
 
 test('freezes decision-backed, error-overlap, state, reason, and multi-turn fixtures', () => {
