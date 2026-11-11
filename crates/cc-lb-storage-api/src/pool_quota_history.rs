@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{StorageResult, upstream_subscription_quota::SubscriptionQuotaWindow};
+use crate::{Provider, StorageResult, upstream_subscription_quota::SubscriptionQuotaWindow};
 
 pub const POOL_QUOTA_POLICY_VERSION: i32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoolQuotaSnapshotRecord {
+    pub provider: Provider,
     pub snapshot_at_unix_secs: i64,
     pub window: SubscriptionQuotaWindow,
     pub utilization: Option<f64>,
@@ -26,6 +27,7 @@ pub struct PoolQuotaSnapshotRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoolQuotaSnapshotSummaryRecord {
+    pub provider: Provider,
     pub snapshot_at_unix_secs: i64,
     pub window: SubscriptionQuotaWindow,
     pub utilization: Option<f64>,
@@ -45,6 +47,7 @@ pub struct PoolQuotaSnapshotSummaryRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoolQuotaChartPointRecord {
+    pub provider: Provider,
     pub snapshot_at_unix_secs: i64,
     pub window: SubscriptionQuotaWindow,
     pub utilization: Option<f64>,
@@ -53,6 +56,7 @@ pub struct PoolQuotaChartPointRecord {
 impl From<&PoolQuotaSnapshotRecord> for PoolQuotaSnapshotSummaryRecord {
     fn from(record: &PoolQuotaSnapshotRecord) -> Self {
         Self {
+            provider: record.provider,
             snapshot_at_unix_secs: record.snapshot_at_unix_secs,
             window: record.window,
             utilization: record.utilization,
@@ -81,11 +85,13 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
 
     async fn list_latest_pool_quota_snapshots(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>>;
 
     async fn list_pool_quota_snapshots_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -93,9 +99,12 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
 
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        let records = self.list_latest_pool_quota_snapshots(windows).await?;
+        let records = self
+            .list_latest_pool_quota_snapshots(provider, windows)
+            .await?;
         Ok(records
             .iter()
             .map(PoolQuotaSnapshotSummaryRecord::from)
@@ -104,12 +113,13 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
 
     async fn list_pool_quota_snapshot_summaries_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
         let records = self
-            .list_pool_quota_snapshots_in_range(windows, since_unix_secs, until_unix_secs)
+            .list_pool_quota_snapshots_in_range(provider, windows, since_unix_secs, until_unix_secs)
             .await?;
         Ok(records
             .iter()
@@ -119,6 +129,7 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
 
     async fn list_pool_quota_chart_points_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -126,7 +137,7 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>>;
 
     /// Removes at most `batch_size` old snapshots, preserving the latest
-    /// snapshot at or before the cutoff for each quota window.
+    /// snapshot at or before the cutoff for each provider and quota window.
     async fn prune_pool_quota_history_before(
         &self,
         cutoff_unix_secs: i64,

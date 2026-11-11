@@ -1,11 +1,28 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     PoolQuotaChartPointRecord, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaSnapshotSummaryRecord, Provider, StorageError, StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
+
+// Keep provider reads on one physical table without building SQL at runtime.
+macro_rules! history_read {
+    ($provider:expr, $query:ident $(, $mode:ident)?) => {
+        match $provider {
+            Provider::Anthropic => $query!(
+                "(SELECT 'anthropic'::text AS provider, history.* FROM pool_subscription_quota_history_v1 history)"
+                $(, $mode)?
+            ),
+            Provider::Openai | Provider::Gemini => $query!(
+                "pool_subscription_quota_history_v2"
+                $(, $mode)?
+            ),
+        }
+    };
+}
+pub(super) use history_read;
 
 #[async_trait]
 impl PoolQuotaHistoryStore for PostgresStorage {
@@ -17,29 +34,58 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         if batch_size == 0 {
             return Ok(0);
         }
-        let result = sqlx::query(
-            r#"DELETE FROM pool_subscription_quota_history_v1
-               WHERE ctid IN (
-                   SELECT old.ctid FROM pool_subscription_quota_history_v1 old
-                   WHERE old.snapshot_at_unix_secs < $1
-                     AND EXISTS (
-                         SELECT 1 FROM pool_subscription_quota_history_v1 newer
-                         WHERE newer."quota_window" = old."quota_window"
-                           AND newer.snapshot_at_unix_secs <= $1
-                           AND newer.snapshot_at_unix_secs > old.snapshot_at_unix_secs
-                     )
-                   ORDER BY old.snapshot_at_unix_secs LIMIT $2
-               )"#,
+        let deleted = sqlx::query_scalar::<_, i64>(
+            r#"WITH candidates AS (
+                (SELECT 0 AS source, old.ctid AS row_id,
+                        old.snapshot_at_unix_secs, old.quota_window
+                 FROM pool_subscription_quota_history_v1 old
+                 WHERE old.snapshot_at_unix_secs < $1
+                   AND EXISTS (
+                       SELECT 1 FROM pool_subscription_quota_history_v1 newer
+                       WHERE newer.quota_window = old.quota_window
+                         AND newer.snapshot_at_unix_secs <= $1
+                         AND newer.snapshot_at_unix_secs > old.snapshot_at_unix_secs
+                   )
+                 ORDER BY old.snapshot_at_unix_secs, old.quota_window LIMIT $2)
+                UNION ALL
+                (SELECT 1 AS source, old.ctid AS row_id,
+                        old.snapshot_at_unix_secs, old.quota_window
+                 FROM pool_subscription_quota_history_v2 old
+                 WHERE old.snapshot_at_unix_secs < $1
+                   AND EXISTS (
+                       SELECT 1 FROM pool_subscription_quota_history_v2 newer
+                       WHERE newer.provider = old.provider
+                         AND newer.quota_window = old.quota_window
+                         AND newer.snapshot_at_unix_secs <= $1
+                         AND newer.snapshot_at_unix_secs > old.snapshot_at_unix_secs
+                   )
+                 ORDER BY old.snapshot_at_unix_secs, old.quota_window LIMIT $2)
+            ), victims AS MATERIALIZED (
+                SELECT source, row_id FROM candidates
+                ORDER BY snapshot_at_unix_secs, quota_window, source LIMIT $2
+            ), deleted_anthropic AS (
+                DELETE FROM pool_subscription_quota_history_v1 history
+                USING victims
+                WHERE victims.source = 0 AND history.ctid = victims.row_id
+                RETURNING 1
+            ), deleted_providers AS (
+                DELETE FROM pool_subscription_quota_history_v2 history
+                USING victims
+                WHERE victims.source = 1 AND history.ctid = victims.row_id
+                RETURNING 1
+            )
+            SELECT (SELECT COUNT(*) FROM deleted_anthropic)
+                 + (SELECT COUNT(*) FROM deleted_providers)"#,
         )
         .bind(cutoff_unix_secs)
         .bind(crate::adapter::u64_to_i64(
             batch_size as u64,
             "pool history prune batch size",
         )?)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
+        Ok(deleted as u64)
     }
 
     async fn record_pool_quota_snapshots(
@@ -51,48 +97,75 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         }
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         for record in records {
-            sqlx::query(
-                r#"INSERT INTO pool_subscription_quota_history_v1 (
-                    snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                    capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                    stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                    header_contributing_upstreams, api_contributing_upstreams,
-                    max_observed_at_unix_millis, computed_at_unix_millis,
-                    policy_version
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                ON CONFLICT (snapshot_at_unix_secs, "quota_window") DO UPDATE SET
-                    utilization = excluded.utilization,
-                    weighted_utilization_sum = excluded.weighted_utilization_sum,
-                    capacity_ratio_sum = excluded.capacity_ratio_sum,
-                    eligible_upstreams = excluded.eligible_upstreams,
-                    contributing_upstreams = excluded.contributing_upstreams,
-                    stale_upstreams = excluded.stale_upstreams,
-                    missing_observation_upstreams = excluded.missing_observation_upstreams,
-                    missing_metadata_upstreams = excluded.missing_metadata_upstreams,
-                    header_contributing_upstreams = excluded.header_contributing_upstreams,
-                    api_contributing_upstreams = excluded.api_contributing_upstreams,
-                    max_observed_at_unix_millis = excluded.max_observed_at_unix_millis,
-                    computed_at_unix_millis = excluded.computed_at_unix_millis,
-                    policy_version = excluded.policy_version"#,
-            )
-            .bind(record.snapshot_at_unix_secs)
-            .bind(record.window.as_str())
-            .bind(record.utilization)
-            .bind(record.weighted_utilization_sum)
-            .bind(record.capacity_ratio_sum)
-            .bind(record.eligible_upstreams)
-            .bind(record.contributing_upstreams)
-            .bind(record.stale_upstreams)
-            .bind(record.missing_observation_upstreams)
-            .bind(record.missing_metadata_upstreams)
-            .bind(record.header_contributing_upstreams)
-            .bind(record.api_contributing_upstreams)
-            .bind(record.max_observed_at_unix_millis)
-            .bind(record.computed_at_unix_millis)
-            .bind(record.policy_version)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
+            let query = if record.provider == Provider::Anthropic {
+                sqlx::query(
+                    r#"INSERT INTO pool_subscription_quota_history_v1 (
+                        snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                        capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                        stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                        header_contributing_upstreams, api_contributing_upstreams,
+                        max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    ON CONFLICT (snapshot_at_unix_secs, "quota_window") DO UPDATE SET
+                        utilization = excluded.utilization,
+                        weighted_utilization_sum = excluded.weighted_utilization_sum,
+                        capacity_ratio_sum = excluded.capacity_ratio_sum,
+                        eligible_upstreams = excluded.eligible_upstreams,
+                        contributing_upstreams = excluded.contributing_upstreams,
+                        stale_upstreams = excluded.stale_upstreams,
+                        missing_observation_upstreams = excluded.missing_observation_upstreams,
+                        missing_metadata_upstreams = excluded.missing_metadata_upstreams,
+                        header_contributing_upstreams = excluded.header_contributing_upstreams,
+                        api_contributing_upstreams = excluded.api_contributing_upstreams,
+                        max_observed_at_unix_millis = excluded.max_observed_at_unix_millis,
+                        computed_at_unix_millis = excluded.computed_at_unix_millis,
+                        policy_version = excluded.policy_version"#,
+                )
+            } else {
+                sqlx::query(
+                    r#"INSERT INTO pool_subscription_quota_history_v2 (
+                        provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                        capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                        stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                        header_contributing_upstreams, api_contributing_upstreams,
+                        max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ON CONFLICT (provider, snapshot_at_unix_secs, "quota_window") DO UPDATE SET
+                        utilization = excluded.utilization,
+                        weighted_utilization_sum = excluded.weighted_utilization_sum,
+                        capacity_ratio_sum = excluded.capacity_ratio_sum,
+                        eligible_upstreams = excluded.eligible_upstreams,
+                        contributing_upstreams = excluded.contributing_upstreams,
+                        stale_upstreams = excluded.stale_upstreams,
+                        missing_observation_upstreams = excluded.missing_observation_upstreams,
+                        missing_metadata_upstreams = excluded.missing_metadata_upstreams,
+                        header_contributing_upstreams = excluded.header_contributing_upstreams,
+                        api_contributing_upstreams = excluded.api_contributing_upstreams,
+                        max_observed_at_unix_millis = excluded.max_observed_at_unix_millis,
+                        computed_at_unix_millis = excluded.computed_at_unix_millis,
+                        policy_version = excluded.policy_version"#,
+                )
+                .bind(provider_key(record.provider))
+            };
+            query
+                .bind(record.snapshot_at_unix_secs)
+                .bind(record.window.as_str())
+                .bind(record.utilization)
+                .bind(record.weighted_utilization_sum)
+                .bind(record.capacity_ratio_sum)
+                .bind(record.eligible_upstreams)
+                .bind(record.contributing_upstreams)
+                .bind(record.stale_upstreams)
+                .bind(record.missing_observation_upstreams)
+                .bind(record.missing_metadata_upstreams)
+                .bind(record.header_contributing_upstreams)
+                .bind(record.api_contributing_upstreams)
+                .bind(record.max_observed_at_unix_millis)
+                .bind(record.computed_at_unix_millis)
+                .bind(record.policy_version)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
@@ -100,31 +173,37 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_latest_pool_quota_snapshots(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>> {
         if windows.is_empty() {
             return Ok(Vec::new());
         }
+        macro_rules! query {
+            ($table:literal) => {
+                concat!(
+                    r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                              capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                              stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                              header_contributing_upstreams, api_contributing_upstreams,
+                              max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+                       FROM "#,
+                    $table,
+                    r#" WHERE provider = $1 AND "quota_window" = $2
+                       ORDER BY snapshot_at_unix_secs DESC LIMIT 1"#,
+                )
+            };
+        }
         let mut out = Vec::with_capacity(windows.len());
         for window in windows {
-            let row = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                          capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                          stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                          header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, computed_at_unix_millis,
-                          policy_version
-                   FROM pool_subscription_quota_history_v1
-                  WHERE "quota_window" = $1
-               ORDER BY snapshot_at_unix_secs DESC
-                  LIMIT 1"#,
-            )
-            .bind(window.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
+            let row = sqlx::query(history_read!(provider, query))
+                .bind(provider_key(provider))
+                .bind(window.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
             if let Some(row) = row {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -132,6 +211,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_pool_quota_snapshots_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -139,28 +219,34 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         if windows.is_empty() || since_unix_secs > until_unix_secs {
             return Ok(Vec::new());
         }
+        macro_rules! query {
+            ($table:literal) => {
+                concat!(
+                    r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                              capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                              stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                              header_contributing_upstreams, api_contributing_upstreams,
+                              max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+                       FROM "#,
+                    $table,
+                    r#" WHERE provider = $1 AND "quota_window" = $2
+                          AND snapshot_at_unix_secs BETWEEN $3 AND $4
+                       ORDER BY snapshot_at_unix_secs ASC"#,
+                )
+            };
+        }
         let mut out = Vec::new();
         for window in windows {
-            let rows = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                          capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                          stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                          header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, computed_at_unix_millis,
-                          policy_version
-                   FROM pool_subscription_quota_history_v1
-                  WHERE "quota_window" = $1
-                    AND snapshot_at_unix_secs BETWEEN $2 AND $3
-               ORDER BY snapshot_at_unix_secs ASC"#,
-            )
-            .bind(window.as_str())
-            .bind(since_unix_secs)
-            .bind(until_unix_secs)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
+            let rows = sqlx::query(history_read!(provider, query))
+                .bind(provider_key(provider))
+                .bind(window.as_str())
+                .bind(since_unix_secs)
+                .bind(until_unix_secs)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
             for row in rows {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -168,19 +254,22 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        super::pool_quota_history_summary::list_latest(self, windows).await
+        super::pool_quota_history_summary::list_latest(self, provider, windows).await
     }
 
     async fn list_pool_quota_snapshot_summaries_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
         super::pool_quota_history_summary::list_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -190,6 +279,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_pool_quota_chart_points_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -197,6 +287,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>> {
         super::pool_quota_history_summary::list_chart_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -206,7 +297,10 @@ impl PoolQuotaHistoryStore for PostgresStorage {
     }
 }
 
-fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {
+fn row_to_record(
+    row: sqlx::postgres::PgRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaSnapshotRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -215,6 +309,7 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotR
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaSnapshotRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get::<i64, _>("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -259,4 +354,12 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotR
             .try_get::<i32, _>("policy_version")
             .map_err(map_sqlx_error)?,
     })
+}
+
+pub(super) fn provider_key(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::Openai => "openai",
+        Provider::Gemini => "gemini",
+    }
 }

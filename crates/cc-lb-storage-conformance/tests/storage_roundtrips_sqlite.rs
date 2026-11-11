@@ -177,6 +177,30 @@ fn pool_quota_history_fable_roundtrip_sqlite() {
 }
 
 #[test]
+fn pool_quota_history_provider_isolation_roundtrip_sqlite() {
+    run_sqlite_scenario(
+        "pool_quota_history_provider_isolation_roundtrip",
+        pool_quota_history_store::provider_isolation_roundtrip,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_prune_anchors_sqlite() {
+    run_sqlite_scenario(
+        "pool_quota_history_provider_prune_anchors",
+        pool_quota_history_store::provider_prune_anchors,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_chart_gaps_and_peaks_sqlite() {
+    run_sqlite_scenario(
+        "pool_quota_history_provider_chart_gaps_and_peaks",
+        pool_quota_history_store::provider_chart_gaps_and_peaks,
+    );
+}
+
+#[test]
 fn request_event_cache_split_round_trip_sqlite() {
     run_sqlite_scenario(
         "request_event_cache_split_round_trip",

@@ -223,6 +223,7 @@ async fn auxiliary_quota_history_keeps_cutoff_anchors() -> Result<(), Box<dyn st
                 .await?;
             storage
                 .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
+                    provider: cc_lb_storage_api::Provider::Anthropic,
                     snapshot_at_unix_secs: i64::try_from(ts)?,
                     window: SubscriptionQuotaWindow::FiveHour,
                     utilization,
@@ -272,6 +273,7 @@ async fn auxiliary_quota_history_keeps_cutoff_anchors() -> Result<(), Box<dyn st
         );
         let snapshots = storage
             .list_pool_quota_snapshot_summaries_in_range(
+                cc_lb_storage_api::Provider::Anthropic,
                 &[SubscriptionQuotaWindow::FiveHour],
                 0,
                 i64::try_from(now)?,

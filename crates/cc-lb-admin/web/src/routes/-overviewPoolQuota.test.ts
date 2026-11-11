@@ -13,9 +13,11 @@ import {
   oldestProviderObservation,
   POOL_QUOTA_HEARTBEAT_CARRY_SECS,
   poolQuotaResponseLatest,
+  poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
 
@@ -68,6 +70,26 @@ describe('Overview pooled quota history', () => {
       '7d': null,
       '7d_fable': null,
     });
+  });
+
+  it('reads live provider latest independently of empty or null historical buckets', () => {
+    for (const window of ['5h', 'gemini_5h', 'third_party_7d']) {
+      const entry = historyWindow(window, [[100, null]], 23);
+      for (const rows of [[], buildPoolQuotaChartData([entry])]) {
+        expect(
+          poolQuotaResponseLatest([entry], rows, {
+            requireVisibleHistory: false,
+          })[window],
+        ).toBe(23);
+      }
+      expect(
+        poolQuotaResponseLatest(
+          [{ ...entry, latest: null }],
+          [{ unix: 100, [window]: 88 }],
+          { requireVisibleHistory: false },
+        )[window],
+      ).toBeNull();
+    }
   });
 
   it('keeps chart rows sparse when the provider omits the 5h window', () => {
@@ -282,6 +304,72 @@ describe('Overview pooled quota history', () => {
   });
 });
 
+describe('recordedPoolQuotaChartData', () => {
+  it('anchors only persisted history and keeps snapshot counts unextended', () => {
+    const rows = [
+      { unix: 0, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+      { unix: 5400, '5h': 60 },
+    ];
+    expect(recordedPoolQuotaChartData(rows, 900, 4500)).toEqual([
+      { unix: 900, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+    ]);
+    expect(
+      recordedPoolQuotaChartData(rows, 900, 4500, {
+        anchorPredecessor: false,
+      }),
+    ).toEqual([{ unix: 3600, '5h': 40 }]);
+  });
+
+  it('preserves null predecessors and never overwrites an explicit boundary', () => {
+    expect(
+      recordedPoolQuotaChartData(
+        [
+          { unix: 0, '5h': null, '7d': 40 },
+          { unix: 3600, '5h': 64, '7d': 50 },
+        ],
+        900,
+        4500,
+      ),
+    ).toEqual([
+      { unix: 900, '5h': null, '7d': 40 },
+      { unix: 3600, '5h': 64, '7d': 50 },
+    ]);
+    const boundaryRows = [
+      { unix: 0, '5h': 40 },
+      { unix: 900, '5h': null },
+      { unix: 3600, '5h': 64 },
+    ];
+    expect(recordedPoolQuotaChartData(boundaryRows, 900, 4500)).toEqual(
+      boundaryRows.slice(1),
+    );
+  });
+
+  it('bounds the persisted gap by the heartbeat and does not invent a tail', () => {
+    const first = { unix: 3600, '5h': 40 };
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3600 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([{ unix: 900, '5h': 30 }, first]);
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3599 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([first]);
+    expect(
+      recordedPoolQuotaChartData([{ unix: 0, '5h': 30 }], 900, 4500),
+    ).toEqual([]);
+    expect(recordedPoolQuotaChartData([], 900, 4500)).toEqual([]);
+    expect(recordedPoolQuotaChartData([first], 4500, 900)).toEqual([]);
+  });
+});
+
 function lot(
   upstream_id: string,
   utilization: number | null,
@@ -413,6 +501,49 @@ describe('missingCapacityUpstreams', () => {
   });
 });
 
+describe('poolQuotaResponseObservation', () => {
+  it('uses the oldest eligible live observation, not the newest contributor or history', () => {
+    const windows = [
+      { window: 'gemini_5h', oldest: 900, stale: 0 },
+      { window: 'third_party_7d', oldest: 300, stale: 1 },
+      { window: 'unified', oldest: 100, stale: 1 },
+    ].map(({ window, oldest, stale }) => {
+      const entry = historyWindow(window, [[100, 70]], 20);
+      if (!entry.latest) throw new Error('Expected a fixture reading');
+      return {
+        ...entry,
+        latest: {
+          ...entry.latest,
+          max_observed_at_unix_millis: 1_000_000,
+          oldest_observed_at_unix_millis: oldest * 1000,
+          stale_upstreams: stale,
+          max_staleness_secs: 300,
+        },
+      };
+    });
+    expect(
+      poolQuotaResponseObservation(windows, ['gemini_5h', 'third_party_7d']),
+    ).toEqual({ observedAtUnixSecs: 300, stale: true });
+    expect(poolQuotaResponseObservation(windows, ['gemini_5h'])).toEqual({
+      observedAtUnixSecs: 900,
+      stale: false,
+    });
+  });
+
+  it('does not infer observation age from a latest snapshot timestamp', () => {
+    expect(
+      poolQuotaResponseObservation(
+        [historyWindow('5h', [[1_000, 40]])],
+        ['5h'],
+      ),
+    ).toEqual({ observedAtUnixSecs: null, stale: false });
+    expect(poolQuotaResponseObservation(undefined, ['5h'])).toEqual({
+      observedAtUnixSecs: null,
+      stale: false,
+    });
+  });
+});
+
 describe('oldestProviderObservation', () => {
   function observed(
     id: string,
@@ -436,6 +567,19 @@ describe('oldestProviderObservation', () => {
       }),
     );
     expect(result).toEqual({ observedAtUnixSecs: 700, stale: false });
+  });
+  it('includes Gemini and third-party observations without letting a newer window hide an old one', () => {
+    const result = oldestProviderObservation({
+      ...aggregate({
+        gemini_5h: [observed('a', 1000)],
+        gemini_7d: [observed('a', 900)],
+        third_party_5h: [observed('a', 300)],
+        third_party_7d: [observed('a', 1000)],
+      }),
+      now_unix_secs: 1000,
+      max_staleness_secs: 300,
+    });
+    expect(result).toEqual({ observedAtUnixSecs: 300, stale: true });
   });
 
   it('marks the data stale by lot state or by the staleness limit', () => {

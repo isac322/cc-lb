@@ -3,11 +3,11 @@ use std::{str::FromStr, sync::Arc};
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStore, MetaStore, PoolQuotaHistoryStore, PriceCatalogCache,
-    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    CacheKeepaliveSessionStore, MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
+    PriceCatalogCache, Provider, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
     UpstreamSubscriptionQuotaStore, UsageRollupStore, UsageTokenInterval, UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -236,12 +236,12 @@ async fn auxiliary_pruners_share_batch_budget_and_pool_ranges_keep_left_anchors(
         assert_eq!(storage.prune_pool_quota_history_before(25, 1).await?, 1);
         assert_eq!(storage.prune_pool_quota_history_before(25, 10).await?, 1);
         let windows = [SubscriptionQuotaWindow::FiveHour, SubscriptionQuotaWindow::SevenDay];
-        let summaries = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 25, 35).await?;
+        let summaries = storage.list_pool_quota_snapshot_summaries_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 25, 35).await?;
         assert_eq!(summaries.len(), 4);
-        let idle = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 25, 29).await?;
+        let idle = storage.list_pool_quota_snapshot_summaries_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 25, 29).await?;
         assert_eq!(idle.len(), 2);
         assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == 25 && row.utilization == Some(0.2)));
-        let exact = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 30, 35).await?;
+        let exact = storage.list_pool_quota_snapshot_summaries_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 30, 35).await?;
         assert_eq!(exact.len(), 2, "exact summary boundary suppresses synthetic anchors");
         assert!(exact.iter().all(|row| row.snapshot_at_unix_secs == 30 && row.utilization == Some(0.3)));
         for window in windows {
@@ -251,13 +251,13 @@ async fn auxiliary_pruners_share_batch_budget_and_pool_ranges_keep_left_anchors(
             assert_eq!(points[1].snapshot_at_unix_secs, 30);
         }
         for (bucket, expected_start) in [(None, 25), (Some(10), 20)] {
-            let points = storage.list_pool_quota_chart_points_in_range(&windows, 25, 35, bucket).await?;
+            let points = storage.list_pool_quota_chart_points_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 25, 35, bucket).await?;
             assert_eq!(points.len(), 4);
             assert_eq!(points.iter().filter(|row| row.snapshot_at_unix_secs == expected_start).count(), 2);
-            let idle = storage.list_pool_quota_chart_points_in_range(&windows, 25, 29, bucket).await?;
+            let idle = storage.list_pool_quota_chart_points_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 25, 29, bucket).await?;
             assert_eq!(idle.len(), 2);
             assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == expected_start && row.utilization == Some(0.2)));
-            let exact = storage.list_pool_quota_chart_points_in_range(&windows, 30, 35, bucket).await?;
+            let exact = storage.list_pool_quota_chart_points_in_range(cc_lb_storage_api::Provider::Anthropic,&windows, 30, 35, bucket).await?;
             assert_eq!(exact.len(), 2, "exact boundary suppresses synthetic anchors");
             assert!(exact.iter().all(|row| row.utilization == Some(0.3)));
         }
@@ -400,4 +400,383 @@ impl Fixture {
         self.admin_pool.close().await;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let result: Result<()> = async {
+        let mut connection = fixture.pool.acquire().await?;
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(162), &mut *connection, false)
+            .await?;
+        sqlx::query(
+            "INSERT INTO pool_subscription_quota_history_v1 (
+                snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+                capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                header_contributing_upstreams, api_contributing_upstreams,
+                max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+            ) VALUES (10, '5h', 0.3, 1.2, 4, 7, 3, 2, 1, 1, 1, 2, 9000, 11000, 7),
+                     (20, '7d', NULL, 1.2, 4, 7, 3, 2, 1, 1, 1, 2, 9000, 11000, 7)",
+        )
+        .execute(&mut *connection)
+        .await?;
+        drop(connection);
+        let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+        storage.initialize().await?;
+        storage.initialize().await?;
+        let expected = PoolQuotaSnapshotRecord {
+            provider: Provider::Anthropic,
+            snapshot_at_unix_secs: 10,
+            window: SubscriptionQuotaWindow::FiveHour,
+            utilization: Some(0.3),
+            weighted_utilization_sum: 1.2,
+            capacity_ratio_sum: 4.0,
+            eligible_upstreams: 7,
+            contributing_upstreams: 3,
+            stale_upstreams: 2,
+            missing_observation_upstreams: 1,
+            missing_metadata_upstreams: 1,
+            header_contributing_upstreams: 1,
+            api_contributing_upstreams: 2,
+            max_observed_at_unix_millis: Some(9000),
+            computed_at_unix_millis: 11000,
+            policy_version: 7,
+        };
+        let windows = [
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+        ];
+        let mut legacy = storage
+            .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+            .await?;
+        assert_eq!(
+            legacy,
+            vec![
+                expected.clone(),
+                PoolQuotaSnapshotRecord {
+                    snapshot_at_unix_secs: 20,
+                    window: SubscriptionQuotaWindow::SevenDay,
+                    utilization: None,
+                    ..expected.clone()
+                },
+            ]
+        );
+        for provider in [Provider::Openai, Provider::Gemini] {
+            assert!(
+                storage
+                    .list_latest_pool_quota_snapshots(provider, &windows)
+                    .await?
+                    .is_empty()
+            );
+        }
+        // A running older node must still be able to record Anthropic history.
+        sqlx::query(
+            "INSERT INTO pool_subscription_quota_history_v1 (
+                snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+                capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                header_contributing_upstreams, api_contributing_upstreams,
+                max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+            ) VALUES (30, '5h', 0.3, 1.2, 4, 7, 3, 2, 1, 1, 1, 2, 9000, 11000, 7)",
+        )
+        .execute(storage.pool())
+        .await?;
+        legacy[0].snapshot_at_unix_secs = 30;
+        storage
+            .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
+                provider: Provider::Openai,
+                snapshot_at_unix_secs: 40,
+                utilization: Some(0.8),
+                ..expected
+            }])
+            .await?;
+        assert_eq!(
+            storage
+                .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+                .await?,
+            legacy
+        );
+        let old_reader: (i64, Option<f64>) = sqlx::query_as(
+            "SELECT snapshot_at_unix_secs, utilization
+             FROM pool_subscription_quota_history_v1
+             WHERE quota_window = '5h'
+             ORDER BY snapshot_at_unix_secs DESC LIMIT 1",
+        )
+        .fetch_one(storage.pool())
+        .await?;
+        assert_eq!(
+            old_reader,
+            (30, Some(0.3)),
+            "old nodes must not read OpenAI as Anthropic"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+fn provider_pool_record(
+    provider: Provider,
+    window: SubscriptionQuotaWindow,
+    at: i64,
+) -> PoolQuotaSnapshotRecord {
+    PoolQuotaSnapshotRecord {
+        provider,
+        snapshot_at_unix_secs: at,
+        window,
+        utilization: Some(0.25),
+        weighted_utilization_sum: 0.25,
+        capacity_ratio_sum: 1.0,
+        eligible_upstreams: 2,
+        contributing_upstreams: 1,
+        stale_upstreams: 1,
+        missing_observation_upstreams: 0,
+        missing_metadata_upstreams: 0,
+        header_contributing_upstreams: 0,
+        api_contributing_upstreams: 1,
+        max_observed_at_unix_millis: Some(at * 1000),
+        computed_at_unix_millis: at * 1000,
+        policy_version: 1,
+    }
+}
+
+#[tokio::test]
+async fn pool_history_provider_split_mixed_writes_are_atomic() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let original =
+            provider_pool_record(Provider::Anthropic, SubscriptionQuotaWindow::FiveHour, 10);
+        storage
+            .record_pool_quota_snapshots(std::slice::from_ref(&original))
+            .await?;
+        let replacement = PoolQuotaSnapshotRecord {
+            utilization: Some(0.75),
+            weighted_utilization_sum: 0.75,
+            ..original.clone()
+        };
+        let records = [
+            replacement,
+            provider_pool_record(Provider::Openai, SubscriptionQuotaWindow::FiveHour, 10),
+            provider_pool_record(
+                Provider::Gemini,
+                SubscriptionQuotaWindow::GeminiFiveHour,
+                10,
+            ),
+        ];
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_provider_pool_insert() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture insert failure'; END $$;
+             CREATE TRIGGER reject_provider_pool_insert BEFORE INSERT
+             ON pool_subscription_quota_history_v2 FOR EACH ROW
+             EXECUTE FUNCTION reject_provider_pool_insert();",
+        )
+        .execute(storage.pool())
+        .await?;
+        assert!(storage.record_pool_quota_snapshots(&records).await.is_err());
+        assert_eq!(
+            storage
+                .list_latest_pool_quota_snapshots(Provider::Anthropic, &[original.window])
+                .await?,
+            vec![original],
+        );
+        for record in &records[1..] {
+            assert!(
+                storage
+                    .list_latest_pool_quota_snapshots(record.provider, &[record.window])
+                    .await?
+                    .is_empty()
+            );
+        }
+        sqlx::query(
+            "DROP TRIGGER reject_provider_pool_insert ON pool_subscription_quota_history_v2",
+        )
+        .execute(storage.pool())
+        .await?;
+        storage.record_pool_quota_snapshots(&records).await?;
+        storage.record_pool_quota_snapshots(&records).await?;
+        for record in records {
+            assert_eq!(
+                storage
+                    .list_pool_quota_snapshots_in_range(record.provider, &[record.window], 10, 10)
+                    .await?,
+                vec![record],
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn pool_history_provider_split_prunes_oldest_with_one_budget() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let series = [
+            (
+                Provider::Anthropic,
+                SubscriptionQuotaWindow::FiveHour,
+                10,
+                100,
+            ),
+            (
+                Provider::Anthropic,
+                SubscriptionQuotaWindow::SevenDayFable,
+                15,
+                90,
+            ),
+            (Provider::Openai, SubscriptionQuotaWindow::FiveHour, 20, 100),
+            (Provider::Openai, SubscriptionQuotaWindow::SevenDay, 25, 80),
+            (
+                Provider::Gemini,
+                SubscriptionQuotaWindow::GeminiFiveHour,
+                30,
+                100,
+            ),
+        ];
+        let mut expected = series
+            .iter()
+            .flat_map(|&(provider, window, old, anchor)| {
+                [old, anchor, 110].map(|at| provider_pool_record(provider, window, at))
+            })
+            .collect::<Vec<_>>();
+        storage.record_pool_quota_snapshots(&expected).await?;
+        assert_eq!(storage.prune_pool_quota_history_before(100, 0).await?, 0);
+        for (provider, window, old, _) in series {
+            assert_eq!(storage.prune_pool_quota_history_before(100, 1).await?, 1);
+            expected.retain(|record| {
+                !(record.provider == provider
+                    && record.window == window
+                    && record.snapshot_at_unix_secs == old)
+            });
+            for (provider, window, _, _) in series {
+                let rows = storage
+                    .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                    .await?;
+                let remaining = expected
+                    .iter()
+                    .filter(|record| record.provider == provider && record.window == window)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    rows, remaining,
+                    "one oldest row across both tables, with independent anchors"
+                );
+            }
+        }
+        assert_eq!(storage.prune_pool_quota_history_before(100, 1).await?, 0);
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn pool_history_provider_split_prune_failure_rolls_back_both_tables() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let series = [
+            (Provider::Anthropic, SubscriptionQuotaWindow::FiveHour, 10),
+            (Provider::Openai, SubscriptionQuotaWindow::FiveHour, 20),
+        ];
+        let records = series
+            .iter()
+            .flat_map(|&(provider, window, old)| {
+                [old, 100].map(|at| provider_pool_record(provider, window, at))
+            })
+            .collect::<Vec<_>>();
+        storage.record_pool_quota_snapshots(&records).await?;
+        sqlx::raw_sql(
+            "CREATE TABLE provider_pool_prune_probe (calls INTEGER NOT NULL);
+             INSERT INTO provider_pool_prune_probe VALUES (0);
+             CREATE FUNCTION reject_second_pool_delete() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             DECLARE calls_after INTEGER;
+             BEGIN
+                 UPDATE provider_pool_prune_probe SET calls = calls + 1
+                 RETURNING calls INTO calls_after;
+                 IF calls_after = 2 THEN RAISE EXCEPTION 'fixture second delete failure'; END IF;
+                 RETURN NULL;
+             END $$;
+             CREATE TRIGGER reject_pool_delete AFTER DELETE
+             ON pool_subscription_quota_history_v1 FOR EACH STATEMENT
+             EXECUTE FUNCTION reject_second_pool_delete();
+             CREATE TRIGGER reject_pool_delete AFTER DELETE
+             ON pool_subscription_quota_history_v2 FOR EACH STATEMENT
+             EXECUTE FUNCTION reject_second_pool_delete();",
+        )
+        .execute(storage.pool())
+        .await?;
+        assert!(
+            storage
+                .prune_pool_quota_history_before(100, 2)
+                .await
+                .is_err()
+        );
+        let calls: i32 = sqlx::query_scalar("SELECT calls FROM provider_pool_prune_probe")
+            .fetch_one(storage.pool())
+            .await?;
+        assert_eq!(
+            calls, 0,
+            "the first table's trigger mutation must also roll back"
+        );
+        for (provider, window, _) in series {
+            let actual = storage
+                .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                .await?;
+            let expected = records
+                .iter()
+                .filter(|record| record.provider == provider)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+        sqlx::raw_sql(
+            "DROP TRIGGER reject_pool_delete ON pool_subscription_quota_history_v1;
+             DROP TRIGGER reject_pool_delete ON pool_subscription_quota_history_v2;",
+        )
+        .execute(storage.pool())
+        .await?;
+        assert_eq!(storage.prune_pool_quota_history_before(100, 2).await?, 2);
+        for (provider, window, _) in series {
+            assert_eq!(
+                storage
+                    .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                    .await?,
+                vec![provider_pool_record(provider, window, 100)],
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
 }

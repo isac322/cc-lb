@@ -120,15 +120,125 @@ async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
     .await?;
     sqlx::query(
         "INSERT INTO pool_subscription_quota_history_v1 (
+            provider, snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+            capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+            stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+            header_contributing_upstreams, api_contributing_upstreams,
+            max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+        ) VALUES ('gemini', 2, 'gemini_5h', 0.2, 0.2, 1, 1, 1, 0, 0, 0, 0, 1, 2, 2, 1)",
+    )
+    .execute(storage.pool())
+    .await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(storage.pool())
+        .await?;
+    assert_eq!(integrity, "ok");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<(), Box<dyn Error>>
+{
+    use cc_lb_storage_api::{PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, Provider};
+
+    let dir = tempfile::tempdir()?;
+    let url = format!(
+        "sqlite://{}",
+        dir.path().join("pool-provider.sqlite").display()
+    );
+    let options = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let mut connection = SqliteConnection::connect_with(&options).await?;
+    let migrator = Migrator::new(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations"
+    )))
+    .await?;
+    migrator
+        .run_direct(Some(119), &mut connection, false)
+        .await?;
+    sqlx::query(
+        "INSERT INTO pool_subscription_quota_history_v1 (
             snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
             capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
             stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
             header_contributing_upstreams, api_contributing_upstreams,
             max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-        ) VALUES (2, 'gemini_5h', 0.2, 0.2, 1, 1, 1, 0, 0, 0, 0, 1, 2, 2, 1)",
+        ) VALUES (10, '5h', 0.3, 1.2, 4, 7, 3, 2, 1, 1, 1, 2, 9000, 11000, 7),
+                 (20, '7d', NULL, 1.2, 4, 7, 3, 2, 1, 1, 1, 2, 9000, 11000, 7)",
     )
-    .execute(storage.pool())
+    .execute(&mut connection)
     .await?;
+    connection.close().await?;
+    let storage = open_sqlite(&url, Arc::new(SystemClock)).await?;
+    storage.initialize().await?;
+    storage.initialize().await?;
+    let expected = PoolQuotaSnapshotRecord {
+        provider: Provider::Anthropic,
+        snapshot_at_unix_secs: 10,
+        window: SubscriptionQuotaWindow::FiveHour,
+        utilization: Some(0.3),
+        weighted_utilization_sum: 1.2,
+        capacity_ratio_sum: 4.0,
+        eligible_upstreams: 7,
+        contributing_upstreams: 3,
+        stale_upstreams: 2,
+        missing_observation_upstreams: 1,
+        missing_metadata_upstreams: 1,
+        header_contributing_upstreams: 1,
+        api_contributing_upstreams: 2,
+        max_observed_at_unix_millis: Some(9000),
+        computed_at_unix_millis: 11000,
+        policy_version: 7,
+    };
+    let windows = [
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaWindow::SevenDay,
+    ];
+    let legacy = storage
+        .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+        .await?;
+    assert_eq!(
+        legacy,
+        vec![
+            expected.clone(),
+            PoolQuotaSnapshotRecord {
+                snapshot_at_unix_secs: 20,
+                window: SubscriptionQuotaWindow::SevenDay,
+                utilization: None,
+                ..expected.clone()
+            },
+        ]
+    );
+    for provider in [Provider::Openai, Provider::Gemini] {
+        assert!(
+            storage
+                .list_latest_pool_quota_snapshots(provider, &windows)
+                .await?
+                .is_empty()
+        );
+    }
+    storage
+        .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
+            provider: Provider::Openai,
+            utilization: Some(0.8),
+            ..expected
+        }])
+        .await?;
+    assert_eq!(
+        storage
+            .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+            .await?,
+        legacy
+    );
+    let index_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_index_info('pool_subscription_quota_history_v1_window_time_idx') ORDER BY seqno",
+    ).fetch_all(storage.pool()).await?;
+    assert_eq!(
+        index_columns,
+        vec!["provider", "quota_window", "snapshot_at_unix_secs"]
+    );
     let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(storage.pool())
         .await?;
