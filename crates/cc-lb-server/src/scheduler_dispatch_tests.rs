@@ -4067,3 +4067,199 @@ async fn keepalive_signing_delay_rechecks_deadline_before_http_and_refunds_unsen
         }
     }
 }
+
+#[tokio::test]
+async fn keepalive_bulkhead_admission_rechecks_deadline_and_preserves_started_http_accounting() {
+    use cc_lb_engine::cache_keepalive::AnthropicKeepaliveDispatcher;
+    use cc_lb_engine::{
+        BreakerRegistry, BreakerRuntimeConfig, BreakerState, CircuitBreakerDispatch,
+    };
+    use cc_lb_engine::{BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig};
+    use tokio::sync::Notify;
+
+    for (admission_secs, expected_calls, breaker_open) in
+        [(9, 1, false), (10, 0, false), (11, 0, false), (9, 0, true)]
+    {
+        let fixture = Fixture::new().await;
+        fixture.http.return_cache_hit_usage(100, 0, 10);
+        let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+        let mut request = fixture.enqueue_request();
+        request.accounting_key_id = Some(key_id.clone());
+        request.params.max_total_duration_secs = 10;
+        fixture
+            .enqueuer(pusher.clone())
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue");
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load")
+            .expect("session");
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(
+            record.first_scheduled_at_unix_secs,
+        ));
+        let registry = Arc::new(BulkheadRegistry::new());
+        let breakers = Arc::new(BreakerRegistry::new());
+        let config = BulkheadRuntimeConfig {
+            max_conns_per_upstream: 1,
+            semaphore_permits: 1,
+            acquire_timeout: Duration::from_secs(10),
+        };
+        let upstream = "deadline-upstream";
+        if breaker_open {
+            let breaker =
+                breakers.breaker(upstream, BreakerRuntimeConfig::default(), clock.clone());
+            breaker.state.store(Arc::new(BreakerState::Open));
+            breaker.last_open_ts.store(
+                record.first_scheduled_at_unix_secs,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        let inner = Arc::new(CircuitBreakerDispatch::new(
+            fixture.http.clone(),
+            breakers.clone(),
+            BreakerRuntimeConfig::default(),
+            Arc::new(move |_| upstream.to_owned()),
+            clock.clone(),
+        ));
+        let bulkhead = registry.bulkhead_with_dispatcher(upstream, config, inner);
+        let occupied = bulkhead.acquire_owned().await.expect("saturate bulkhead");
+        let entered = Arc::new(Notify::new());
+        let entered_for_name = entered.clone();
+        let http = Arc::new(BulkheadDispatch::with_dispatcher_factory(
+            registry,
+            config,
+            Arc::new(move |_| {
+                entered_for_name.notify_one();
+                upstream.to_owned()
+            }),
+            Arc::new(|_| panic!("the saturated production bulkhead already exists")),
+        ));
+        let view = fixture.dynamic_view();
+        let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
+            view.clone(),
+            fixture.storage.clone(),
+            http,
+            clock.clone(),
+        ));
+        let mut dispatch = fixture.dispatch_with_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            limit_engine.clone(),
+            dispatcher,
+        );
+        dispatch.clock = clock.clone();
+        // A request admitted before the deadline may complete after it. The
+        // send gate must never turn that paid response into an unsent refund.
+        let after_http_started = clock.clone();
+        fixture
+            .http
+            .run_on_next_dispatch(Arc::new(move || after_http_started.advance_secs(20)));
+        let job = fixture.pending_keepalive_job(1).await;
+        let pending = tokio::spawn(async move { dispatch.dispatch_cache_keepalive(job).await });
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .expect("entered bulkhead");
+        assert_eq!(
+            bulkhead.active(),
+            1,
+            "only the occupying request has capacity"
+        );
+        assert!(fixture.http.requests.lock().expect("HTTP calls").is_empty());
+        clock.advance_secs(admission_secs);
+        drop(occupied);
+        assert!(matches!(
+            pending
+                .await
+                .expect("dispatch task")
+                .expect("dispatch result"),
+            JobOutcome::Done
+        ));
+        assert_eq!(
+            fixture.http.requests.lock().expect("HTTP calls").len(),
+            expected_calls,
+            "capacity acquired at {admission_secs}s"
+        );
+        assert_eq!(bulkhead.active(), 0, "admission permits are released");
+        let terminal = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load")
+            .expect("session");
+        let expected_reason = if breaker_open {
+            CacheKeepaliveTerminalReason::DispatchError
+        } else {
+            CacheKeepaliveTerminalReason::MaxDuration
+        };
+        assert_eq!(terminal.terminal_reason, Some(expected_reason));
+        assert_eq!(request_event_count(&fixture).await, expected_calls as i64);
+        let turns = cc_lb_storage_api::CacheKeepaliveSessionReadStore::list_cache_keepalive_turns(
+            fixture.storage.as_ref(),
+            "principal",
+            "session-hash",
+        )
+        .await
+        .expect("turns");
+        assert_eq!(turns.len(), expected_calls);
+        if breaker_open {
+            assert_eq!(
+                **breakers
+                    .get(upstream)
+                    .expect("open breaker retained")
+                    .state
+                    .load(),
+                BreakerState::Open
+            );
+        } else if expected_calls == 0 {
+            assert!(
+                breakers.get(upstream).is_none(),
+                "unsent expiry must not trip the circuit breaker"
+            );
+        } else {
+            assert_eq!(
+                **breakers
+                    .get(upstream)
+                    .expect("breaker is not bypassed")
+                    .state
+                    .load(),
+                BreakerState::Closed
+            );
+        }
+        let key = KeyStore::new(fixture.storage.clone())
+            .get("principal", &key_id)
+            .await
+            .expect("key lookup")
+            .expect("key");
+        let current = view.load();
+        let remaining = if expected_calls == 0 { 4_000 } else { 3_900 };
+        let verifier = limit_engine
+            .reserve(
+                current.principal_view.as_ref(),
+                &key,
+                "principal",
+                "claude-test",
+                Some(0),
+                remaining,
+                None,
+            )
+            .expect("unsent attempts refund; HTTP started before expiry settles actual usage");
+        assert!(
+            limit_engine
+                .reserve(
+                    current.principal_view.as_ref(),
+                    &key,
+                    "principal",
+                    "claude-test",
+                    Some(0),
+                    1,
+                    None
+                )
+                .is_err()
+        );
+        drop(verifier);
+    }
+}

@@ -22,6 +22,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(test)]
 use tokio::time::Instant;
 
+use crate::attempt_rail::{DispatchBeforeError, DispatchDeadline};
 use crate::dns_cache::{CachingDnsConnector, DnsCacheError, DnsResolverConfig};
 use crate::instrumented_connector::InstrumentedHttpsConnector;
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
@@ -97,6 +98,24 @@ impl Bulkhead {
             .dispatch(signed)
             .await
             .map_err(ExecuteError::Dispatch)
+    }
+
+    /// Preserves the send deadline across the capacity wait without timing out
+    /// HTTP once it starts.
+    pub async fn execute_before(
+        &self,
+        signed: SignedRequest,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        let wait_start = Instant::now();
+        let _guard = self.acquire().await.map_err(|source| match source {
+            BulkheadError::QueueFull { retry_after } => {
+                DispatchBeforeError::Dispatch(DispatchError::BulkheadFull { retry_after })
+            }
+        })?;
+        crate::request_timing::record_bulkhead_wait(wait_start.elapsed());
+        deadline.check()?;
+        self.client.dispatch_before(signed, deadline).await
     }
 
     pub async fn acquire(&self) -> Result<BulkheadGuard<'_>, BulkheadError> {
@@ -270,23 +289,36 @@ impl BulkheadDispatch {
             dispatcher_factory,
         }
     }
+
+    fn bulkhead_for(&self, request: &SignedRequest) -> Arc<Bulkhead> {
+        let upstream_name = (self.upstream_name)(request);
+        let config = self.config;
+        let dispatcher_factory = Arc::clone(&self.dispatcher_factory);
+        self.registry
+            .bulkhead_with_factory(upstream_name, config, || {
+                dispatcher_factory(config.max_conns_per_upstream as usize)
+            })
+    }
 }
 
 #[async_trait]
 impl UpstreamDispatch for BulkheadDispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        let upstream_name = (self.upstream_name)(&request);
-        let config = self.config;
-        let dispatcher_factory = Arc::clone(&self.dispatcher_factory);
-        let bulkhead = self
-            .registry
-            .bulkhead_with_factory(upstream_name, config, || {
-                dispatcher_factory(config.max_conns_per_upstream as usize)
-            });
+        let bulkhead = self.bulkhead_for(&request);
         bulkhead
             .execute(request)
             .await
             .map_err(dispatch_error_from_execute)
+    }
+
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        self.bulkhead_for(&request)
+            .execute_before(request, deadline)
+            .await
     }
 }
 
@@ -297,6 +329,14 @@ impl UpstreamDispatch for Bulkhead {
             .await
             .map_err(dispatch_error_from_execute)
     }
+
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        self.execute_before(request, deadline).await
+    }
 }
 
 #[async_trait]
@@ -305,6 +345,14 @@ impl UpstreamDispatch for Arc<Bulkhead> {
         self.execute(request)
             .await
             .map_err(dispatch_error_from_execute)
+    }
+
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        self.execute_before(request, deadline).await
     }
 }
 

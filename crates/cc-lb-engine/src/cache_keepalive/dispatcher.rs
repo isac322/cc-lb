@@ -22,7 +22,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
-use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
+use crate::attempt_rail::{
+    AttemptIntent, DispatchBeforeError, DispatchDeadline, ResponseAccountingGuard, Signed,
+};
 use crate::lifecycle::{
     PromptCacheUsage, UpstreamDispatch, decode_prompt_cache_observations_pure,
     prompt_cache_observation_context, prompt_cache_policy_for_upstream,
@@ -106,11 +108,11 @@ impl AnthropicKeepaliveDispatcher {
     async fn dispatch_signed(
         &self,
         signed: Signed<'_>,
-    ) -> Result<(StatusCode, http::HeaderMap, Bytes, Duration), String> {
+        deadline: &DispatchDeadline,
+    ) -> Result<(StatusCode, http::HeaderMap, Bytes, Duration), DispatchBeforeError> {
         let response = signed
-            .dispatch(self.http_client.as_ref())
-            .await
-            .map_err(|source| source.to_string())?;
+            .dispatch_before(self.http_client.as_ref(), deadline)
+            .await?;
         let cache_anchor_at = Instant::now();
         let status = response.status();
         let headers = response.headers().clone();
@@ -118,7 +120,11 @@ impl AnthropicKeepaliveDispatcher {
             .into_body()
             .collect()
             .await
-            .map_err(|source| source.to_string())?
+            .map_err(|source| {
+                DispatchBeforeError::Dispatch(crate::DispatchError::Transport {
+                    source: Box::new(source),
+                })
+            })?
             .to_bytes();
         Ok((status, headers, body, cache_anchor_at.elapsed()))
     }
@@ -170,8 +176,16 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             return DispatchOutcome::MaxDuration;
         }
         let dispatch_start_ms = unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
+        let send_deadline = DispatchDeadline::new(self.clock.clone(), deadline);
         let dispatch_result =
-            tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await;
+            match tokio::time::timeout(self.timeout, self.dispatch_signed(signed, &send_deadline))
+                .await
+            {
+                Ok(Err(DispatchBeforeError::DeadlineElapsed)) => {
+                    return DispatchOutcome::MaxDuration;
+                }
+                result => result,
+            };
         let accounting_guard = reserved.into_response_accounting_guard();
 
         match dispatch_result {
@@ -201,7 +215,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(Ok((status, _headers, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
-            Ok(Err(source)) => DispatchOutcome::Error(source),
+            Ok(Err(source)) => DispatchOutcome::Error(source.to_string()),
             Err(_elapsed) => DispatchOutcome::Error(format!(
                 "renewal timed out after {}s",
                 self.timeout.as_secs()

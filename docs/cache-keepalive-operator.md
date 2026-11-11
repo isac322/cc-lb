@@ -121,7 +121,10 @@ reset `refresh_count` and `first_scheduled_at`.
 Both caps are checked before provider dispatch. A renewal scheduled at or after
 `first_scheduled_at + max_total_duration_secs` is terminal `max_duration`
 without an HTTP request. A late worker also stops when the current time reaches
-that deadline. The post-response cap checks remain in force.
+that deadline. The send gate stays attached through signing and bulkhead
+admission, and is checked again after capacity is acquired without bypassing
+the circuit breaker. Once HTTP starts, crossing the cap does not cancel the
+request or discard its paid usage. The post-response cap checks remain in force.
 
 Anthropic rescheduling requires positive cache reads and zero cache creation.
 A renewal that reads one prefix but rebuilds another is terminal `cache_miss`,

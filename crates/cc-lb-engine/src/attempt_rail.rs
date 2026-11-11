@@ -2,12 +2,46 @@
 
 use std::marker::PhantomData;
 
+use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_upstream::{ShapedRequest, SignedRequest, Signer, SignerError, sign_request};
 use http::{HeaderMap, Method, Response};
 use url::Url;
 
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 use cc_lb_control::api_keys::limit_engine::Reservation;
+
+/// An unsent request's absolute send deadline, propagated through admission.
+pub struct DispatchDeadline {
+    clock: ClockHandle,
+    unix_secs: u64,
+}
+
+impl DispatchDeadline {
+    /// Uses the same injected clock as the renewal scheduler.
+    pub fn new(clock: ClockHandle, unix_secs: u64) -> Self {
+        Self { clock, unix_secs }
+    }
+
+    /// Checks only whether HTTP may start; never cancels an in-flight request.
+    pub fn check(&self) -> Result<(), DispatchBeforeError> {
+        if unix_secs(self.clock.now()) >= self.unix_secs {
+            Err(DispatchBeforeError::DeadlineElapsed)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Keeps an unsent deadline expiry distinct from a provider/transport failure.
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchBeforeError {
+    /// HTTP has not started and the reservation remains refundable.
+    #[error("upstream dispatch deadline elapsed before HTTP started")]
+    DeadlineElapsed,
+    /// The normal dispatch path failed.
+    #[error(transparent)]
+    Dispatch(#[from] DispatchError),
+}
 
 /// Input to a proxy attempt before its reservation becomes lifecycle-owned.
 pub struct AttemptIntent {
@@ -112,6 +146,17 @@ impl Signed<'_> {
         dispatcher: &dyn UpstreamDispatch,
     ) -> Result<Response<Body>, DispatchError> {
         dispatcher.dispatch(self.signed_request).await
+    }
+
+    /// Propagates the send gate through middleware to the final HTTP admission.
+    pub async fn dispatch_before(
+        self,
+        dispatcher: &dyn UpstreamDispatch,
+        deadline: &DispatchDeadline,
+    ) -> Result<Response<Body>, DispatchBeforeError> {
+        dispatcher
+            .dispatch_before(self.signed_request, deadline)
+            .await
     }
 }
 
