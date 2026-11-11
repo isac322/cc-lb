@@ -33,6 +33,7 @@ export interface ProviderPlanMetadata {
 function readablePlan(value: string): string {
   return value
     .replace(PLAN_SEPARATORS, ' ')
+    .trim()
     .replace(WORD_START, (letter) => letter.toUpperCase());
 }
 

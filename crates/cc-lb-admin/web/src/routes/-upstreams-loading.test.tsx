@@ -776,6 +776,7 @@ describe('/upstreams provider account metadata', () => {
       },
     ],
     ['openai_oauth', 'ChatGPT Pro (More)', { plan: 'pro' }],
+    ['openai_oauth', 'ChatGPT Proto', { plan: '__proto__' }],
     [
       'gemini_oauth',
       'Google AI Ultra',
