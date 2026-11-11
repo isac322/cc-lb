@@ -6199,7 +6199,8 @@ impl Lifecycle {
                 original_body: ctx.body_bytes.clone(),
                 downstream_headers: ctx.downstream_headers.clone(),
                 request_dispatched_at: keepalive_request_dispatched_at
-                    .map(|(at, _)| at)
+                    .as_ref()
+                    .map(|(at, _)| *at)
                     .unwrap_or(dispatch_started),
                 request_start_order: keepalive_request_dispatched_at.and_then(|(_, order)| order),
             }

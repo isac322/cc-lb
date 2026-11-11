@@ -13,12 +13,20 @@ use cc_lb_engine::cache_keepalive::{
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
-use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+use cc_lb_storage_api::{CacheKeepaliveCompletionTicket, CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use serde_json::json;
 
 use common::{TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle};
+
+fn completion_ticket(sequence: u64) -> CacheKeepaliveCompletionTicket {
+    CacheKeepaliveCompletionTicket {
+        epoch: uuid::Uuid::from_u128(1),
+        sequence,
+        valid_until_unix_secs: u64::MAX,
+    }
+}
 
 #[tokio::test]
 async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_sse() {
@@ -316,8 +324,8 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
         async fn observe_session_generation(
             &self,
             _session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
-            Ok(Some(42))
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
+            Ok(Some(completion_ticket(42)))
         }
     }
 
@@ -370,7 +378,7 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
         assert!(
             completion_cancellations
                 .iter()
-                .all(|request| request.expected_generation == Some(42))
+                .all(|request| request.expected_generation == Some(completion_ticket(42)))
         );
     }
 
@@ -388,14 +396,14 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
 
     let enqueued = enqueuer.enqueued.lock().expect("enqueued lock");
     assert_eq!(enqueued.len(), 2);
-    assert_eq!(enqueued[0].expected_generation, Some(42));
-    assert_eq!(enqueued[1].expected_generation, Some(42));
+    assert_eq!(enqueued[0].expected_generation, Some(completion_ticket(42)));
+    assert_eq!(enqueued[1].expected_generation, Some(completion_ticket(42)));
 }
 
 #[tokio::test]
 async fn compaction_fence_retains_unrelated_agent_scope_state() {
     struct ScopedEnqueuer {
-        active: Mutex<HashMap<String, u64>>,
+        active: Mutex<HashMap<String, CacheKeepaliveCompletionTicket>>,
         cancelled: Mutex<Vec<String>>,
     }
 
@@ -407,7 +415,9 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
         ) -> Result<(), CacheKeepaliveEnqueueError> {
             self.active.lock().expect("active sessions lock").insert(
                 request.session_key_hash,
-                request.expected_generation.unwrap_or(1),
+                request
+                    .expected_generation
+                    .unwrap_or_else(|| completion_ticket(1)),
             );
             Ok(())
         }
@@ -437,7 +447,7 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
         async fn observe_session_generation(
             &self,
             session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             Ok(self
                 .active
                 .lock()
@@ -1094,16 +1104,16 @@ async fn cache_keepalive_shared_lifecycle_serializes_buffered_and_streaming_comp
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum KeepaliveOperation {
-    Observe(String, Option<u64>),
-    Enqueue(String, Option<u64>),
-    Cancel(String, Option<u64>, CancelReason),
+    Observe(String, Option<CacheKeepaliveCompletionTicket>),
+    Enqueue(String, Option<CacheKeepaliveCompletionTicket>),
+    Cancel(String, Option<CacheKeepaliveCompletionTicket>, CancelReason),
     NotTracked(String, String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ScopedKeepaliveState {
-    generations: std::collections::BTreeMap<String, u64>,
-    request_owners: std::collections::BTreeMap<String, Option<u64>>,
+    generations: std::collections::BTreeMap<String, CacheKeepaliveCompletionTicket>,
+    request_owners: std::collections::BTreeMap<String, Option<CacheKeepaliveCompletionTicket>>,
     operations: Vec<KeepaliveOperation>,
     next_generation: u64,
 }
@@ -1138,7 +1148,7 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
     async fn observe_session_generation(
         &self,
         key: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("scoped keepalive state");
         let generation = state.generations.get(key).copied();
         state
@@ -1163,7 +1173,7 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
             request.expected_generation,
         ));
         state.next_generation += 1;
-        let generation = state.next_generation;
+        let generation = completion_ticket(state.next_generation);
         state.generations.insert(key, generation);
         self.enqueued.notify_one();
         self.completed.notify_one();
@@ -1465,7 +1475,7 @@ async fn explicit_auxiliary_preserves_all_generation_scopes() {
         before
             .generations
             .values()
-            .copied()
+            .map(|ticket| ticket.sequence)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         5
@@ -1858,7 +1868,8 @@ async fn real_followup_fences_queued_generation_before_pending_ttfb_and_sse() {
             completed
                 .generations
                 .get(key)
-                .is_some_and(|generation| generation > old_generation),
+                .is_some_and(|generation| generation.epoch == old_generation.epoch
+                    && generation.sequence > old_generation.sequence),
             "successful agent completion must establish a fresh generation"
         );
         assert_eq!(
@@ -1889,7 +1900,7 @@ async fn real_dispatch_waits_for_durable_request_cancellation() {
         async fn observe_session_generation(
             &self,
             key: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
             self.inner.observe_session_generation(key).await
         }
 
@@ -1989,7 +2000,8 @@ async fn real_dispatch_waits_for_durable_request_cancellation() {
         after
             .generations
             .get(key)
-            .is_some_and(|generation| generation > old_generation)
+            .is_some_and(|generation| generation.epoch == old_generation.epoch
+                && generation.sequence > old_generation.sequence)
     );
 }
 
@@ -2129,7 +2141,7 @@ impl CacheKeepaliveEnqueuer for BlockingCompletionEnqueuer {
     async fn observe_session_generation(
         &self,
         key: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         self.inner.observe_session_generation(key).await
     }
 
@@ -2206,10 +2218,10 @@ struct RequestOwnerEnqueuer {
 #[derive(Default)]
 struct RequestOwnerState {
     next_ticket: u64,
-    owner: Option<u64>,
+    owner: Option<CacheKeepaliveCompletionTicket>,
     updated_at: u64,
     now: u64,
-    completions: Vec<Option<u64>>,
+    completions: Vec<Option<CacheKeepaliveCompletionTicket>>,
     observations: usize,
 }
 
@@ -2218,11 +2230,11 @@ impl CacheKeepaliveEnqueuer for RequestOwnerEnqueuer {
     async fn observe_session_generation(
         &self,
         _key: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("request owner");
         state.next_ticket += 1;
         state.observations += 1;
-        Ok(Some(state.next_ticket))
+        Ok(Some(completion_ticket(state.next_ticket)))
     }
 
     async fn cancel_cache_keepalive(
@@ -2237,7 +2249,9 @@ impl CacheKeepaliveEnqueuer for RequestOwnerEnqueuer {
             state.completions.push(request.expected_generation);
             // Model the pre-fix monotonic-ticket acceptance rule, so an engine
             // that invents a fresh completion owner visibly mutates B's marker.
-            if request.expected_generation >= state.owner {
+            if request.expected_generation.map(|ticket| ticket.sequence)
+                >= state.owner.map(|ticket| ticket.sequence)
+            {
                 state.owner = None;
                 state.updated_at = state.now;
             }
@@ -2252,7 +2266,9 @@ impl CacheKeepaliveEnqueuer for RequestOwnerEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let mut state = self.state.lock().expect("request owner");
         state.completions.push(request.expected_generation);
-        if request.expected_generation >= state.owner {
+        if request.expected_generation.map(|ticket| ticket.sequence)
+            >= state.owner.map(|ticket| ticket.sequence)
+        {
             state.owner = request.expected_generation;
             state.updated_at = state.now;
         }

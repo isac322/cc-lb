@@ -173,6 +173,17 @@ impl ConformanceBackend for PostgresConformanceBackend {
         Ok(PostgresStorage::new(fixture.pool.clone(), system_clock()))
     }
 
+    async fn open_independent(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                PgConnectOptions::from_str(&fixture.url)?
+                    .options([("search_path", fixture.schema.as_str())]),
+            )
+            .await?;
+        Ok(PostgresStorage::new(pool, system_clock()))
+    }
+
     async fn teardown(&self, _fixture: Self::Fixture) -> anyhow::Result<()> {
         Ok(())
     }
@@ -361,6 +372,14 @@ fn cache_keepalive_request_markers_project_consistently_postgres() {
     run_postgres_scenario(
         "cache_keepalive_request_markers_project_consistently",
         cache_keepalive_session_reads::request_markers_project_consistently,
+    );
+}
+
+#[test]
+fn cache_keepalive_bounded_order_namespaces_postgres() {
+    run_postgres_scenario(
+        "cache_keepalive_bounded_order_namespaces",
+        cache_keepalive_session_reads::bounded_order_namespaces,
     );
 }
 

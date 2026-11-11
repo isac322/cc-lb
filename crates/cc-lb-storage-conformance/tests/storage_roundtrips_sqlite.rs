@@ -249,6 +249,14 @@ fn cache_keepalive_request_markers_project_consistently_sqlite() {
 }
 
 #[test]
+fn cache_keepalive_bounded_order_namespaces_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_bounded_order_namespaces",
+        cache_keepalive_session_reads::bounded_order_namespaces,
+    );
+}
+
+#[test]
 fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
     run_sqlite_scenario(
         "usage_rollup_v2_preserves_upstream_id_across_renames",

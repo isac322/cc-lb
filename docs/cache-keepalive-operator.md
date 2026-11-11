@@ -103,12 +103,56 @@ generation. A final cancellation records its actual completion reason. If the
 real request fails, cc-lb does not resume the old snapshot. Completion-sequence
 fencing prevents an older completion from replacing a newer request.
 
+Ordering metadata is retained only while its session exists or a request-owner
+protection window remains open. Issuance records the last issuance time and
+protection deadline in the existing ticket write. The window is the configured
+upstream total timeout plus one additional timeout as a safety margin.
+Housekeeping may remove orphan metadata after the latest protection deadline.
+Payload and evidence retention remain unchanged.
+
+Each ticket also carries its own deadline and namespace epoch. Expired tickets
+cannot mutate keep-alive state, and a recreated namespace receives a new epoch.
+A delayed callback therefore cannot claim a later owner even if its numeric
+ticket sequence repeats after cleanup.
+Malformed or unrecognized metadata is retained and cannot authorize a leased
+completion; housekeeping does not recycle an identity it cannot validate.
+
+New writers store leased ownership under `keepalive_order_v2:<session>`.
+The old `keepalive_order:<session>` key remains a numeric legacy counter.
+The first allocation in a new namespace reads its legacy issued floor, but
+does not import its applied owner or epoch. New writers never rewrite that
+legacy key; later allocations in an existing v2 namespace ignore legacy changes.
+Housekeeping handles both namespaces with their respective retention rules.
+
+Rolling ownership upgrades are supported from the latest published 2.2.x line
+and current master. A provisional marker temporarily stores its protection
+deadline plus one in raw `first_scheduled_at`, so those versions' ticketed
+replacement fence declines rather than reviving it. New readers use the real
+start in `running_since`; finalization and reactivation restore a real
+first-scheduled anchor. Active renewal-duration limits are unchanged.
+An old enqueue declined by this fence is a no-op, not a failed client request.
+A later old-node cache anchor can resume legacy scheduling after protection
+expires. These comparisons use the existing UTC lease clock; keep pod clocks
+synchronized.
+
+Rolling directly from 2.1.x or older can transiently revive an in-request marker
+during the overlap because those writers use different replacement predicates.
+Drain and stop those old pods before starting new writers, or upgrade to 2.2.x
+first. Normal client requests still succeed, but ignoring this recommendation
+can schedule unnecessary renewals from an older snapshot.
+
+If failover changes a threadless request's fallback cache identity, completion
+retires the original marker with `session_identity_changed` using its original
+owner ticket. The final identity receives a normal fresh completion, never a
+ticket borrowed from the original identity.
+
 The proxy waits for the request-start fence before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
 if the fence cannot be persisted.
 
 Successful real-request cancellations persist a nullable `cancel_reason`:
-`new_request`, `user_turn_detected`, `snapshot_too_large`,
+`new_request`, `user_turn_detected`, `ambiguous_turn`, `retention_recorded`,
+`renewal_not_beneficial`, `session_identity_changed`, `snapshot_too_large`,
 `cached_prefix_too_small`, or `zero_token_renewal_unsupported`. Older rows
 remain null; their display must say only “Cancelled”, without guessing a cause.
 
@@ -303,9 +347,11 @@ An existing snapshot retains the key order of its stored body; an upgrade cannot
 recover ordering already lost by an older writer. A new eligible real request
 captures a fresh snapshot in that request's shaped-body order.
 
-Drain and stop all old workers and request-serving replicas before starting any
-new writer. Old binaries cannot read the new format. Mixed-version operation is
-unsupported; do not downgrade while active sessions contain new-format payloads.
+When crossing an incompatible payload-format boundary, drain and stop old
+workers and request-serving replicas before starting new writers. Binaries
+that cannot read the framed format must not overlap its writers; do not
+downgrade while active sessions contain unsupported payloads. Ownership-only
+rollouts between payload-compatible versions follow the support policy above.
 
 ## Configuration
 

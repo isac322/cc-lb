@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cacheKeepaliveRows } from '../components/principals/cache-keepalive/__fixtures__/cacheKeepaliveFixtures';
 import vocabulary from './__contract__/cache_keepalive_vocabulary.json';
@@ -24,6 +25,9 @@ import {
   cacheKeepaliveSummaryOnlyResponseFixture,
 } from './test-utils/cacheKeepalive-fixtures';
 
+const CANCEL_REASON_PARAGRAPH =
+  /Successful real-request cancellations persist a nullable `cancel_reason`:\s*([\s\S]*?)(?:\n\n|$)/;
+
 describe('Cache keepalive canonical wire vocabulary', () => {
   it('accepts exactly the canonical Rust cancellation reasons', () => {
     expect(CacheKeepaliveCancelReasonSchema.options).toEqual(
@@ -38,6 +42,21 @@ describe('Cache keepalive canonical wire vocabulary', () => {
     expect([...CACHE_KEEPALIVE_STATUS_FILTERS].sort()).toEqual(
       [...vocabulary.status_filters].sort(),
     );
+  });
+
+  it('documents every canonical cancellation reason in the operator reason list', () => {
+    const guide = readFileSync(
+      new URL(
+        '../../../../../docs/cache-keepalive-operator.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    const paragraph = guide.match(CANCEL_REASON_PARAGRAPH)?.[1];
+    expect(paragraph).toBeDefined();
+    for (const reason of vocabulary.cancel_reasons) {
+      expect(paragraph).toContain(`\`${reason}\``);
+    }
   });
 
   it.each(vocabulary.cancel_reasons)(

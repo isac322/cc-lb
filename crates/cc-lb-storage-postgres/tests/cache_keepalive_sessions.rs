@@ -18,6 +18,11 @@ fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
 
+fn order_counters(raw: String) -> (u64, u64) {
+    let meta = cc_lb_storage_api::parse_keepalive_order_meta(Some(&raw)).unwrap();
+    (meta.issued, meta.applied)
+}
+
 #[test]
 fn cache_keepalive_postgres_conformance() {
     let Some(url) = postgres_url() else {
@@ -29,6 +34,242 @@ fn cache_keepalive_postgres_conformance() {
         .expect("tokio runtime")
         .block_on(async move { run_conformance(&url).await })
         .expect("cache keepalive postgres conformance");
+}
+
+#[tokio::test]
+async fn housekeeping_expires_order_metadata_after_request_lifetime() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let key = "bounded-order";
+        storage
+            .allocate_cache_keepalive_completion_ticket(key, 100, 200)
+            .await?;
+        let meta_key = cc_lb_storage_api::cache_keepalive_order_meta_key(key);
+        for cutoff in [100, 200] {
+            storage.purge_cache_keepalive_expired(cutoff).await?;
+            anyhow::ensure!(storage.get_meta_value(&meta_key).await?.is_some());
+        }
+        storage.purge_cache_keepalive_expired(201).await?;
+        anyhow::ensure!(
+            storage.get_meta_value(&meta_key).await?.is_none(),
+            "orphan order metadata must expire after its request protection window"
+        );
+        Ok(())
+    }
+    .await;
+    fixture.drop_schema().await?;
+    result
+}
+
+#[tokio::test]
+async fn housekeeping_retains_protected_order_counters_and_fails_closed_at_overflow() -> Result<()>
+{
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    for stale_pending in [false, true] {
+        let key = format!("retained-order-{stale_pending}");
+        let request = replace_request(&key, b"expiring-payload", 100);
+        storage.replace_from_real_request(&request).await?;
+        assert_eq!(
+            storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?
+                .sequence,
+            1
+        );
+        if stale_pending {
+            assert_eq!(storage.purge_cache_keepalive_stale_pending(101).await?, 1);
+        } else {
+            assert_eq!(storage.purge_cache_keepalive_expired(401).await?, 1);
+        }
+        assert!(storage.get_cache_keepalive_session(&key).await?.is_none());
+        assert_eq!(storage.purge_cache_keepalive_expired(1_000_000).await?, 0);
+        assert_eq!(
+            storage
+                .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(&key))
+                .await?
+                .map(order_counters),
+            Some((1, 0))
+        );
+        assert_eq!(
+            storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?
+                .sequence,
+            2
+        );
+    }
+    let key = "retained-order-overflow";
+    let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(key);
+    let exhausted = format!("v2:10000000:100:{}:{}:7", Uuid::from_u128(7), u64::MAX);
+    storage.put_meta_value(&order_key, &exhausted).await?;
+    assert_eq!(storage.purge_cache_keepalive_expired(1_000_000).await?, 0);
+    let allocation = storage
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
+        .await;
+    let retained = storage.get_meta_value(&order_key).await?;
+    fixture.drop_schema().await?;
+    assert!(matches!(
+        allocation,
+        Err(cc_lb_storage_api::StorageError::Fatal { message })
+            if message == "cache keepalive completion ticket overflow"
+    ));
+    assert_eq!(retained, Some(exhausted));
+    Ok(())
+}
+
+#[tokio::test]
+async fn housekeeping_never_recycles_in_flight_request_owners() -> Result<()> {
+    // QA: absent-row purge between processes, both completion kinds, an untouched
+    // B-owner control, and unchanged marker/order metadata after a stale completion.
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let other_pool = schema_pool(&url, &fixture.schema).await?;
+    let other = PostgresStorage::new(other_pool.clone(), Arc::new(SystemClock));
+    let mut failures = Vec::new();
+    for replacement in [false, true] {
+        for stale_attempt in [false, true] {
+            let key = format!("purge-owner-{replacement}-{stale_attempt}");
+            let failed_start = storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?;
+            assert_eq!(failed_start.sequence, 1);
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(failed_start), 100, 900)
+                    .await?
+            );
+            let ticket_a = storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?;
+            assert_eq!(ticket_a.sequence, 2);
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket_a), 101, 901)
+                    .await?
+            );
+            assert_eq!(other.purge_cache_keepalive_expired(102).await?, 0);
+            let ticket_c = other
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?;
+            let mut completion = replace_request(&key, b"c-prefix", 103);
+            let original = other
+                .replace_from_real_request_fenced(&completion, Some(ticket_c))
+                .await?
+                .unwrap();
+            let ticket_b = other
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await?;
+            assert!(
+                other
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), 104, 904)
+                    .await?
+            );
+            let marker = other.get_cache_keepalive_session(&key).await?.unwrap();
+            let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(&key);
+            let order_before = other.get_meta_value(&order_key).await?;
+            completion.cache_anchor_at_unix_secs = 110;
+            completion.now_unix_secs = 111;
+            completion.encrypted_payload = b"late-a".to_vec();
+            if stale_attempt {
+                let accepted = if replacement {
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(ticket_a))
+                        .await?
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(ticket_a),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("request_failed"),
+                            111,
+                        )
+                        .await?
+                };
+                if accepted
+                    || storage.get_cache_keepalive_session(&key).await?.as_ref() != Some(&marker)
+                    || storage.get_meta_value(&order_key).await? != order_before
+                {
+                    failures.push(format!(
+                        "replacement={replacement}: late A2 resolved B's marker; C={ticket_c:?}, B={ticket_b:?}"
+                    ));
+                    continue;
+                }
+            }
+            // Healthy B completes using its original start ticket, not a new one.
+            completion.encrypted_payload = b"healthy-b".to_vec();
+            let accepted = if replacement {
+                other
+                    .replace_from_real_request_fenced(&completion, Some(ticket_b))
+                    .await?
+                    .is_some()
+            } else {
+                other
+                    .cancel_cache_keepalive_fenced(
+                        &key,
+                        Some(ticket_b),
+                        110,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                        Some("user_turn_detected"),
+                        111,
+                    )
+                    .await?
+            };
+            assert!(
+                accepted,
+                "B's original start ticket must remain authoritative"
+            );
+            let resolved = other.get_cache_keepalive_session(&key).await?.unwrap();
+            assert_eq!(resolved.running_since_unix_secs, None);
+            assert_eq!(
+                resolved.generation,
+                original.generation + u64::from(replacement)
+            );
+            assert_eq!(
+                resolved.status,
+                if replacement {
+                    CacheKeepaliveSessionStatus::Active
+                } else {
+                    CacheKeepaliveSessionStatus::Terminal
+                }
+            );
+            assert_eq!(
+                resolved.encrypted_payload,
+                if replacement {
+                    b"healthy-b".to_vec()
+                } else {
+                    Vec::new()
+                }
+            );
+            if ticket_c.sequence != 3 || ticket_b.sequence != 4 {
+                failures.push(format!(
+                    "replacement={replacement}, stale_attempt={stale_attempt}: ordering namespace recycled; C={ticket_c:?}, B={ticket_b:?}"
+                ));
+            }
+        }
+    }
+    other_pool.close().await;
+    fixture.drop_schema().await?;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
 }
 
 #[tokio::test]
@@ -48,7 +289,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
                 let seed = replace_request(&key, b"prefix", 90);
                 let original = storage.replace_from_real_request(&seed).await?;
                 let ticket_a = storage
-                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                     .await?;
                 assert!(
                     storage
@@ -56,7 +297,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
                         .await?
                 );
                 let ticket_b = storage
-                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                     .await?;
                 assert!(
                     storage
@@ -68,7 +309,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
                 assert_eq!(marker.running_since_unix_secs, Some(start_b));
                 let completion_ticket = if fresh_completion_ticket {
                     storage
-                        .allocate_cache_keepalive_completion_ticket(&key)
+                        .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                         .await?
                 } else {
                     ticket_a
@@ -155,7 +396,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
             storage.replace_from_real_request(&request).await?;
         }
         let ticket = storage
-            .allocate_cache_keepalive_completion_ticket(&key)
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
             .await?;
         if absent {
             assert!(
@@ -193,7 +434,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
             completed
         );
         let cancel_ticket = storage
-            .allocate_cache_keepalive_completion_ticket(&key)
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
             .await?;
         assert!(
             storage
@@ -222,7 +463,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
     }
     let first = replace_request("competing-first-session", b"first", 110);
     let older = storage
-        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash, 100, 10_000_000)
         .await?;
     assert!(
         !storage
@@ -230,7 +471,7 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
             .await?
     );
     let newer = storage
-        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash, 100, 10_000_000)
         .await?;
     assert!(
         !storage
@@ -1031,7 +1272,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     let ticketed_first_cycle_id = Uuid::from_u128(21);
     let ticketed_second_cycle_id = Uuid::from_u128(22);
     let ticketed_first_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(ticketed_key)
+        .allocate_cache_keepalive_completion_ticket(ticketed_key, 100, 10_000_000)
         .await?;
     let mut ticketed_first_request = replace_request(ticketed_key, b"fenced-ticketed-first", 100);
     ticketed_first_request.cycle_id = ticketed_first_cycle_id;
@@ -1072,12 +1313,16 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
                 ticketed_key
             ))
-            .await?,
-        Some(format!("{ticketed_first_ticket}:{ticketed_first_ticket}"))
+            .await?
+            .map(order_counters),
+        Some((
+            ticketed_first_ticket.sequence,
+            ticketed_first_ticket.sequence
+        ))
     );
 
     let ticketed_replacement_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(ticketed_key)
+        .allocate_cache_keepalive_completion_ticket(ticketed_key, 100, 10_000_000)
         .await?;
     let mut ticketed_stale_request = replace_request(ticketed_key, b"fenced-ticketed-stale", 99);
     ticketed_stale_request.cycle_id = ticketed_second_cycle_id;
@@ -1102,10 +1347,11 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
                 ticketed_key
             ))
-            .await?,
-        Some(format!(
-            "{ticketed_replacement_ticket}:{}",
-            ticketed_first_ticket
+            .await?
+            .map(order_counters),
+        Some((
+            ticketed_replacement_ticket.sequence,
+            ticketed_first_ticket.sequence
         ))
     );
 
@@ -1139,9 +1385,11 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
                 ticketed_key
             ))
-            .await?,
-        Some(format!(
-            "{ticketed_replacement_ticket}:{ticketed_replacement_ticket}"
+            .await?
+            .map(order_counters),
+        Some((
+            ticketed_replacement_ticket.sequence,
+            ticketed_replacement_ticket.sequence
         ))
     );
 
@@ -2173,7 +2421,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
         .replace_from_real_request(&replace_request(key, b"original-prefix", 100))
         .await?;
     let replacement_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
@@ -2200,7 +2448,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(active.generation, refreshed.generation + 1);
 
     let cancel_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
     assert!(
         !storage
@@ -2217,8 +2465,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("2:1".to_owned())
+            .await?
+            .map(order_counters),
+        Some((2, 1))
     );
     assert_eq!(
         storage
@@ -2247,7 +2496,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(terminal.cache_anchor_at_unix_secs, 370);
 
     let newer_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
     assert!(
         storage
@@ -2261,8 +2510,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("3:2".to_owned())
+            .await?
+            .map(order_counters),
+        Some((3, 2))
     );
     let replacement = storage
         .replace_from_real_request_fenced(
@@ -2278,8 +2528,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("3:3".to_owned())
+            .await?
+            .map(order_counters),
+        Some((3, 3))
     );
     Ok(())
 }
@@ -2292,9 +2543,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
         .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
         .await?;
     let ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
-    assert_eq!(ticket, 1);
+    assert_eq!(ticket.sequence, 1);
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
             session_key_hash: key.to_owned(),
@@ -2333,8 +2584,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("1:1".to_owned())
+            .await?
+            .map(order_counters),
+        Some((1, 1))
     );
     assert!(
         !storage
@@ -2359,7 +2611,7 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
         .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
         .await?;
     let cancelled_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
     assert!(
         storage
@@ -2374,9 +2626,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
             .await?
     );
     let newer_ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
-    assert_eq!(newer_ticket, cancelled_ticket + 1);
+    assert_eq!(newer_ticket.sequence, cancelled_ticket.sequence + 1);
     let active = storage
         .replace_from_real_request_fenced(
             &replace_request(key, b"post-compaction-prefix", 102),
@@ -2391,8 +2643,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("2:2".to_owned())
+            .await?
+            .map(order_counters),
+        Some((2, 2))
     );
     assert!(
         storage
@@ -2421,7 +2674,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
         .replace_from_real_request(&replace_request(key, b"newer-active-prefix", 371))
         .await?;
     let ticket = storage
-        .allocate_cache_keepalive_completion_ticket(key)
+        .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
     for expected_ticket in [None, Some(ticket)] {
         assert!(
@@ -2456,8 +2709,9 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
     assert_eq!(
         storage
             .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
-            .await?,
-        Some("1:0".to_owned())
+            .await?
+            .map(order_counters),
+        Some((1, 0))
     );
     assert!(
         storage

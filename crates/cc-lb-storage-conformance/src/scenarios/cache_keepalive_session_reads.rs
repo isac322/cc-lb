@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveReplaceRequest,
     CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
@@ -384,6 +384,7 @@ where
             ("ambiguous_turn", "Cancelled: the agent turn could not be determined"),
             ("retention_recorded", "Retention recorded without renewal"),
             ("renewal_not_beneficial", "Refresh expected value is unknown or non-positive"),
+            ("session_identity_changed", "Cancelled: the request completed under a different cache identity"),
         ].into_iter().enumerate() {
             let now = 1_100 + index as u64;
             storage.replace_from_real_request(&request("final-reason", now)).await?;
@@ -463,6 +464,520 @@ where
         ensure!(fresh_summary.unlisted_spent_micros == expired_summary.unlisted_spent_micros);
         Ok(())
     }).await
+}
+
+/// Checks bounded ordering through same-adapter and independent connections to
+/// one existing conformance fixture, with teardown even on assertion failure.
+pub async fn bounded_order_namespaces<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let fixture = backend.create_fixture().await?;
+    let result = async {
+        let storage = backend.open(&fixture).await?;
+        let independent = backend.open_independent(&fixture).await?;
+        let seed = CacheKeepaliveReplaceRequest {
+            session_key_hash: "lease-seed".to_owned(),
+            principal_id: TARGET_PRINCIPAL.to_owned(),
+            accounting_key_id: None,
+            upstream_id: Uuid::from_u128(11),
+            cycle_id: Uuid::from_u128(1),
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 100,
+            run_at_unix_secs: 370,
+            expires_at_unix_secs: 400,
+            encrypted_payload: vec![1],
+            display_reason: "agent-in-turn".to_owned(),
+            config_snapshot: CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: 100,
+        };
+        check_bounded_order_namespaces(&storage, &independent, &seed).await
+    }
+    .await;
+    let teardown = backend.teardown(fixture).await;
+    result?;
+    teardown
+}
+
+async fn check_bounded_order_namespaces<S>(
+    storage: &S,
+    independent: &S,
+    seed: &CacheKeepaliveReplaceRequest,
+) -> Result<()>
+where
+    S: CacheKeepaliveSessionStore + cc_lb_storage_api::MetaStore,
+{
+    use cc_lb_storage_api::{
+        CacheKeepaliveCompletionTicket, cache_keepalive_legacy_order_meta_key,
+        cache_keepalive_order_meta_key, parse_keepalive_order_meta,
+    };
+
+    // Initial v2 allocation imports issuance only, including an incorrectly
+    // leased value at the old key. Epoch, applied owner and lease stay isolated.
+    for (index, legacy) in [
+        "41:17",
+        "v2:9999:50:00000000-0000-0000-0000-000000000007:41:17",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("bounded-legacy-floor-{index}");
+        let legacy_key = cache_keepalive_legacy_order_meta_key(&key);
+        let order_key = cache_keepalive_order_meta_key(&key);
+        storage.put_meta_value(&legacy_key, legacy).await?;
+        let ticket = independent
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 800)
+            .await?;
+        ensure!(ticket.sequence == 42 && ticket.epoch != Uuid::from_u128(7));
+        let raw = storage.get_meta_value(&order_key).await?;
+        let meta = parse_keepalive_order_meta(raw.as_deref())?;
+        let lease = meta.lease.context("isolated v2 lease")?;
+        ensure!(meta.applied == 0 && lease.epoch == ticket.epoch);
+        ensure!(lease.last_issued_at_unix_secs == 100 && lease.protected_until_unix_secs == 800);
+        ensure!(storage.get_meta_value(&legacy_key).await?.as_deref() == Some(legacy));
+        // Existing v2 ignores both larger legacy issuance and legacy corruption.
+        for legacy_update in ["999:17", "broken"] {
+            storage.put_meta_value(&legacy_key, legacy_update).await?;
+            let next = independent
+                .allocate_cache_keepalive_completion_ticket(&key, 101, 200)
+                .await?;
+            ensure!(next.epoch == ticket.epoch && next.valid_until_unix_secs == 200);
+        }
+        let raw = storage.get_meta_value(&order_key).await?;
+        let meta = parse_keepalive_order_meta(raw.as_deref())?;
+        ensure!(meta.issued == 44 && meta.applied == 0);
+        ensure!(
+            meta.lease
+                .context("unchanged lease")?
+                .protected_until_unix_secs
+                == 800
+        );
+    }
+    for (connection, other) in [storage, independent].into_iter().enumerate() {
+        // Shorter configuration durations and clock regressions cannot shorten
+        // another request's protection; each ticket retains its own deadline.
+        let key = format!("bounded-maximum-{connection}");
+        let first = storage
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 400)
+            .await?;
+        let short = other
+            .allocate_cache_keepalive_completion_ticket(&key, 110, 200)
+            .await?;
+        let long = other
+            .allocate_cache_keepalive_completion_ticket(&key, 105, 600)
+            .await?;
+        let intermediate = storage
+            .get_meta_value(&cache_keepalive_order_meta_key(&key))
+            .await?;
+        ensure!(
+            parse_keepalive_order_meta(intermediate.as_deref())?
+                .lease
+                .context("issued lease")?
+                .last_issued_at_unix_secs
+                == 110
+        );
+        let latest = storage
+            .allocate_cache_keepalive_completion_ticket(&key, 120, 300)
+            .await?;
+        ensure!(short.valid_until_unix_secs == 200 && long.valid_until_unix_secs == 600);
+        ensure!(first.epoch == latest.epoch && latest.sequence == 4);
+        let order_key = cache_keepalive_order_meta_key(&key);
+        let raw = storage.get_meta_value(&order_key).await?;
+        let meta = parse_keepalive_order_meta(raw.as_deref())?;
+        let lease = meta.lease.context("issued lease")?;
+        ensure!(lease.last_issued_at_unix_secs == 120 && lease.protected_until_unix_secs == 600);
+        for cutoff in [401, 600] {
+            other.purge_cache_keepalive_expired(cutoff).await?;
+            ensure!(storage.get_meta_value(&order_key).await? == raw);
+        }
+        other.purge_cache_keepalive_expired(601).await?;
+        ensure!(storage.get_meta_value(&order_key).await?.is_none());
+        let recreated = other
+            .allocate_cache_keepalive_completion_ticket(&key, 602, 700)
+            .await?;
+        ensure!(recreated.sequence == 1 && recreated.epoch != first.epoch);
+
+        // Allocation races orphan collection on both previously leased and
+        // legacy namespaces. Either winner is valid, but every returned ticket
+        // must name persisted, protected metadata and authorize its completion.
+        for legacy in [false, true] {
+            for attempt in 0..4 {
+                let key = format!("bounded-allocation-gc-{connection}-{legacy}-{attempt}");
+                let order_key = cache_keepalive_order_meta_key(&key);
+                if legacy {
+                    storage
+                        .put_meta_value(&cache_keepalive_legacy_order_meta_key(&key), "9:7")
+                        .await?;
+                } else {
+                    storage
+                        .allocate_cache_keepalive_completion_ticket(&key, 100, 200)
+                        .await?;
+                }
+                let (allocation, purge) = tokio::join!(
+                    storage.allocate_cache_keepalive_completion_ticket(&key, 201, 800),
+                    other.purge_cache_keepalive_expired(201),
+                );
+                purge?;
+                let ticket = allocation?;
+                let raw = other.get_meta_value(&order_key).await?;
+                let meta = parse_keepalive_order_meta(raw.as_deref())?;
+                let lease = meta.lease.context("persisted allocation raced with GC")?;
+                ensure!(lease.epoch == ticket.epoch && meta.issued == ticket.sequence);
+                ensure!(lease.protected_until_unix_secs == 800);
+                ensure!(lease.last_issued_at_unix_secs == 201);
+                let mut request = seed.clone();
+                request.session_key_hash = key;
+                request.cache_anchor_at_unix_secs = 201;
+                request.now_unix_secs = 201;
+                request.expires_at_unix_secs = 900;
+                ensure!(
+                    other
+                        .replace_from_real_request_fenced(&request, Some(ticket))
+                        .await?
+                        .is_some()
+                );
+                let after = other.get_meta_value(&order_key).await?;
+                let applied = parse_keepalive_order_meta(after.as_deref())?;
+                ensure!(applied.applied == ticket.sequence && applied.lease == Some(lease));
+            }
+        }
+
+        for replacement in [false, true] {
+            for stale_attempt in [false, true] {
+                let key = format!("bounded-aba-{connection}-{replacement}-{stale_attempt}");
+                let mut request = seed.clone();
+                request.session_key_hash = key.clone();
+                request.cache_anchor_at_unix_secs = 100;
+                request.now_unix_secs = 100;
+                request.expires_at_unix_secs = 200;
+                let original = storage.replace_from_real_request(&request).await?;
+                let old = storage
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 200)
+                    .await?;
+                ensure!(
+                    storage
+                        .begin_cache_keepalive_request_fenced(&key, Some(old), 100, 190)
+                        .await?
+                );
+                let old_marker = storage.get_cache_keepalive_session(&key).await?;
+                let order_key = cache_keepalive_order_meta_key(&key);
+                let old_order = storage.get_meta_value(&order_key).await?;
+                request.cache_anchor_at_unix_secs = 201;
+                request.now_unix_secs = 201;
+                // Expiry must reject a callback even while its original marker
+                // and metadata still exist and the applied sequence matches.
+                ensure!(
+                    !other
+                        .begin_cache_keepalive_request_fenced(&key, Some(old), 201, 300)
+                        .await?
+                );
+                ensure!(
+                    other
+                        .replace_from_real_request_fenced(&request, Some(old))
+                        .await?
+                        .is_none()
+                );
+                ensure!(
+                    !other
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(old),
+                            201,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("request_failed"),
+                            201,
+                        )
+                        .await?
+                );
+                ensure!(storage.get_cache_keepalive_session(&key).await? == old_marker);
+                ensure!(storage.get_meta_value(&order_key).await? == old_order);
+                other.purge_cache_keepalive_expired(201).await?;
+                ensure!(storage.get_cache_keepalive_session(&key).await?.is_none());
+                ensure!(storage.get_meta_value(&order_key).await?.is_none());
+
+                // B deliberately reuses A's ordinal. Its namespace must differ.
+                let current = other
+                    .allocate_cache_keepalive_completion_ticket(&key, 202, 600)
+                    .await?;
+                ensure!(current.sequence == old.sequence && current.epoch != old.epoch);
+                request.cache_anchor_at_unix_secs = 202;
+                request.now_unix_secs = 202;
+                request.expires_at_unix_secs = 900;
+                other.replace_from_real_request(&request).await?;
+                ensure!(
+                    other
+                        .begin_cache_keepalive_request_fenced(&key, Some(current), 202, 500)
+                        .await?
+                );
+                let marker = storage.get_cache_keepalive_session(&key).await?;
+                let order = storage.get_meta_value(&order_key).await?;
+                request.cache_anchor_at_unix_secs = 450;
+                request.now_unix_secs = 450;
+                request.encrypted_payload = b"healthy-b".to_vec();
+                if stale_attempt {
+                    // The original expired token and an unexpired same-ordinal
+                    // token from the old epoch must both fail independently.
+                    for stale in [
+                        old,
+                        CacheKeepaliveCompletionTicket {
+                            valid_until_unix_secs: 600,
+                            ..old
+                        },
+                    ] {
+                        ensure!(
+                            !storage
+                                .begin_cache_keepalive_request_fenced(&key, Some(stale), 450, 550)
+                                .await?
+                        );
+                        ensure!(
+                            storage
+                                .replace_from_real_request_fenced(&request, Some(stale))
+                                .await?
+                                .is_none()
+                        );
+                        ensure!(
+                            !storage
+                                .cancel_cache_keepalive_fenced(
+                                    &key,
+                                    Some(stale),
+                                    450,
+                                    CacheKeepaliveTerminalReason::Cancelled,
+                                    Some("request_failed"),
+                                    450,
+                                )
+                                .await?
+                        );
+                        ensure!(storage.get_cache_keepalive_session(&key).await? == marker);
+                        ensure!(storage.get_meta_value(&order_key).await? == order);
+                    }
+                }
+                if replacement {
+                    ensure!(
+                        other
+                            .replace_from_real_request_fenced(&request, Some(current))
+                            .await?
+                            .is_some()
+                    );
+                } else {
+                    ensure!(
+                        other
+                            .cancel_cache_keepalive_fenced(
+                                &key,
+                                Some(current),
+                                450,
+                                CacheKeepaliveTerminalReason::Cancelled,
+                                Some("user_turn_detected"),
+                                450,
+                            )
+                            .await?
+                    );
+                }
+                let resolved = storage
+                    .get_cache_keepalive_session(&key)
+                    .await?
+                    .context("resolved B")?;
+                ensure!(resolved.running_since_unix_secs.is_none());
+                ensure!(resolved.generation == original.generation + u64::from(replacement));
+                let after = storage.get_meta_value(&order_key).await?;
+                ensure!(
+                    after == order,
+                    "completion must not extend the lease or change its owner"
+                );
+            }
+        }
+
+        // Inclusive individual deadline and session retention beyond protection.
+        for replacement in [false, true] {
+            let key = format!("bounded-inclusive-{connection}-{replacement}");
+            let mut request = seed.clone();
+            request.session_key_hash = key.clone();
+            request.cache_anchor_at_unix_secs = 100;
+            request.now_unix_secs = 100;
+            request.expires_at_unix_secs = 900;
+            storage.replace_from_real_request(&request).await?;
+            let ticket = storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 200)
+                .await?;
+            ensure!(
+                other
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket), 100, 190)
+                    .await?
+            );
+            request.cache_anchor_at_unix_secs = 200;
+            request.now_unix_secs = 200;
+            if replacement {
+                ensure!(
+                    storage
+                        .replace_from_real_request_fenced(&request, Some(ticket))
+                        .await?
+                        .is_some()
+                );
+            } else {
+                ensure!(
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(ticket),
+                            200,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("user_turn_detected"),
+                            200,
+                        )
+                        .await?
+                );
+            }
+            let order_key = cache_keepalive_order_meta_key(&key);
+            let order = storage.get_meta_value(&order_key).await?;
+            other.purge_cache_keepalive_expired(201).await?;
+            ensure!(storage.get_cache_keepalive_session(&key).await?.is_some());
+            ensure!(storage.get_meta_value(&order_key).await? == order);
+        }
+    }
+
+    // Missing, legacy, malformed and future-version metadata never authorize a
+    // leased completion; malformed counters are never silently reset or purged.
+    for (index, raw) in [
+        None,
+        Some("9:7"),
+        Some("broken"),
+        Some("1:2"),
+        Some("v3:200:100:unknown:1:0"),
+        Some("v2:200:100:bad:1:0"),
+        Some("v2:1:100:00000000-0000-0000-0000-000000000007:1:0:extra"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("bounded-invalid-{index}");
+        let order_key = cache_keepalive_order_meta_key(&key);
+        let mut request = seed.clone();
+        request.session_key_hash = key.clone();
+        request.cache_anchor_at_unix_secs = 100;
+        request.now_unix_secs = 100;
+        request.expires_at_unix_secs = 900;
+        let original = storage.replace_from_real_request(&request).await?;
+        if let Some(raw) = raw {
+            storage.put_meta_value(&order_key, raw).await?;
+        }
+        let ticket = CacheKeepaliveCompletionTicket {
+            epoch: Uuid::from_u128(7),
+            sequence: 9,
+            valid_until_unix_secs: 800,
+        };
+        // Invalid encodings may report an error; valid-but-unauthorized state
+        // returns rejection. Neither outcome may consume a fence.
+        ensure!(!matches!(
+            storage
+                .begin_cache_keepalive_request_fenced(&key, Some(ticket), 200, 300)
+                .await,
+            Ok(true)
+        ));
+        request.cache_anchor_at_unix_secs = 200;
+        request.now_unix_secs = 200;
+        ensure!(!matches!(
+            storage
+                .replace_from_real_request_fenced(&request, Some(ticket))
+                .await,
+            Ok(Some(_))
+        ));
+        ensure!(!matches!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    &key,
+                    Some(ticket),
+                    200,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    200,
+                )
+                .await,
+            Ok(true)
+        ));
+        ensure!(storage.get_cache_keepalive_session(&key).await?.as_ref() == Some(&original));
+        ensure!(storage.get_meta_value(&order_key).await?.as_deref() == raw);
+        match raw {
+            Some("9:7") => {
+                let modern = independent
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 800)
+                    .await?;
+                ensure!(modern.sequence == 10);
+                let value = storage.get_meta_value(&order_key).await?;
+                let meta = parse_keepalive_order_meta(value.as_deref())?;
+                ensure!(
+                    meta.applied == 7
+                        && meta.lease.context("modernized lease")?.epoch == modern.epoch
+                );
+            }
+            Some(_) => {
+                ensure!(
+                    independent
+                        .allocate_cache_keepalive_completion_ticket(&key, 100, 800)
+                        .await
+                        .is_err()
+                );
+                ensure!(storage.get_meta_value(&order_key).await?.as_deref() == raw);
+            }
+            None => {}
+        }
+    }
+    for legacy in [false, true] {
+        for (suffix, value, retained) in [
+            ("numeric", "9:7", false),
+            ("malformed", "broken", true),
+            ("future", "v3:1:0:unknown:1:0", true),
+            ("malformed-v2", "v2:1:0:bad:1:0", true),
+        ] {
+            let session = format!("bounded-orphan-{legacy}-{suffix}");
+            let key = if legacy {
+                cache_keepalive_legacy_order_meta_key(&session)
+            } else {
+                cache_keepalive_order_meta_key(&session)
+            };
+            storage.put_meta_value(&key, value).await?;
+            independent.purge_cache_keepalive_expired(1_000).await?;
+            ensure!(storage.get_meta_value(&key).await?.is_some() == retained);
+        }
+    }
+    // Legacy overflow must fail before modernization, preserving the raw value.
+    let key = "bounded-legacy-overflow";
+    let order_key = cache_keepalive_legacy_order_meta_key(key);
+    let raw = format!("{}:7", u64::MAX);
+    storage.put_meta_value(&order_key, &raw).await?;
+    ensure!(
+        matches!(independent.allocate_cache_keepalive_completion_ticket(key, 100, 800).await,
+        Err(cc_lb_storage_api::StorageError::Fatal { message })
+        if message == "cache keepalive completion ticket overflow")
+    );
+    ensure!(storage.get_meta_value(&order_key).await?.as_deref() == Some(raw.as_str()));
+    ensure!(
+        storage
+            .get_meta_value(&cache_keepalive_order_meta_key(key))
+            .await?
+            .is_none()
+    );
+    let key = "bounded-legacy-corrupt-floor";
+    let legacy_key = cache_keepalive_legacy_order_meta_key(key);
+    storage.put_meta_value(&legacy_key, "broken").await?;
+    ensure!(
+        independent
+            .allocate_cache_keepalive_completion_ticket(key, 100, 800)
+            .await
+            .is_err()
+    );
+    ensure!(storage.get_meta_value(&legacy_key).await?.as_deref() == Some("broken"));
+    ensure!(
+        storage
+            .get_meta_value(&cache_keepalive_order_meta_key(key))
+            .await?
+            .is_none()
+    );
+    Ok(())
 }
 
 fn canonical_sort(turns: &mut [CacheKeepaliveTurnRecord]) {

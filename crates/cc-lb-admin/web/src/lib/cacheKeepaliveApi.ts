@@ -30,6 +30,7 @@ export const CACHE_KEEPALIVE_CANCEL_REASONS = [
   'ambiguous_turn',
   'retention_recorded',
   'renewal_not_beneficial',
+  'session_identity_changed',
   'snapshot_too_large',
   'cached_prefix_too_small',
   'zero_token_renewal_unsupported',

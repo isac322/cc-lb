@@ -448,7 +448,7 @@ async fn run_real_replacement_case(ticketed: bool) {
     let a_ticket = if ticketed {
         Some(
             storage_b
-                .allocate_cache_keepalive_completion_ticket("session-hash")
+                .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
                 .await
                 .expect("A completion ticket"),
         )
@@ -458,7 +458,7 @@ async fn run_real_replacement_case(ticketed: bool) {
     let b_ticket = if ticketed {
         Some(
             storage_b
-                .allocate_cache_keepalive_completion_ticket("session-hash")
+                .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
                 .await
                 .expect("B completion ticket"),
         )

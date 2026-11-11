@@ -249,6 +249,30 @@ pub struct CacheKeepaliveGenerationCheck {
     pub enqueue_state: CacheKeepaliveEnqueueState,
 }
 
+/// A request owner is unique within a leased ordering namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheKeepaliveCompletionTicket {
+    pub epoch: Uuid,
+    pub sequence: u64,
+    /// Inclusive deadline; expired tickets must not mutate keepalive state.
+    pub valid_until_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheKeepaliveOrderLease {
+    pub epoch: Uuid,
+    pub last_issued_at_unix_secs: u64,
+    pub protected_until_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheKeepaliveOrderMeta {
+    pub issued: u64,
+    pub applied: u64,
+    /// Missing only on legacy counters that cannot authorize leased tickets.
+    pub lease: Option<CacheKeepaliveOrderLease>,
+}
+
 #[async_trait]
 pub trait CacheKeepaliveSessionStore: Send + Sync {
     /// Returns the row image produced by this mutation, even if a later write supersedes it.
@@ -261,24 +285,31 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     ///
     /// Allocate at request start and retain it through completion. Requests
     /// without a start ticket may allocate here at completion instead.
+    ///
+    /// Issuance records the request lifetime protection window in the existing
+    /// counter write. Housekeeping may remove orphan metadata only after that
+    /// window. A recreated namespace has a new epoch, so delayed old callbacks
+    /// cannot acquire a later owner even when sequence numbers repeat.
+    /// New namespaces inherit only the legacy issued floor, never its applied
+    /// owner or epoch. Existing leased namespaces ignore subsequent legacy writes.
     async fn allocate_cache_keepalive_completion_ticket(
         &self,
         session_key_hash: &str,
-    ) -> StorageResult<u64> {
-        let _ = session_key_hash;
-        Ok(0)
-    }
+        now_unix_secs: u64,
+        protected_until_unix_secs: u64,
+    ) -> StorageResult<CacheKeepaliveCompletionTicket>;
 
     /// Returns the accepted mutation's row image, not a later writer's session record.
-    /// A provisional in-request marker accepts only its original start ticket
-    /// (`ticket == applied`), never a freshly allocated completion ticket.
-    /// Active and absent rows retain the strictly-newer applied-ticket fence;
-    /// absent rows additionally reject tickets older than the latest issuance.
+    /// A provisional in-request marker accepts only its original epoch and
+    /// applied sequence, with an unexpired ticket. A freshly allocated ticket
+    /// cannot complete another owner's marker. Active and absent rows retain
+    /// the strictly-newer applied-sequence fence; absent rows also reject
+    /// tickets older than the latest issuance.
     /// `None` retains the unticketed timestamp-fence behavior.
     async fn replace_from_real_request_fenced(
         &self,
         request: &CacheKeepaliveReplaceRequest,
-        expected_ticket: Option<u64>,
+        expected_ticket: Option<CacheKeepaliveCompletionTicket>,
     ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
         let _ = expected_ticket;
         self.replace_from_real_request(request).await.map(Some)
@@ -292,6 +323,14 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     /// extended through the deadline even without a previous keepalive turn.
     /// Read models project this marker as `InRequest` before its deadline and
     /// stale afterward; legacy `new_request` rows without a start remain terminal.
+    /// During a rolling upgrade, raw `first_scheduled_at` on this provisional
+    /// marker is the inclusive ticket deadline plus one (clamped to BIGINT).
+    /// This blocks deployed ticketed writers' logical-anchor predicate; the
+    /// actual start remains in `running_since` and returned records normalize
+    /// the logical anchor to it. Finalization restores a real logical anchor.
+    /// This fence assumes request anchors use the same UTC clock domain as
+    /// ticket deadlines. Unticketed direct API callers use the marker deadline
+    /// instead and are not protected against deployed unfenced replacements.
     /// A newer request may replace an existing provisional marker. Final
     /// cancellation or real-request replacement resolves it.
     ///
@@ -303,7 +342,7 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     async fn begin_cache_keepalive_request_fenced(
         &self,
         session_key_hash: &str,
-        expected_ticket: Option<u64>,
+        expected_ticket: Option<CacheKeepaliveCompletionTicket>,
         now_unix_secs: u64,
         request_deadline_unix_secs: u64,
     ) -> StorageResult<bool>;
@@ -314,7 +353,7 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
     async fn cancel_cache_keepalive_fenced(
         &self,
         session_key_hash: &str,
-        expected_ticket: Option<u64>,
+        expected_ticket: Option<CacheKeepaliveCompletionTicket>,
         cancel_anchor_at_unix_secs: u64,
         reason: CacheKeepaliveTerminalReason,
         cancel_reason: Option<&str>,
@@ -391,6 +430,7 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         now_unix_secs: u64,
     ) -> StorageResult<u64>;
 
+    /// Removes expired session payloads without deleting their ordering counters.
     async fn purge_cache_keepalive_expired(&self, cutoff_unix_secs: u64) -> StorageResult<u64>;
 
     async fn purge_cache_keepalive_stale_pending(
@@ -413,29 +453,146 @@ pub fn cache_keepalive_job_key(session_key_hash: &str, generation: u64) -> Strin
     format!("cache_keepalive:{session_key_hash}:{generation}")
 }
 
+/// Isolated leased-ticket namespace; deployed `keepalive_order:%` GC cannot match it.
+pub const CACHE_KEEPALIVE_ORDER_META_PREFIX: &str = "keepalive_order_v2:";
+/// Read-only migration source. New writers must never modify legacy counters.
+pub const CACHE_KEEPALIVE_LEGACY_ORDER_META_PREFIX: &str = "keepalive_order:";
+
 pub fn cache_keepalive_order_meta_key(session_key_hash: &str) -> String {
-    format!("keepalive_order:{session_key_hash}")
+    format!("{CACHE_KEEPALIVE_ORDER_META_PREFIX}{session_key_hash}")
 }
 
-pub fn parse_keepalive_order_meta(value: Option<&str>) -> (u64, u64) {
+/// Returns the read-only issued-floor source, never a leased owner namespace.
+pub fn cache_keepalive_legacy_order_meta_key(session_key_hash: &str) -> String {
+    format!("{CACHE_KEEPALIVE_LEGACY_ORDER_META_PREFIX}{session_key_hash}")
+}
+
+/// Raw provisional-marker fence understood by deployed ticketed writers.
+/// Saturation covers impossible/future deadlines without exceeding SQL BIGINT.
+pub fn cache_keepalive_legacy_request_anchor_fence(protected_until_unix_secs: u64) -> i64 {
+    protected_until_unix_secs
+        .saturating_add(1)
+        .min(i64::MAX as u64) as i64
+}
+
+/// Decodes legacy counters and leased namespaces without resetting corrupt state.
+pub fn parse_keepalive_order_meta(value: Option<&str>) -> StorageResult<CacheKeepaliveOrderMeta> {
     let Some(raw) = value else {
-        return (0, 0);
+        return Ok(CacheKeepaliveOrderMeta::default());
     };
-    let Some((issued_raw, applied_raw)) = raw.split_once(':') else {
-        return (0, 0);
+    let invalid = || crate::StorageError::Fatal {
+        message: "invalid cache keepalive order metadata".to_owned(),
     };
-    let issued = issued_raw.parse::<u64>().unwrap_or(0);
-    let applied = applied_raw.parse::<u64>().unwrap_or(0);
-    (issued, applied)
+    let number = |field: Option<&str>| -> StorageResult<u64> {
+        let field = field.ok_or_else(invalid)?;
+        if field.is_empty() || !field.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        field.parse().map_err(|_| invalid())
+    };
+    let mut fields = raw.split(':');
+    let first = fields.next();
+    let (issued, applied, lease) = if first == Some("v2") {
+        let protected_until_unix_secs = number(fields.next())?;
+        let last_issued_at_unix_secs = number(fields.next())?;
+        let epoch = fields
+            .next()
+            .ok_or_else(invalid)?
+            .parse::<Uuid>()
+            .map_err(|_| invalid())?;
+        let issued = number(fields.next())?;
+        let applied = number(fields.next())?;
+        (
+            issued,
+            applied,
+            Some(CacheKeepaliveOrderLease {
+                epoch,
+                last_issued_at_unix_secs,
+                protected_until_unix_secs,
+            }),
+        )
+    } else {
+        (number(first)?, number(fields.next())?, None)
+    };
+    if fields.next().is_some() || applied > issued {
+        return Err(invalid());
+    }
+    Ok(CacheKeepaliveOrderMeta {
+        issued,
+        applied,
+        lease,
+    })
 }
 
-pub fn format_keepalive_order_meta(issued: u64, applied: u64) -> String {
-    format!("{issued}:{applied}")
+pub fn format_keepalive_order_meta(meta: &CacheKeepaliveOrderMeta) -> String {
+    match meta.lease {
+        Some(lease) => format!(
+            "v2:{}:{}:{}:{}:{}",
+            lease.protected_until_unix_secs,
+            lease.last_issued_at_unix_secs,
+            lease.epoch,
+            meta.issued,
+            meta.applied,
+        ),
+        None => format!("{}:{}", meta.issued, meta.applied),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_metadata_round_trips_and_rejects_corruption() {
+        assert_eq!(
+            parse_keepalive_order_meta(None).unwrap(),
+            CacheKeepaliveOrderMeta::default()
+        );
+        let legacy = parse_keepalive_order_meta(Some("9:7")).unwrap();
+        assert_eq!(
+            legacy,
+            CacheKeepaliveOrderMeta {
+                issued: 9,
+                applied: 7,
+                lease: None
+            }
+        );
+        assert_eq!(format_keepalive_order_meta(&legacy), "9:7");
+        let leased = CacheKeepaliveOrderMeta {
+            lease: Some(CacheKeepaliveOrderLease {
+                epoch: Uuid::from_u128(7),
+                last_issued_at_unix_secs: 100,
+                protected_until_unix_secs: u64::MAX,
+            }),
+            ..legacy
+        };
+        assert_eq!(
+            parse_keepalive_order_meta(Some(&format_keepalive_order_meta(&leased))).unwrap(),
+            leased
+        );
+        assert_eq!(
+            format_keepalive_order_meta(&leased),
+            format!(
+                "v2:{}:100:00000000-0000-0000-0000-000000000007:9:7",
+                u64::MAX
+            ),
+        );
+        for raw in [
+            "",
+            "garbage",
+            "1",
+            "1:2",
+            "1:0:0",
+            "+1:0",
+            "18446744073709551616:0",
+            "v3:200:100:00000000-0000-0000-0000-000000000007:1:0",
+            "v2:no:100:00000000-0000-0000-0000-000000000007:1:0",
+            "v2:200:100:bad:1:0",
+            "v2:200:100:00000000-0000-0000-0000-000000000007:1:0:extra",
+        ] {
+            assert!(parse_keepalive_order_meta(Some(raw)).is_err(), "{raw}");
+        }
+    }
 
     #[test]
     fn job_key_is_generation_scoped() {
@@ -500,4 +657,22 @@ mod tests {
         assert!(debug.contains("error: Some(\"status=400 body=invalid thinking\")"));
         assert!(debug.contains("redacted"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_request_anchor_fence_is_inclusive_and_bigint_bounded() {
+    assert_eq!(cache_keepalive_legacy_request_anchor_fence(900), 901);
+    assert_eq!(
+        cache_keepalive_legacy_request_anchor_fence(i64::MAX as u64 - 1),
+        i64::MAX
+    );
+    assert_eq!(
+        cache_keepalive_legacy_request_anchor_fence(i64::MAX as u64),
+        i64::MAX
+    );
+    assert_eq!(
+        cache_keepalive_legacy_request_anchor_fence(u64::MAX),
+        i64::MAX
+    );
 }

@@ -2881,6 +2881,153 @@ async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
     assert_eq!(requests.len(), 1);
 }
 
+#[derive(Default)]
+struct FourHourDispatchProbe(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl KeepaliveDispatcher for FourHourDispatchProbe {
+    async fn dispatch(
+        &self,
+        _snapshot: &RequestSnapshot,
+        _context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DispatchOutcome::Error("four-hour guard unexpectedly dispatched".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_four_hour_budget_survives_in_request_rollout_fence() {
+    let fixture = Fixture::new().await;
+    assert_four_hour_budget_survives_request_fence(&fixture, fixture.storage.clone()).await;
+}
+
+async fn assert_four_hour_budget_survives_request_fence(
+    fixture: &Fixture,
+    storage: Arc<dyn Storage>,
+) {
+    const BUDGET_SECS: u64 = 4 * 60 * 60;
+    const MAX_REFRESHES: u32 = 1_000;
+    let key = "four-hour-rollout";
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer_with_storage(storage.clone(), pusher.clone());
+    let mut request = fixture.enqueue_request();
+    request.session_key_hash = key.to_owned();
+    request.cache_anchor_age = Duration::from_secs(30);
+    request.params.max_total_duration_secs = BUDGET_SECS;
+    request.params.max_refreshes = MAX_REFRESHES;
+    request.config_snapshot.max_total_duration_secs = BUDGET_SECS;
+    request.config_snapshot.max_refreshes_per_session = MAX_REFRESHES;
+    enqueuer
+        .enqueue_cache_keepalive(request.clone())
+        .await
+        .expect("seed old cycle");
+    let ticket = enqueuer
+        .observe_session_generation(key)
+        .await
+        .expect("observe owner");
+    enqueuer
+        .cancel_cache_keepalive(cc_lb_engine::cache_keepalive::CacheKeepaliveCancelRequest {
+            session_key_hash: key.to_owned(),
+            reason: cc_lb_engine::cache_keepalive::CancelReason::NewRequest,
+            expected_generation: ticket,
+            cache_anchor_age: Duration::ZERO,
+        })
+        .await
+        .expect("install request marker");
+    let marker = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        marker.first_scheduled_at_unix_secs,
+        marker.running_since_unix_secs.unwrap()
+    );
+    let probe = Arc::new(FourHourDispatchProbe::default());
+    let mut dispatch = fixture.dispatch(pusher);
+    dispatch.storage = storage.clone();
+    dispatch.keepalive_dispatcher = probe.clone();
+    let job_for = |record: &cc_lb_storage_api::CacheKeepaliveSessionRecord| {
+        cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob {
+            session_key_hash: record.session_key_hash.clone(),
+            generation: record.generation,
+            principal_id: record.principal_id.clone(),
+            upstream_id: record.upstream_id,
+            ttl: record.ttl,
+            cache_anchor_at_unix_secs: record.cache_anchor_at_unix_secs,
+            expires_at_unix_secs: record.expires_at_unix_secs,
+            refresh_delay_secs: 270,
+            max_refreshes: MAX_REFRESHES,
+            max_total_duration_secs: BUDGET_SECS,
+            traceparent: None,
+        }
+    };
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job_for(&marker))
+            .await
+            .unwrap(),
+        JobOutcome::Noop
+    ));
+    request.expected_generation = ticket;
+    request.cycle_id = Uuid::new_v4();
+    request.cache_anchor_age = Duration::ZERO;
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("reactivate with real anchor");
+    let mut record = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    let real_anchor = record.cache_anchor_at_unix_secs;
+    assert_eq!(record.first_scheduled_at_unix_secs, real_anchor);
+    for offset in (270..BUDGET_SECS).step_by(270) {
+        let hit_at = real_anchor + offset;
+        record = storage
+            .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
+                session_key_hash: key.to_owned(),
+                generation: record.generation,
+                cache_anchor_at_unix_secs: hit_at,
+                run_at_unix_secs: hit_at + 270,
+                expires_at_unix_secs: hit_at + record.ttl.as_secs(),
+                encrypted_payload: None,
+                now_unix_secs: hit_at,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.first_scheduled_at_unix_secs, real_anchor);
+    }
+    let deadline = real_anchor + BUDGET_SECS;
+    assert!(
+        record.expires_at_unix_secs > deadline,
+        "isolate duration, not TTL expiry"
+    );
+    dispatch.clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(deadline));
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job_for(&record))
+            .await
+            .unwrap(),
+        JobOutcome::Done
+    ));
+    let terminal = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::MaxDuration)
+    );
+    assert_eq!(terminal.first_scheduled_at_unix_secs, real_anchor);
+    assert_eq!(probe.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn cache_keepalive_hit_terminalizes_when_max_duration_reached() {
     let fixture = Fixture::new().await;
@@ -3908,7 +4055,9 @@ async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_ev
             .expect("legacy NULL cycle");
         })
         .await;
-        assert_keepalive_terminal_cap_counts_all_dispatched_renewals(&fixture, storage).await;
+        assert_keepalive_terminal_cap_counts_all_dispatched_renewals(&fixture, storage.clone())
+            .await;
+        assert_four_hour_budget_survives_request_fence(&fixture, storage).await;
     })
     .catch_unwind()
     .await;

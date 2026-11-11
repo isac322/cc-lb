@@ -10,8 +10,9 @@ use cc_lb_engine::cache_keepalive::{
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Storage,
+    CacheKeepaliveCompletionTicket, CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore,
+    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    Storage,
 };
 use uuid::Uuid;
 
@@ -68,10 +69,15 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
     async fn observe_session_generation(
         &self,
         session_key_hash: &str,
-    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+    ) -> Result<Option<CacheKeepaliveCompletionTicket>, CacheKeepaliveEnqueueError> {
+        let now_unix_secs = unix_secs(self.clock.now());
+        let protected_until_unix_secs =
+            now_unix_secs.saturating_add(self.request_timeout.as_secs().max(1).saturating_mul(2));
         let ticket = CacheKeepaliveSessionStore::allocate_cache_keepalive_completion_ticket(
             self.storage.as_ref(),
             session_key_hash,
+            now_unix_secs,
+            protected_until_unix_secs,
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
@@ -285,6 +291,7 @@ fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalRe
         | CancelReason::AmbiguousTurn
         | CancelReason::RetentionRecorded
         | CancelReason::RenewalNotBeneficial
+        | CancelReason::SessionIdentityChanged
         | CancelReason::SnapshotTooLarge
         | CancelReason::CachedPrefixTooSmall
         | CancelReason::ZeroTokenRenewalUnsupported => CacheKeepaliveTerminalReason::Cancelled,

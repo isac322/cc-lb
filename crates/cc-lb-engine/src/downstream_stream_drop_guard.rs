@@ -130,7 +130,7 @@ impl StreamCompletionOwner {
             &context.downstream_headers,
             self.cache_anchor_at.elapsed(),
             self.cached_tokens,
-            context.request_start_order,
+            context.request_start_order.take(),
         );
     }
 }

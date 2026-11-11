@@ -45,6 +45,419 @@ fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
     }
 }
 
+fn order_counters(raw: String) -> (u64, u64) {
+    let meta = cc_lb_storage_api::parse_keepalive_order_meta(Some(&raw)).unwrap();
+    (meta.issued, meta.applied)
+}
+
+// Published master fdc0f9d parser/allocator: keep this independent of v2 helpers.
+async fn allocate_deployed_legacy_ticket(storage: &SqliteStorage, key: &str) -> u64 {
+    let key = format!("keepalive_order:{key}");
+    let mut tx = storage.begin_immediate().await.unwrap();
+    let existing = sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
+        .bind(&key)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    let (issued, applied) = deployed_legacy_counters(existing.as_deref());
+    let next = issued.checked_add(1).unwrap();
+    sqlx::query(
+        "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(&key)
+    .bind(format!("{next}:{applied}"))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    next
+}
+
+fn deployed_legacy_counters(value: Option<&str>) -> (u64, u64) {
+    let Some(raw) = value else { return (0, 0) };
+    let Some((issued_raw, applied_raw)) = raw.split_once(':') else {
+        return (0, 0);
+    };
+    let issued = issued_raw.parse::<u64>().unwrap_or(0);
+    let applied = applied_raw.parse::<u64>().unwrap_or(0);
+    (issued, applied)
+}
+
+#[tokio::test]
+async fn mixed_version_metadata_namespace_isolates_deployed_legacy_allocator_and_gc() {
+    // QA: numeric floor, untouched legacy reader/writer, exact deployed orphan GC,
+    // fresh ownership, begin/finalize, and existing v2 ignoring corrupt legacy.
+    let (_directory, storage) = storage().await;
+    let key = "mixed-version";
+    let legacy_key = format!("keepalive_order:{key}");
+    storage.put_meta_value(&legacy_key, "40:17").await.unwrap();
+    assert_eq!(allocate_deployed_legacy_ticket(&storage, key).await, 41);
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key, 100, 900)
+        .await
+        .unwrap();
+    assert_eq!(ticket.sequence, 42);
+    let legacy = storage.get_meta_value(&legacy_key).await.unwrap();
+    assert_eq!(
+        deployed_legacy_counters(legacy.as_deref()),
+        (41, 17),
+        "deployed legacy reader must still see its numeric pair"
+    );
+    let v2_key = cc_lb_storage_api::cache_keepalive_order_meta_key(key);
+    let raw = storage.get_meta_value(&v2_key).await.unwrap().unwrap();
+    let meta = cc_lb_storage_api::parse_keepalive_order_meta(Some(&raw)).unwrap();
+    assert_eq!(meta.applied, 0, "legacy applied is not a v2 owner");
+    assert_eq!(meta.lease.unwrap().epoch, ticket.epoch);
+    assert_eq!(allocate_deployed_legacy_ticket(&storage, key).await, 42);
+    assert_eq!(
+        storage.get_meta_value(&v2_key).await.unwrap().as_deref(),
+        Some(raw.as_str())
+    );
+    sqlx::query(
+        "DELETE FROM meta_v1 WHERE key LIKE 'keepalive_order:%'
+         AND substr(key, 17) NOT IN (SELECT session_key_hash FROM cache_keepalive_sessions)",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    assert!(storage.get_meta_value(&legacy_key).await.unwrap().is_none());
+    assert_eq!(
+        storage.get_meta_value(&v2_key).await.unwrap().as_deref(),
+        Some(raw.as_str())
+    );
+    let mut request = replace_request(b"modern", 101);
+    request.session_key_hash = key.to_owned();
+    assert!(
+        storage
+            .replace_from_real_request_fenced(&request, Some(ticket))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let owner = storage
+        .allocate_cache_keepalive_completion_ticket(key, 102, 1_000)
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced(key, Some(owner), 102, 950)
+            .await
+            .unwrap()
+    );
+    let owned_raw = storage.get_meta_value(&v2_key).await.unwrap();
+    assert_eq!(allocate_deployed_legacy_ticket(&storage, key).await, 1);
+    assert_eq!(storage.get_meta_value(&v2_key).await.unwrap(), owned_raw);
+    storage
+        .put_meta_value(&legacy_key, "corrupt")
+        .await
+        .unwrap();
+    let later = storage
+        .allocate_cache_keepalive_completion_ticket(key, 103, 200)
+        .await
+        .unwrap();
+    assert_eq!(later.epoch, owner.epoch);
+    assert_eq!(later.sequence, owner.sequence + 1);
+    assert_eq!(later.valid_until_unix_secs, 200);
+    assert_eq!(
+        storage
+            .get_meta_value(&legacy_key)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("corrupt")
+    );
+    let updated = storage.get_meta_value(&v2_key).await.unwrap().unwrap();
+    assert_eq!(
+        cc_lb_storage_api::parse_keepalive_order_meta(Some(&updated))
+            .unwrap()
+            .lease
+            .unwrap()
+            .protected_until_unix_secs,
+        1_000
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(owner),
+                102,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                104
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn housekeeping_expires_order_metadata_after_request_lifetime() {
+    let (_directory, storage) = storage().await;
+    let key = "bounded-order";
+    storage
+        .allocate_cache_keepalive_completion_ticket(key, 100, 200)
+        .await
+        .unwrap();
+    let meta_key = cc_lb_storage_api::cache_keepalive_order_meta_key(key);
+    for cutoff in [100, 200] {
+        storage.purge_cache_keepalive_expired(cutoff).await.unwrap();
+        assert!(storage.get_meta_value(&meta_key).await.unwrap().is_some());
+    }
+    storage.purge_cache_keepalive_expired(201).await.unwrap();
+    assert!(
+        storage.get_meta_value(&meta_key).await.unwrap().is_none(),
+        "orphan order metadata must expire after its request protection window"
+    );
+}
+
+#[tokio::test]
+async fn housekeeping_retains_protected_order_counters_and_fails_closed_at_overflow() {
+    let (_dir, storage) = storage().await;
+    for stale_pending in [false, true] {
+        let key = format!("retained-order-{stale_pending}");
+        let mut request = replace_request(b"expiring-payload", 100);
+        request.session_key_hash = key.clone();
+        storage.replace_from_real_request(&request).await.unwrap();
+        assert_eq!(
+            storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap()
+                .sequence,
+            1
+        );
+        if stale_pending {
+            assert_eq!(
+                storage
+                    .purge_cache_keepalive_stale_pending(101)
+                    .await
+                    .unwrap(),
+                1
+            );
+        } else {
+            assert_eq!(storage.purge_cache_keepalive_expired(401).await.unwrap(), 1);
+        }
+        assert!(
+            storage
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .purge_cache_keepalive_expired(1_000_000)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            storage
+                .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(&key))
+                .await
+                .unwrap()
+                .map(order_counters),
+            Some((1, 0))
+        );
+        assert_eq!(
+            storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap()
+                .sequence,
+            2
+        );
+    }
+    let key = "retained-order-overflow";
+    let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(key);
+    let exhausted = format!("v2:10000000:100:{}:{}:7", Uuid::from_u128(7), u64::MAX);
+    storage
+        .put_meta_value(&order_key, &exhausted)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(1_000_000)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        storage.allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000).await,
+        Err(cc_lb_storage_api::StorageError::Fatal { message })
+            if message == "cache keepalive completion ticket overflow"
+    ));
+    assert_eq!(
+        storage.get_meta_value(&order_key).await.unwrap(),
+        Some(exhausted)
+    );
+}
+
+#[tokio::test]
+async fn housekeeping_never_recycles_in_flight_request_owners() {
+    // QA: absent-row purge between processes, both completion kinds, an untouched
+    // B-owner control, and unchanged marker/order metadata after a stale completion.
+    let (dir, storage) = storage().await;
+    let database_url = format!("sqlite://{}", dir.path().join("keepalive.sqlite").display());
+    let other = open_sqlite(&database_url, Arc::new(SystemClock))
+        .await
+        .expect("open independent sqlite adapter");
+    let mut failures = Vec::new();
+    for replacement in [false, true] {
+        for stale_attempt in [false, true] {
+            let key = format!("purge-owner-{replacement}-{stale_attempt}");
+            let failed_start = storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap();
+            assert_eq!(failed_start.sequence, 1);
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(failed_start), 100, 900)
+                    .await
+                    .unwrap()
+            );
+            let ticket_a = storage
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap();
+            assert_eq!(ticket_a.sequence, 2);
+            assert!(
+                !storage
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket_a), 101, 901)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(other.purge_cache_keepalive_expired(102).await.unwrap(), 0);
+            let ticket_c = other
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap();
+            let mut completion = replace_request(b"c-prefix", 103);
+            completion.session_key_hash = key.clone();
+            let original = other
+                .replace_from_real_request_fenced(&completion, Some(ticket_c))
+                .await
+                .unwrap()
+                .unwrap();
+            let ticket_b = other
+                .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
+                .await
+                .unwrap();
+            assert!(
+                other
+                    .begin_cache_keepalive_request_fenced(&key, Some(ticket_b), 104, 904)
+                    .await
+                    .unwrap()
+            );
+            let marker = other
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            let order_key = cc_lb_storage_api::cache_keepalive_order_meta_key(&key);
+            let order_before = other.get_meta_value(&order_key).await.unwrap();
+            completion.cache_anchor_at_unix_secs = 110;
+            completion.now_unix_secs = 111;
+            completion.encrypted_payload = b"late-a".to_vec();
+            if stale_attempt {
+                let accepted = if replacement {
+                    storage
+                        .replace_from_real_request_fenced(&completion, Some(ticket_a))
+                        .await
+                        .unwrap()
+                        .is_some()
+                } else {
+                    storage
+                        .cancel_cache_keepalive_fenced(
+                            &key,
+                            Some(ticket_a),
+                            110,
+                            CacheKeepaliveTerminalReason::Cancelled,
+                            Some("request_failed"),
+                            111,
+                        )
+                        .await
+                        .unwrap()
+                };
+                if accepted
+                    || storage
+                        .get_cache_keepalive_session(&key)
+                        .await
+                        .unwrap()
+                        .as_ref()
+                        != Some(&marker)
+                    || storage.get_meta_value(&order_key).await.unwrap() != order_before
+                {
+                    failures.push(format!(
+                        "replacement={replacement}: late A2 resolved B's marker; C={ticket_c:?}, B={ticket_b:?}"
+                    ));
+                    continue;
+                }
+            }
+            // Healthy B completes using its original start ticket, not a new one.
+            completion.encrypted_payload = b"healthy-b".to_vec();
+            let accepted = if replacement {
+                other
+                    .replace_from_real_request_fenced(&completion, Some(ticket_b))
+                    .await
+                    .unwrap()
+                    .is_some()
+            } else {
+                other
+                    .cancel_cache_keepalive_fenced(
+                        &key,
+                        Some(ticket_b),
+                        110,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                        Some("user_turn_detected"),
+                        111,
+                    )
+                    .await
+                    .unwrap()
+            };
+            assert!(
+                accepted,
+                "B's original start ticket must remain authoritative"
+            );
+            let resolved = other
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.running_since_unix_secs, None);
+            assert_eq!(
+                resolved.generation,
+                original.generation + u64::from(replacement)
+            );
+            assert_eq!(
+                resolved.status,
+                if replacement {
+                    CacheKeepaliveSessionStatus::Active
+                } else {
+                    CacheKeepaliveSessionStatus::Terminal
+                }
+            );
+            assert_eq!(
+                resolved.encrypted_payload,
+                if replacement {
+                    b"healthy-b".to_vec()
+                } else {
+                    Vec::new()
+                }
+            );
+            if ticket_c.sequence != 3 || ticket_b.sequence != 4 {
+                failures.push(format!(
+                    "replacement={replacement}, stale_attempt={stale_attempt}: ordering namespace recycled; C={ticket_c:?}, B={ticket_b:?}"
+                ));
+            }
+        }
+    }
+    other.pool().close().await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[tokio::test]
 async fn in_request_completion_requires_original_start_ticket() {
     let (_dir, storage) = storage().await;
@@ -57,7 +470,7 @@ async fn in_request_completion_requires_original_start_ticket() {
                 seed.session_key_hash = key.clone();
                 let original = storage.replace_from_real_request(&seed).await.unwrap();
                 let ticket_a = storage
-                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                     .await
                     .unwrap();
                 assert!(
@@ -67,7 +480,7 @@ async fn in_request_completion_requires_original_start_ticket() {
                         .unwrap()
                 );
                 let ticket_b = storage
-                    .allocate_cache_keepalive_completion_ticket(&key)
+                    .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                     .await
                     .unwrap();
                 assert!(
@@ -85,7 +498,7 @@ async fn in_request_completion_requires_original_start_ticket() {
                 assert_eq!(marker.running_since_unix_secs, Some(start_b));
                 let completion_ticket = if fresh_completion_ticket {
                     storage
-                        .allocate_cache_keepalive_completion_ticket(&key)
+                        .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                         .await
                         .unwrap()
                 } else {
@@ -190,7 +603,7 @@ async fn in_request_completion_requires_original_start_ticket() {
             storage.replace_from_real_request(&request).await.unwrap();
         }
         let ticket = storage
-            .allocate_cache_keepalive_completion_ticket(&key)
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
             .await
             .unwrap();
         if absent {
@@ -237,7 +650,7 @@ async fn in_request_completion_requires_original_start_ticket() {
             completed
         );
         let cancel_ticket = storage
-            .allocate_cache_keepalive_completion_ticket(&key)
+            .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
             .await
             .unwrap();
         assert!(
@@ -270,7 +683,7 @@ async fn in_request_completion_requires_original_start_ticket() {
     let mut first = replace_request(b"first", 110);
     first.session_key_hash = "competing-first-session".to_owned();
     let older = storage
-        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash, 100, 10_000_000)
         .await
         .unwrap();
     assert!(
@@ -280,7 +693,7 @@ async fn in_request_completion_requires_original_start_ticket() {
             .unwrap()
     );
     let newer = storage
-        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash)
+        .allocate_cache_keepalive_completion_ticket(&first.session_key_hash, 100, 10_000_000)
         .await
         .unwrap();
     assert!(
@@ -329,11 +742,11 @@ async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences(
         .expect("synthetic hit")
         .expect("synthetic hit accepted");
     let older_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("older ticket");
     let begin_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("begin ticket");
     assert!(
@@ -386,7 +799,7 @@ async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences(
             .expect("older ticket cannot finalize marker")
     );
     let next_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("next ticket");
     assert!(
@@ -401,8 +814,9 @@ async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences(
                 "session-hash"
             ))
             .await
-            .expect("rejected begin rolls back ticket"),
-        Some(format!("{next_ticket}:{begin_ticket}"))
+            .expect("rejected begin rolls back ticket")
+            .map(order_counters),
+        Some((next_ticket.sequence, begin_ticket.sequence))
     );
     assert!(
         storage
@@ -551,7 +965,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
         .await
         .expect("initial real completion");
     let replacement_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("replacement ticket");
     let refreshed = storage
@@ -581,7 +995,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(active.generation, refreshed.generation + 1);
 
     let cancel_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("later-observed cancellation ticket");
     assert!(
@@ -603,8 +1017,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 "session-hash"
             ))
             .await
-            .expect("rejected cancellation must roll back applied order"),
-        Some("2:1".to_owned())
+            .expect("rejected cancellation must roll back applied order")
+            .map(order_counters),
+        Some((2, 1))
     );
     assert_eq!(
         storage
@@ -636,7 +1051,7 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(terminal.cache_anchor_at_unix_secs, 370);
 
     let newer_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("later-observed replacement ticket");
     assert!(
@@ -655,8 +1070,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 "session-hash"
             ))
             .await
-            .expect("rejected replacement must roll back applied order"),
-        Some("3:2".to_owned())
+            .expect("rejected replacement must roll back applied order")
+            .map(order_counters),
+        Some((3, 2))
     );
     let replacement = storage
         .replace_from_real_request_fenced(
@@ -676,8 +1092,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
                 "session-hash"
             ))
             .await
-            .expect("successful retry commits applied order"),
-        Some("3:3".to_owned())
+            .expect("successful retry commits applied order")
+            .map(order_counters),
+        Some((3, 3))
     );
 }
 
@@ -689,10 +1106,10 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh() {
         .await
         .expect("initial real generation");
     let ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("compaction completion ticket");
-    assert_eq!(ticket, 1);
+    assert_eq!(ticket.sequence, 1);
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
             session_key_hash: "session-hash".to_owned(),
@@ -737,8 +1154,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh() {
                 "session-hash"
             ))
             .await
-            .expect("load completion order"),
-        Some("1:1".to_owned())
+            .expect("load completion order")
+            .map(order_counters),
+        Some((1, 1))
     );
     assert!(
         !storage
@@ -763,7 +1181,7 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
         .await
         .expect("initial real generation");
     let cancelled_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("compaction completion ticket");
     assert!(
@@ -780,10 +1198,10 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
             .expect("compaction cancellation")
     );
     let newer_ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("post-compaction completion ticket");
-    assert_eq!(newer_ticket, cancelled_ticket + 1);
+    assert_eq!(newer_ticket.sequence, cancelled_ticket.sequence + 1);
     let active = storage
         .replace_from_real_request_fenced(
             &replace_request(b"post-compaction-prefix", 102),
@@ -802,8 +1220,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
                 "session-hash"
             ))
             .await
-            .expect("load completion order"),
-        Some("2:2".to_owned())
+            .expect("load completion order")
+            .map(order_counters),
+        Some((2, 2))
     );
     assert!(
         storage
@@ -833,7 +1252,7 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards()
         .await
         .expect("initial active generation");
     let ticket = storage
-        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .allocate_cache_keepalive_completion_ticket("session-hash", 100, 10_000_000)
         .await
         .expect("real completion ticket");
     for expected_ticket in [None, Some(ticket)] {
@@ -875,8 +1294,9 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards()
                 "session-hash"
             ))
             .await
-            .expect("rejected replacement preserves completion order"),
-        Some("1:0".to_owned())
+            .expect("rejected replacement preserves completion order")
+            .map(order_counters),
+        Some((1, 0))
     );
     assert!(
         storage
@@ -1988,4 +2408,339 @@ async fn cancellation_causes_roundtrip_and_replacement_clears_them() {
             "a stale cancellation cannot change the cause"
         );
     }
+}
+
+async fn replace_deployed_legacy_request(
+    storage: &SqliteStorage,
+    seed: &CacheKeepaliveReplaceRequest,
+    anchor: i64,
+    now: i64,
+) -> Option<cc_lb_storage_api::CacheKeepaliveSessionRecord> {
+    let key = seed.session_key_hash.as_str();
+    let legacy_key = format!("keepalive_order:{key}");
+    let old_ticket = allocate_deployed_legacy_ticket(storage, key).await;
+    let mut tx = storage.begin_immediate().await.unwrap();
+    // Exact fdc0f9d existing-row SELECT and ticketed logical-anchor fence.
+    let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64)>(
+        "SELECT generation, created_at, status, cache_anchor_at, updated_at, first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    ).bind(key).fetch_one(&mut *tx).await.unwrap();
+    if existing.5 > anchor {
+        tx.rollback().await.unwrap();
+        return None;
+    }
+    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
+        .bind(&legacy_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    let (issued, applied) = deployed_legacy_counters(raw.as_deref());
+    if old_ticket <= applied {
+        tx.rollback().await.unwrap();
+        return None;
+    }
+    sqlx::query(
+        "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(&legacy_key)
+    .bind(format!("{}:{}", issued.max(old_ticket), old_ticket))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    // Verbatim deployed master replacement SQL: no terminal-marker owner fence.
+    sqlx::query("INSERT INTO cache_keepalive_sessions
+             (session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, generation, refresh_count,
+              first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
+              current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', 'pending', NULL, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+             ON CONFLICT(session_key_hash) DO UPDATE SET
+              principal_id = excluded.principal_id,
+              accounting_key_id = excluded.accounting_key_id,
+              upstream_id = excluded.upstream_id,
+              cycle_id = excluded.cycle_id,
+              generation = excluded.generation,
+              refresh_count = 0,
+              first_scheduled_at = excluded.first_scheduled_at,
+              cache_anchor_at = excluded.cache_anchor_at,
+              run_at = excluded.run_at,
+              ttl = excluded.ttl,
+              status = 'active',
+              enqueue_state = 'pending',
+              running_since_unix_secs = NULL,
+              current_job_key = excluded.current_job_key,
+              encrypted_payload = excluded.encrypted_payload,
+              display_reason = excluded.display_reason,
+              error = NULL,
+              config_snapshot = excluded.config_snapshot,
+              last_message_at_ms = excluded.last_message_at_ms,
+              terminal_reason = NULL,
+              cancel_reason = NULL,
+              expires_at = excluded.expires_at,
+              updated_at = excluded.updated_at")
+        .bind(key).bind(&seed.principal_id).bind(&seed.accounting_key_id)
+        .bind(seed.upstream_id.to_string()).bind(seed.cycle_id.to_string())
+        .bind(existing.0 + 1).bind(anchor).bind(anchor).bind(anchor + 270).bind("5m")
+        .bind(cache_keepalive_job_key(key, (existing.0 + 1) as u64))
+        .bind(b"old-completion".as_slice()).bind(&seed.display_reason)
+        .bind(serde_json::to_string(&seed.config_snapshot).unwrap()).bind(anchor * 1_000)
+        .bind(anchor + 300).bind(existing.1).bind(now)
+        .execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    storage.get_cache_keepalive_session(key).await.unwrap()
+}
+
+#[tokio::test]
+async fn deployed_master_replacement_cannot_resolve_modern_request_marker() {
+    // QA: raw-vs-normalized anchors, inclusive old-writer protection, modern
+    // replacement/cancellation, expired owner rejection and later legacy resume.
+    let (_directory, storage) = storage().await;
+    for finish in ["replace", "cancel", "legacy-resume"] {
+        let key = format!("mixed-version-shared-row-{finish}");
+        storage
+            .put_meta_value(&format!("keepalive_order:{key}"), "3:3")
+            .await
+            .unwrap();
+        let mut seed = replace_request(b"seed", 100);
+        seed.session_key_hash = key.clone();
+        let active = storage.replace_from_real_request(&seed).await.unwrap();
+        assert_eq!(active.first_scheduled_at_unix_secs, 100);
+        let owner = storage
+            .allocate_cache_keepalive_completion_ticket(&key, 105, 900)
+            .await
+            .unwrap();
+        assert_eq!(owner.sequence, 4);
+        assert!(
+            storage
+                .begin_cache_keepalive_request_fenced(&key, Some(owner), 105, 700)
+                .await
+                .unwrap()
+        );
+        let marker = storage
+            .get_cache_keepalive_session(&key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.first_scheduled_at_unix_secs, 105);
+        assert_eq!(marker.running_since_unix_secs, Some(105));
+        assert_eq!(marker.run_at_unix_secs, 700);
+        let raw_anchor = sqlx::query_scalar::<_, i64>(
+            "SELECT first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        )
+        .bind(&key)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(raw_anchor, 901, "owner lease, not shorter marker deadline");
+        let v2_key = cc_lb_storage_api::cache_keepalive_order_meta_key(&key);
+        let owned_meta = storage.get_meta_value(&v2_key).await.unwrap();
+        assert_deployed_active_only_mutations_reject_marker(&storage, &key, marker.generation)
+            .await;
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&marker)
+        );
+        assert_eq!(storage.get_meta_value(&v2_key).await.unwrap(), owned_meta);
+        for anchor in [110, 900] {
+            assert!(
+                replace_deployed_legacy_request(&storage, &seed, anchor, anchor + 10)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                storage
+                    .get_cache_keepalive_session(&key)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(&marker)
+            );
+            assert_eq!(storage.get_meta_value(&v2_key).await.unwrap(), owned_meta);
+        }
+        if finish == "replace" {
+            let mut completion = seed.clone();
+            completion.cache_anchor_at_unix_secs = 110;
+            completion.now_unix_secs = 120;
+            let row = storage
+                .replace_from_real_request_fenced(&completion, Some(owner))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, CacheKeepaliveSessionStatus::Active);
+            assert_eq!(row.first_scheduled_at_unix_secs, 110);
+        } else if finish == "cancel" {
+            assert!(
+                storage
+                    .cancel_cache_keepalive_fenced(
+                        &key,
+                        Some(owner),
+                        110,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                        Some("request_failed"),
+                        120
+                    )
+                    .await
+                    .unwrap()
+            );
+            let row = storage
+                .get_cache_keepalive_session(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.first_scheduled_at_unix_secs, 110);
+            assert_eq!(row.running_since_unix_secs, None);
+        } else {
+            assert!(
+                !storage
+                    .cancel_cache_keepalive_fenced(
+                        &key,
+                        Some(owner),
+                        901,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                        Some("request_failed"),
+                        901
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                storage
+                    .get_cache_keepalive_session(&key)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(&marker)
+            );
+            let resumed = replace_deployed_legacy_request(&storage, &seed, 901, 910)
+                .await
+                .unwrap();
+            assert_eq!(resumed.status, CacheKeepaliveSessionStatus::Active);
+            assert_eq!(resumed.first_scheduled_at_unix_secs, 901);
+        }
+        let row = storage
+            .get_cache_keepalive_session(&key)
+            .await
+            .unwrap()
+            .unwrap();
+        let raw = sqlx::query_scalar::<_, i64>(
+            "SELECT first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        )
+        .bind(&key)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            raw as u64, row.first_scheduled_at_unix_secs,
+            "no resolved row retains a synthetic fence"
+        );
+    }
+}
+
+async fn assert_deployed_active_only_mutations_reject_marker(
+    storage: &SqliteStorage,
+    key: &str,
+    generation: u64,
+) {
+    // Verbatim master cancellation/reschedule statements: both require active.
+    let cancelled = sqlx::query("UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, cancel_reason = ?, error = NULL, running_since_unix_secs = NULL,
+             encrypted_payload = X'',
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
+             updated_at = ?,
+             first_scheduled_at = CASE WHEN ? THEN ? ELSE first_scheduled_at END
+             WHERE session_key_hash = ? AND status = 'active'
+               AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?")
+        .bind("cancelled").bind("request_failed").bind(604_920_i64).bind(120_i64)
+        .bind(true).bind(110_i64).bind(key).bind(true).bind(110_i64)
+        .execute(storage.pool()).await.unwrap();
+    assert_eq!(cancelled.rows_affected(), 0);
+    let refreshed = sqlx::query("UPDATE cache_keepalive_sessions SET generation = ?, refresh_count = refresh_count + 1,
+                 cache_anchor_at = ?, run_at = ?, ttl = ttl, status = 'active', enqueue_state = 'pending',
+                 running_since_unix_secs = NULL, current_job_key = ?, encrypted_payload = ?, terminal_reason = NULL, error = NULL, expires_at = ?, updated_at = ?
+                 WHERE session_key_hash = ? AND generation = ? AND status = 'active'
+                 RETURNING *")
+        .bind((generation + 1) as i64).bind(110_i64).bind(380_i64)
+        .bind(cache_keepalive_job_key(key, generation + 1)).bind(b"old-hit".as_slice())
+        .bind(410_i64).bind(120_i64).bind(key).bind(generation as i64)
+        .fetch_optional(storage.pool()).await.unwrap();
+    assert!(refreshed.is_none());
+}
+
+#[tokio::test]
+async fn unticketed_marker_fence_restores_real_start_and_active_duration_anchor() {
+    let (_directory, storage) = storage().await;
+    let key = "unticketed-marker-fence";
+    let mut seed = replace_request(b"seed", 100);
+    seed.session_key_hash = key.to_owned();
+    let active = storage.replace_from_real_request(&seed).await.unwrap();
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: key.to_owned(),
+            generation: active.generation,
+            cache_anchor_at_unix_secs: 150,
+            run_at_unix_secs: 420,
+            expires_at_unix_secs: 450,
+            encrypted_payload: None,
+            now_unix_secs: 150,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        refreshed.first_scheduled_at_unix_secs, 100,
+        "active duration anchor is not a protection fence"
+    );
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced(key, None, 160, 700)
+            .await
+            .unwrap()
+    );
+    let marker = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.first_scheduled_at_unix_secs, 160);
+    let raw = sqlx::query_scalar::<_, i64>(
+        "SELECT first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(key)
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert_eq!(raw, 701, "None-owner direct API uses the marker deadline");
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                None,
+                170,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                180
+            )
+            .await
+            .unwrap()
+    );
+    let row = storage
+        .get_cache_keepalive_session(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.first_scheduled_at_unix_secs, 160,
+        "unticketed finalization restores prior real start"
+    );
+    assert_eq!(row.running_since_unix_secs, None);
+    let raw = sqlx::query_scalar::<_, i64>(
+        "SELECT first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(key)
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert_eq!(raw, 160);
 }

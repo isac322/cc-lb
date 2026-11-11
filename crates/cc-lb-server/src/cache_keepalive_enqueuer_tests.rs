@@ -1,7 +1,7 @@
 use super::*;
 
 use bytes::Bytes;
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::{SystemClock, TestClock};
 use cc_lb_config::{SchedulerConfig, StorageConfig};
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveNotTrackedRequest, RequestSnapshot, ScheduleParams,
@@ -9,8 +9,9 @@ use cc_lb_engine::cache_keepalive::{
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::worker::{Filter, TaskStatus};
 use cc_lb_storage_api::{
-    CacheKeepaliveEnqueueState, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
-    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
+    CacheKeepaliveEnqueueState, CacheKeepaliveOrderMeta, CacheKeepaliveSessionFilter,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus,
+    CacheTtl, MetaStore, cache_keepalive_order_meta_key, parse_keepalive_order_meta,
 };
 use http::{HeaderMap, Method};
 use tempfile::TempDir;
@@ -586,6 +587,15 @@ impl Fixture {
             aead: Arc::new(AeadService::from_master_key([7; 32])),
         }
     }
+
+    async fn order_meta(&self) -> CacheKeepaliveOrderMeta {
+        let raw = self
+            .storage
+            .get_meta_value(&cache_keepalive_order_meta_key("session-hash"))
+            .await
+            .expect("read ordering metadata");
+        parse_keepalive_order_meta(raw.as_deref()).expect("parse ordering metadata")
+    }
 }
 
 struct FailingPusher;
@@ -868,6 +878,7 @@ async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
         CancelReason::AmbiguousTurn,
         CancelReason::RetentionRecorded,
         CancelReason::RenewalNotBeneficial,
+        CancelReason::SessionIdentityChanged,
         CancelReason::SnapshotTooLarge,
         CancelReason::CachedPrefixTooSmall,
         CancelReason::ZeroTokenRenewalUnsupported,
@@ -925,6 +936,7 @@ async fn request_fence_is_provisional_until_the_real_completion_resolves_it() {
     for final_reason in [
         CancelReason::UserTurnDetected,
         CancelReason::AmbiguousTurn,
+        CancelReason::SessionIdentityChanged,
         CancelReason::SnapshotTooLarge,
         CancelReason::CachedPrefixTooSmall,
         CancelReason::ZeroTokenRenewalUnsupported,
@@ -1061,4 +1073,252 @@ async fn agent_in_turn_completion_reactivates_a_provisional_request_fence() {
     assert_eq!(record.cancel_reason, None);
     assert_eq!(record.running_since_unix_secs, None);
     assert!(!record.encrypted_payload.is_empty());
+}
+
+#[derive(Default)]
+struct CountingPusher(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl CacheKeepaliveTaskPusher for CountingPusher {
+    async fn push_cache_keepalive_task(
+        &self,
+        _task: SchedulerPushTask<AdaptiveJob>,
+    ) -> SchedulerResult<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn request_ticket_protection_uses_configured_timeout_and_completion_preserves_lease() {
+    let fixture = Fixture::new().await;
+    let clock = Arc::new(TestClock::new_at_secs(100));
+    let pusher = Arc::new(CountingPusher::default());
+    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: pusher.clone(),
+        aead: fixture.aead.clone(),
+        clock: clock.clone(),
+        request_timeout: std::time::Duration::from_secs(47),
+    });
+    enqueuer
+        .enqueue_cache_keepalive(enqueue_request())
+        .await
+        .expect("seed tracked session");
+    pusher.0.store(0, std::sync::atomic::Ordering::SeqCst);
+    let ticket = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("allocate owner")
+        .expect("leased owner");
+    assert_eq!(ticket.sequence, 1);
+    assert_eq!(ticket.valid_until_unix_secs, 194);
+    let issued = fixture.order_meta().await;
+    let lease = issued.lease.expect("leased namespace");
+    assert_eq!(lease.epoch, ticket.epoch);
+    assert_eq!(lease.last_issued_at_unix_secs, 100);
+    assert_eq!(lease.protected_until_unix_secs, 194);
+    enqueuer
+        .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: CancelReason::NewRequest,
+            expected_generation: Some(ticket),
+            cache_anchor_age: std::time::Duration::ZERO,
+        })
+        .await
+        .expect("begin request");
+    let marker = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("read marker")
+        .expect("request marker");
+    assert_eq!(marker.run_at_unix_secs, 147, "marker retains one timeout");
+    assert_eq!(marker.running_since_unix_secs, Some(100));
+
+    clock.advance_secs(10);
+    let newer = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("allocate later ticket")
+        .expect("leased later ticket");
+    assert_eq!(newer.epoch, ticket.epoch);
+    assert_eq!(newer.sequence, 2);
+    assert_eq!(newer.valid_until_unix_secs, 204);
+    assert_eq!(
+        ticket.valid_until_unix_secs, 194,
+        "ticket keeps its own deadline"
+    );
+    let extended = fixture.order_meta().await;
+    assert_eq!(extended.issued, 2);
+    assert_eq!(extended.applied, ticket.sequence);
+    let extended_lease = extended.lease.expect("extended namespace");
+    assert_eq!(extended_lease.last_issued_at_unix_secs, 110);
+    assert_eq!(extended_lease.protected_until_unix_secs, 204);
+
+    clock.advance_secs(30);
+    let mut completion = enqueue_request();
+    completion.expected_generation = Some(ticket);
+    completion.cache_anchor_age = std::time::Duration::ZERO;
+    enqueuer
+        .enqueue_cache_keepalive(completion)
+        .await
+        .expect("complete original owner without observing again");
+    assert_eq!(fixture.order_meta().await, extended);
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("read completion")
+        .expect("completed session");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(record.running_since_unix_secs, None);
+    assert_eq!(pusher.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn request_ticket_deadline_is_inclusive_and_newer_lease_cannot_extend_it() {
+    for completion_at in [194, 195] {
+        let fixture = Fixture::new().await;
+        let clock = Arc::new(TestClock::new_at_secs(100));
+        let pusher = Arc::new(CountingPusher::default());
+        let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage: fixture.storage.clone(),
+            pusher: pusher.clone(),
+            aead: fixture.aead.clone(),
+            clock: clock.clone(),
+            request_timeout: std::time::Duration::from_secs(47),
+        });
+        enqueuer
+            .enqueue_cache_keepalive(enqueue_request())
+            .await
+            .expect("seed tracked session");
+        pusher.0.store(0, std::sync::atomic::Ordering::SeqCst);
+        let ticket = enqueuer
+            .observe_session_generation("session-hash")
+            .await
+            .expect("allocate owner")
+            .expect("leased owner");
+        enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: "session-hash".to_owned(),
+                reason: CancelReason::NewRequest,
+                expected_generation: Some(ticket),
+                cache_anchor_age: std::time::Duration::ZERO,
+            })
+            .await
+            .expect("begin");
+        clock.set_unix_secs(110);
+        let newer = enqueuer
+            .observe_session_generation("session-hash")
+            .await
+            .expect("extend namespace")
+            .expect("later ticket");
+        assert_eq!(newer.valid_until_unix_secs, 204);
+        let before = fixture.order_meta().await;
+        clock.set_unix_secs(completion_at);
+        let mut completion = enqueue_request();
+        completion.expected_generation = Some(ticket);
+        completion.cache_anchor_age = std::time::Duration::ZERO;
+        enqueuer
+            .enqueue_cache_keepalive(completion)
+            .await
+            .expect("fenced completion");
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("read session")
+            .expect("session");
+        assert_eq!(
+            record.status,
+            if completion_at == 194 {
+                CacheKeepaliveSessionStatus::Active
+            } else {
+                CacheKeepaliveSessionStatus::Terminal
+            },
+            "completion at {completion_at}"
+        );
+        assert_eq!(fixture.order_meta().await, before);
+        assert_eq!(
+            pusher.0.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(completion_at == 194)
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_ticket_rejects_wrong_epoch_and_superseded_owner() {
+    let fixture = Fixture::new().await;
+    let clock = Arc::new(TestClock::new_at_secs(100));
+    let pusher = Arc::new(CountingPusher::default());
+    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: pusher.clone(),
+        aead: fixture.aead.clone(),
+        clock: clock.clone(),
+        request_timeout: std::time::Duration::from_secs(47),
+    });
+    enqueuer
+        .enqueue_cache_keepalive(enqueue_request())
+        .await
+        .expect("seed tracked session");
+    pusher.0.store(0, std::sync::atomic::Ordering::SeqCst);
+    let older = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("older ticket")
+        .expect("leased owner");
+    clock.advance_secs(10);
+    let owner = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("new owner")
+        .expect("leased owner");
+    enqueuer
+        .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: CancelReason::NewRequest,
+            expected_generation: Some(owner),
+            cache_anchor_age: std::time::Duration::ZERO,
+        })
+        .await
+        .expect("newer begin");
+    let before = fixture.order_meta().await;
+    let wrong_epoch = CacheKeepaliveCompletionTicket {
+        epoch: Uuid::nil(),
+        ..owner
+    };
+    assert_ne!(wrong_epoch.epoch, owner.epoch);
+    for rejected in [older, wrong_epoch] {
+        let mut completion = enqueue_request();
+        completion.expected_generation = Some(rejected);
+        completion.cache_anchor_age = std::time::Duration::ZERO;
+        enqueuer
+            .enqueue_cache_keepalive(completion)
+            .await
+            .expect("reject completion");
+        for reason in [CancelReason::NewRequest, CancelReason::UserTurnDetected] {
+            enqueuer
+                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                    session_key_hash: "session-hash".to_owned(),
+                    reason,
+                    expected_generation: Some(rejected),
+                    cache_anchor_age: std::time::Duration::ZERO,
+                })
+                .await
+                .expect("reject stale fence");
+        }
+        assert_eq!(fixture.order_meta().await, before);
+    }
+    assert_eq!(pusher.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let mut completion = enqueue_request();
+    completion.expected_generation = Some(owner);
+    completion.cache_anchor_age = std::time::Duration::ZERO;
+    enqueuer
+        .enqueue_cache_keepalive(completion)
+        .await
+        .expect("current owner completes");
+    assert_eq!(fixture.order_meta().await, before);
+    assert_eq!(pusher.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

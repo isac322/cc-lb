@@ -221,6 +221,13 @@ impl Fixture {
     }
 
     fn with_limits(upstreams: Vec<TestUpstream>, limits: Vec<Limit>) -> Self {
+        Self::with_principal_view(upstreams, principal_view(limits))
+    }
+
+    fn with_principal_view(
+        upstreams: Vec<TestUpstream>,
+        principal_view: Arc<PrincipalView>,
+    ) -> Self {
         let mut records = Vec::new();
         let mut credentials = HashMap::new();
         let mut replies = HashMap::new();
@@ -243,7 +250,6 @@ impl Fixture {
             hosts: Mutex::new(Vec::new()),
             headers: Mutex::new(Vec::new()),
         });
-        let principal_view = principal_view(limits);
         let authn =
             TestAuthn::with_principal_view(TestState::default(), Arc::clone(&principal_view));
         let view = DynamicViewBuilder::new(0)
@@ -332,6 +338,11 @@ fn principal_view(limits: Vec<Limit>) -> Arc<PrincipalView> {
         )]),
     ))
 }
+
+// QA: real official-to-custom identity transition, independent completion tickets,
+// JSON/SSE response fidelity, terminal old identity, and newer-owner fencing.
+#[path = "lifecycle_upstream_failover/keepalive_identity.rs"]
+mod keepalive_identity;
 
 fn known_base_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
     vec![
