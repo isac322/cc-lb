@@ -184,6 +184,7 @@ import {
   useSharedTimeRange,
 } from '../lib/timePresets';
 import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
+import { useVisibility } from '../lib/visibilityManager';
 
 const UPSTREAM_FILTERS = [
   'all',
@@ -437,19 +438,6 @@ function UpstreamsPage() {
   // 7-day spend in one place; the DetailView polls /latest with the same
   // key, so TanStack dedups it into one request.
   const upstreamUsage = useUpstreamUsageData();
-  // A plan-only deep link must also find rows that have not mounted yet.
-  // These observers share the caption's query and only fetch while searching.
-  const searchedMetadata = useQueries({
-    queries: view.q.trim()
-      ? upstreamUsage.rows
-          .filter((row) => row.upstream.kind.endsWith('_oauth'))
-          .map((row) => ({
-            ...upstreamSubscriptionMetadataQueryOptions(row.upstream.id),
-            staleTime: POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
-          }))
-      : [],
-    combine: (results) => results.map((query) => query.data),
-  });
   const rowWindowsByProvider = useMemo(
     () => visibleRowWindowsByProvider(upstreamUsage.rows),
     [upstreamUsage.rows],
@@ -492,12 +480,9 @@ function UpstreamsPage() {
         const plan = oauth
           ? providerPlanLabel(
               providerOf(upstream.kind),
-              searchedMetadata.find(
-                (metadata) => metadata?.upstream_id === upstream.id,
-              ) ??
-                queryClient.getQueryData<SubscriptionMetadataResponse>(
-                  qk.upstreamSubscriptionMetadata(upstream.id),
-                ),
+              queryClient.getQueryData<SubscriptionMetadataResponse>(
+                qk.upstreamSubscriptionMetadata(upstream.id),
+              ),
             )
           : null;
         return [
@@ -523,7 +508,7 @@ function UpstreamsPage() {
         name: compareUpstreamNames,
       },
     }),
-    [queryClient, nowUnixSecs, searchedMetadata],
+    [queryClient, nowUnixSecs],
   );
   const scopedRows = upstreamUsage.rows.filter(
     (row) =>
@@ -532,6 +517,41 @@ function UpstreamsPage() {
   );
   const reconnectCount = countReconnectNudges(scopedRows);
   const flatListView = useEntityListView(scopedRows, view, viewConfig);
+  const visibility = useVisibility();
+  const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
+  const wasHiddenRef = useRef(isHidden);
+  // Mounted captions and the selected detail already own this query's cadence.
+  const mountedMetadataIds = new Set(
+    flatListView.visible.map((row) => row.upstream.id),
+  );
+  if (selectedId) mountedMetadataIds.add(selectedId);
+  const searchedRows = view.q.trim()
+    ? scopedRows.filter((row) => row.upstream.kind.endsWith('_oauth'))
+    : [];
+  const pollingSearchRows = searchedRows.filter(
+    (row) => !mountedMetadataIds.has(row.upstream.id),
+  );
+  useQueries({
+    queries: searchedRows.map((row) => ({
+      ...upstreamSubscriptionMetadataQueryOptions(row.upstream.id),
+      refetchInterval:
+        !isHidden && !mountedMetadataIds.has(row.upstream.id)
+          ? POLLING_INTERVALS.UPSTREAM_SUB_META_MS
+          : (false as const),
+    })),
+    combine: (results) => results.map((query) => query.data),
+  });
+  useEffect(() => {
+    if (wasHiddenRef.current && !isHidden) {
+      for (const row of pollingSearchRows) {
+        void queryClient.refetchQueries({
+          queryKey: qk.upstreamSubscriptionMetadata(row.upstream.id),
+          exact: true,
+        });
+      }
+    }
+    wasHiddenRef.current = isHidden;
+  }, [isHidden, pollingSearchRows, queryClient]);
   const providerCount = new Set(
     scopedRows.map((row) => providerOf(row.upstream.kind)),
   ).size;

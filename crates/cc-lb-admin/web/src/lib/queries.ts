@@ -819,6 +819,7 @@ export function upstreamSubscriptionMetadataQueryOptions(
 ) {
   return queryOptions({
     queryKey: qk.upstreamSubscriptionMetadata(upstreamId ?? ''),
+    staleTime: POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
     queryFn: ({ signal }) =>
       getJson<SubscriptionMetadataResponse>(
         `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,

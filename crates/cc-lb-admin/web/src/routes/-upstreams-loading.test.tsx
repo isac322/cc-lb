@@ -649,6 +649,121 @@ describe('/upstreams disabled list rows', () => {
 });
 
 describe('/upstreams provider account metadata', () => {
+  function setSearchVisibility(state: DocumentVisibilityState) {
+    Object.defineProperty(document, 'visibilityState', {
+      value: state,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  async function renderBackfillingPlanSearch(initialPlan: string | null) {
+    vi.useFakeTimers();
+    act(() => setSearchVisibility('visible'));
+    const actualQueries =
+      await vi.importActual<typeof queries>('../lib/queries');
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(
+      actualQueries.useUpstreamSubscriptionMetadata,
+    );
+    searchState = { q: 'Google AI Ultra' };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({
+        upstreams: [
+          { ...upstream, kind: 'gemini_oauth' },
+          ...Array.from({ length: 7 }, (_, index) => ({
+            ...apiKeyUpstream,
+            id: `backfill-api-${index}`,
+            name: `Backfill backup ${index}`,
+          })),
+        ],
+      }),
+    );
+    const initial: api.SubscriptionMetadataResponse = {
+      upstream_id: upstream.id,
+      subscription_metadata: null,
+      organization_metadata: null,
+      plan: initialPlan,
+      plan_name: null,
+    };
+    const getMetadata = vi.spyOn(api, 'getJson').mockResolvedValue(initial);
+    const metadataUrl = `/admin/v1/upstreams/${upstream.id}/subscription-metadata`;
+    const metadataRequestCount = () =>
+      getMetadata.mock.calls.filter(([path]) => path === metadataUrl).length;
+    const rendered = renderRoute();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(metadataRequestCount()).toBe(1);
+    expect(screen.queryByRole('button', { name: /OAuth Primary/ })).toBeNull();
+    return {
+      metadataRequestCount,
+      backfill: () => {
+        getMetadata.mockResolvedValue({
+          ...initial,
+          plan: 'g1-ultra-tier',
+          plan_name: 'Google AI Ultra',
+        } satisfies api.SubscriptionMetadataResponse);
+      },
+      dispose: () => {
+        rendered.unmount();
+        act(() => setSearchVisibility('visible'));
+      },
+    };
+  }
+
+  test.each([null, 'free-tier'])(
+    'finds a hidden row when its initially %s plan is backfilled on the metadata cadence',
+    async (initialPlan) => {
+      const search = await renderBackfillingPlanSearch(initialPlan);
+      try {
+        search.backfill();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(
+            queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS + 1,
+          );
+        });
+        const row = screen.getByRole('button', { name: /OAuth Primary/ });
+        expect(within(row).getByText('Google AI Ultra')).toBeDefined();
+        expect(search.metadataRequestCount()).toBe(2);
+        expect(searchState.q).toBe('Google AI Ultra');
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(
+            queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
+          );
+        });
+        expect(search.metadataRequestCount()).toBe(3);
+      } finally {
+        search.dispose();
+      }
+    },
+  );
+
+  test('pauses hidden-row metadata polling while the document is hidden and refetches on return', async () => {
+    const search = await renderBackfillingPlanSearch(null);
+    try {
+      act(() => setSearchVisibility('hidden'));
+      search.backfill();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          queries.POLLING_INTERVALS.UPSTREAM_SUB_META_MS * 3,
+        );
+      });
+      expect(search.metadataRequestCount()).toBe(1);
+      expect(
+        screen.queryByRole('button', { name: /OAuth Primary/ }),
+      ).toBeNull();
+      act(() => setSearchVisibility('visible'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const row = screen.getByRole('button', { name: /OAuth Primary/ });
+      expect(within(row).getByText('Google AI Ultra')).toBeDefined();
+      expect(search.metadataRequestCount()).toBe(2);
+    } finally {
+      search.dispose();
+    }
+  });
+
   test.each([
     [
       'anthropic_oauth',
