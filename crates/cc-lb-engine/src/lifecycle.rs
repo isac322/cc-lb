@@ -7606,6 +7606,9 @@ impl Lifecycle {
             let mut semantic_message_stop_seen = false;
             let mut semantic_completion_observed = false;
             let mut semantic_completion_emitted = false;
+            // A finished choice can precede the final usage chunk. Only an
+            // emitted [DONE] permits accepting a later Chat body fault.
+            let mut chat_done_emitted = false;
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -7661,6 +7664,7 @@ impl Lifecycle {
                                 upstream_has_content_length && body.is_end_stream();
                             let mut raw_passthrough_current_chunk = false;
                             let mut raw_chunk_completes_response = false;
+                            let mut raw_chunk_done = false;
                             let mut provider_error_in_chunk = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
@@ -7750,17 +7754,18 @@ impl Lifecycle {
                                         && (success_sse_affinity_gate || sse_transform_active)
                                         && upstream_end_after_message_stop_is_acceptable(
                                             status,
-                                            if response_affinity_context.capability.usage_shape()
-                                                == crate::provider_capability::UsageShape::OpenaiResponses
-                                            {
-                                                semantic_completion_emitted
-                                            } else {
-                                                semantic_message_stop_seen
+                                            match response_affinity_context.capability {
+                                                ProviderCapability::OpenaiChatCompletions => chat_done_emitted,
+                                                ProviderCapability::OpenaiResponses
+                                                | ProviderCapability::OpenaiResponsesCompact => semantic_completion_emitted,
+                                                _ => semantic_message_stop_seen,
                                             },
                                             stream_upstream_error.is_some()
                                                 || stream_transform_error.is_some()
                                                 || stream_affinity_error.is_some(),
-                                            stream_provider_error_seen,
+                                            stream_provider_error_seen
+                                                || (response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                                                    && stream_provider_error_forwarded),
                                             upstream_diagnostics.warning_recorded(),
                                             &buffer,
                                         )
@@ -8219,6 +8224,7 @@ impl Lifecycle {
                                     usage_update.message_stop,
                                 );
                                 raw_chunk_completes_response |= event_completes_response;
+                                raw_chunk_done |= parsed_event.is_done();
                                 if !semantic_completion_observed && event_completes_response {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
@@ -8292,6 +8298,7 @@ impl Lifecycle {
                                 if sse_transform_active {
                                     let mut outgoing_provider_error = provider_error_in_event;
                                     let mut outgoing_completes_response = event_completes_response;
+                                    let mut outgoing_done = parsed_event.is_done();
                                     let outgoing = if let Some(response_headers) = response_headers.as_ref() {
                                         match transform_sse_event_bytes(
                                             sse_transform_hook,
@@ -8318,6 +8325,7 @@ impl Lifecycle {
                                                         );
                                                     outgoing_provider_error = output.emitted_error;
                                                     outgoing_completes_response = output.completes_response;
+                                                    outgoing_done = output.done;
                                                 }
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
@@ -8490,6 +8498,9 @@ impl Lifecycle {
                                     if outgoing_completes_response {
                                         semantic_completion_emitted = true;
                                         downstream_drop_guard.mark_semantic_completion();
+                                    }
+                                    if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                                        chat_done_emitted |= outgoing_done;
                                     }
                                     if outgoing_provider_error && !outgoing.is_empty() {
                                         stream_provider_error_forwarded = true;
@@ -8685,6 +8696,9 @@ impl Lifecycle {
                                         }
                                         debug_assert!(deferred_terminal_chunks.is_empty());
                                         deferred_terminal_chunks.push(data);
+                                        if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                                            chat_done_emitted |= raw_chunk_done;
+                                        }
                                         if provider_error_in_chunk {
                                             stream_provider_error_forwarded = true;
                                         }
@@ -8692,6 +8706,9 @@ impl Lifecycle {
                                         if raw_chunk_completes_response {
                                             semantic_completion_emitted = true;
                                             downstream_drop_guard.mark_semantic_completion();
+                                        }
+                                        if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                                            chat_done_emitted |= raw_chunk_done;
                                         }
                                         if provider_error_in_chunk {
                                             stream_provider_error_forwarded = true;
@@ -8731,17 +8748,18 @@ impl Lifecycle {
                                     && !downstream_sse_boundary.partial_event_pending()))
                             && upstream_end_after_message_stop_is_acceptable(
                                 status,
-                                if response_affinity_context.capability.usage_shape()
-                                    == crate::provider_capability::UsageShape::OpenaiResponses
-                                {
-                                    semantic_completion_emitted
-                                } else {
-                                    semantic_message_stop_seen
+                                match response_affinity_context.capability {
+                                    ProviderCapability::OpenaiChatCompletions => chat_done_emitted,
+                                    ProviderCapability::OpenaiResponses
+                                    | ProviderCapability::OpenaiResponsesCompact => semantic_completion_emitted,
+                                    _ => semantic_message_stop_seen,
                                 },
                                 stream_upstream_error.is_some()
                                     || stream_transform_error.is_some()
                                     || stream_affinity_error.is_some(),
-                                stream_provider_error_seen,
+                                stream_provider_error_seen
+                                    || (response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                                        && stream_provider_error_forwarded),
                                 upstream_diagnostics.warning_recorded(),
                                 &buffer,
                             );
@@ -9280,17 +9298,18 @@ impl Lifecycle {
                         && (success_sse_affinity_gate || sse_transform_active)
                         && upstream_end_after_message_stop_is_acceptable(
                             status,
-                            if response_affinity_context.capability.usage_shape()
-                                == crate::provider_capability::UsageShape::OpenaiResponses
-                            {
-                                semantic_completion_emitted
-                            } else {
-                                semantic_message_stop_seen
+                            match response_affinity_context.capability {
+                                ProviderCapability::OpenaiChatCompletions => chat_done_emitted,
+                                ProviderCapability::OpenaiResponses
+                                | ProviderCapability::OpenaiResponsesCompact => semantic_completion_emitted,
+                                _ => semantic_message_stop_seen,
                             },
                             stream_upstream_error.is_some()
                                 || stream_transform_error.is_some()
                                 || stream_affinity_error.is_some(),
-                            stream_provider_error_seen,
+                            stream_provider_error_seen
+                                || (response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                                    && stream_provider_error_forwarded),
                             false,
                             &buffer,
                         )
@@ -9483,7 +9502,8 @@ impl Lifecycle {
                 && status.is_success()
                 && parse_sse_events_active
                 && transform_decode_supported
-                && semantic_terminal_event_type(response_affinity_context.capability).is_some()
+                && (semantic_terminal_event_type(response_affinity_context.capability).is_some()
+                    || response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions)
                 && !semantic_completion_emitted
                 && sse_buffer_is_blank(&buffer)
                 && !downstream_drop_guard.has_abnormal_stop()
@@ -9499,7 +9519,11 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
                         usage: to_usage_snapshot(&usage),
-                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                        source: if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                            cc_lb_lifecycle::UsageSource::Final
+                        } else {
+                            cc_lb_lifecycle::UsageSource::MessageDelta
+                        },
                     });
                 }
                 let incomplete_message = if matches!(
@@ -9508,6 +9532,8 @@ impl Lifecycle {
                         | ProviderCapability::OpenaiResponsesCompact
                 ) {
                     "upstream SSE response ended before a terminal Responses event"
+                } else if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions {
+                    "upstream SSE response ended before a finished choice or [DONE]"
                 } else {
                     "upstream SSE response ended before message_stop"
                 };
@@ -9540,6 +9566,21 @@ impl Lifecycle {
                         yield Ok::<Bytes, Infallible>(chunk);
                     }
                     yield Ok::<Bytes, Infallible>(frame);
+                }
+                if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                    && (success_sse_affinity_gate || sse_transform_active || downstream_stream_is_identity)
+                {
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
+                        &responses_error_context,
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                        incomplete_message,
+                        false,
+                    );
+                    batch_index = batch_index.saturating_add(1);
+                    // Commit the incomplete outcome before a client can close
+                    // on this error frame, using the existing final flush.
+                    deferred_terminal_chunks.push(frame);
                 }
             }
             if stream_affinity_error.is_none()
@@ -9635,6 +9676,17 @@ impl Lifecycle {
             let finalize_ms = if let Some(o) = observer.as_ref() {
                 if usage.has_billable_usage() {
                     o.set_usage_counts(&usage, message_stop_at.is_some());
+                    if response_affinity_context.capability == ProviderCapability::OpenaiChatCompletions
+                        && stream_provider_error_seen
+                    {
+                        // The provider error already completed the stream.
+                        // Flush usage that partial-update throttling held back.
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                            event_id: o.event_id().to_owned(),
+                            usage: to_usage_snapshot(&usage),
+                            source: cc_lb_lifecycle::UsageSource::Final,
+                        });
+                    }
                 }
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);
@@ -9671,7 +9723,9 @@ impl Lifecycle {
                             ..Default::default()
                         }),
                     });
-                } else {
+                } else if response_affinity_context.capability != ProviderCapability::OpenaiChatCompletions
+                    || !stream_provider_error_seen
+                {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {

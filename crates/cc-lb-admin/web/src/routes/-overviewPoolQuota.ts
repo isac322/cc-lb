@@ -22,6 +22,10 @@ export type PoolQuotaChartRow = {
 };
 /** Latest pool utilization per window (0-100 used), for legends. */
 export type PoolQuotaLatest = Record<PoolQuotaWindow, number | null>;
+export interface PoolQuotaObservation {
+  observedAtUnixSecs: number | null;
+  stale: boolean;
+}
 
 /**
  * The default call ignores unknown provider windows; provider-specific callers
@@ -37,6 +41,14 @@ export function poolQuotaWindowsPresent(
   for (const entry of history ?? []) returned.add(entry.window);
   for (const entry of aggregate?.windows ?? []) returned.add(entry.window);
   return defaults.filter((window) => {
+    const historyWindow = history?.find(
+      (candidate) => candidate.window === window,
+    );
+    // Live provider history knows current eligibility; aggregate lots may
+    // include an older, now superseded provider window.
+    if (historyWindow?.latest?.max_staleness_secs != null) {
+      return historyWindow.latest.eligible_upstreams > 0;
+    }
     const aggregateWindow = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
@@ -48,11 +60,9 @@ export function poolQuotaWindowsPresent(
       return false;
     }
     if (!requireData) return returned.has(window);
-    const historyWindow = history?.find(
-      (candidate) => candidate.window === window,
-    );
     return (
       aggregateWindow?.utilization_percent != null ||
+      (historyWindow?.latest?.eligible_upstreams ?? 0) > 0 ||
       (aggregateWindow?.cc_window_reset_unix_secs ?? 0) > 0 ||
       (historyWindow?.series.length ?? 0) > 0
     );
@@ -129,6 +139,99 @@ export function buildPoolQuotaChartData(
  * and the chart must not fabricate a live flat line across the outage.
  */
 export const POOL_QUOTA_HEARTBEAT_CARRY_SECS = 3_600 + 300;
+
+/**
+ * Clip persisted history without substituting current readings or extending
+ * the tail. A bounded predecessor anchors the left edge only when the next
+ * persisted point confirms collection continued within one heartbeat.
+ * Snapshot counts disable anchoring so a clipped point is not counted twice.
+ */
+export function recordedPoolQuotaChartData(
+  rows: readonly PoolQuotaChartRow[],
+  rangeStartUnix: number,
+  rangeEndUnix: number,
+  { anchorPredecessor = true }: { anchorPredecessor?: boolean } = {},
+): PoolQuotaChartRow[] {
+  if (rangeStartUnix > rangeEndUnix) return [];
+
+  let predecessor: PoolQuotaChartRow | undefined;
+  const visible: PoolQuotaChartRow[] = [];
+  for (const row of rows) {
+    if (row.unix < rangeStartUnix) {
+      predecessor = row;
+    } else if (row.unix <= rangeEndUnix) {
+      visible.push(row);
+    }
+  }
+
+  const first = visible[0];
+  if (
+    anchorPredecessor &&
+    predecessor &&
+    first &&
+    first.unix > rangeStartUnix &&
+    first.unix - predecessor.unix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS
+  ) {
+    visible.unshift({ ...predecessor, unix: rangeStartUnix });
+  }
+  return visible;
+}
+
+/**
+ * Hold an unchanged provider reading to the response clock only while its
+ * recorded tail and actual member observations are fresh. Synthetic points
+ * preserve recorded values and never replace null history after recovery.
+ */
+export function freshProviderPoolQuotaChartData(
+  rows: readonly PoolQuotaChartRow[],
+  rangeStartUnix: number,
+  rangeEndUnix: number,
+  windows: readonly PoolHistoryWindowResponse[] | undefined,
+): PoolQuotaChartRow[] {
+  const visible = recordedPoolQuotaChartData(
+    rows,
+    rangeStartUnix,
+    rangeEndUnix,
+  );
+  const last = visible.at(-1);
+  if (!last || last.unix >= rangeEndUnix) return visible;
+
+  const tail: PoolQuotaChartRow = { unix: rangeEndUnix };
+  for (const key of Object.keys(last)) {
+    if (key === 'unix') continue;
+    tail[key] = null;
+    const entry = windows?.find((window) => window.window === key);
+    const recorded = entry?.series.find(
+      (point) => point.snapshot_at_unix_secs === last.unix,
+    );
+    const current = entry?.latest;
+    const observed = current?.oldest_observed_at_unix_millis;
+    const maxAge = current?.max_staleness_secs;
+    const used = current?.utilization_percent;
+    if (
+      last[key] != null &&
+      recorded?.utilization_percent != null &&
+      Number.isFinite(recorded.utilization_percent) &&
+      rangeEndUnix - recorded.snapshot_at_unix_secs <=
+        POOL_QUOTA_HEARTBEAT_CARRY_SECS &&
+      observed != null &&
+      Number.isFinite(observed) &&
+      maxAge != null &&
+      Number.isFinite(maxAge) &&
+      maxAge >= 0 &&
+      observed <= rangeEndUnix * 1000 &&
+      rangeEndUnix - observed / 1000 <= maxAge &&
+      current?.stale_upstreams === 0 &&
+      used != null &&
+      Number.isFinite(used) &&
+      Math.abs(used / 100 - recorded.utilization_percent / 100) < 0.001
+    ) {
+      tail[key] = last[key];
+    }
+  }
+  if (hasPoolQuotaValue(tail)) visible.push(tail);
+  return visible;
+}
 
 function hasPoolQuotaValue(row: PoolQuotaChartRow): boolean {
   return Object.entries(row).some(
@@ -255,17 +358,44 @@ export function visiblePoolQuotaChartData(
 export function poolQuotaResponseLatest(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
   visibleRows: readonly PoolQuotaChartRow[],
+  { requireVisibleHistory = true }: { requireVisibleHistory?: boolean } = {},
 ): PoolQuotaLatest {
   const latest: PoolQuotaLatest = {};
   for (const window of POOL_QUOTA_WINDOWS) latest[window] = null;
   for (const window of windowKeys(windows)) {
     latest[window] = null;
-    if (!visibleRows.some((row) => row[window] != null)) continue;
+    if (
+      requireVisibleHistory &&
+      !visibleRows.some((row) => row[window] != null)
+    ) {
+      continue;
+    }
     latest[window] =
       windows?.find((entry) => entry.window === window)?.latest
         ?.utilization_percent ?? null;
   }
   return latest;
+}
+
+/** Current provider observation age, independent of historical aggregate lots. */
+export function poolQuotaResponseObservation(
+  windows: readonly PoolHistoryWindowResponse[] | undefined,
+  visibleWindows: readonly PoolQuotaWindow[],
+): PoolQuotaObservation {
+  let observedAtUnixSecs: number | null = null;
+  let stale = false;
+  for (const entry of windows ?? []) {
+    if (!visibleWindows.includes(entry.window)) continue;
+    const current = entry.latest;
+    const oldest = current?.oldest_observed_at_unix_millis;
+    if (oldest != null) {
+      const secs = oldest / 1000;
+      observedAtUnixSecs =
+        observedAtUnixSecs == null ? secs : Math.min(observedAtUnixSecs, secs);
+    }
+    if ((current?.stale_upstreams ?? 0) > 0) stale = true;
+  }
+  return { observedAtUnixSecs, stale };
 }
 
 /**

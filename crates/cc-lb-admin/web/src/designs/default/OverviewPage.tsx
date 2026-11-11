@@ -119,17 +119,21 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  freshProviderPoolQuotaChartData,
   latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
   POOL_QUOTA_WINDOWS,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
+  type PoolQuotaObservation,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
+  poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from '../../routes/-overviewPoolQuota';
 
@@ -1184,6 +1188,7 @@ type PoolQuotaChartProps = {
   rangeStartUnix: number;
   rangeEndUnix: number;
   latest: PoolQuotaLatest;
+  observation?: PoolQuotaObservation;
   windows?: readonly PoolQuotaWindow[];
 };
 
@@ -1263,9 +1268,11 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
-  const provider = oldestProviderObservation(aggregate);
+  const provider = chart.observation ?? oldestProviderObservation(aggregate);
   const missingCapacity = missingCapacityUpstreams(aggregate);
-  const serverNow = aggregate?.now_unix_secs ?? null;
+  const serverNow = chart.observation
+    ? chart.rangeEndUnix
+    : (aggregate?.now_unix_secs ?? null);
   const weighting =
     aggregate && 'weighting' in aggregate ? aggregate.weighting : 'plan';
   const scopedWindows = windows ?? chart.windows ?? POOL_QUOTA_WINDOWS;
@@ -1349,6 +1356,10 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
                     <Badge tone="warn">Stale reading</Badge>
                   ) : null}
                 </span>
+              ) : null}
+              {chart.observation?.stale &&
+              provider.observedAtUnixSecs == null ? (
+                <Badge tone="warn">Stale reading</Badge>
               ) : null}
               {proof ? <span>{proof}</span> : null}
             </>
@@ -1806,6 +1817,8 @@ export function ProviderOverviewPage({
     quotaPoolHistory.data?.range_secs ?? seriesRangeSecs;
   const normalizedPoolHistoryWindows = quotaPoolHistory.data?.windows;
   const normalizedPoolAggregate = quotaAggregate.data;
+  const liveProviderHistory =
+    scopedProvider === 'openai' || scopedProvider === 'gemini';
   const visiblePoolWindows = useMemo(
     () =>
       presentPoolQuotaWindows(
@@ -1827,20 +1840,18 @@ export function ProviderOverviewPage({
   );
   const recordedChartData = useMemo(
     () =>
-      chartData
-        .filter(
-          (row) =>
-            row.unix >=
-              poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs &&
-            row.unix <= poolHistoryNowUnixSecs,
-        )
-        .map((row) => {
-          const sparseRow: PoolQuotaChartRow = { unix: row.unix };
-          for (const window of visiblePoolWindows) {
-            if (window in row) sparseRow[window] = row[window];
-          }
-          return sparseRow;
-        }),
+      recordedPoolQuotaChartData(
+        chartData,
+        poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+        poolHistoryNowUnixSecs,
+        { anchorPredecessor: false },
+      ).map((row) => {
+        const sparseRow: PoolQuotaChartRow = { unix: row.unix };
+        for (const window of visiblePoolWindows) {
+          if (window in row) sparseRow[window] = row[window];
+        }
+        return sparseRow;
+      }),
     [
       chartData,
       displayedPoolHistoryRangeSecs,
@@ -1854,12 +1865,20 @@ export function ProviderOverviewPage({
   );
   const visibleChartData = useMemo(
     () =>
-      visiblePoolQuotaChartData(
-        chartData,
-        poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
-        poolHistoryNowUnixSecs,
-        latestPoolQuotaSnapshotUnixSecs,
-        normalizedPoolHistoryWindows,
+      (liveProviderHistory
+        ? freshProviderPoolQuotaChartData(
+            chartData,
+            poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+            poolHistoryNowUnixSecs,
+            normalizedPoolHistoryWindows,
+          )
+        : visiblePoolQuotaChartData(
+            chartData,
+            poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+            poolHistoryNowUnixSecs,
+            latestPoolQuotaSnapshotUnixSecs,
+            normalizedPoolHistoryWindows,
+          )
       ).map((row) => {
         const sparseRow: PoolQuotaChartRow = { unix: row.unix };
         for (const window of visiblePoolWindows) {
@@ -1871,6 +1890,7 @@ export function ProviderOverviewPage({
       chartData,
       displayedPoolHistoryRangeSecs,
       latestPoolQuotaSnapshotUnixSecs,
+      liveProviderHistory,
       normalizedPoolHistoryWindows,
       poolHistoryNowUnixSecs,
       visiblePoolWindows,
@@ -1879,8 +1899,10 @@ export function ProviderOverviewPage({
 
   const chartLatest = useMemo(
     () =>
-      poolQuotaResponseLatest(normalizedPoolHistoryWindows, visibleChartData),
-    [normalizedPoolHistoryWindows, visibleChartData],
+      poolQuotaResponseLatest(normalizedPoolHistoryWindows, visibleChartData, {
+        requireVisibleHistory: !liveProviderHistory,
+      }),
+    [liveProviderHistory, normalizedPoolHistoryWindows, visibleChartData],
   );
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
@@ -1889,13 +1911,22 @@ export function ProviderOverviewPage({
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       latest: chartLatest,
+      observation: liveProviderHistory
+        ? poolQuotaResponseObservation(
+            normalizedPoolHistoryWindows,
+            visiblePoolWindows,
+          )
+        : undefined,
     }),
     [
       chartLatest,
       displayedPoolHistoryRangeSecs,
+      liveProviderHistory,
+      normalizedPoolHistoryWindows,
       poolHistoryNowUnixSecs,
       recordedChartData,
       visibleChartData,
+      visiblePoolWindows,
     ],
   );
 

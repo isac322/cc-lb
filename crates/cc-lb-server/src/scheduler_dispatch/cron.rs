@@ -104,45 +104,25 @@ impl SchedulerDispatch {
         &self,
         job: PoolQuotaSnapshotCronJob,
     ) -> SchedulerResult<JobOutcome> {
-        use cc_lb_admin::subscription_quotas::{
-            POOLED_HISTORY_WINDOWS, build_cc_lb_aggregate_response, record_pool_quota_snapshots_now,
-        };
-        use cc_lb_storage_api::SubscriptionQuotaSourceMerge;
+        use cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now;
+        use cc_lb_storage_api::Provider;
 
-        let view = self.dynamic_view.load();
-        let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
-        drop(view);
-
-        let aggregate = match build_cc_lb_aggregate_response(
-            self.storage.as_ref(),
-            self.dynamic_view.as_ref(),
-            None,
-            POOLED_HISTORY_WINDOWS.to_vec(),
-            SubscriptionQuotaSourceMerge::Merged,
-            max_staleness_secs,
-            &*self.clock,
-        )
-        .await
-        {
-            Ok(aggregate) => aggregate,
-            Err(error) => {
+        for provider in [Provider::Anthropic, Provider::Openai, Provider::Gemini] {
+            if let Err(error) = record_provider_pool_quota_snapshots_now(
+                self.storage.as_ref(),
+                self.dynamic_view.as_ref(),
+                provider,
+                &*self.clock,
+            )
+            .await
+            {
                 tracing::warn!(
                     tick_unix_secs = job.tick_unix_secs,
+                    ?provider,
                     %error,
-                    "pool quota snapshot aggregate build failed",
+                    "provider pool quota snapshot persist failed",
                 );
-                return Ok(JobOutcome::Done);
             }
-        };
-
-        if let Err(error) =
-            record_pool_quota_snapshots_now(self.storage.as_ref(), &aggregate, &*self.clock).await
-        {
-            tracing::warn!(
-                tick_unix_secs = job.tick_unix_secs,
-                %error,
-                "pool quota snapshot persist failed",
-            );
         }
 
         Ok(JobOutcome::Done)

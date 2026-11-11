@@ -133,6 +133,83 @@ the captured native request bytes through cc-lb; capture alone does not claim a
 completed CLI generation. The harness closes its processes and listeners and
 retains evidence directories recorded in the external ledger for later cleanup.
 
+### Offline actual-OMP Chat terminal regression (#1241)
+
+`chat-stream-terminal.py` uses Python 3.10+ standard-library HTTP clients and the
+installed **OMP 18.18.7**. It installs no SDKs. Supply an existing SQLite-enabled
+`cc-lb` binary and a new output directory whose parent already exists:
+
+```sh
+python3 tests/real-client/provider-e2e/chat-stream-terminal.py \
+  --binary /absolute/path/to/baseline/cc-lb \
+  --output /tmp/cc-lb-1241/before --expect old \
+  --source-sha c2bf4da7eb1428850e337988e57a274703ffb0fc \
+  --ledger /tmp/cc-lb-1241-cleanup-ledger.md
+
+python3 tests/real-client/provider-e2e/chat-stream-terminal.py \
+  --binary /absolute/path/to/fixed/cc-lb \
+  --output /tmp/cc-lb-1241/after --expect new \
+  --source-sha <source-commit-used-to-build-fixed-binary> \
+  --ledger /tmp/cc-lb-1241-cleanup-ledger.md
+```
+
+Each run covers five endings through raw HTTP and actual OMP separately:
+complete `[DONE]` followed by a chunked-body fault, partial clean EOF, healthy
+completion, finished-choice-only clean EOF, and finished-choice-only body fault.
+The complete fixtures include the final usage-only chunk (seven input and two
+output tokens). Partial and finish-only fixtures have unknown usage; the harness
+rejects fabricated token counts or costs.
+
+The path is OMP `api: openai-completions` → observing loopback HTTP tap →
+`/openai/v1/chat/completions` → loopback `/v1/chat/completions`.
+The tap injects a fresh canonical request ID for every attempt, forwards request
+and response body bytes unchanged, and captures the response status, headers,
+complete proxy body, and bytes written to the client socket. Serial forwarding
+joins each upstream dispatch to that exact request ID, including OMP retries.
+Every dispatch must have exactly one SQLite row and a matching admin projection.
+Raw requests make one dispatch; successful OMP controls must not retry.
+
+For faulty endings, the upstream waits for a tap observation event before closing
+without the HTTP zero chunk. Once the tap observes the terminal read, it signals
+that event and holds that read until the proxy finishes; earlier reads stream
+normally. This bounded tail hold lets the harness capture any post-`[DONE]` local
+error without racing OMP's immediate disconnect. It changes delivery timing,
+not body bytes. No sleep determines the fault timing. State-readiness polling
+and all process, socket, and observation waits have finite deadlines.
+
+`--expect old` requires both historical classification defects:
+post-`[DONE]` failure despite OMP success, and successful durable rows for
+premature EOF that OMP rejects and retries. It prints `OLD_DEFECTS_REPRODUCED`;
+this is baseline evidence, not a fixed-build pass. `--expect new` requires
+post-`[DONE]` success with a body-end warning and no appended local error, and
+one native `api_error` plus durable `upstream_response_incomplete` per premature
+EOF attempt. Healthy and finish-only boundaries must retain their behavior.
+
+The final JSON line names `result`, `cases` (10), `dispatch_count`, `report`, and
+`retained_resources`. `report.json` records binary version/hash, caller-attested
+source SHA, OMP version, stdout/stderr/exit status, per-case checks, dispatches,
+and every attempt's downstream files and durable diagnostics/accounting.
+`--source-sha` also accepts `CC_LB_SOURCE_SHA`; if omitted, the report explicitly
+marks the binary source commit as unknown. Each attempt retains `.upstream.sse`,
+`.downstream.sse`, and `.delivered.sse` evidence. Delivered bytes mean successful
+socket writes, not proof that OMP parsed every byte after `[DONE]`.
+
+Credentials are synthetic. Child environments allowlist platform essentials and
+isolate HOME, OMP configuration, temporary files, and XDG directories beneath the
+output directory; the price catalog refresh URL is loopback too. OMP uses the
+issue's disabling flags and its own 12-second limit, with a separate 25-second
+wall bound. Its internal retries remain enabled and their count is observed,
+not fixed. This checks controlled HTTP/1.1 loopback behavior, not live-provider
+frequency, other clients, compressed streams, or every engine precedence path.
+
+The harness appends exact UTC creation records and stop records to `--ledger`
+(JSONL records may coexist with the parent's Markdown ledger). It stops its
+owned process groups and listeners in `finally`, including on assertion failure.
+It retains the output tree and ledger entries for the caller's explicit cleanup;
+existing output directories are rejected. Config files contain only synthetic
+keys, and JSON reports redact those keys. Failed checks exit nonzero and retain
+`report.json` and `server.log` for diagnosis.
+
 ### 2. Preflight Check (Zero Provider Calls / Zero Cost)
 
 Verifies `target/debug/cc-lb`, installed CLI binaries (`omp`, `codex`, `agy`), free local port offsets, and credential variable presence (without printing secret values):

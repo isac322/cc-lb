@@ -96,6 +96,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
                  cache_keepalive_turns, config_draft_v1, config_history_v1, \
                  metadata_tier_mapping_override_v1, oauth_pkce_flows_v1, organization_metadata_v1, \
                  overview_excluded_error_rollups_v1, pool_subscription_quota_history_v1, \
+                 pool_subscription_quota_history_v2, \
                  price_catalog_snapshots_v1, principals_v1, prompt_cache_observations, \
                  provider_native_cache_observations, request_events_v1, \
                  upstream_plan_tier_history_v1, upstream_rate_limit_state_v1, \
@@ -300,6 +301,30 @@ fn pool_quota_history_fable_roundtrip_postgres() {
     run_postgres_scenario(
         "pool_quota_history_fable_roundtrip",
         pool_quota_history_store::fable_roundtrip,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_isolation_roundtrip_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_isolation_roundtrip",
+        pool_quota_history_store::provider_isolation_roundtrip,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_prune_anchors_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_prune_anchors",
+        pool_quota_history_store::provider_prune_anchors,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_chart_gaps_and_peaks_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_chart_gaps_and_peaks",
+        pool_quota_history_store::provider_chart_gaps_and_peaks,
     );
 }
 

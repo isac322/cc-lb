@@ -104,4 +104,62 @@ describe('presentProviderWindows', () => {
 
     expect(result).toEqual(['5h', '7d']);
   });
+  it('keeps a fresh first provider reading visible before history has snapshots', () => {
+    const windows = history(['gemini_5h', 'third_party_7d']).map((entry) => ({
+      ...entry,
+      series: [],
+    }));
+    expect(
+      presentProviderWindows(
+        ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+        undefined,
+        windows,
+        false,
+      ),
+    ).toEqual(['gemini_5h', 'third_party_7d']);
+  });
+
+  it('keeps an all-stale eligible pool visible with no historical numeric reading', () => {
+    const windows = history(['5h']).map((entry) => ({
+      ...entry,
+      latest: {
+        ...entry.latest,
+        snapshot_at_unix_secs: NOW,
+        utilization: null,
+        utilization_percent: null,
+        eligible_upstreams: 1,
+        contributing_upstreams: 0,
+        stale_upstreams: 1,
+        max_observed_at_unix_millis: null,
+      },
+      series: [],
+    }));
+    expect(
+      presentProviderWindows(['5h', '7d'], undefined, windows, false),
+    ).toEqual(['5h']);
+  });
+  it('uses live eligibility instead of superseded aggregate lots for provider windows', () => {
+    const entry = history(['5h'])[0];
+    if (!entry?.latest) throw new Error('Expected a fixture reading');
+    const live = {
+      ...entry,
+      latest: { ...entry.latest, max_staleness_secs: 300 },
+    };
+    expect(
+      presentProviderWindows(
+        ['5h'],
+        aggregate([aggregateWindow('5h', 'absent', null)]),
+        [live],
+        false,
+      ),
+    ).toEqual(['5h']);
+    expect(
+      presentProviderWindows(
+        ['5h'],
+        aggregate([aggregateWindow('5h', 'ready', 40)]),
+        [{ ...live, latest: { ...live.latest, eligible_upstreams: 0 } }],
+        false,
+      ),
+    ).toEqual([]);
+  });
 });

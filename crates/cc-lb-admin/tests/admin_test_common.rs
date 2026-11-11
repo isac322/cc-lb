@@ -37,7 +37,7 @@ pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_control::api_keys::ke
     Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(storage))
 }
 
-pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
+pub fn dynamic_view_holder(config: &Config) -> Arc<DynamicViewHolder> {
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
         std::collections::HashMap::new(),
@@ -47,6 +47,9 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
             .signer_factory(Arc::new(NoopSignerFactory))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .subscription_quota_routing_max_staleness_secs(
+                config.subscription_quota.routing_max_staleness_secs,
+            )
             .build(),
     ))
 }

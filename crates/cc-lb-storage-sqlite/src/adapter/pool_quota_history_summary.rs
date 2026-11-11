@@ -1,32 +1,35 @@
 use cc_lb_storage_api::{
-    PoolQuotaChartPointRecord, PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult,
-    SubscriptionQuotaWindow,
+    PoolQuotaChartPointRecord, PoolQuotaSnapshotSummaryRecord, Provider, StorageError,
+    StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+use super::pool_quota_history::provider_key;
+
 const CHART_POINTS_CTE: &str = "\
 WITH points AS ( \
     SELECT snapshot_at_unix_secs, quota_window, utilization \
     FROM pool_subscription_quota_history_v1 \
-    WHERE quota_window = ?1 AND snapshot_at_unix_secs BETWEEN ?2 AND ?3 \
+    WHERE provider = ?5 AND quota_window = ?1 AND snapshot_at_unix_secs BETWEEN ?2 AND ?3 \
     UNION ALL \
     SELECT ?2 AS snapshot_at_unix_secs, quota_window, utilization \
     FROM pool_subscription_quota_history_v1 \
-    WHERE quota_window = ?1 \
+    WHERE provider = ?5 AND quota_window = ?1 \
       AND snapshot_at_unix_secs = ( \
           SELECT MAX(snapshot_at_unix_secs) FROM pool_subscription_quota_history_v1 \
-          WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2 \
+          WHERE provider = ?5 AND quota_window = ?1 AND snapshot_at_unix_secs < ?2 \
       ) \
       AND NOT EXISTS ( \
           SELECT 1 FROM pool_subscription_quota_history_v1 \
-          WHERE quota_window = ?1 AND snapshot_at_unix_secs = ?2 \
+          WHERE provider = ?5 AND quota_window = ?1 AND snapshot_at_unix_secs = ?2 \
       ) \
 ) ";
 
 pub(super) async fn list_latest(
     storage: &SqliteStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
 ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
     if windows.is_empty() {
@@ -41,16 +44,17 @@ pub(super) async fn list_latest(
                       header_contributing_upstreams, api_contributing_upstreams,
                       max_observed_at_unix_millis, computed_at_unix_millis, policy_version
                FROM pool_subscription_quota_history_v1
-              WHERE quota_window = ?
+              WHERE provider = ? AND quota_window = ?
            ORDER BY snapshot_at_unix_secs DESC
               LIMIT 1"#,
         )
+        .bind(provider_key(provider))
         .bind(window.as_str())
         .fetch_optional(storage.pool())
         .await
         .map_err(map_sqlx_error)?;
         if let Some(row) = row {
-            out.push(row_to_summary(row)?);
+            out.push(row_to_summary(row, provider)?);
         }
     }
     Ok(out)
@@ -58,6 +62,7 @@ pub(super) async fn list_latest(
 
 pub(super) async fn list_range(
     storage: &SqliteStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
     since_unix_secs: i64,
     until_unix_secs: i64,
@@ -76,18 +81,18 @@ pub(super) async fn list_range(
                       header_contributing_upstreams, api_contributing_upstreams,
                       max_observed_at_unix_millis, computed_at_unix_millis, policy_version
                FROM pool_subscription_quota_history_v1
-              WHERE quota_window = ?1
+              WHERE provider = ?4 AND quota_window = ?1
                 AND (
                     snapshot_at_unix_secs BETWEEN ?2 AND ?3
                     OR (
                         snapshot_at_unix_secs = (
                             SELECT MAX(snapshot_at_unix_secs)
                             FROM pool_subscription_quota_history_v1
-                            WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2
+                            WHERE provider = ?4 AND quota_window = ?1 AND snapshot_at_unix_secs < ?2
                         )
                         AND NOT EXISTS (
                             SELECT 1 FROM pool_subscription_quota_history_v1
-                            WHERE quota_window = ?1 AND snapshot_at_unix_secs = ?2
+                            WHERE provider = ?4 AND quota_window = ?1 AND snapshot_at_unix_secs = ?2
                         )
                     )
                 )
@@ -96,11 +101,12 @@ pub(super) async fn list_range(
         .bind(window.as_str())
         .bind(since_unix_secs)
         .bind(until_unix_secs)
+        .bind(provider_key(provider))
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;
         for row in rows {
-            out.push(row_to_summary(row)?);
+            out.push(row_to_summary(row, provider)?);
         }
     }
     Ok(out)
@@ -108,6 +114,7 @@ pub(super) async fn list_range(
 
 pub(super) async fn list_chart_range(
     storage: &SqliteStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
     since_unix_secs: i64,
     until_unix_secs: i64,
@@ -127,7 +134,8 @@ pub(super) async fn list_chart_range(
                 "{CHART_POINTS_CTE} \
                  SELECT snapshot_at_unix_secs \
                      - ((snapshot_at_unix_secs % ?4 + ?4) % ?4) AS snapshot_at_unix_secs, \
-                     quota_window, MAX(utilization) AS utilization \
+                     quota_window, CASE WHEN ?5 <> 'anthropic' AND COUNT(*) <> COUNT(utilization) \
+                         THEN NULL ELSE MAX(utilization) END AS utilization \
                  FROM points \
                  GROUP BY quota_window, snapshot_at_unix_secs \
                      - ((snapshot_at_unix_secs % ?4 + ?4) % ?4) \
@@ -148,6 +156,7 @@ pub(super) async fn list_chart_range(
                 .bind(since_unix_secs)
                 .bind(until_unix_secs)
                 .bind(bucket_secs)
+                .bind(provider_key(provider))
                 .fetch_all(storage.pool())
                 .await
                 .map_err(map_sqlx_error)?,
@@ -155,18 +164,23 @@ pub(super) async fn list_chart_range(
                 .bind(window.as_str())
                 .bind(since_unix_secs)
                 .bind(until_unix_secs)
+                .bind(Option::<i64>::None)
+                .bind(provider_key(provider))
                 .fetch_all(storage.pool())
                 .await
                 .map_err(map_sqlx_error)?,
         };
         for row in rows {
-            out.push(row_to_chart_point(row)?);
+            out.push(row_to_chart_point(row, provider)?);
         }
     }
     Ok(out)
 }
 
-fn row_to_chart_point(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaChartPointRecord> {
+fn row_to_chart_point(
+    row: sqlx::sqlite::SqliteRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaChartPointRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -175,6 +189,7 @@ fn row_to_chart_point(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaCh
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaChartPointRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -183,7 +198,10 @@ fn row_to_chart_point(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaCh
     })
 }
 
-fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapshotSummaryRecord> {
+fn row_to_summary(
+    row: sqlx::sqlite::SqliteRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaSnapshotSummaryRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -192,6 +210,7 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsh
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaSnapshotSummaryRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -230,7 +249,7 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsh
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_storage_api::{PoolQuotaHistoryStore, SubscriptionQuotaWindow};
+    use cc_lb_storage_api::{PoolQuotaHistoryStore, Provider, SubscriptionQuotaWindow};
     use sqlx::sqlite::SqlitePoolOptions;
     use tokio::runtime::Builder;
 
@@ -256,12 +275,14 @@ mod tests {
 
                 let latest = PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(
                     &storage,
+                    Provider::Anthropic,
                     &[SubscriptionQuotaWindow::FiveHour],
                 )
                 .await
                 .expect("latest summary query succeeds without contributors_json");
                 let range = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
                     &storage,
+                    Provider::Anthropic,
                     &[SubscriptionQuotaWindow::FiveHour],
                     0,
                     20,
@@ -279,6 +300,7 @@ mod tests {
     async fn create_minimal_pool_history_table(pool: &sqlx::SqlitePool) {
         sqlx::query(
             r#"CREATE TABLE pool_subscription_quota_history_v1 (
+                provider TEXT NOT NULL DEFAULT 'anthropic',
                 snapshot_at_unix_secs INTEGER NOT NULL,
                 quota_window TEXT NOT NULL,
                 utilization REAL,
@@ -294,7 +316,7 @@ mod tests {
                 max_observed_at_unix_millis INTEGER,
                 computed_at_unix_millis INTEGER NOT NULL,
                 policy_version INTEGER NOT NULL,
-                PRIMARY KEY(snapshot_at_unix_secs, quota_window)
+                PRIMARY KEY(provider, snapshot_at_unix_secs, quota_window)
             )"#,
         )
         .execute(pool)

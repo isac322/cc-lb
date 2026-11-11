@@ -1,0 +1,226 @@
+{
+  "schema": "cc-lb-pr1238-media/v1",
+  "pinnedSHAs": {
+    "before": "a1f5a06ef6fd62f9b60e98236ccf5949b5eed1e1",
+    "after": "1054fa804b28d886e893948f7821ea1dfb647907"
+  },
+  "scenario": "mixed",
+  "fixture": {
+    "kind": "synthetic-browser-routes",
+    "note": "Comparative UI: Playwright routes serve synthetic mixed-scenario responses. The hash covers only aggregate and pool-history bodies for each provider and the unscoped request. Other routes use the same fixture setup but are not hashed. Native backend behavior was verified separately.",
+    "hash": "e7e3a4738230d6326f9e9365c0a9022a0956a81f6da88868d29509e021a4522a",
+    "identicalAcrossVersions": true,
+    "keys": [
+      "/admin/v1/subscription-quotas/aggregate?anthropic",
+      "/admin/v1/subscription-quotas/aggregate?gemini",
+      "/admin/v1/subscription-quotas/aggregate?null",
+      "/admin/v1/subscription-quotas/aggregate?openai",
+      "/admin/v1/subscription-quotas/pool-history?anthropic",
+      "/admin/v1/subscription-quotas/pool-history?gemini",
+      "/admin/v1/subscription-quotas/pool-history?null",
+      "/admin/v1/subscription-quotas/pool-history?openai"
+    ]
+  },
+  "viewports": [
+    {
+      "width": 390,
+      "height": 900
+    },
+    {
+      "width": 768,
+      "height": 900
+    },
+    {
+      "width": 1440,
+      "height": 900
+    }
+  ],
+  "deviations": [
+    "page.clock.setFixedTime(NOW) replaces the spec helper clock.install: no fake timers.",
+    "Scratch-built SPAs from git archive of pinned SHAs, served by a loopback static server; no repository edits.",
+    "Baseline overview has no provider-age captions or non-Anthropic headlines; its OpenAI provider caption reports just now. Updated captures show the oldest current observation age and stale badge."
+  ],
+  "browser": {
+    "engine": "chromium",
+    "name": "156.0.8078.4"
+  },
+  "deterministic": false,
+  "captures": [
+    {
+      "id": "before-390-overview",
+      "file": "before-390.png",
+      "sha256": "f1d2964f44d1090f1c2b81d317ddbab5a367118e4acdfacebf4934914543de87",
+      "width": 390,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 390,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": false
+    },
+    {
+      "id": "before-390-openai",
+      "file": "before-390-openai.png",
+      "sha256": "7134ec8f220bfb095c3b67adc1bc1458cdd2c31988b1174fe5e3e33582e064d3",
+      "width": 390,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 390,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": false
+    },
+    {
+      "id": "before-768-overview",
+      "file": "before-768.png",
+      "sha256": "8bc1ada27c257851d2ac25dcde29a63a6e39040d662298ebf4545a93b98d48d0",
+      "width": 768,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 768,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "before-768-openai",
+      "file": "before-768-openai.png",
+      "sha256": "7533a279ca7e8dc37e991fcad63f2fc51ee1371c82734f07939e691a5eb63061",
+      "width": 768,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 768,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "before-1440-overview",
+      "file": "before-1440.png",
+      "sha256": "8c4a0336db7f4b8581cc817de5cf66eab0becd437088f6cfc245468774c2fd1e",
+      "width": 1440,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 1440,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "before-1440-openai",
+      "file": "before-1440-openai.png",
+      "sha256": "a52647d84235b07745c0202c2063c3137823398124944f07132cc2a069f3c665",
+      "width": 1440,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 1440,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "after-390-overview",
+      "file": "after-390.png",
+      "sha256": "7d693f3beae71d4673bd63026f5da3c92f2de7c9784737c778c38a6c4b91fa94",
+      "width": 390,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 390,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "after-390-openai",
+      "file": "after-390-openai.png",
+      "sha256": "401192a0ea01bab13a4408cdf61c636d963916f03dc23e62864aedd63996bd5a",
+      "width": 390,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 390,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "after-768-overview",
+      "file": "after-768.png",
+      "sha256": "3879d1d7330bdec40b7e371de3ab7a1ca13f55d0ee840dde021fa1159aca57fc",
+      "width": 768,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 768,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": false
+    },
+    {
+      "id": "after-768-openai",
+      "file": "after-768-openai.png",
+      "sha256": "aa007d66afae1d8fa95142f4326d861994b33c66606aca8e416a0ad8318967c2",
+      "width": 768,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 768,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    },
+    {
+      "id": "after-1440-overview",
+      "file": "after-1440.png",
+      "sha256": "8cf04e4d2f8d905a65e6954d5dc16f91cfa3f36c75279713016903de0367e07d",
+      "width": 1440,
+      "surface": "overview",
+      "selector": "testid:pool-quota-overview",
+      "innerWidth": 1440,
+      "scrollOk": true,
+      "hydratedValues": [
+        "25%",
+        "31%"
+      ],
+      "repeatSha256Equal": false
+    },
+    {
+      "id": "after-1440-openai",
+      "file": "after-1440-openai.png",
+      "sha256": "60653cf534d82bb0b0b68f67d51f6eb1374835c465bf06a131df3abf5bad203f",
+      "width": 1440,
+      "surface": "openai",
+      "selector": "testid:pool-quota-card",
+      "innerWidth": 1440,
+      "scrollOk": true,
+      "hydratedValues": [
+        "31%"
+      ],
+      "repeatSha256Equal": true
+    }
+  ],
+  "canonical": "out root copies of rep0 captures: before-{width}[-openai].png and after-{width}[-openai].png",
+  "determinismNote": "Repeated captures were not byte-identical. Observed differences were confined to x-axis tick label pixels (up to 1404 pixels). These PNGs record observed UI appearance; exact byte stability was not established."
+}

@@ -8,14 +8,17 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  freshProviderPoolQuotaChartData,
   latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
   POOL_QUOTA_HEARTBEAT_CARRY_SECS,
   poolQuotaResponseLatest,
+  poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
 
@@ -68,6 +71,26 @@ describe('Overview pooled quota history', () => {
       '7d': null,
       '7d_fable': null,
     });
+  });
+
+  it('reads live provider latest independently of empty or null historical buckets', () => {
+    for (const window of ['5h', 'gemini_5h', 'third_party_7d']) {
+      const entry = historyWindow(window, [[100, null]], 23);
+      for (const rows of [[], buildPoolQuotaChartData([entry])]) {
+        expect(
+          poolQuotaResponseLatest([entry], rows, {
+            requireVisibleHistory: false,
+          })[window],
+        ).toBe(23);
+      }
+      expect(
+        poolQuotaResponseLatest(
+          [{ ...entry, latest: null }],
+          [{ unix: 100, [window]: 88 }],
+          { requireVisibleHistory: false },
+        )[window],
+      ).toBeNull();
+    }
   });
 
   it('keeps chart rows sparse when the provider omits the 5h window', () => {
@@ -282,6 +305,228 @@ describe('Overview pooled quota history', () => {
   });
 });
 
+describe('recordedPoolQuotaChartData', () => {
+  it('anchors only persisted history and keeps snapshot counts unextended', () => {
+    const rows = [
+      { unix: 0, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+      { unix: 5400, '5h': 60 },
+    ];
+    expect(recordedPoolQuotaChartData(rows, 900, 4500)).toEqual([
+      { unix: 900, '5h': 40 },
+      { unix: 3600, '5h': 40 },
+    ]);
+    expect(
+      recordedPoolQuotaChartData(rows, 900, 4500, {
+        anchorPredecessor: false,
+      }),
+    ).toEqual([{ unix: 3600, '5h': 40 }]);
+  });
+
+  it('preserves null predecessors and never overwrites an explicit boundary', () => {
+    expect(
+      recordedPoolQuotaChartData(
+        [
+          { unix: 0, '5h': null, '7d': 40 },
+          { unix: 3600, '5h': 64, '7d': 50 },
+        ],
+        900,
+        4500,
+      ),
+    ).toEqual([
+      { unix: 900, '5h': null, '7d': 40 },
+      { unix: 3600, '5h': 64, '7d': 50 },
+    ]);
+    const boundaryRows = [
+      { unix: 0, '5h': 40 },
+      { unix: 900, '5h': null },
+      { unix: 3600, '5h': 64 },
+    ];
+    expect(recordedPoolQuotaChartData(boundaryRows, 900, 4500)).toEqual(
+      boundaryRows.slice(1),
+    );
+  });
+
+  it('bounds the persisted gap by the heartbeat and does not invent a tail', () => {
+    const first = { unix: 3600, '5h': 40 };
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3600 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([{ unix: 900, '5h': 30 }, first]);
+    expect(
+      recordedPoolQuotaChartData(
+        [{ unix: 3599 - POOL_QUOTA_HEARTBEAT_CARRY_SECS, '5h': 30 }, first],
+        900,
+        4500,
+      ),
+    ).toEqual([first]);
+    expect(
+      recordedPoolQuotaChartData([{ unix: 0, '5h': 30 }], 900, 4500),
+    ).toEqual([]);
+    expect(recordedPoolQuotaChartData([], 900, 4500)).toEqual([]);
+    expect(recordedPoolQuotaChartData([first], 4500, 900)).toEqual([]);
+  });
+});
+
+describe('freshProviderPoolQuotaChartData', () => {
+  function observedWindow(
+    window: string,
+    values: Array<[number, number | null]> = [
+      [900, 40],
+      [4500, 40],
+    ],
+    current = 40,
+    overrides: Partial<NonNullable<PoolHistoryWindowResponse['latest']>> = {},
+  ): PoolHistoryWindowResponse {
+    const entry = historyWindow(window, values, current);
+    return {
+      ...entry,
+      latest: {
+        ...entry.latest!,
+        snapshot_at_unix_secs: 7200,
+        oldest_observed_at_unix_millis: 7_185_000,
+        max_staleness_secs: 1800,
+        ...overrides,
+      },
+    };
+  }
+
+  function project(
+    windows: PoolHistoryWindowResponse[],
+    start = 3600,
+    now = 7200,
+  ) {
+    return freshProviderPoolQuotaChartData(
+      buildPoolQuotaChartData(windows),
+      start,
+      now,
+      windows,
+    );
+  }
+
+  it.each(['5h', 'gemini_5h', 'third_party_7d'])(
+    'extends fresh unchanged %s to the response clock without changing recorded history',
+    (window) => {
+      const windows = [observedWindow(window)];
+      const rows = buildPoolQuotaChartData(windows);
+      const original = structuredClone(rows);
+      expect(
+        freshProviderPoolQuotaChartData(rows, 3600, 7200, windows),
+      ).toEqual([
+        { unix: 3600, [window]: 40 },
+        { unix: 4500, [window]: 40 },
+        { unix: 7200, [window]: 40 },
+      ]);
+      expect(rows).toEqual(original);
+      expect(
+        recordedPoolQuotaChartData(rows, 3600, 7200, {
+          anchorPredecessor: false,
+        }),
+      ).toEqual([{ unix: 4500, [window]: 40 }]);
+    },
+  );
+
+  it('bounds original recorded age inclusively without reviving an expired tail', () => {
+    const atBound = observedWindow('5h', [[3300, 40]]);
+    expect(project([atBound], 0).at(-1)).toEqual({ unix: 7200, '5h': 40 });
+    const expired = observedWindow('5h', [[3299, 40]]);
+    expect(project([expired], 0)).toEqual([{ unix: 3299, '5h': 40 }]);
+  });
+
+  it('uses the supplied observation-age boundary, including a zero age limit', () => {
+    for (const [observed, limit] of [
+      [5_400_000, 1800],
+      [7_200_000, 0],
+    ]) {
+      const entry = observedWindow('5h', undefined, 40, {
+        oldest_observed_at_unix_millis: observed,
+        max_staleness_secs: limit,
+        snapshot_at_unix_secs: 1,
+      });
+      expect(project([entry]).at(-1)).toEqual({ unix: 7200, '5h': 40 });
+    }
+  });
+
+  it.each([
+    { oldest_observed_at_unix_millis: 5_399_999 },
+    { oldest_observed_at_unix_millis: null },
+    { oldest_observed_at_unix_millis: undefined },
+    { oldest_observed_at_unix_millis: Number.NaN },
+    { oldest_observed_at_unix_millis: Number.POSITIVE_INFINITY },
+    { oldest_observed_at_unix_millis: 7_200_001 },
+    { max_staleness_secs: undefined },
+    { max_staleness_secs: Number.NaN },
+    { max_staleness_secs: Number.POSITIVE_INFINITY },
+    { max_staleness_secs: -1 },
+    { stale_upstreams: 1 },
+    { utilization_percent: null },
+    { utilization_percent: Number.NaN },
+    { utilization_percent: Number.POSITIVE_INFINITY },
+    { utilization_percent: 41 },
+  ])('rejects missing, stale or changed live evidence: %j', (overrides) => {
+    const windows = [observedWindow('5h', undefined, 40, overrides)];
+    expect(project(windows)).toEqual([
+      { unix: 3600, '5h': 40 },
+      { unix: 4500, '5h': 40 },
+    ]);
+  });
+
+  it('preserves recorded percent within the strict utilization deadband', () => {
+    expect(project([observedWindow('5h', undefined, 40.09)]).at(-1)).toEqual({
+      unix: 7200,
+      '5h': 40,
+    });
+    // Zero gives an exactly representable deadband comparison after /100.
+    const changed = observedWindow('5h', [[4500, 0]], 0.1);
+    expect(project([changed])).toEqual([{ unix: 4500, '5h': 0 }]);
+    // Compare raw persisted utilization before the chart's 100% clamp.
+    expect(project([observedWindow('5h', [[4500, 120]], 120)]).at(-1)).toEqual({
+      unix: 7200,
+      '5h': 100,
+    });
+  });
+
+  it('keeps windows independent, sparse keys and earlier null intervals intact', () => {
+    const windows = [
+      observedWindow('gemini_5h', [
+        [3800, 25],
+        [4000, null],
+        [4500, 40],
+      ]),
+      observedWindow('third_party_7d', [[4500, 40]], 40, {
+        oldest_observed_at_unix_millis: 5_399_000,
+      }),
+    ];
+    expect(project(windows)).toEqual([
+      { unix: 3800, gemini_5h: 25, third_party_7d: null },
+      { unix: 4000, gemini_5h: null, third_party_7d: null },
+      { unix: 4500, gemini_5h: 40, third_party_7d: 40 },
+      { unix: 7200, gemini_5h: 40, third_party_7d: null },
+    ]);
+  });
+
+  it('does not invent numeric history after a null tail or missing current reading', () => {
+    const entry = observedWindow('5h', [
+      [4000, 40],
+      [4500, null],
+    ]);
+    expect(project([entry])).toEqual([
+      { unix: 4000, '5h': 40 },
+      { unix: 4500, '5h': null },
+    ]);
+    const noCurrent = { ...observedWindow('5h'), latest: null };
+    expect(project([noCurrent]).at(-1)).toEqual({ unix: 4500, '5h': 40 });
+    expect(project([observedWindow('5h', [])])).toEqual([]);
+    expect(project([observedWindow('5h')], 7201)).toEqual([]);
+    expect(project([observedWindow('5h', [[7200, 40]])])).toEqual([
+      { unix: 7200, '5h': 40 },
+    ]);
+  });
+});
+
 function lot(
   upstream_id: string,
   utilization: number | null,
@@ -413,6 +658,49 @@ describe('missingCapacityUpstreams', () => {
   });
 });
 
+describe('poolQuotaResponseObservation', () => {
+  it('uses the oldest eligible live observation, not the newest contributor or history', () => {
+    const windows = [
+      { window: 'gemini_5h', oldest: 900, stale: 0 },
+      { window: 'third_party_7d', oldest: 300, stale: 1 },
+      { window: 'unified', oldest: 100, stale: 1 },
+    ].map(({ window, oldest, stale }) => {
+      const entry = historyWindow(window, [[100, 70]], 20);
+      if (!entry.latest) throw new Error('Expected a fixture reading');
+      return {
+        ...entry,
+        latest: {
+          ...entry.latest,
+          max_observed_at_unix_millis: 1_000_000,
+          oldest_observed_at_unix_millis: oldest * 1000,
+          stale_upstreams: stale,
+          max_staleness_secs: 300,
+        },
+      };
+    });
+    expect(
+      poolQuotaResponseObservation(windows, ['gemini_5h', 'third_party_7d']),
+    ).toEqual({ observedAtUnixSecs: 300, stale: true });
+    expect(poolQuotaResponseObservation(windows, ['gemini_5h'])).toEqual({
+      observedAtUnixSecs: 900,
+      stale: false,
+    });
+  });
+
+  it('does not infer observation age from a latest snapshot timestamp', () => {
+    expect(
+      poolQuotaResponseObservation(
+        [historyWindow('5h', [[1_000, 40]])],
+        ['5h'],
+      ),
+    ).toEqual({ observedAtUnixSecs: null, stale: false });
+    expect(poolQuotaResponseObservation(undefined, ['5h'])).toEqual({
+      observedAtUnixSecs: null,
+      stale: false,
+    });
+  });
+});
+
 describe('oldestProviderObservation', () => {
   function observed(
     id: string,
@@ -436,6 +724,19 @@ describe('oldestProviderObservation', () => {
       }),
     );
     expect(result).toEqual({ observedAtUnixSecs: 700, stale: false });
+  });
+  it('includes Gemini and third-party observations without letting a newer window hide an old one', () => {
+    const result = oldestProviderObservation({
+      ...aggregate({
+        gemini_5h: [observed('a', 1000)],
+        gemini_7d: [observed('a', 900)],
+        third_party_5h: [observed('a', 300)],
+        third_party_7d: [observed('a', 1000)],
+      }),
+      now_unix_secs: 1000,
+      max_staleness_secs: 300,
+    });
+    expect(result).toEqual({ observedAtUnixSecs: 300, stale: true });
   });
 
   it('marks the data stale by lot state or by the staleness limit', () => {

@@ -19,12 +19,12 @@ use cc_lb_domain::{
 use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
-    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage,
-    StorageError, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRangeQuery,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord,
+    Provider as PoolQuotaProvider, Storage, StorageError, SubscriptionQuotaBucket,
     SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -40,6 +40,8 @@ const MAX_SERIES_MAX_POINTS: u32 = 10_000;
 const MAX_SERIES_UPSTREAMS: usize = 50;
 const RESET_DROP_THRESHOLD: f64 = 0.5;
 const GAP_MARKER_MULTIPLIER: u64 = 2;
+const POOL_SNAPSHOT_HEARTBEAT_SECS: i64 = 3_600;
+const POOL_HISTORY_GAP_SLACK_SECS: i64 = 300;
 const CAPACITY_CAVEAT: &str = "capacity is inferred from proxy tokens and quota utilization; Anthropic quota units are not directly exposed";
 const HEADER_FALLBACK_CAVEAT: &str = "utilization is the arithmetic mean of header observations; capacity-weighted estimate is unavailable because cc-lb has not proxied enough traffic to back-solve provider capacity";
 const PLAN_RATIO_CAVEAT: &str = "utilization is weighted by subscription plan ratios from Anthropic metadata; 5h and 7d use the same documented plan ratios";
@@ -157,39 +159,30 @@ struct SeriesMarkerResponse {
     to_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PoolQuotaProvider {
-    Anthropic,
-    Openai,
-    Gemini,
+fn parse_pool_quota_provider(raw: Option<&str>) -> Result<PoolQuotaProvider, Response> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("anthropic") => Ok(PoolQuotaProvider::Anthropic),
+        Some("openai") => Ok(PoolQuotaProvider::Openai),
+        Some("gemini") => Ok(PoolQuotaProvider::Gemini),
+        Some(value) => Err(bad_request(
+            "invalid_provider",
+            format!("unsupported provider: {value}"),
+        )),
+    }
 }
 
-impl PoolQuotaProvider {
-    fn parse(raw: Option<&str>) -> Result<Self, Response> {
-        match raw.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("anthropic") => Ok(Self::Anthropic),
-            Some("openai") => Ok(Self::Openai),
-            Some("gemini") => Ok(Self::Gemini),
-            Some(value) => Err(bad_request(
-                "invalid_provider",
-                format!("unsupported provider: {value}"),
-            )),
-        }
+const fn pool_provider_kind(provider: PoolQuotaProvider) -> UpstreamKind {
+    match provider {
+        PoolQuotaProvider::Anthropic => UpstreamKind::AnthropicOauth,
+        PoolQuotaProvider::Openai => UpstreamKind::OpenaiOauth,
+        PoolQuotaProvider::Gemini => UpstreamKind::GeminiOauth,
     }
+}
 
-    const fn upstream_kind(self) -> UpstreamKind {
-        match self {
-            Self::Anthropic => UpstreamKind::AnthropicOauth,
-            Self::Openai => UpstreamKind::OpenaiOauth,
-            Self::Gemini => UpstreamKind::GeminiOauth,
-        }
-    }
-
-    const fn weighting(self) -> &'static str {
-        match self {
-            Self::Anthropic => "plan",
-            Self::Openai | Self::Gemini => "equal",
-        }
+const fn pool_provider_weighting(provider: PoolQuotaProvider) -> &'static str {
+    match provider {
+        PoolQuotaProvider::Anthropic => "plan",
+        PoolQuotaProvider::Openai | PoolQuotaProvider::Gemini => "equal",
     }
 }
 #[derive(Debug)]
@@ -364,6 +357,8 @@ struct PoolHistoryQuery {
     windows: Option<String>,
     since_unix_secs: Option<i64>,
     until_unix_secs: Option<i64>,
+    relative_range_secs: Option<i64>,
+    window_quantum_secs: Option<i64>,
     series_projection: Option<String>,
     max_points_per_series: Option<usize>,
     provider: Option<String>,
@@ -398,6 +393,11 @@ struct PoolHistoryPoint {
     contributing_upstreams: i64,
     eligible_upstreams: i64,
     stale_upstreams: i64,
+    missing_observation_upstreams: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oldest_observed_at_unix_millis: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_staleness_secs: Option<u64>,
     max_observed_at_unix_millis: Option<i64>,
 }
 
@@ -411,7 +411,7 @@ async fn build_pool_history_response(
     state: &AdminState,
     query: PoolHistoryQuery,
 ) -> Result<PoolHistoryResponse, Response> {
-    let provider = PoolQuotaProvider::parse(query.provider.as_deref())?;
+    let provider = parse_pool_quota_provider(query.provider.as_deref())?;
     let mut windows = parse_pool_history_windows(query.windows.as_deref(), provider)?;
     let storage = storage(state)?;
     let compact_series = match query.series_projection.as_deref() {
@@ -427,10 +427,60 @@ async fn build_pool_history_response(
     };
     let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
-    let since_unix_secs = query
-        .since_unix_secs
-        .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
-    let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
+    let (since_unix_secs, until_unix_secs) = if let Some(range_secs) = query.relative_range_secs {
+        if range_secs <= 0 {
+            return Err(bad_request(
+                "invalid_relative_range",
+                "pool history relative_range_secs must be positive",
+            ));
+        }
+        if query.since_unix_secs.is_some() || query.until_unix_secs.is_some() {
+            return Err(bad_request(
+                "ambiguous_history_range",
+                "pool history relative_range_secs cannot be combined with absolute bounds",
+            ));
+        }
+        let quantum_secs = query.window_quantum_secs.unwrap_or(0);
+        if quantum_secs < 0 {
+            return Err(bad_request(
+                "invalid_window_quantum",
+                "pool history window_quantum_secs must be nonnegative",
+            ));
+        }
+        let invalid_range = || {
+            bad_request(
+                "invalid_relative_range",
+                "pool history relative range exceeds supported timestamp bounds",
+            )
+        };
+        let until = if quantum_secs == 0 {
+            now_unix_secs
+        } else {
+            let remainder = now_unix_secs.rem_euclid(quantum_secs);
+            now_unix_secs
+                .checked_add(if remainder == 0 {
+                    0
+                } else {
+                    quantum_secs - remainder
+                })
+                .ok_or_else(invalid_range)?
+        };
+        let since = until
+            .checked_sub(range_secs)
+            .and_then(|value| value.checked_sub(quantum_secs))
+            .and_then(|value| {
+                value.checked_sub(POOL_SNAPSHOT_HEARTBEAT_SECS + POOL_HISTORY_GAP_SLACK_SECS)
+            })
+            .ok_or_else(invalid_range)?;
+        (since, until)
+    } else {
+        (
+            query
+                .since_unix_secs
+                .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs)),
+            query.until_unix_secs.unwrap_or(now_unix_secs),
+        )
+    };
     let bucket_secs = match query.max_points_per_series {
         None => None,
         Some(_) if !compact_series => {
@@ -453,28 +503,9 @@ async fn build_pool_history_response(
             Some(range_secs.saturating_add(divisor - 1) / divisor.max(1))
         }
     };
-    if provider != PoolQuotaProvider::Anthropic {
-        let response_windows = build_provider_pool_history_windows(
-            storage,
-            ProviderPoolHistoryParams {
-                provider,
-                windows: &windows,
-                source: SubscriptionQuotaSourceMerge::Merged,
-                since_unix_secs,
-                until_unix_secs,
-                compact_series,
-                bucket_secs: bucket_secs.filter(|value| *value > 0),
-            },
-        )
-        .await
-        .map_err(storage_error)?;
-        return Ok(PoolHistoryResponse {
-            now_unix_secs,
-            weighting: provider.weighting(),
-            windows: response_windows,
-        });
-    }
-    if windows.contains(&SubscriptionQuotaWindow::FiveHour) {
+    if provider == PoolQuotaProvider::Anthropic
+        && windows.contains(&SubscriptionQuotaWindow::FiveHour)
+    {
         let upstreams = pool_quota_upstreams(
             list_all_upstreams_storage(storage)
                 .await
@@ -514,18 +545,35 @@ async fn build_pool_history_response(
         }
     }
 
-    let latest_records = storage
-        .list_latest_pool_quota_snapshot_summaries(&windows)
+    let mut latest_by_window = if provider == PoolQuotaProvider::Anthropic {
+        storage
+            .list_latest_pool_quota_snapshot_summaries(provider, &windows)
+            .await
+            .map_err(storage_error)?
+            .iter()
+            .map(|record| (record.window, pool_history_point_from_record(record)))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        build_provider_pool_quota_snapshots(
+            storage,
+            &state.dynamic_view,
+            provider,
+            &windows,
+            &*state.clock,
+        )
         .await
-        .map_err(storage_error)?;
-    let mut latest_by_window = latest_records
+        .map_err(storage_error)?
         .into_iter()
-        .map(|record| {
-            let window = record.window;
-            let point = pool_history_point_from_record(&record);
-            (window, point)
+        .map(|snapshot| {
+            let mut point = pool_history_point_from_record(&PoolQuotaSnapshotSummaryRecord::from(
+                &snapshot.record,
+            ));
+            point.oldest_observed_at_unix_millis = snapshot.oldest_observed_at_unix_millis;
+            point.max_staleness_secs = Some(snapshot.max_staleness_secs);
+            (snapshot.record.window, point)
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect()
+    };
 
     let mut full_series_by_window =
         BTreeMap::<SubscriptionQuotaWindow, Vec<PoolHistoryPoint>>::new();
@@ -534,6 +582,7 @@ async fn build_pool_history_response(
     if compact_series {
         let records = storage
             .list_pool_quota_chart_points_in_range(
+                provider,
                 &windows,
                 since_unix_secs,
                 until_unix_secs,
@@ -550,7 +599,12 @@ async fn build_pool_history_response(
         }
     } else {
         let records = storage
-            .list_pool_quota_snapshot_summaries_in_range(&windows, since_unix_secs, until_unix_secs)
+            .list_pool_quota_snapshot_summaries_in_range(
+                provider,
+                &windows,
+                since_unix_secs,
+                until_unix_secs,
+            )
             .await
             .map_err(storage_error)?;
         for record in records {
@@ -577,216 +631,11 @@ async fn build_pool_history_response(
 
     Ok(PoolHistoryResponse {
         now_unix_secs,
-        weighting: provider.weighting(),
+        weighting: pool_provider_weighting(provider),
         windows: response_windows,
     })
 }
 
-#[derive(Clone, Copy)]
-struct DerivedPoolCheckpointState {
-    observed_at_unix_millis: u64,
-    utilization: Option<f64>,
-}
-struct ProviderPoolHistoryParams<'a> {
-    provider: PoolQuotaProvider,
-    windows: &'a [SubscriptionQuotaWindow],
-    source: SubscriptionQuotaSourceMerge,
-    since_unix_secs: i64,
-    until_unix_secs: i64,
-    compact_series: bool,
-    bucket_secs: Option<i64>,
-}
-
-async fn build_provider_pool_history_windows(
-    storage: &dyn Storage,
-    params: ProviderPoolHistoryParams<'_>,
-) -> Result<Vec<PoolHistoryWindowResponse>, StorageError> {
-    let ProviderPoolHistoryParams {
-        provider,
-        windows,
-        source,
-        since_unix_secs,
-        until_unix_secs,
-        compact_series,
-        bucket_secs,
-    } = params;
-    if windows.is_empty() || since_unix_secs > until_unix_secs {
-        return Ok(windows
-            .iter()
-            .copied()
-            .map(|window| PoolHistoryWindowResponse {
-                window: window.as_str().to_owned(),
-                latest: None,
-                series: if compact_series {
-                    PoolHistorySeries::Chart(Vec::new())
-                } else {
-                    PoolHistorySeries::Full(Vec::new())
-                },
-            })
-            .collect());
-    }
-
-    let upstreams = pool_quota_upstreams(
-        list_all_upstreams_storage(storage).await?,
-        None,
-        provider.upstream_kind(),
-    );
-    let upstream_ids = upstreams
-        .iter()
-        .map(|upstream| upstream.id)
-        .collect::<Vec<_>>();
-    let since_unix_millis = u64::try_from(since_unix_secs)
-        .unwrap_or(0)
-        .saturating_mul(1_000);
-    let until_unix_millis = u64::try_from(until_unix_secs)
-        .unwrap_or(0)
-        .saturating_mul(1_000);
-    let checkpoints = if upstream_ids.is_empty() {
-        Vec::new()
-    } else {
-        storage
-            .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
-                upstream_ids,
-                windows: windows.to_vec(),
-                sources: sources_for_merge(source),
-                since_unix_millis,
-                until_unix_millis,
-            })
-            .await?
-    };
-    let mut checkpoints_by_key =
-        HashMap::<(Uuid, SubscriptionQuotaWindow), Vec<SubscriptionQuotaSlimCheckpoint>>::new();
-    for checkpoint in checkpoints {
-        checkpoints_by_key
-            .entry((checkpoint.upstream_id, checkpoint.window))
-            .or_default()
-            .push(checkpoint);
-    }
-    for checkpoints in checkpoints_by_key.values_mut() {
-        checkpoints.sort_by(|left, right| {
-            left.changed_at_unix_millis
-                .cmp(&right.changed_at_unix_millis)
-                .then_with(|| left.source.as_str().cmp(right.source.as_str()))
-                .then_with(|| left.sample_id.cmp(&right.sample_id))
-        });
-    }
-
-    let quantum_secs = bucket_secs
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(60);
-    let start_bucket = u64::try_from(since_unix_secs).unwrap_or(0) / quantum_secs * quantum_secs;
-    let end_bucket = u64::try_from(until_unix_secs).unwrap_or(0) / quantum_secs * quantum_secs;
-    let eligible_upstreams = i64::try_from(upstreams.len()).unwrap_or(i64::MAX);
-
-    let mut response_windows = Vec::with_capacity(windows.len());
-    for window in windows {
-        let mut states = HashMap::<Uuid, DerivedPoolCheckpointState>::new();
-        let mut indices = HashMap::<(Uuid, SubscriptionQuotaWindow), usize>::new();
-        for upstream in &upstreams {
-            let key = (upstream.id, *window);
-            let Some(checkpoints) = checkpoints_by_key.get(&key) else {
-                continue;
-            };
-            let mut index = 0;
-            while index < checkpoints.len()
-                && checkpoints[index].changed_at_unix_millis < since_unix_millis
-            {
-                states.insert(
-                    upstream.id,
-                    DerivedPoolCheckpointState {
-                        observed_at_unix_millis: checkpoints[index].changed_at_unix_millis,
-                        utilization: checkpoints[index].utilization,
-                    },
-                );
-                index += 1;
-            }
-            indices.insert(key, index);
-        }
-
-        let mut points = Vec::new();
-        let mut bucket_start = start_bucket;
-        while bucket_start <= end_bucket {
-            for upstream in &upstreams {
-                let key = (upstream.id, *window);
-                let Some(checkpoints) = checkpoints_by_key.get(&key) else {
-                    continue;
-                };
-                let index = indices.entry(key).or_insert(0);
-                while *index < checkpoints.len()
-                    && bucket_start_unix_secs(
-                        checkpoints[*index].changed_at_unix_millis,
-                        quantum_secs,
-                    ) == bucket_start
-                {
-                    let checkpoint = &checkpoints[*index];
-                    states.insert(
-                        upstream.id,
-                        DerivedPoolCheckpointState {
-                            observed_at_unix_millis: checkpoint.changed_at_unix_millis,
-                            utilization: checkpoint.utilization,
-                        },
-                    );
-                    *index += 1;
-                }
-            }
-
-            if !states.is_empty() {
-                let contributing = states
-                    .values()
-                    .filter_map(|state| state.utilization)
-                    .collect::<Vec<_>>();
-                let utilization = (!contributing.is_empty())
-                    .then(|| contributing.iter().sum::<f64>() / contributing.len() as f64);
-                let max_observed_at_unix_millis = states
-                    .values()
-                    .map(|state| state.observed_at_unix_millis)
-                    .max()
-                    .and_then(|value| i64::try_from(value).ok());
-                let snapshot_at_unix_secs = i64::try_from(bucket_start).unwrap_or(i64::MAX);
-                points.push(PoolHistoryPoint {
-                    snapshot_at_unix_secs,
-                    utilization,
-                    utilization_percent: utilization.map(|value| value * 100.0),
-                    contributing_upstreams: i64::try_from(contributing.len()).unwrap_or(i64::MAX),
-                    eligible_upstreams,
-                    stale_upstreams: 0,
-                    max_observed_at_unix_millis,
-                });
-            }
-
-            let Some(next_bucket) = bucket_start.checked_add(quantum_secs) else {
-                break;
-            };
-            bucket_start = next_bucket;
-        }
-
-        let latest = points.last().cloned();
-        let series = if compact_series {
-            PoolHistorySeries::Chart(
-                points
-                    .iter()
-                    .map(|point| PoolHistorySeriesPoint {
-                        snapshot_at_unix_secs: point.snapshot_at_unix_secs,
-                        utilization_percent: point.utilization_percent,
-                    })
-                    .collect(),
-            )
-        } else {
-            PoolHistorySeries::Full(points)
-        };
-        response_windows.push(PoolHistoryWindowResponse {
-            window: window.as_str().to_owned(),
-            latest,
-            series,
-        });
-    }
-    Ok(response_windows)
-}
-const fn bucket_start_unix_secs(timestamp_unix_millis: u64, bucket_secs: u64) -> u64 {
-    let timestamp_unix_secs = timestamp_unix_millis / 1_000;
-    timestamp_unix_secs / bucket_secs * bucket_secs
-}
 fn parse_pool_history_windows(
     raw: Option<&str>,
     provider: PoolQuotaProvider,
@@ -822,7 +671,7 @@ fn parse_pool_history_windows(
                 format!("unknown pool history window: {token}"),
             )
         })?;
-        if !provider_quota_windows(provider.upstream_kind()).contains(&window) {
+        if !provider_quota_windows(pool_provider_kind(provider)).contains(&window) {
             return Err(bad_request(
                 "unsupported_pool_window",
                 format!("window {token} is not supported for this provider"),
@@ -847,6 +696,9 @@ fn pool_history_point_from_record(record: &PoolQuotaSnapshotSummaryRecord) -> Po
         contributing_upstreams: record.contributing_upstreams,
         eligible_upstreams: record.eligible_upstreams,
         stale_upstreams: record.stale_upstreams,
+        missing_observation_upstreams: record.missing_observation_upstreams,
+        oldest_observed_at_unix_millis: None,
+        max_staleness_secs: None,
         max_observed_at_unix_millis: record.max_observed_at_unix_millis,
     }
 }
@@ -1045,7 +897,7 @@ async fn build_aggregate_response(
     query: AggregateQuery,
 ) -> Result<AggregateResponse, Response> {
     let storage = storage(state)?;
-    let provider = PoolQuotaProvider::parse(query.provider.as_deref())?;
+    let provider = parse_pool_quota_provider(query.provider.as_deref())?;
     let source = parse_source_merge(query.source.as_deref())?;
     let windows = parse_windows_or_provider_default(query.windows.as_deref(), provider)?;
     let upstream_ids = match query.upstream_ids.as_deref() {
@@ -1112,8 +964,8 @@ async fn build_cc_lb_aggregate_response_for_provider(
         max_staleness_secs,
         provider,
     } = params;
-    let weighting = provider.weighting();
-    let provider_kind = provider.upstream_kind();
+    let weighting = pool_provider_weighting(provider);
+    let provider_kind = pool_provider_kind(provider);
     let now_unix_millis = now_unix_millis(clock);
     let now_unix_secs = now_unix_millis / 1_000;
     let requested = upstream_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
@@ -1571,6 +1423,7 @@ pub fn pool_quota_snapshots_from_aggregate(
                 .max()
                 .and_then(|millis| i64::try_from(millis).ok());
             Some(PoolQuotaSnapshotRecord {
+                provider: PoolQuotaProvider::Anthropic,
                 snapshot_at_unix_secs,
                 window,
                 utilization: window_response.utilization,
@@ -1597,6 +1450,220 @@ pub fn pool_quota_snapshots_from_aggregate(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+struct ProviderPoolObservation {
+    observed_at_unix_millis: u64,
+    utilization: Option<f64>,
+    absent: bool,
+    api: bool,
+}
+
+fn provider_pool_observation<'a>(
+    durable: impl Iterator<Item = &'a SubscriptionQuotaSample>,
+    cached: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_unix_millis: u64,
+    max_staleness_secs: u64,
+) -> Option<ProviderPoolObservation> {
+    let rank = |observation: &ProviderPoolObservation| {
+        (
+            now_unix_millis.saturating_sub(observation.observed_at_unix_millis)
+                <= max_staleness_secs.saturating_mul(1_000),
+            observation.observed_at_unix_millis,
+            observation.api,
+        )
+    };
+    let durable = durable.map(|sample| ProviderPoolObservation {
+        observed_at_unix_millis: sample.observed_at_unix_millis,
+        utilization: sample.utilization,
+        absent: sample.sample_kind == SubscriptionQuotaSampleKind::Absent,
+        api: sample.source == SubscriptionQuotaSource::Api,
+    });
+    let cached = cached
+        .filter(|snapshot| snapshot.state != SubscriptionQuotaDataState::Unobserved)
+        .and_then(|snapshot| {
+            Some(ProviderPoolObservation {
+                observed_at_unix_millis: snapshot.observed_at_unix_millis?,
+                utilization: snapshot.utilization,
+                absent: snapshot.state == SubscriptionQuotaDataState::Absent,
+                api: snapshot.source.as_deref() == Some("api"),
+            })
+        });
+    // Select a whole observation: newer absence or missing utilization must
+    // never borrow an older numeric value and its apparent freshness.
+    durable.chain(cached).max_by_key(rank)
+}
+
+struct ProviderPoolSnapshot {
+    record: PoolQuotaSnapshotRecord,
+    oldest_observed_at_unix_millis: Option<i64>,
+    max_staleness_secs: u64,
+}
+
+async fn build_provider_pool_quota_snapshots(
+    storage: &dyn Storage,
+    dynamic_view: &DynamicViewHolder,
+    provider: PoolQuotaProvider,
+    windows: &[SubscriptionQuotaWindow],
+    clock: &dyn Clock,
+) -> Result<Vec<ProviderPoolSnapshot>, StorageError> {
+    let upstreams = pool_quota_upstreams(
+        list_all_upstreams_storage(storage).await?,
+        None,
+        pool_provider_kind(provider),
+    );
+    let ids = upstreams
+        .iter()
+        .map(|upstream| upstream.id)
+        .collect::<Vec<_>>();
+    let durable = if ids.is_empty() {
+        Vec::new()
+    } else {
+        storage
+            .list_latest_subscription_quota_for_upstreams(&ids)
+            .await?
+    };
+    let mut durable_by_window = HashMap::with_capacity(durable.len());
+    for sample in &durable {
+        let slots = durable_by_window
+            .entry((sample.upstream_id, sample.window))
+            .or_insert([None; 2]);
+        slots[usize::from(sample.source == SubscriptionQuotaSource::Api)] = Some(sample);
+    }
+    let now = now_unix_millis(clock);
+    let computed_at_unix_millis = i64::try_from(now).unwrap_or(i64::MAX);
+    let view = dynamic_view.load();
+    let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+    let mut snapshots = windows
+        .iter()
+        .map(|window| ProviderPoolSnapshot {
+            record: PoolQuotaSnapshotRecord {
+                provider,
+                snapshot_at_unix_secs: computed_at_unix_millis / 1_000,
+                window: *window,
+                utilization: None,
+                weighted_utilization_sum: 0.0,
+                capacity_ratio_sum: 0.0,
+                eligible_upstreams: i64::try_from(upstreams.len()).unwrap_or(i64::MAX),
+                contributing_upstreams: 0,
+                stale_upstreams: 0,
+                missing_observation_upstreams: 0,
+                missing_metadata_upstreams: 0,
+                header_contributing_upstreams: 0,
+                api_contributing_upstreams: 0,
+                max_observed_at_unix_millis: None,
+                computed_at_unix_millis,
+                policy_version: POOL_QUOTA_POLICY_VERSION,
+            },
+            oldest_observed_at_unix_millis: None,
+            max_staleness_secs,
+        })
+        .collect::<Vec<_>>();
+    for upstream in upstreams {
+        let cached = view.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now,
+            max_staleness_secs,
+        );
+        for snapshot in &mut snapshots {
+            let record = &mut snapshot.record;
+            let observation = provider_pool_observation(
+                durable_by_window
+                    .get(&(upstream.id, record.window))
+                    .into_iter()
+                    .flat_map(|samples| samples.iter().copied().flatten()),
+                cached
+                    .iter()
+                    .find(|candidate| candidate.window == record.window.as_str()),
+                now,
+                max_staleness_secs,
+            );
+            let Some(observation) = observation else {
+                record.missing_observation_upstreams += 1;
+                continue;
+            };
+            if observation.absent {
+                record.eligible_upstreams -= 1;
+                continue;
+            }
+            let observed = i64::try_from(observation.observed_at_unix_millis).unwrap_or(i64::MAX);
+            snapshot.oldest_observed_at_unix_millis = Some(
+                snapshot
+                    .oldest_observed_at_unix_millis
+                    .map_or(observed, |oldest| oldest.min(observed)),
+            );
+            if now.saturating_sub(observation.observed_at_unix_millis)
+                > max_staleness_secs.saturating_mul(1_000)
+            {
+                record.stale_upstreams += 1;
+                continue;
+            }
+            let Some(utilization) = observation.utilization else {
+                record.missing_observation_upstreams += 1;
+                continue;
+            };
+            record.weighted_utilization_sum += utilization;
+            record.capacity_ratio_sum += 1.0;
+            record.contributing_upstreams += 1;
+            if observation.api {
+                record.api_contributing_upstreams += 1;
+            } else {
+                record.header_contributing_upstreams += 1;
+            }
+            record.max_observed_at_unix_millis = Some(
+                record
+                    .max_observed_at_unix_millis
+                    .map_or(observed, |latest| latest.max(observed)),
+            );
+        }
+    }
+    for snapshot in &mut snapshots {
+        let record = &mut snapshot.record;
+        if record.contributing_upstreams > 0 {
+            record.utilization =
+                Some(record.weighted_utilization_sum / record.contributing_upstreams as f64);
+        }
+    }
+    Ok(snapshots)
+}
+
+/// Persist one provider at the existing pool-history tick. Anthropic retains
+/// its weighted aggregate; other providers share the HTTP latest builder.
+pub async fn record_provider_pool_quota_snapshots_now(
+    storage: &dyn Storage,
+    dynamic_view: &DynamicViewHolder,
+    provider: PoolQuotaProvider,
+    clock: &dyn Clock,
+) -> Result<(), StorageError> {
+    if provider == PoolQuotaProvider::Anthropic {
+        let max_staleness_secs = dynamic_view
+            .load()
+            .subscription_quota_routing_max_staleness_secs;
+        let aggregate = build_cc_lb_aggregate_response(
+            storage,
+            dynamic_view,
+            None,
+            POOLED_HISTORY_WINDOWS.to_vec(),
+            SubscriptionQuotaSourceMerge::Merged,
+            max_staleness_secs,
+            clock,
+        )
+        .await?;
+        return record_pool_quota_snapshots_now(storage, &aggregate, clock).await;
+    }
+    let windows = provider_quota_windows(pool_provider_kind(provider))
+        .iter()
+        .copied()
+        .filter(|window| POOLED_HISTORY_WINDOWS.contains(window))
+        .collect::<Vec<_>>();
+    let records =
+        build_provider_pool_quota_snapshots(storage, dynamic_view, provider, &windows, clock)
+            .await?
+            .into_iter()
+            .map(|snapshot| snapshot.record)
+            .collect::<Vec<_>>();
+    record_pool_quota_snapshot_records(storage, provider, &records).await
+}
+
 pub async fn record_pool_quota_snapshots_now(
     storage: &dyn Storage,
     aggregate: &AggregateResponse,
@@ -1609,6 +1676,14 @@ pub async fn record_pool_quota_snapshots_now(
         snapshot_at_unix_secs,
         computed_at_unix_millis,
     );
+    record_pool_quota_snapshot_records(storage, PoolQuotaProvider::Anthropic, &records).await
+}
+
+async fn record_pool_quota_snapshot_records(
+    storage: &dyn Storage,
+    provider: PoolQuotaProvider,
+    records: &[PoolQuotaSnapshotRecord],
+) -> Result<(), StorageError> {
     if records.is_empty() {
         return Ok(());
     }
@@ -1617,7 +1692,7 @@ pub async fn record_pool_quota_snapshots_now(
         .map(|record| record.window)
         .collect::<Vec<_>>();
     let latest = storage
-        .list_latest_pool_quota_snapshot_summaries(&windows)
+        .list_latest_pool_quota_snapshot_summaries(provider, &windows)
         .await?;
     let should_record = records.iter().any(|record| {
         should_record_pool_quota_snapshot(
@@ -1630,7 +1705,7 @@ pub async fn record_pool_quota_snapshots_now(
     if !should_record {
         return Ok(());
     }
-    PoolQuotaHistoryStore::record_pool_quota_snapshots(storage, &records).await
+    PoolQuotaHistoryStore::record_pool_quota_snapshots(storage, records).await
 }
 
 fn should_record_pool_quota_snapshot(
@@ -1648,7 +1723,7 @@ fn should_record_pool_quota_snapshot(
     !(record
         .snapshot_at_unix_secs
         .saturating_sub(latest.snapshot_at_unix_secs)
-        < 3_600
+        < POOL_SNAPSHOT_HEARTBEAT_SECS
         && utilization_unchanged
         && record.eligible_upstreams == latest.eligible_upstreams
         && record.contributing_upstreams == latest.contributing_upstreams
@@ -2567,7 +2642,7 @@ fn parse_windows_or_provider_default(
     };
     if windows
         .iter()
-        .any(|window| !provider_quota_windows(provider.upstream_kind()).contains(window))
+        .any(|window| !provider_quota_windows(pool_provider_kind(provider)).contains(window))
     {
         return Err(bad_request(
             "unsupported_pool_window",
@@ -2876,6 +2951,7 @@ mod tests {
 
     fn snapshot_for_deadband() -> PoolQuotaSnapshotRecord {
         PoolQuotaSnapshotRecord {
+            provider: PoolQuotaProvider::Anthropic,
             snapshot_at_unix_secs: 10_000,
             window: SubscriptionQuotaWindow::FiveHour,
             utilization: Some(0.0),
