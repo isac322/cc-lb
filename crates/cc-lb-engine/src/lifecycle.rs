@@ -13278,37 +13278,56 @@ fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
     if buffer.len() > MAX_HELD_JSON_ERROR_BODY_BYTES {
         return ErrorBodyClass::Sse;
     }
-    // `serde_json` reports a truncated document as EOF at every boundary
-    // except inside a number that could still continue (`-`, `2.`, `2.5e`);
-    // `sonic_rs` reports syntax errors for ordinary truncations, so it cannot
-    // drive this decision. Error bodies only, capped above, so off the
-    // request hot path.
-    if json_prefix_is_unfinished(buffer) {
-        return ErrorBodyClass::JsonCandidate;
-    }
-    // A document cut inside a number (`-`, `2.`, `2.5e+`) is the one
-    // truncation `serde_json` reports as a syntax error. Every unfinished
-    // number accepts one more digit, so the buffer is still a JSON prefix
-    // exactly when appending `0` leaves an unfinished document. This rejects
-    // `01`, `+2`, a bare `e`, `0.e`, a number where a key is required
-    // (`{\n\n2`), and digits after a complete document.
-    let mut probe = Vec::with_capacity(buffer.len() + 1);
-    probe.extend_from_slice(buffer);
-    probe.push(b'0');
-    if json_prefix_is_unfinished(&probe) {
+    if is_json_prefix(buffer) {
         ErrorBodyClass::JsonCandidate
     } else {
         ErrorBodyClass::Sse
     }
 }
 
-/// Whether `bytes` is a valid JSON prefix: a complete document, or one that
-/// only ended early.
-fn json_prefix_is_unfinished(bytes: &[u8]) -> bool {
-    match serde_json::from_slice::<serde::de::IgnoredAny>(bytes) {
+/// Whether `buffer` is a prefix of some valid JSON document.
+///
+/// `serde_json` reports a truncated document as EOF, with two exceptions
+/// that are probed by completing them. A document cut inside a number
+/// (`-`, `2.`, `2.5e+`) is a syntax error, and every unfinished number
+/// accepts one more digit. A `\u` escape with fewer than four following
+/// bytes is EOF even when those bytes cannot be hex (`"\u\n\n`), so the
+/// escape is padded with `0`s, which is always legal (lone surrogates are
+/// accepted here). `sonic_rs` reports syntax errors for ordinary
+/// truncations, so it cannot drive this decision. Held error bodies only,
+/// capped by `MAX_HELD_JSON_ERROR_BODY_BYTES`, so off the request hot path.
+fn is_json_prefix(buffer: &[u8]) -> bool {
+    let unfinished = |bytes: &[u8]| match serde_json::from_slice::<serde::de::IgnoredAny>(bytes) {
         Ok(_) => true,
         Err(error) => error.is_eof(),
+    };
+    let padded = |padding: usize| {
+        let mut probe = Vec::with_capacity(buffer.len() + padding);
+        probe.extend_from_slice(buffer);
+        probe.resize(buffer.len() + padding, b'0');
+        unfinished(&probe)
+    };
+    if let Some(missing) = short_unicode_escape_missing_bytes(buffer) {
+        return padded(missing);
     }
+    unfinished(buffer) || padded(1)
+}
+
+/// Hex digits still missing when `buffer` ends inside a `\u` escape.
+fn short_unicode_escape_missing_bytes(buffer: &[u8]) -> Option<usize> {
+    (0..4).find_map(|present| {
+        let u = buffer.len().checked_sub(present + 1)?;
+        if buffer[u] != b'u' {
+            return None;
+        }
+        // The `u` follows an escaping backslash only after an odd run of them.
+        let backslashes = buffer[..u]
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b'\\')
+            .count();
+        (backslashes % 2 == 1).then_some(4 - present)
+    })
 }
 
 /// Whether a held error body is one complete JSON document.

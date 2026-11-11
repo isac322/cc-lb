@@ -780,6 +780,14 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         ));
     }
 
+    // A `\u` escape whose following bytes cannot be hex is not JSON, so its
+    // completed event is relayed like any SSE event.
+    for body in [&b"{\"a\":\"\\u\n\n"[..], b"[\"\\u0\r\r"] {
+        let (status, received) = gemini_oauth_stream_error(&[body]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(received, Bytes::from_static(body));
+    }
+
     // Whitespace-only error bodies: completed blank events reach the client
     // as sent, a lone line break is dropped, and other whitespace is an
     // unterminated event.
