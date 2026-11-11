@@ -22,6 +22,10 @@ export type PoolQuotaChartRow = {
 };
 /** Latest pool utilization per window (0-100 used), for legends. */
 export type PoolQuotaLatest = Record<PoolQuotaWindow, number | null>;
+export interface PoolQuotaObservation {
+  observedAtUnixSecs: number | null;
+  stale: boolean;
+}
 
 /**
  * The default call ignores unknown provider windows; provider-specific callers
@@ -37,6 +41,14 @@ export function poolQuotaWindowsPresent(
   for (const entry of history ?? []) returned.add(entry.window);
   for (const entry of aggregate?.windows ?? []) returned.add(entry.window);
   return defaults.filter((window) => {
+    const historyWindow = history?.find(
+      (candidate) => candidate.window === window,
+    );
+    // Live provider history knows current eligibility; aggregate lots may
+    // include an older, now superseded provider window.
+    if (historyWindow?.latest?.max_staleness_secs != null) {
+      return historyWindow.latest.eligible_upstreams > 0;
+    }
     const aggregateWindow = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
@@ -48,11 +60,9 @@ export function poolQuotaWindowsPresent(
       return false;
     }
     if (!requireData) return returned.has(window);
-    const historyWindow = history?.find(
-      (candidate) => candidate.window === window,
-    );
     return (
       aggregateWindow?.utilization_percent != null ||
+      (historyWindow?.latest?.eligible_upstreams ?? 0) > 0 ||
       (aggregateWindow?.cc_window_reset_unix_secs ?? 0) > 0 ||
       (historyWindow?.series.length ?? 0) > 0
     );
@@ -255,17 +265,44 @@ export function visiblePoolQuotaChartData(
 export function poolQuotaResponseLatest(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
   visibleRows: readonly PoolQuotaChartRow[],
+  { requireVisibleHistory = true }: { requireVisibleHistory?: boolean } = {},
 ): PoolQuotaLatest {
   const latest: PoolQuotaLatest = {};
   for (const window of POOL_QUOTA_WINDOWS) latest[window] = null;
   for (const window of windowKeys(windows)) {
     latest[window] = null;
-    if (!visibleRows.some((row) => row[window] != null)) continue;
+    if (
+      requireVisibleHistory &&
+      !visibleRows.some((row) => row[window] != null)
+    ) {
+      continue;
+    }
     latest[window] =
       windows?.find((entry) => entry.window === window)?.latest
         ?.utilization_percent ?? null;
   }
   return latest;
+}
+
+/** Current provider observation age, independent of historical aggregate lots. */
+export function poolQuotaResponseObservation(
+  windows: readonly PoolHistoryWindowResponse[] | undefined,
+  visibleWindows: readonly PoolQuotaWindow[],
+): PoolQuotaObservation {
+  let observedAtUnixSecs: number | null = null;
+  let stale = false;
+  for (const entry of windows ?? []) {
+    if (!visibleWindows.includes(entry.window)) continue;
+    const current = entry.latest;
+    const oldest = current?.oldest_observed_at_unix_millis;
+    if (oldest != null) {
+      const secs = oldest / 1000;
+      observedAtUnixSecs =
+        observedAtUnixSecs == null ? secs : Math.min(observedAtUnixSecs, secs);
+    }
+    if ((current?.stale_upstreams ?? 0) > 0) stale = true;
+  }
+  return { observedAtUnixSecs, stale };
 }
 
 /**

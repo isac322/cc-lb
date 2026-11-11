@@ -13,6 +13,7 @@ import {
   createContext,
   type ReactNode,
   useContext,
+  useSyncExternalStore,
 } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as RequestEventsTableModule from '../components/ui/RequestEventsTable';
@@ -923,6 +924,341 @@ describe('Pool quota aligned readout', () => {
         .getAllByTestId('pool-quota-legend-slot')
         .every((row) => row.querySelector('.skeleton') !== null),
     ).toBe(true);
+  });
+});
+
+describe('Provider pool observation freshness', () => {
+  const providers = [
+    { provider: 'openai', window: '5h' },
+    { provider: 'gemini', window: 'gemini_5h' },
+    { provider: 'gemini', window: 'third_party_7d' },
+  ] as const;
+  // Query subscriptions, not parent prop changes, refresh memoized pool cards.
+  // Publish immutable snapshots so recovery exercises that same update path.
+  const readingListeners = new Set<() => void>();
+  let aggregateReading: unknown;
+  let historyReading: unknown;
+  const subscribeToReadings = (listener: () => void) => {
+    readingListeners.add(listener);
+    return () => readingListeners.delete(listener);
+  };
+
+  function mockProviderReading(
+    window: string,
+    value: number | null,
+    series: Array<[number, number | null]>,
+    { age = 30, stale = 0 }: { age?: number; stale?: number } = {},
+  ) {
+    // The live aggregate still has its existing weighting; it must not supply
+    // the provider history's current fresh-only value.
+    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 92);
+    const nextAggregate = {
+      data: {
+        ...aggregate,
+        windows: aggregate.windows.slice(0, 1).map((entry) => ({
+          ...entry,
+          window,
+          provider_lots: [
+            {
+              ...entry.provider_lots[0],
+              window,
+              state: 'stale',
+              observed_at_unix_millis: (POOL_HISTORY_NOW - 86400) * 1000,
+            },
+            {
+              ...entry.provider_lots[0],
+              window,
+              observed_at_unix_millis: POOL_HISTORY_NOW * 1000,
+            },
+          ],
+        })),
+      },
+      isPending: false,
+    };
+    const nextHistory = {
+      data: {
+        now_unix_secs: POOL_HISTORY_NOW,
+        range_secs: 86400,
+        windows: [
+          {
+            window,
+            latest: {
+              snapshot_at_unix_secs: POOL_HISTORY_NOW,
+              utilization: value == null ? null : value / 100,
+              utilization_percent: value,
+              contributing_upstreams: value == null ? 0 : 1,
+              eligible_upstreams: 2,
+              stale_upstreams: stale,
+              missing_observation_upstreams: 0,
+              max_observed_at_unix_millis:
+                value == null ? null : POOL_HISTORY_NOW * 1000,
+              oldest_observed_at_unix_millis: (POOL_HISTORY_NOW - age) * 1000,
+              max_staleness_secs: 300,
+            },
+            series: series.map(
+              ([snapshot_at_unix_secs, utilization_percent]) => ({
+                snapshot_at_unix_secs,
+                utilization_percent,
+              }),
+            ),
+          },
+        ],
+      },
+      isPending: false,
+    };
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockImplementation(
+      () =>
+        useSyncExternalStore(
+          subscribeToReadings,
+          () => aggregateReading,
+        ) as never,
+    );
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockImplementation(
+      () =>
+        useSyncExternalStore(
+          subscribeToReadings,
+          () => historyReading,
+        ) as never,
+    );
+    act(() => {
+      aggregateReading = nextAggregate;
+      historyReading = nextHistory;
+      for (const listener of readingListeners) listener();
+    });
+  }
+
+  it.each(providers)(
+    'keeps $provider $window current with empty or null history, ignoring historical lots',
+    ({ provider, window }) => {
+      mockProviderReading(window, 23, []);
+      const { rerender } = render(
+        <ProviderPoolCard
+          compact
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      const card = screen.getByTestId(`provider-pool-${provider}`);
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('23%');
+      expect(
+        card.querySelector('[data-slot="provider-pool-headline"]')?.textContent,
+      ).toBe('23%used');
+      expect(within(card).getByText('Provider data just now')).toBeDefined();
+      expect(within(card).queryByText('Stale reading')).toBeNull();
+      expect(
+        within(card).getByText('No timeline data yet for this range'),
+      ).toBeDefined();
+
+      mockProviderReading(window, 23, [[POOL_HISTORY_NOW - 60, null]]);
+      rerender(
+        <ProviderPoolCard
+          compact
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('23%');
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 60}:`);
+    },
+  );
+
+  it.each(providers)(
+    'shows mixed $provider $window fresh-only usage and the oldest member age',
+    ({ provider, window }) => {
+      mockProviderReading(window, 31, [[POOL_HISTORY_NOW - 60, 88]], {
+        age: 600,
+        stale: 1,
+      });
+      render(
+        <ProviderPoolCard
+          compact
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      const card = screen.getByTestId(`provider-pool-${provider}`);
+      expect(
+        card.querySelector('[data-slot="provider-pool-headline"]')?.textContent,
+      ).toBe('31%used');
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('31%');
+      expect(within(card).getByText('Provider data 10m ago')).toBeDefined();
+      expect(within(card).getByText('Stale reading').className).toContain(
+        'text-warn-text',
+      );
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 60}:88`);
+    },
+  );
+
+  it.each(providers)(
+    'keeps $provider $window stale gaps through unchanged recovery without a stale headline fallback',
+    ({ provider, window }) => {
+      const series: Array<[number, number | null]> = [
+        [POOL_HISTORY_NOW - 120, 64],
+        [POOL_HISTORY_NOW - 60, null],
+      ];
+      mockProviderReading(window, null, series, { age: 600, stale: 2 });
+      const { rerender } = render(
+        <ProviderPoolCard
+          compact
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      const card = screen.getByTestId(`provider-pool-${provider}`);
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('—');
+      expect(
+        within(card).getByLabelText('Current pool usage unavailable')
+          .textContent,
+      ).toBe('—');
+      expect(within(card).getByText('Stale reading')).toBeDefined();
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 120}:64|${POOL_HISTORY_NOW - 60}:`);
+
+      mockProviderReading(window, 64, series);
+      rerender(
+        <ProviderPoolCard
+          compact
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      expect(
+        card.querySelector('[data-slot="provider-pool-headline"]')?.textContent,
+      ).toBe('64%used');
+      expect(within(card).queryByText('Stale reading')).toBeNull();
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 120}:64|${POOL_HISTORY_NOW - 60}:`);
+
+      rerender(
+        <ProviderPoolCard
+          hasSubscription
+          provider={provider}
+          rangeSecs={86400}
+        />,
+      );
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('64%');
+      expect(within(card).getByText('Provider data just now')).toBeDefined();
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 120}:64|${POOL_HISTORY_NOW - 60}:`);
+    },
+  );
+
+  it.each(providers)(
+    'keeps the full $provider $window page aligned with compact freshness and retained gaps',
+    ({ provider, window }) => {
+      mockResolvedKpiQueries();
+      mockProviderReading(window, 23, []);
+      const { rerender } = render(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+      const card = screen.getByTestId('pool-quota-card');
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('23%');
+      expect(within(card).getByText('Provider data just now')).toBeDefined();
+      expect(within(card).queryByText('Stale reading')).toBeNull();
+      expect(
+        within(card).getByText('No timeline data yet for this range'),
+      ).toBeDefined();
+
+      const series: Array<[number, number | null]> = [
+        [POOL_HISTORY_NOW - 120, 64],
+        [POOL_HISTORY_NOW - 60, null],
+      ];
+      mockProviderReading(window, 31, series, { age: 600, stale: 1 });
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('31%');
+      expect(within(card).getByText('Provider data 10m ago')).toBeDefined();
+      expect(within(card).getByText('Stale reading').className).toContain(
+        'text-warn-text',
+      );
+
+      mockProviderReading(window, null, series, { age: 600, stale: 2 });
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('—');
+      expect(within(card).getByText('Stale reading')).toBeDefined();
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 120}:64|${POOL_HISTORY_NOW - 60}:`);
+
+      mockProviderReading(window, 64, series);
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ProviderOverviewPage provider={provider} />
+        </QueryClientProvider>,
+      );
+      expect(
+        card.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+      ).toBe('64%');
+      expect(within(card).getByText('Provider data just now')).toBeDefined();
+      expect(within(card).queryByText('Stale reading')).toBeNull();
+      expect(
+        within(card).getByTestId(`pool-quota-area-${window}`).getAttribute('d'),
+      ).toBe(`${POOL_HISTORY_NOW - 120}:64|${POOL_HISTORY_NOW - 60}:`);
+    },
+  );
+
+  it('preserves healthy Anthropic history headline and boundary carry', () => {
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregateResponse(POOL_HISTORY_NOW, 92),
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: poolHistoryResponse(POOL_HISTORY_NOW, 18, POOL_HISTORY_NOW - 60),
+      isPending: false,
+    } as never);
+    render(
+      <ProviderPoolCard
+        compact
+        hasSubscription
+        provider="anthropic"
+        rangeSecs={86400}
+      />,
+    );
+    const card = screen.getByTestId('provider-pool-anthropic');
+    expect(
+      card.querySelector('[data-slot="provider-pool-headline"]')?.textContent,
+    ).toBe('38%used');
+    expect(within(card).queryByText('Stale reading')).toBeNull();
+    expect(
+      within(card).getByTestId('pool-quota-area-7d_fable').getAttribute('d'),
+    ).toBe(`${POOL_HISTORY_NOW - 60}:38|${POOL_HISTORY_NOW}:38`);
   });
 });
 

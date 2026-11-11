@@ -1035,6 +1035,7 @@ fn pool_record(
     utilization: f64,
 ) -> PoolQuotaSnapshotRecord {
     PoolQuotaSnapshotRecord {
+        provider: cc_lb_storage_api::Provider::Anthropic,
         snapshot_at_unix_secs: at,
         window,
         utilization: Some(utilization),
@@ -1096,7 +1097,12 @@ async fn pool_history_retains_anchors_and_clamps_idle_and_bucket_starts() {
         0
     );
     let summaries = storage
-        .list_pool_quota_snapshot_summaries_in_range(&[window], 35, 39)
+        .list_pool_quota_snapshot_summaries_in_range(
+            cc_lb_storage_api::Provider::Anthropic,
+            &[window],
+            35,
+            39,
+        )
         .await
         .expect("idle summary anchor");
     assert_eq!(summaries.len(), 1);
@@ -1104,14 +1110,26 @@ async fn pool_history_retains_anchors_and_clamps_idle_and_bucket_starts() {
     assert_eq!(summaries[0].utilization, Some(0.3));
     for (bucket, expected_start) in [(None, 35), (Some(10), 30)] {
         let points = storage
-            .list_pool_quota_chart_points_in_range(&[window], 35, 39, bucket)
+            .list_pool_quota_chart_points_in_range(
+                cc_lb_storage_api::Provider::Anthropic,
+                &[window],
+                35,
+                39,
+                bucket,
+            )
             .await
             .expect("idle chart anchor");
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].snapshot_at_unix_secs, expected_start);
         assert_eq!(points[0].utilization, Some(0.3));
         let exact = storage
-            .list_pool_quota_chart_points_in_range(&[window], 40, 40, bucket)
+            .list_pool_quota_chart_points_in_range(
+                cc_lb_storage_api::Provider::Anthropic,
+                &[window],
+                40,
+                40,
+                bucket,
+            )
             .await
             .expect("exact boundary");
         assert_eq!(exact.len(), 1);
@@ -1119,13 +1137,23 @@ async fn pool_history_retains_anchors_and_clamps_idle_and_bucket_starts() {
         assert_eq!(exact[0].utilization, Some(0.4));
     }
     let exact = storage
-        .list_pool_quota_snapshot_summaries_in_range(&[window], 40, 40)
+        .list_pool_quota_snapshot_summaries_in_range(
+            cc_lb_storage_api::Provider::Anthropic,
+            &[window],
+            40,
+            40,
+        )
         .await
         .expect("exact summary boundary");
     assert_eq!(exact.len(), 1);
     assert_eq!(exact[0].utilization, Some(0.4));
     let other = storage
-        .list_pool_quota_snapshot_summaries_in_range(&[SubscriptionQuotaWindow::SevenDay], 35, 39)
+        .list_pool_quota_snapshot_summaries_in_range(
+            cc_lb_storage_api::Provider::Anthropic,
+            &[SubscriptionQuotaWindow::SevenDay],
+            35,
+            39,
+        )
         .await
         .expect("other partition anchor");
     assert_eq!(other.len(), 1);

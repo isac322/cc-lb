@@ -1,7 +1,7 @@
 import { Link } from '@tanstack/react-router';
 import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
-import { cx, Skeleton } from '../components/ui/primitives';
+import { Badge, cx, Skeleton } from '../components/ui/primitives';
 import {
   PoolQuotaLegend,
   PoolQuotaThemedChart,
@@ -14,12 +14,16 @@ import {
   useSubscriptionQuotaPoolHistory,
 } from '../lib/queries';
 import { formatQuotaPercent } from '../lib/quotaSeverity';
+import { formatInTimezone } from '../lib/timezone';
 import {
   buildPoolQuotaChartData,
+  formatAgo,
   latestPoolQuotaSnapshotUnix,
   type PoolQuotaChartRow,
+  type PoolQuotaLatest,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
+  poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolWindowResets,
   visiblePoolQuotaChartData,
@@ -48,14 +52,13 @@ export function presentProviderWindows(
 }
 
 function providerMetricHeadline(
-  data: readonly PoolQuotaChartRow[],
+  latest: PoolQuotaLatest | undefined,
   visibleWindows: readonly PoolQuotaWindow[],
 ): string | null {
   const allowed = new Set(visibleWindows);
-  const latest = data.at(-1);
   if (!latest) return null;
   const values = Object.entries(latest)
-    .filter(([key]) => key !== 'unix' && allowed.has(key))
+    .filter(([key]) => allowed.has(key))
     .map(([, value]) => value)
     .filter((value): value is number => value != null);
   return values.length > 0 ? formatQuotaPercent(Math.max(...values)) : null;
@@ -112,36 +115,51 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
     [normalizedHistory],
   );
-  const visibleChartData = useMemo(
-    () =>
-      visiblePoolQuotaChartData(
-        chartData,
-        (history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000)) -
-          (history.data?.range_secs ?? rangeSecs),
-        history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000),
-        latestSnapshotUnixSecs,
-        normalizedHistory,
-      ).map((row) => {
-        const sparseRow: PoolQuotaChartRow = { unix: row.unix };
-        for (const window of visibleWindows) {
-          if (window in row) sparseRow[window] = row[window];
-        }
-        return sparseRow;
-      }),
-    [
-      chartData,
-      history.data,
-      latestSnapshotUnixSecs,
-      normalizedHistory,
-      rangeSecs,
-      visibleWindows,
-    ],
-  );
+  const rangeEndUnix =
+    history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000);
+  const rangeStartUnix = rangeEndUnix - (history.data?.range_secs ?? rangeSecs);
+  const visibleChartData = useMemo(() => {
+    // Provider history is retained evidence, not a replay of the live reading.
+    // Recovery must not paint over a recorded stale interval.
+    const rows =
+      provider === 'anthropic'
+        ? visiblePoolQuotaChartData(
+            chartData,
+            rangeStartUnix,
+            rangeEndUnix,
+            latestSnapshotUnixSecs,
+            normalizedHistory,
+          )
+        : chartData.filter(
+            (row) => row.unix >= rangeStartUnix && row.unix <= rangeEndUnix,
+          );
+    return rows.map((row) => {
+      const sparseRow: PoolQuotaChartRow = { unix: row.unix };
+      for (const window of visibleWindows) {
+        if (window in row) sparseRow[window] = row[window];
+      }
+      return sparseRow;
+    });
+  }, [
+    chartData,
+    latestSnapshotUnixSecs,
+    normalizedHistory,
+    provider,
+    rangeEndUnix,
+    rangeStartUnix,
+    visibleWindows,
+  ]);
   const latest = useMemo(
-    () => poolQuotaResponseLatest(normalizedHistory, visibleChartData),
-    [normalizedHistory, visibleChartData],
+    () =>
+      poolQuotaResponseLatest(normalizedHistory, visibleChartData, {
+        requireVisibleHistory: provider === 'anthropic',
+      }),
+    [normalizedHistory, provider, visibleChartData],
   );
-  const headline = providerMetricHeadline(visibleChartData, visibleWindows);
+  const headline = providerMetricHeadline(
+    provider === 'anthropic' ? visibleChartData.at(-1) : latest,
+    visibleWindows,
+  );
   const resets = poolWindowResets(normalizedAggregate);
   const error = hasSubscription && (aggregate.isError || history.isError);
   const weighting =
@@ -150,6 +168,22 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       : undefined;
   const nowUnixSecs =
     normalizedAggregate?.now_unix_secs ?? Math.floor(Date.now() / 1000);
+  const observation = useMemo(
+    () =>
+      provider === 'anthropic'
+        ? { observedAtUnixSecs: null, stale: false }
+        : poolQuotaResponseObservation(normalizedHistory, visibleWindows),
+    [normalizedHistory, provider, visibleWindows],
+  );
+  const observationNow =
+    provider === 'anthropic'
+      ? nowUnixSecs
+      : (history.data?.now_unix_secs ?? nowUnixSecs);
+  const showHeadline =
+    compact &&
+    (provider === 'anthropic'
+      ? headline != null
+      : hasSubscription && !loading && !error && visibleWindows.length > 0);
 
   return (
     <article
@@ -175,10 +209,21 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
             <span className="truncate">{PROVIDER_LABELS[provider]}</span>
           </Link>
         </div>
-        {compact && headline != null ? (
-          <span className="inline-flex shrink-0 items-baseline gap-1 text-display tabular-nums text-text">
-            {headline}
-            <span className="text-caption text-text-muted">used</span>
+        {showHeadline ? (
+          <span
+            className={cx(
+              'inline-flex shrink-0 items-baseline gap-1 text-display tabular-nums',
+              headline == null ? 'text-text-faint' : 'text-text',
+            )}
+            data-slot="provider-pool-headline"
+            aria-label={
+              headline == null ? 'Current pool usage unavailable' : undefined
+            }
+          >
+            {headline ?? '—'}
+            {headline != null ? (
+              <span className="text-caption text-text-muted">used</span>
+            ) : null}
           </span>
         ) : null}
       </header>
@@ -218,19 +263,31 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 <Skeleton className="size-full" />
               ) : (
                 <PoolQuotaThemedChart
-                  rangeEndUnix={
-                    history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000)
-                  }
-                  rangeStartUnix={
-                    (history.data?.now_unix_secs ??
-                      Math.floor(Date.now() / 1000)) -
-                    (history.data?.range_secs ?? rangeSecs)
-                  }
+                  rangeEndUnix={rangeEndUnix}
+                  rangeStartUnix={rangeStartUnix}
                   seriesData={visibleChartData}
                   windows={visibleWindows}
                 />
               )}
             </div>
+            {!loading &&
+            (observation.observedAtUnixSecs != null || observation.stale) ? (
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-caption tabular-nums text-text-muted">
+                {observation.observedAtUnixSecs != null ? (
+                  <span
+                    title={formatInTimezone(
+                      observation.observedAtUnixSecs * 1000,
+                      timeZone,
+                    )}
+                  >
+                    {`Provider data ${formatAgo(observation.observedAtUnixSecs, observationNow)}`}
+                  </span>
+                ) : null}
+                {observation.stale ? (
+                  <Badge tone="warn">Stale reading</Badge>
+                ) : null}
+              </div>
+            ) : null}
           </>
         )}
       </div>

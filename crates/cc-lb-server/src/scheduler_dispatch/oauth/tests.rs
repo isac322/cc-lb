@@ -49,6 +49,449 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 
+#[tokio::test]
+async fn pool_quota_snapshot_tick_records_provider_freshness_and_cache_recovery() {
+    use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
+    use cc_lb_scheduler::retry::JobOutcome;
+    use cc_lb_scheduler::worker::CronJob;
+    use cc_lb_storage_api::{
+        PoolQuotaHistoryStore, Provider, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+        SubscriptionQuotaSource, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    };
+
+    let fixture = DispatchFixture::new().await;
+    fixture.dispatch.dynamic_view.store(
+        DynamicViewBuilder::new(1)
+            .signer_factory(Arc::new(StubSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
+            .subscription_quota_cache(fixture.dispatch.subscription_quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(1_800)
+            .build(),
+    );
+    let initial_secs = 1_700_000_000;
+    let mut samples = Vec::new();
+    for (kind, window) in [
+        (
+            UpstreamKind::AnthropicOauth,
+            SubscriptionQuotaWindow::FiveHour,
+        ),
+        (UpstreamKind::OpenaiOauth, SubscriptionQuotaWindow::FiveHour),
+        (
+            UpstreamKind::GeminiOauth,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+        ),
+    ] {
+        let upstream = UpstreamStore::create(
+            fixture.storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: format!("snapshot-{kind:?}"),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .unwrap();
+        samples.push(SubscriptionQuotaSample {
+            upstream_id: upstream.id,
+            window,
+            source: SubscriptionQuotaSource::Api,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis: initial_secs * 1_000,
+            sample_id: Uuid::new_v4(),
+            utilization: Some(0.50),
+            status: None,
+            resets_at_unix_secs: Some(initial_secs + 18_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            ingested_at_unix_millis: initial_secs * 1_000,
+        });
+    }
+    fixture
+        .storage
+        .record_subscription_quota_samples(&samples)
+        .await
+        .unwrap();
+    let tick = |at| CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(at));
+    assert_eq!(
+        fixture
+            .dispatch
+            .dispatch_singleton(tick(initial_secs))
+            .await
+            .unwrap(),
+        JobOutcome::Done
+    );
+    for (provider, window) in [
+        (Provider::Anthropic, SubscriptionQuotaWindow::FiveHour),
+        (Provider::Openai, SubscriptionQuotaWindow::FiveHour),
+        (Provider::Gemini, SubscriptionQuotaWindow::GeminiFiveHour),
+    ] {
+        let latest = fixture
+            .storage
+            .list_latest_pool_quota_snapshot_summaries(provider, &[window])
+            .await
+            .unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].provider, provider);
+        assert_eq!(latest[0].snapshot_at_unix_secs, initial_secs as i64);
+        assert_eq!(latest[0].utilization, Some(0.50));
+        assert_eq!(latest[0].stale_upstreams, 0);
+    }
+    fixture.clock.advance_secs(1_801);
+    fixture
+        .dispatch
+        .dispatch_singleton(tick(initial_secs + 1_801))
+        .await
+        .unwrap();
+    for (provider, window) in [
+        (Provider::Anthropic, SubscriptionQuotaWindow::FiveHour),
+        (Provider::Openai, SubscriptionQuotaWindow::FiveHour),
+        (Provider::Gemini, SubscriptionQuotaWindow::GeminiFiveHour),
+    ] {
+        let latest = fixture
+            .storage
+            .list_latest_pool_quota_snapshot_summaries(provider, &[window])
+            .await
+            .unwrap();
+        assert_eq!(latest[0].stale_upstreams, 1);
+        assert_eq!(
+            latest[0].utilization,
+            if provider == Provider::Anthropic {
+                Some(0.50)
+            } else {
+                None
+            }
+        );
+    }
+    // The cache sees a successful unchanged poll before the async writer does.
+    // It must restore freshness without borrowing the durable timestamp.
+    fixture.clock.advance_secs(1);
+    for sample in &mut samples {
+        sample.observed_at_unix_millis = (initial_secs + 1_802) * 1_000;
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .upsert_observation(sample.upstream_id, sample);
+    }
+    fixture
+        .dispatch
+        .dispatch_singleton(tick(initial_secs + 1_802))
+        .await
+        .unwrap();
+    for (provider, window) in [
+        (Provider::Openai, SubscriptionQuotaWindow::FiveHour),
+        (Provider::Gemini, SubscriptionQuotaWindow::GeminiFiveHour),
+    ] {
+        let records = fixture
+            .storage
+            .list_pool_quota_snapshot_summaries_in_range(
+                provider,
+                &[window],
+                initial_secs as i64,
+                (initial_secs + 1_802) as i64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].utilization, Some(0.50));
+        assert_eq!(records[1].utilization, None);
+        assert_eq!(records[2].utilization, Some(0.50));
+        assert_eq!(records[2].stale_upstreams, 0);
+        assert_eq!(
+            records[2].max_observed_at_unix_millis,
+            Some(((initial_secs + 1_802) * 1_000) as i64)
+        );
+    }
+    for (offset, kind) in [
+        (1_803, SubscriptionQuotaSampleKind::Absent),
+        (1_804, SubscriptionQuotaSampleKind::Sample),
+    ] {
+        fixture.clock.set_unix_secs(initial_secs + offset);
+        for sample in &mut samples {
+            sample.observed_at_unix_millis = (initial_secs + offset) * 1_000;
+            sample.sample_kind = kind;
+            sample.utilization = None;
+            fixture
+                .dispatch
+                .subscription_quota_cache
+                .upsert_observation(sample.upstream_id, sample);
+        }
+        fixture
+            .dispatch
+            .dispatch_singleton(tick(initial_secs + offset))
+            .await
+            .unwrap();
+        for (provider, window) in [
+            (Provider::Openai, SubscriptionQuotaWindow::FiveHour),
+            (Provider::Gemini, SubscriptionQuotaWindow::GeminiFiveHour),
+        ] {
+            let latest = fixture
+                .storage
+                .list_latest_pool_quota_snapshot_summaries(provider, &[window])
+                .await
+                .unwrap();
+            assert_eq!(
+                latest[0].utilization, None,
+                "never revive older durable numeric value"
+            );
+            assert_eq!(latest[0].contributing_upstreams, 0);
+            assert_eq!(latest[0].stale_upstreams, 0);
+            assert_eq!(
+                latest[0].eligible_upstreams,
+                if kind == SubscriptionQuotaSampleKind::Absent {
+                    0
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                latest[0].missing_observation_upstreams,
+                if kind == SubscriptionQuotaSampleKind::Absent {
+                    0
+                } else {
+                    1
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_provider_usage_polls_preserve_observation_age_and_stale_snapshot() {
+    use cc_lb_domain::SubscriptionQuotaDataState;
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
+    use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
+    use cc_lb_scheduler::worker::CronJob;
+    use cc_lb_storage_api::{
+        PoolQuotaHistoryStore, Provider, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+        SubscriptionQuotaSource, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    };
+
+    for (kind, provider, window) in [
+        (
+            UpstreamKind::OpenaiOauth,
+            Provider::Openai,
+            SubscriptionQuotaWindow::FiveHour,
+        ),
+        (
+            UpstreamKind::GeminiOauth,
+            Provider::Gemini,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+        ),
+    ] {
+        let mut fixture = DispatchFixture::new().await;
+        fixture.dispatch.dynamic_view.store(
+            DynamicViewBuilder::new(1)
+                .signer_factory(Arc::new(StubSignerFactory))
+                .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
+                .subscription_quota_cache(fixture.dispatch.subscription_quota_cache.clone())
+                .subscription_quota_routing_max_staleness_secs(1_800)
+                .build(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded_calls = calls.clone();
+        let app = axum::Router::new().fallback(move || {
+            recorded_calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    [("content-type", "application/json")],
+                    r#"{"rate_limit":{"primary_window":{"used_percent":90,"limit_window_seconds":18000}},"groups":[{"displayName":"Gemini models","buckets":[{"window":"5h","remainingFraction":0.1,"resetTime":"2026-11-01T14:00:00Z"}]}]}"#,
+                )
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve failed usage responses");
+        });
+        // Access-only credentials avoid token-refresh requests, so failures
+        // below exercise the real usage HTTP path rather than refresh handling.
+        let upstream = scoped_refresh_probe_record(&fixture, kind, true)
+            .await
+            .unwrap();
+        UpstreamStore::update_spec(
+            fixture.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                base_url: Some(Some(base_url)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+        let initial_secs = 1_700_000_000;
+        let sample = SubscriptionQuotaSample {
+            upstream_id: upstream.id,
+            window,
+            source: SubscriptionQuotaSource::Api,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis: initial_secs * 1_000,
+            sample_id: Uuid::new_v4(),
+            utilization: Some(0.50),
+            status: None,
+            resets_at_unix_secs: Some(initial_secs + 18_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            ingested_at_unix_millis: initial_secs * 1_000,
+        };
+        fixture
+            .storage
+            .record_subscription_quota_samples(std::slice::from_ref(&sample))
+            .await
+            .unwrap();
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .upsert_observation(upstream.id, &sample);
+        fixture
+            .dispatch
+            .dispatch_singleton(CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(
+                initial_secs,
+            )))
+            .await
+            .unwrap();
+        let fresh = fixture
+            .storage
+            .list_latest_pool_quota_snapshot_summaries(provider, &[window])
+            .await
+            .unwrap();
+        assert_eq!(fresh[0].utilization, Some(0.50));
+        assert_eq!(fresh[0].stale_upstreams, 0);
+
+        fixture.clock.advance_secs(1_801);
+        let http_failure = fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(http_failure,
+                OAuthUsagePollObservation::StatusFailure { observed_at_unix_secs, status: 503 }
+                    if observed_at_unix_secs == initial_secs + 1_801
+            ),
+            "{kind:?}: {http_failure:?}"
+        );
+        let expected_requests = if kind == UpstreamKind::GeminiOauth {
+            3
+        } else {
+            1
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), expected_requests);
+
+        for network_failure in [false, true] {
+            if network_failure {
+                let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                UpstreamStore::update_spec(
+                    fixture.storage.as_ref(),
+                    upstream.id,
+                    current.revision,
+                    UpstreamUpdate {
+                        base_url: Some(Some(refused_token_url())),
+                        ..UpstreamUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+                fixture.clock.advance_secs(1);
+                let result = fixture
+                    .dispatch
+                    .poll_usage(upstream.id, None)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(result,
+                        OAuthUsagePollObservation::NetworkFailure { observed_at_unix_secs }
+                            if observed_at_unix_secs == initial_secs + 1_802
+                    ),
+                    "{kind:?}: {result:?}"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), expected_requests);
+            }
+            let durable = fixture
+                .storage
+                .list_latest_subscription_quota_for_upstreams(&[upstream.id])
+                .await
+                .unwrap();
+            assert_eq!(durable.len(), 1);
+            assert_eq!(
+                durable[0].observed_at_unix_millis,
+                sample.observed_at_unix_millis
+            );
+            assert_eq!(durable[0].utilization, sample.utilization);
+            let now_secs = initial_secs + if network_failure { 1_802 } else { 1_801 };
+            let cache = fixture
+                .dispatch
+                .subscription_quota_cache
+                .snapshot_for_upstream(upstream.id, now_secs * 1_000, 1_800);
+            let cached = cache
+                .iter()
+                .find(|candidate| candidate.window == window.as_str())
+                .unwrap();
+            assert_eq!(
+                cached.observed_at_unix_millis,
+                Some(sample.observed_at_unix_millis)
+            );
+            assert_eq!(cached.utilization, Some(0.50));
+            assert_eq!(cached.state, SubscriptionQuotaDataState::Stale);
+            assert!(
+                fixture._quota_rx.try_recv().is_err(),
+                "failed polls enqueue no observations"
+            );
+            fixture
+                .dispatch
+                .dispatch_singleton(CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(
+                    now_secs,
+                )))
+                .await
+                .unwrap();
+            let latest = fixture
+                .storage
+                .list_latest_pool_quota_snapshot_summaries(provider, &[window])
+                .await
+                .unwrap();
+            assert_eq!(latest[0].stale_upstreams, 1);
+            assert_eq!(latest[0].contributing_upstreams, 0);
+            assert_eq!(latest[0].utilization, None);
+            assert_eq!(latest[0].max_observed_at_unix_millis, None);
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+}
+
 #[test]
 fn usage_poll_includes_disabled_registered_oauth_upstream() {
     let mut upstream = registered_oauth_upstream();

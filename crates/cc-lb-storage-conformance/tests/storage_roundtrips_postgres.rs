@@ -293,6 +293,30 @@ fn pool_quota_history_fable_roundtrip_postgres() {
 }
 
 #[test]
+fn pool_quota_history_provider_isolation_roundtrip_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_isolation_roundtrip",
+        pool_quota_history_store::provider_isolation_roundtrip,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_prune_anchors_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_prune_anchors",
+        pool_quota_history_store::provider_prune_anchors,
+    );
+}
+
+#[test]
+fn pool_quota_history_provider_chart_gaps_and_peaks_postgres() {
+    run_postgres_scenario(
+        "pool_quota_history_provider_chart_gaps_and_peaks",
+        pool_quota_history_store::provider_chart_gaps_and_peaks,
+    );
+}
+
+#[test]
 fn request_event_cache_split_round_trip_postgres() {
     run_postgres_scenario(
         "request_event_cache_split_round_trip",

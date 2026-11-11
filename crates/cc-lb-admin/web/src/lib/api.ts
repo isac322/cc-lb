@@ -1662,6 +1662,10 @@ export interface PoolHistoryPoint {
   eligible_upstreams: number;
   stale_upstreams: number;
   max_observed_at_unix_millis: number | null;
+  /** Live provider readout only; historical snapshots do not retain these fields. */
+  oldest_observed_at_unix_millis?: number | null;
+  max_staleness_secs?: number;
+  missing_observation_upstreams?: number;
 }
 
 export interface PoolHistorySeriesPoint {

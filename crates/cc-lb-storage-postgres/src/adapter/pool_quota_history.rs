@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     PoolQuotaChartPointRecord, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaSnapshotSummaryRecord, Provider, StorageError, StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
@@ -24,7 +24,8 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                    WHERE old.snapshot_at_unix_secs < $1
                      AND EXISTS (
                          SELECT 1 FROM pool_subscription_quota_history_v1 newer
-                         WHERE newer."quota_window" = old."quota_window"
+                         WHERE newer.provider = old.provider
+                           AND newer."quota_window" = old."quota_window"
                            AND newer.snapshot_at_unix_secs <= $1
                            AND newer.snapshot_at_unix_secs > old.snapshot_at_unix_secs
                      )
@@ -53,14 +54,14 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         for record in records {
             sqlx::query(
                 r#"INSERT INTO pool_subscription_quota_history_v1 (
-                    snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                    provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
                     capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                     stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                     header_contributing_upstreams, api_contributing_upstreams,
                     max_observed_at_unix_millis, computed_at_unix_millis,
                     policy_version
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                ON CONFLICT (snapshot_at_unix_secs, "quota_window") DO UPDATE SET
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                ON CONFLICT (provider, snapshot_at_unix_secs, "quota_window") DO UPDATE SET
                     utilization = excluded.utilization,
                     weighted_utilization_sum = excluded.weighted_utilization_sum,
                     capacity_ratio_sum = excluded.capacity_ratio_sum,
@@ -75,6 +76,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                     computed_at_unix_millis = excluded.computed_at_unix_millis,
                     policy_version = excluded.policy_version"#,
             )
+            .bind(provider_key(record.provider))
             .bind(record.snapshot_at_unix_secs)
             .bind(record.window.as_str())
             .bind(record.utilization)
@@ -100,6 +102,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_latest_pool_quota_snapshots(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>> {
         if windows.is_empty() {
@@ -108,23 +111,24 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         let mut out = Vec::with_capacity(windows.len());
         for window in windows {
             let row = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
                           max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
-                  WHERE "quota_window" = $1
+                  WHERE provider = $1 AND "quota_window" = $2
                ORDER BY snapshot_at_unix_secs DESC
                   LIMIT 1"#,
             )
+            .bind(provider_key(provider))
             .bind(window.as_str())
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
             if let Some(row) = row {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -132,6 +136,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_pool_quota_snapshots_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -142,17 +147,18 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         let mut out = Vec::new();
         for window in windows {
             let rows = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
                           max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
-                  WHERE "quota_window" = $1
-                    AND snapshot_at_unix_secs BETWEEN $2 AND $3
+                  WHERE provider = $1 AND "quota_window" = $2
+                    AND snapshot_at_unix_secs BETWEEN $3 AND $4
                ORDER BY snapshot_at_unix_secs ASC"#,
             )
+            .bind(provider_key(provider))
             .bind(window.as_str())
             .bind(since_unix_secs)
             .bind(until_unix_secs)
@@ -160,7 +166,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
             for row in rows {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -168,19 +174,22 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        super::pool_quota_history_summary::list_latest(self, windows).await
+        super::pool_quota_history_summary::list_latest(self, provider, windows).await
     }
 
     async fn list_pool_quota_snapshot_summaries_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
         super::pool_quota_history_summary::list_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -190,6 +199,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 
     async fn list_pool_quota_chart_points_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -197,6 +207,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>> {
         super::pool_quota_history_summary::list_chart_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -206,7 +217,10 @@ impl PoolQuotaHistoryStore for PostgresStorage {
     }
 }
 
-fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {
+fn row_to_record(
+    row: sqlx::postgres::PgRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaSnapshotRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -215,6 +229,7 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotR
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaSnapshotRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get::<i64, _>("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -259,4 +274,12 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotR
             .try_get::<i32, _>("policy_version")
             .map_err(map_sqlx_error)?,
     })
+}
+
+pub(super) fn provider_key(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::Openai => "openai",
+        Provider::Gemini => "gemini",
+    }
 }

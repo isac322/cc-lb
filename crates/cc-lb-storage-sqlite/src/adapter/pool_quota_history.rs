@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     PoolQuotaChartPointRecord, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaSnapshotSummaryRecord, Provider, StorageError, StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
@@ -23,7 +23,8 @@ impl PoolQuotaHistoryStore for SqliteStorage {
              WHERE candidate.snapshot_at_unix_secs < ?1 \
                AND candidate.rowid <> ( \
                  SELECT anchor.rowid FROM pool_subscription_quota_history_v1 anchor \
-                 WHERE anchor.quota_window = candidate.quota_window \
+                 WHERE anchor.provider = candidate.provider
+                   AND anchor.quota_window = candidate.quota_window \
                    AND anchor.snapshot_at_unix_secs <= ?1 \
                  ORDER BY anchor.snapshot_at_unix_secs DESC LIMIT 1 \
                ) \
@@ -51,14 +52,14 @@ impl PoolQuotaHistoryStore for SqliteStorage {
         for record in records {
             sqlx::query(
                 r#"INSERT INTO pool_subscription_quota_history_v1 (
-                    snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+                    provider, snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
                     capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                     stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                     header_contributing_upstreams, api_contributing_upstreams,
                     max_observed_at_unix_millis, computed_at_unix_millis,
                     policy_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_at_unix_secs, quota_window) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, snapshot_at_unix_secs, quota_window) DO UPDATE SET
                     utilization = excluded.utilization,
                     weighted_utilization_sum = excluded.weighted_utilization_sum,
                     capacity_ratio_sum = excluded.capacity_ratio_sum,
@@ -73,6 +74,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
                     computed_at_unix_millis = excluded.computed_at_unix_millis,
                     policy_version = excluded.policy_version"#,
             )
+            .bind(provider_key(record.provider))
             .bind(record.snapshot_at_unix_secs)
             .bind(record.window.as_str())
             .bind(record.utilization)
@@ -98,6 +100,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
 
     async fn list_latest_pool_quota_snapshots(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>> {
         if windows.is_empty() {
@@ -106,23 +109,24 @@ impl PoolQuotaHistoryStore for SqliteStorage {
         let mut out = Vec::with_capacity(windows.len());
         for window in windows {
             let row = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+                r#"SELECT provider, snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
                           max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
-                  WHERE quota_window = ?
+                  WHERE provider = ? AND quota_window = ?
                ORDER BY snapshot_at_unix_secs DESC
                   LIMIT 1"#,
             )
+            .bind(provider_key(provider))
             .bind(window.as_str())
             .fetch_optional(self.pool())
             .await
             .map_err(map_sqlx_error)?;
             if let Some(row) = row {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -130,6 +134,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
 
     async fn list_pool_quota_snapshots_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -140,17 +145,18 @@ impl PoolQuotaHistoryStore for SqliteStorage {
         let mut out = Vec::new();
         for window in windows {
             let rows = sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+                r#"SELECT provider, snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
                           max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
-                  WHERE quota_window = ?
+                  WHERE provider = ? AND quota_window = ?
                     AND snapshot_at_unix_secs BETWEEN ? AND ?
                ORDER BY snapshot_at_unix_secs ASC"#,
             )
+            .bind(provider_key(provider))
             .bind(window.as_str())
             .bind(since_unix_secs)
             .bind(until_unix_secs)
@@ -158,7 +164,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
             for row in rows {
-                out.push(row_to_record(row)?);
+                out.push(row_to_record(row, provider)?);
             }
         }
         Ok(out)
@@ -166,19 +172,22 @@ impl PoolQuotaHistoryStore for SqliteStorage {
 
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        super::pool_quota_history_summary::list_latest(self, windows).await
+        super::pool_quota_history_summary::list_latest(self, provider, windows).await
     }
 
     async fn list_pool_quota_snapshot_summaries_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
     ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
         super::pool_quota_history_summary::list_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -188,6 +197,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
 
     async fn list_pool_quota_chart_points_in_range(
         &self,
+        provider: Provider,
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
@@ -195,6 +205,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>> {
         super::pool_quota_history_summary::list_chart_range(
             self,
+            provider,
             windows,
             since_unix_secs,
             until_unix_secs,
@@ -204,7 +215,10 @@ impl PoolQuotaHistoryStore for SqliteStorage {
     }
 }
 
-fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapshotRecord> {
+fn row_to_record(
+    row: sqlx::sqlite::SqliteRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaSnapshotRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -213,6 +227,7 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsho
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaSnapshotRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get::<i64, _>("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -257,4 +272,12 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsho
             .try_get::<i32, _>("policy_version")
             .map_err(map_sqlx_error)?,
     })
+}
+
+pub(super) fn provider_key(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::Openai => "openai",
+        Provider::Gemini => "gemini",
+    }
 }

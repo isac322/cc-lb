@@ -1,10 +1,12 @@
 use cc_lb_storage_api::{
-    PoolQuotaChartPointRecord, PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult,
-    SubscriptionQuotaWindow,
+    PoolQuotaChartPointRecord, PoolQuotaSnapshotSummaryRecord, Provider, StorageError,
+    StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
+
+use super::pool_quota_history::provider_key;
 
 // The left anchor carries the last observation into an otherwise idle range.
 macro_rules! range_points {
@@ -14,20 +16,20 @@ macro_rules! range_points {
     CROSS JOIN LATERAL (
         SELECT *
         FROM pool_subscription_quota_history_v1 h
-        WHERE h."quota_window" = w."quota_window"
+        WHERE h.provider = $4 AND h."quota_window" = w."quota_window"
           AND h.snapshot_at_unix_secs < $2
         ORDER BY h.snapshot_at_unix_secs DESC
         LIMIT 1
     ) h
     WHERE NOT EXISTS (
         SELECT 1 FROM pool_subscription_quota_history_v1 boundary
-        WHERE boundary."quota_window" = h."quota_window"
+        WHERE boundary.provider = $4 AND boundary."quota_window" = h."quota_window"
           AND boundary.snapshot_at_unix_secs = $2
     )
 ), points AS (
     SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
     FROM pool_subscription_quota_history_v1
-    WHERE "quota_window" = ANY($1) AND snapshot_at_unix_secs BETWEEN $2 AND $3
+    WHERE provider = $4 AND "quota_window" = ANY($1) AND snapshot_at_unix_secs BETWEEN $2 AND $3
     UNION ALL
     SELECT $2 AS snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
     FROM anchors
@@ -36,6 +38,7 @@ macro_rules! range_points {
 
 pub(super) async fn list_latest(
     storage: &PostgresStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
 ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
     if windows.is_empty() {
@@ -55,21 +58,25 @@ pub(super) async fn list_latest(
            CROSS JOIN LATERAL (
                SELECT *
                FROM pool_subscription_quota_history_v1
-               WHERE "quota_window" = w."quota_window"
+               WHERE provider = $2 AND "quota_window" = w."quota_window"
                ORDER BY snapshot_at_unix_secs DESC
                LIMIT 1
            ) h
        ORDER BY h."quota_window""#,
     )
     .bind(&windows)
+    .bind(provider_key(provider))
     .fetch_all(storage.pool())
     .await
     .map_err(map_sqlx_error)?;
-    rows.into_iter().map(row_to_summary).collect()
+    rows.into_iter()
+        .map(|row| row_to_summary(row, provider))
+        .collect()
 }
 
 pub(super) async fn list_range(
     storage: &PostgresStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
     since_unix_secs: i64,
     until_unix_secs: i64,
@@ -88,14 +95,18 @@ pub(super) async fn list_range(
     .bind(&windows)
     .bind(since_unix_secs)
     .bind(until_unix_secs)
+    .bind(provider_key(provider))
     .fetch_all(storage.pool())
     .await
     .map_err(map_sqlx_error)?;
-    rows.into_iter().map(row_to_summary).collect()
+    rows.into_iter()
+        .map(|row| row_to_summary(row, provider))
+        .collect()
 }
 
 pub(super) async fn list_chart_range(
     storage: &PostgresStorage,
+    provider: Provider,
     windows: &[SubscriptionQuotaWindow],
     since_unix_secs: i64,
     until_unix_secs: i64,
@@ -116,25 +127,31 @@ pub(super) async fn list_chart_range(
     let rows = match bucket_secs {
         Some(bucket_secs) => sqlx::query(concat!(range_points!(),
             r#"
-               SELECT snapshot_at_unix_secs - MOD(MOD(snapshot_at_unix_secs, $4) + $4, $4) AS snapshot_at_unix_secs,
-                      "quota_window", MAX(utilization) AS utilization
+               SELECT snapshot_at_unix_secs - MOD(MOD(snapshot_at_unix_secs, $5) + $5, $5) AS snapshot_at_unix_secs,
+                      "quota_window", CASE WHEN $4 <> 'anthropic' AND COUNT(*) <> COUNT(utilization)
+                          THEN NULL ELSE MAX(utilization) END AS utilization
                FROM points
                GROUP BY "quota_window", 1
                ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
         ))
-        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(bucket_secs)
+        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(provider_key(provider)).bind(bucket_secs)
         .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
         None => sqlx::query(concat!(range_points!(),
             r#" SELECT snapshot_at_unix_secs, "quota_window", utilization
                FROM points ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
         ))
-        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs)
+        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(provider_key(provider))
         .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
     };
-    rows.into_iter().map(row_to_chart_point).collect()
+    rows.into_iter()
+        .map(|row| row_to_chart_point(row, provider))
+        .collect()
 }
 
-fn row_to_chart_point(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaChartPointRecord> {
+fn row_to_chart_point(
+    row: sqlx::postgres::PgRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaChartPointRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -143,6 +160,7 @@ fn row_to_chart_point(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaChar
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaChartPointRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
@@ -151,7 +169,10 @@ fn row_to_chart_point(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaChar
     })
 }
 
-fn row_to_summary(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotSummaryRecord> {
+fn row_to_summary(
+    row: sqlx::postgres::PgRow,
+    provider: Provider,
+) -> StorageResult<PoolQuotaSnapshotSummaryRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
@@ -160,6 +181,7 @@ fn row_to_summary(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshot
             message: format!("unknown quota_window in pool quota history: {window_text}"),
         })?;
     Ok(PoolQuotaSnapshotSummaryRecord {
+        provider,
         snapshot_at_unix_secs: row
             .try_get("snapshot_at_unix_secs")
             .map_err(map_sqlx_error)?,
