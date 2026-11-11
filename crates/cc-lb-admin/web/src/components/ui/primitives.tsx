@@ -667,6 +667,9 @@ export function Hint({
     <BasePopover.Root open={open} onOpenChange={setOpen}>
       <BasePopover.Trigger
         delay={200}
+        onFocus={() => {
+          if (openOnFocus) setOpen(true);
+        }}
         onClick={(event: React.MouseEvent) => {
           if (stopClickPropagation) event.stopPropagation();
         }}
@@ -678,7 +681,11 @@ export function Hint({
       <BasePopover.Portal>
         <BasePopover.Positioner className="z-50" side={side} sideOffset={4}>
           {/* Tall breakdowns scroll inside the popup instead of running past the viewport edge. */}
-          <BasePopover.Popup className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay">
+          <BasePopover.Popup
+            initialFocus={false}
+            finalFocus={false}
+            className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay"
+          >
             {label}
           </BasePopover.Popup>
         </BasePopover.Positioner>

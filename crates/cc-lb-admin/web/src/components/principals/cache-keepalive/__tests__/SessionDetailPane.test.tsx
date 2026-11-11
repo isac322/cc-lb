@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../../../lib/api';
 import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
+import { cacheKeepaliveRenewedDetailFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import type { PolledDataResult } from '../../../../lib/usePolledData';
 import { SessionDetailPane } from '../SessionDetailPane';
 
@@ -370,5 +371,88 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     expect(screen.queryByTestId('session-detail-time-rail')).toBeNull();
     expect(screen.queryByText(/Next renewal/)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['new_request', 'Cancelled: new request'],
+    ['user_turn_detected', 'Cancelled: user turn detected'],
+    ['snapshot_too_large', 'Cancelled: snapshot too large'],
+    ['cached_prefix_too_small', 'Cancelled: cached prefix too small'],
+    [
+      'zero_token_renewal_unsupported',
+      'Cancelled: zero-token renewal unsupported',
+    ],
+    [null, 'Cancelled'],
+    [undefined, 'Cancelled'],
+  ] as const)(
+    'shows cancellation cause %s instead of a stale scheduling reason',
+    (cancelReason, expected) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+        data: {
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'cancelled',
+          is_active: false,
+          cancel_reason: cancelReason,
+          reason: cancelReason
+            ? expected
+            : 'agent-in-turn — first renewal in 4m 30s',
+          gaps: [],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="cancelled-session"
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText(expected)).toBeDefined();
+      expect(screen.queryByText(/first renewal in/)).toBeNull();
+    },
+  );
+
+  it('keeps the cancellation cause visible alongside retained renewal history', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: {
+        ...cacheKeepaliveRenewedDetailFixture,
+        state: 'cancelled',
+        is_active: false,
+        cancel_reason: 'new_request',
+        reason: 'Cancelled: new request',
+        gaps: [
+          {
+            cycle_id: 'retained-cycle',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 20_000,
+            pulses: [],
+            ending_kind: 'ttl_expired_no_followup',
+            ending_at_ms: 1_700_000_300_000,
+            total_duration_sec: 300,
+            since_last_renewal_sec: null,
+            spent_usd: 0,
+            avoided_usd: null,
+            net_pnl_usd: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="cancelled-session"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('Cancelled: new request')).toBeDefined();
+    expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+    expect(screen.queryByText(/first renewal in/)).toBeNull();
   });
 });

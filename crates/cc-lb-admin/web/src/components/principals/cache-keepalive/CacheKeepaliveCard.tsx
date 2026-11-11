@@ -248,7 +248,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         span="full"
         data-testid="cache-keepalive-card"
         title={headerTitle}
-        description="Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring."
+        description="Keeps prompt caches warm during idle gaps."
         action={headerActions}
       >
         {!enabled ? (
@@ -256,9 +256,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
             className="text-body text-text-muted"
             data-testid="cache-keepalive-off"
           >
-            Off. Turn on to renew supported prompt-cache sessions during idle
-            gaps. OpenAI Responses 12h retention is recorded without read
-            re-anchoring.
+            Off. Turn on to keep prompt caches warm.
           </p>
         ) : summaryQ.isError && !summary ? (
           <div

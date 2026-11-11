@@ -54,6 +54,32 @@ describe('Hint', () => {
     expect(screen.getByTestId('hint-content')).toBeDefined();
   });
 
+  it.each([true, false])(
+    'preserves openOnFocus=%s after the hint has already been engaged',
+    (openOnFocus) => {
+      render(
+        <Hint
+          openOnFocus={openOnFocus}
+          label={<span data-testid="hint-content">Tooltip Content</span>}
+        >
+          <button type="button" data-testid="hint-trigger">
+            Hover me
+          </button>
+        </Hint>,
+      );
+
+      fireEvent.pointerEnter(screen.getByTestId('hint-trigger'));
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByTestId('hint-content')).toBeDefined();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByTestId('hint-content')).toBeNull();
+
+      fireEvent.focus(screen.getByTestId('hint-trigger'));
+      expect(screen.queryByTestId('hint-content') !== null).toBe(openOnFocus);
+    },
+  );
+
   it('leaves children untouched when no label is provided', () => {
     const onChildClick = vi.fn();
     const onParentClick = vi.fn();
