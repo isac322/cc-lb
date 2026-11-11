@@ -762,6 +762,9 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
             b"{\ndata: {\"code\":429}\n\n2",
             b"{\ndata: {\"code\":429}\n\n",
         ),
+        // A number cannot stand where an object key is required.
+        (b"{\n\n2", b"{\n\n"),
+        (b"{\n\n+2", b"{\n\n"),
     ] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -772,11 +775,24 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         ));
     }
 
-    // Blank-line-only error bodies reach the client as sent.
-    for body in [&b"\n\n"[..], b"\r\n\r\n"] {
+    // Whitespace-only error bodies: completed blank events reach the client
+    // as sent, a lone line break is dropped, and other whitespace is an
+    // unterminated event.
+    for (body, expected) in [
+        (&b"\n\n"[..], &b"\n\n"[..]),
+        (b"\r\n\r\n", b"\r\n\r\n"),
+        (b"\n", b""),
+        (b"\r\n", b""),
+    ] {
         let (status, received) = gemini_oauth_stream_error(&[body]).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(received, Bytes::from_static(body));
+        assert_eq!(received, Bytes::from_static(expected));
+    }
+    for body in [&b" "[..], b"\t"] {
+        let (status, received) = gemini_oauth_stream_error(&[body]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let text = std::str::from_utf8(&received).expect("error frame is utf8");
+        assert!(text.contains("incomplete event before transform output"));
     }
 }
 
