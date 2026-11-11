@@ -7914,14 +7914,16 @@ impl Lifecycle {
                                     }
                                 }
                             }
-                            if error_body_class != ErrorBodyClass::Sse {
-                                error_body_class = classify_error_body(error_body_class, &buffer);
-                            }
                             let hold_unsolicited_chunk = unsolicited_hold_pending;
                             let mut unsolicited_event_completed = false;
-                                while !raw_passthrough_current_chunk
-                                    && error_body_class == ErrorBodyClass::Sse
-                                {
+                                while !raw_passthrough_current_chunk {
+                                    if error_body_class != ErrorBodyClass::Sse {
+                                        error_body_class =
+                                            classify_error_body(error_body_class, &buffer);
+                                        if error_body_class == ErrorBodyClass::JsonCandidate {
+                                            break;
+                                        }
+                                    }
                                     let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
                                         break;
                                     };
@@ -8843,13 +8845,16 @@ impl Lifecycle {
                     }
                     if parse_sse_events_active {
                         buffer.extend_from_slice(&tail);
-                        if error_body_class != ErrorBodyClass::Sse {
-                            error_body_class = classify_error_body(error_body_class, &buffer);
-                        }
-                        // A held body (JSON candidate or whitespace) is decided after the loop.
-                        while error_body_class == ErrorBodyClass::Sse
-                            && let Some(end) = usage_parser::find_sse_event_end(&buffer)
-                        {
+                        loop {
+                            if error_body_class != ErrorBodyClass::Sse {
+                                error_body_class = classify_error_body(error_body_class, &buffer);
+                                if error_body_class == ErrorBodyClass::JsonCandidate {
+                                    break;
+                                }
+                            }
+                            let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
+                                break;
+                            };
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             if matches!(
@@ -9453,37 +9458,22 @@ impl Lifecycle {
             // A held error body that is complete, valid JSON is the provider's
             // error response: relay it unchanged. A candidate that fails
             // validation stays in `buffer` and reaches the framing error below.
-            // A body that never got past whitespace relays exactly the blank
-            // events SSE splitting would have completed; any partial remainder
-            // stays in `buffer` for the incomplete-event check.
-            let held_relay_len = match error_body_class {
-                ErrorBodyClass::JsonCandidate if held_error_body_is_json(&buffer) => buffer.len(),
-                ErrorBodyClass::Pending => {
-                    let mut consumed = 0;
-                    while let Some(end) = usage_parser::find_sse_event_end(&buffer[consumed..])
-                        && end > 0
-                    {
-                        consumed += end;
-                    }
-                    consumed
-                }
-                _ => 0,
-            };
-            if held_relay_len > 0
+            // Any blank events before it already took the normal SSE path.
+            if error_body_class == ErrorBodyClass::JsonCandidate
                 && upstream_body_eof
                 && parse_sse_events_active
                 && sse_transform_active
-                && !transformed_output_started
                 && stream_upstream_error.is_none()
                 && !stream_provider_error_forwarded
                 && !stream_upstream_error_frame_emitted
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
+                && held_error_body_is_json(&buffer)
             {
                 raw_before_transform_output.clear();
-                stream_provider_error_forwarded |= error_body_class == ErrorBodyClass::JsonCandidate;
+                stream_provider_error_forwarded = true;
                 batch_index = batch_index.saturating_add(1);
-                yield Ok::<Bytes, Infallible>(buffer.split_to(held_relay_len).freeze());
+                yield Ok::<Bytes, Infallible>(buffer.split().freeze());
             }
             if upstream_is_sse
                 && (!upstream_error_status || sse_transform_active)
@@ -13097,7 +13087,8 @@ const MAX_HELD_JSON_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// How an error-status body on a transformed SSE stream is read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ErrorBodyClass {
-    /// Only whitespace so far; SSE splitting waits for the first real byte.
+    /// Only blank events so far; they take the normal SSE path while the
+    /// next unconsumed bytes decide between JSON and SSE.
     Pending,
     /// Every byte so far is a valid JSON prefix; held unparsed.
     JsonCandidate,
@@ -13105,18 +13096,29 @@ enum ErrorBodyClass {
     Sse,
 }
 
-/// Advances the error-body class after more bytes reach `buffer`.
+/// Advances the error-body class before the next SSE event is split.
 ///
-/// A body is held only while it remains a valid JSON prefix. The first byte
-/// that breaks JSON syntax (`[trace: x`, `{"extension:` followed by a raw
-/// newline) returns it to SSE parsing in the same chunk, before any event is
-/// lost, so genuine SSE keeps its normal handling.
+/// While `Pending`, blank events are parsed normally. Unconsumed bytes that
+/// start with `{` or `[` become a JSON candidate; any other first byte, or a
+/// next complete event that is not blank, makes the body SSE. A candidate is
+/// held only while it remains a valid JSON prefix: the first byte that breaks
+/// JSON syntax (`[trace: x`, `{"extension:` followed by a raw newline)
+/// returns it to SSE parsing before any event is split, so genuine SSE keeps
+/// its normal handling.
 fn classify_error_body(class: ErrorBodyClass, buffer: &[u8]) -> ErrorBodyClass {
     let class = match class {
-        ErrorBodyClass::Pending => match buffer.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        ErrorBodyClass::Pending => match buffer.first() {
             None => return ErrorBodyClass::Pending,
             Some(b'{' | b'[') => ErrorBodyClass::JsonCandidate,
-            Some(_) => return ErrorBodyClass::Sse,
+            Some(byte) if !byte.is_ascii_whitespace() => return ErrorBodyClass::Sse,
+            Some(_) => {
+                return match usage_parser::find_sse_event_end(buffer) {
+                    Some(end) if !buffer[..end].iter().all(u8::is_ascii_whitespace) => {
+                        ErrorBodyClass::Sse
+                    }
+                    _ => ErrorBodyClass::Pending,
+                };
+            }
         },
         class => class,
     };

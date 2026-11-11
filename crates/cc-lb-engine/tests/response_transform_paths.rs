@@ -794,6 +794,16 @@ async fn gemini_oauth_stream_sse_error_starting_with_brace_stays_sse() {
         let text = std::str::from_utf8(&received).expect("error frame is utf8");
         assert!(text.contains("incomplete event before transform output"));
     }
+    // A completed blank event goes through the transform like any event,
+    // so trailing whitespace is reported after transform output.
+    for body in [&b"\n\n "[..], b"\r\n\r\n\t"] {
+        let (status, received) = gemini_oauth_stream_error(&[body]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let blank = &body[..body.len() - 1];
+        assert!(received.starts_with(blank));
+        let text = std::str::from_utf8(&received).expect("error frame is utf8");
+        assert!(text.contains("incomplete event after transform output"));
+    }
 }
 
 async fn ingress_cap_does_not_limit_existing_response_paths() {
