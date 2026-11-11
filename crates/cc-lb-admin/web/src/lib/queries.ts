@@ -814,24 +814,31 @@ export function useUpstreamOAuthStatus(id: string | null | undefined) {
     enabled: Boolean(id),
   });
 }
+export function upstreamSubscriptionMetadataQueryOptions(
+  upstreamId: string | null | undefined,
+) {
+  return queryOptions({
+    queryKey: qk.upstreamSubscriptionMetadata(upstreamId ?? ''),
+    staleTime: POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
+    queryFn: ({ signal }) =>
+      getJson<SubscriptionMetadataResponse>(
+        `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
+        { signal },
+      ),
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[0] === 'upstream-subscription-metadata' &&
+      previousQuery.queryKey[1] === upstreamId
+        ? previousData
+        : undefined,
+    enabled: !!upstreamId,
+  });
+}
+
 export function useUpstreamSubscriptionMetadata(
   upstreamId: string | null | undefined,
 ) {
   return usePolledData(
-    {
-      queryKey: qk.upstreamSubscriptionMetadata(upstreamId ?? ''),
-      queryFn: ({ signal }) =>
-        getJson<SubscriptionMetadataResponse>(
-          `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
-          { signal },
-        ),
-      placeholderData: (previousData, previousQuery) =>
-        previousQuery?.queryKey[0] === 'upstream-subscription-metadata' &&
-        previousQuery.queryKey[1] === upstreamId
-          ? previousData
-          : undefined,
-      enabled: !!upstreamId,
-    },
+    upstreamSubscriptionMetadataQueryOptions(upstreamId),
     POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
   );
 }
