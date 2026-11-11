@@ -46,6 +46,255 @@ fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
 }
 
 #[tokio::test]
+async fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
+    let (_dir, storage) = storage().await;
+    let original = storage
+        .replace_from_real_request(&replace_request(b"prefix", 100))
+        .await
+        .expect("seed");
+    storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: "session-hash".to_owned(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 371,
+            run_at_unix_secs: 641,
+            expires_at_unix_secs: 671,
+            encrypted_payload: None,
+            now_unix_secs: 371,
+        })
+        .await
+        .expect("synthetic hit")
+        .expect("synthetic hit accepted");
+    let older_ticket = storage
+        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .await
+        .expect("older ticket");
+    let begin_ticket = storage
+        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .await
+        .expect("begin ticket");
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced("session-hash", Some(begin_ticket), 370, 900)
+            .await
+            .expect("begin uses logical rather than synthetic anchor")
+    );
+    let marker = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load marker")
+        .expect("marker");
+    assert_eq!(marker.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        marker.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    assert_eq!(marker.cancel_reason.as_deref(), Some("new_request"));
+    assert_eq!(marker.running_since_unix_secs, Some(370));
+    assert_eq!(marker.run_at_unix_secs, 900);
+    assert!(marker.expires_at_unix_secs >= 900);
+    assert_eq!(marker.first_scheduled_at_unix_secs, 370);
+    assert_eq!(marker.cache_anchor_at_unix_secs, 371);
+    assert_eq!(marker.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(marker.encrypted_payload.is_empty());
+    assert!(
+        !storage
+            .authorize_cache_keepalive_dispatch("session-hash", marker.generation)
+            .await
+            .expect("request marker cannot dispatch")
+    );
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", Some(older_ticket), 380, 910)
+            .await
+            .expect("older ticket cannot replace marker")
+    );
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                Some(older_ticket),
+                380,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                381,
+            )
+            .await
+            .expect("older ticket cannot finalize marker")
+    );
+    let next_ticket = storage
+        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .await
+        .expect("next ticket");
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", Some(next_ticket), 369, 950)
+            .await
+            .expect("older logical start rejected")
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
+            .await
+            .expect("rejected begin rolls back ticket"),
+        Some(format!("{next_ticket}:{begin_ticket}"))
+    );
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced("session-hash", Some(next_ticket), 380, 950)
+            .await
+            .expect("newer request extends existing marker")
+    );
+    let extended = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load extended marker")
+        .expect("extended marker");
+    assert_eq!(extended.running_since_unix_secs, Some(380));
+    assert_eq!(extended.run_at_unix_secs, 950);
+    assert_eq!(extended.generation, marker.generation);
+    let final_ticket = storage
+        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .await
+        .expect("final cancellation ticket");
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                Some(final_ticket),
+                379,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                400,
+            )
+            .await
+            .expect("older request cannot finalize newer marker")
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                Some(final_ticket),
+                380,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                400,
+            )
+            .await
+            .expect("final cancellation replaces provisional reason")
+    );
+    let finalized = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load final cancellation")
+        .expect("final cancellation");
+    assert_eq!(finalized.running_since_unix_secs, None);
+    assert_eq!(finalized.cancel_reason.as_deref(), Some("request_failed"));
+    assert_eq!(finalized.status, CacheKeepaliveSessionStatus::Terminal);
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", None, 401, 960)
+            .await
+            .expect("final cancellation cannot become provisional")
+    );
+}
+
+#[tokio::test]
+async fn in_request_marker_replacement_and_legacy_terminal_states() {
+    let (_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&replace_request(b"prefix", 100))
+        .await
+        .expect("seed");
+    assert!(
+        storage
+            .begin_cache_keepalive_request_fenced("session-hash", None, 200, 900)
+            .await
+            .expect("unticketed begin")
+    );
+    let fresh_marker = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load marker without keepalive turns")
+        .expect("fresh marker");
+    assert_eq!(fresh_marker.refresh_count, 0);
+    assert!(fresh_marker.expires_at_unix_secs >= 900);
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", None, 199, 950)
+            .await
+            .expect("unticketed older start cannot overwrite marker")
+    );
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                None,
+                199,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                201,
+            )
+            .await
+            .expect("unticketed older cancellation cannot clear marker")
+    );
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket("session-hash")
+        .await
+        .expect("completion ticket");
+    let active = storage
+        .replace_from_real_request_fenced(&replace_request(b"new-prefix", 201), Some(ticket))
+        .await
+        .expect("completion replaces marker")
+        .expect("accepted completion");
+    assert_eq!(active.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(active.running_since_unix_secs, None);
+    assert_eq!(active.terminal_reason, None);
+    assert_eq!(active.cancel_reason, None);
+    assert_eq!(active.encrypted_payload, b"new-prefix");
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", Some(ticket), 202, 950)
+            .await
+            .expect("applied completion ticket cannot retire replacement")
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                None,
+                202,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("new_request"),
+                202,
+            )
+            .await
+            .expect("legacy terminal new_request without request start")
+    );
+    assert!(
+        !storage
+            .begin_cache_keepalive_request_fenced("session-hash", None, 203, 950)
+            .await
+            .expect("legacy terminal row cannot become an in-request marker")
+    );
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                None,
+                203,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("request_failed"),
+                203,
+            )
+            .await
+            .expect("legacy terminal row remains final")
+    );
+}
+
+#[tokio::test]
 async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses() {
     let (_dir, storage) = storage().await;
     let original = storage

@@ -4,6 +4,7 @@ import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { CacheKeepaliveListResponse } from '../../cacheKeepaliveApi';
 import {
+  POLLING_INTERVALS,
   qk,
   useCacheKeepaliveSessionDetail,
   useCacheKeepaliveSessions,
@@ -931,4 +932,75 @@ describe('useCacheKeepaliveSessionDetail', () => {
     expect(result.current.fetchStatus).toBe('idle');
     expect(result.current.data).toBeUndefined();
   });
+});
+
+describe('in-request detail polling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(visibilityManager, 'useVisibility').mockReturnValue({
+      visible: true,
+      online: true,
+      hiddenSince: null,
+      gracePeriodElapsed: false,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test.each(['scheduled', 'cancelled', 'expired'] as const)(
+    'polls an inactive in-request projection until it becomes %s',
+    async (nextState) => {
+      const inRequest = {
+        ...cacheKeepaliveRenewedDetailFixture,
+        state: 'in_request',
+        is_active: false,
+        evidence_status: 'none',
+        cancel_reason: null,
+        reason: 'A real request is in progress',
+        error: null,
+      };
+      const resolved = {
+        ...inRequest,
+        state: nextState,
+        is_active: nextState === 'scheduled',
+        reason:
+          nextState === 'expired'
+            ? 'Request did not complete before its deadline'
+            : nextState === 'cancelled'
+              ? 'Cancelled: user turn detected'
+              : 'agent-in-turn — first renewal in 4m 30s',
+      };
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(inRequest))
+        .mockImplementation(async () => jsonResponse(resolved));
+      vi.stubGlobal('fetch', fetchMock);
+      const { result, unmount } = renderHook(
+        () => useCacheKeepaliveSessionDetail(PRINCIPAL_ID, SESSION_ID),
+        { wrapper: makeWrapper(makeClient()) },
+      );
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(result.current.data?.state).toBe('in_request');
+
+      await act(() =>
+        vi.advanceTimersByTimeAsync(
+          POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+        ),
+      );
+      expect(result.current.data?.state).toBe(nextState);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      await act(() =>
+        vi.advanceTimersByTimeAsync(
+          POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+        ),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(
+        nextState === 'scheduled' ? 3 : 2,
+      );
+      unmount();
+    },
+  );
 });

@@ -33,6 +33,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         enqueue_state: None,
         terminal_reason: None,
         cancel_reason: None,
+        request_incomplete: false,
         decision: Some("not_tracked".to_owned()),
         reason: "user turn (stop_reason=end_turn)".to_owned(),
         display_reason: None,

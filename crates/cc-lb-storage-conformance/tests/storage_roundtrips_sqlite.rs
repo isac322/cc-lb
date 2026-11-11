@@ -241,6 +241,14 @@ fn cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
 }
 
 #[test]
+fn cache_keepalive_request_markers_project_consistently_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_request_markers_project_consistently",
+        cache_keepalive_session_reads::request_markers_project_consistently,
+    );
+}
+
+#[test]
 fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
     run_sqlite_scenario(
         "usage_rollup_v2_preserves_upstream_id_across_renames",

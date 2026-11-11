@@ -304,11 +304,13 @@ function PointHoverPopover({
 function TimeRailGap({
   gap,
   maxAttempts,
+  renewalScheduled,
   placeTooltipBelow,
   timeZone,
 }: {
   gap: CacheKeepaliveGap;
   maxAttempts: number;
+  renewalScheduled: boolean;
   placeTooltipBelow: boolean;
   timeZone: string;
 }) {
@@ -462,7 +464,11 @@ function TimeRailGap({
         <span className="shrink-0 whitespace-nowrap">0s (pause)</span>
         <span className="min-w-0 text-center">
           {count === 0 ? (
-            `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
+            renewalScheduled ? (
+              `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
+            ) : (
+              '0 renewals'
+            )
           ) : count === 1 ? (
             <>
               ↻ 1 renewal at {plusDeltaLabel(gap.pulses[0].offset_sec)}{' '}
@@ -721,6 +727,11 @@ export function SessionDetailPane({
           <span className="font-mono text-data text-text" title={session.id}>
             {shortThreadDisplay(session.id)}
           </span>
+          {session.state === 'in_request' ? (
+            <span className="rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
+              In request
+            </span>
+          ) : null}
           <span className="text-text-faint">·</span>
           <span className="text-text-faint">
             <RelativeTime ts={session.last_message_at_ms} compact />
@@ -755,9 +766,20 @@ export function SessionDetailPane({
       </div>
 
       <div className="space-y-3 p-4">
+        {session.state === 'in_request' ? (
+          <p className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
+            A real request is in progress. Keepalive renewals are paused until
+            it completes.
+          </p>
+        ) : null}
         {session.state === 'cancelled' ? (
           <p className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
             {session.cancel_reason ? session.reason : 'Cancelled'}
+          </p>
+        ) : null}
+        {session.state === 'expired' ? (
+          <p className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
+            {session.reason}
           </p>
         ) : null}
         {session.ttl === '12h' ? (
@@ -795,12 +817,20 @@ export function SessionDetailPane({
                 key={gap.cycle_id ?? `${gap.pause_at_ms}-${index}`}
                 gap={gap}
                 maxAttempts={session.max_attempts}
+                renewalScheduled={
+                  session.is_active &&
+                  (session.state === 'scheduled' ||
+                    session.state === 'renewed') &&
+                  gap.ending_kind === 'scheduled_waiting'
+                }
                 placeTooltipBelow={index === 0}
                 timeZone={timeZone}
               />
             ))}
           </div>
-        ) : session.state !== 'cancelled' ? (
+        ) : session.state !== 'cancelled' &&
+          session.state !== 'in_request' &&
+          session.state !== 'expired' ? (
           <div className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
             {session.reason}
           </div>

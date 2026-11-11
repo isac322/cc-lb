@@ -74,6 +74,7 @@ pub(crate) fn list_item_from_row(row: SqliteRow) -> StorageResult<CacheKeepalive
             .map(terminal_reason_from_db)
             .transpose()?,
         cancel_reason: row.try_get("cancel_reason").map_err(map_sqlx_error)?,
+        request_incomplete: row.try_get("request_incomplete").map_err(map_sqlx_error)?,
         decision: row.try_get("decision").map_err(map_sqlx_error)?,
         reason: row.try_get("reason").map_err(map_sqlx_error)?,
         display_reason: row.try_get("display_reason").map_err(map_sqlx_error)?,
@@ -204,6 +205,7 @@ fn ttl_from_db(value: &str) -> StorageResult<CacheTtl> {
 fn status_from_db(value: &str) -> StorageResult<CacheKeepaliveSessionStatus> {
     match value {
         "active" => Ok(CacheKeepaliveSessionStatus::Active),
+        "in_request" => Ok(CacheKeepaliveSessionStatus::InRequest),
         "terminal" => Ok(CacheKeepaliveSessionStatus::Terminal),
         _ => Err(StorageError::Corrupted {
             message: format!("invalid cache keepalive status {value}"),

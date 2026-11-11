@@ -88,13 +88,24 @@ purging and recreating a session cannot overwrite retained spend.
 An authenticated, non-auxiliary, keep-alive-eligible real request retires the
 matching active generation before upstream dispatch. Its queued renewal cannot
 fire while that real request waits for response headers or streams its response.
-If the real request fails, cc-lb does not resume the old snapshot. A later
-eligible response classified as `AgentInTurn` can establish a new generation;
-completion-sequence fencing prevents an older completion from replacing it.
+The session appears as **In request** (`in_request`), with renewals paused.
+This state remains tracked and visible even without retained renewal history,
+but does not count toward **Renewing now** or match Scheduled/Renewed filters.
 
-The proxy waits for the cancellation attempt before dispatch. Storage errors
+The request marker expires at the deadline derived from the server's configured
+request timeout. Without a recorded completion by then, the read model shows
+Expired with the neutral reason “Request did not complete before its deadline”.
+This does not claim a known abort or error. Legacy `new_request` cancellations
+without a request-start marker remain Cancelled.
+
+A completed eligible response classified as `AgentInTurn` can establish a new
+generation. A final cancellation records its actual completion reason. If the
+real request fails, cc-lb does not resume the old snapshot. Completion-sequence
+fencing prevents an older completion from replacing a newer request.
+
+The proxy waits for the request-start fence before dispatch. Storage errors
 are logged and do not fail the proxy request; a queued renewal can still run
-if cancellation cannot be persisted.
+if the fence cannot be persisted.
 
 Successful real-request cancellations persist a nullable `cancel_reason`:
 `new_request`, `user_turn_detected`, `snapshot_too_large`,
@@ -242,10 +253,17 @@ lifetime total and do not imply that a session is still active.
   session. When keep-alive is disabled, the Admin Web card does not poll the
   summary endpoint.
 
-The base status remains one of Renewed, Scheduled, Capped, Expired, or Not
-tracked. Errors are orthogonal: a terminal dispatch/decrypt/provider error
-does not become a live Scheduled or Renewed row, and `error` is displayed
-alongside the terminal base state.
+The base status is one of Renewed, Scheduled, In request, Capped, Expired,
+Cancelled, Failed, or Not tracked. In request uses a neutral badge and explains
+that real traffic has paused renewal. The `in_request` API status filter selects
+that state; `visible` and `tracked` include it. The sessions drawer keeps its
+existing horizon control and server-side visibility filter.
+
+Errors are orthogonal: a terminal dispatch/decrypt/provider error does not
+become a live Scheduled or Renewed row, and `error` is displayed alongside the
+terminal base state. An expired request marker is terminal/stale in storage
+but projects as Expired without an invented error. Its deadline explanation
+remains visible alongside retained renewal history.
 
 
 Renewal request events retain the originating `thread_id` for thread-scoped

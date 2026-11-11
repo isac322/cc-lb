@@ -2468,3 +2468,208 @@ async fn cancelled_horizon_keeps_overview_groups_and_header_consistent() {
         }
     }
 }
+
+#[test]
+fn provisional_requests_remain_visible_without_inventing_final_cancellations() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::provisional_requests_remain_visible_without_inventing_final_cancellations";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build request marker regression runtime")
+            .block_on(
+                provisional_requests_remain_visible_without_inventing_final_cancellations_case(),
+            );
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn provisional_requests_remain_visible_without_inventing_final_cancellations_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for (index, (session, deadline, renewal_cost)) in [
+        ("fresh", 4_000_000_000, None),
+        ("fresh-renewed", 4_000_000_000, Some(6_000)),
+        ("incomplete", 0, None),
+        ("incomplete-renewed", 0, Some(8_000)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cycle = Uuid::from_u128(0xf000 + index as u128);
+        seed_session(&storage, &principal_id, session, cycle, false).await;
+        if let Some(cost_micros) = renewal_cost {
+            append_turn(
+                &storage,
+                AppendTurnParams {
+                    principal_id: &principal_id,
+                    session_key_hash: session,
+                    cycle_id: cycle,
+                    source_ref_id: session,
+                    ts: NOW_UNIX_SECS,
+                    cache_read_input_tokens: 20_000,
+                    cost_micros,
+                    hit_miss: "hit",
+                    with_follow_up: false,
+                },
+            )
+            .await;
+            sqlx::query(
+                "UPDATE cache_keepalive_sessions SET refresh_count = 1 WHERE session_key_hash = ?",
+            )
+            .bind(session)
+            .execute(storage.pool())
+            .await
+            .expect("set renewal count");
+        }
+        assert!(
+            storage
+                .begin_cache_keepalive_request_fenced(session, None, NOW_UNIX_SECS + 1, deadline,)
+                .await
+                .expect("begin request")
+        );
+    }
+    seed_session(
+        &storage,
+        &principal_id,
+        "legacy",
+        Uuid::from_u128(0xf100),
+        false,
+    )
+    .await;
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "legacy",
+                None,
+                NOW_UNIX_SECS + 1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("new_request"),
+                NOW_UNIX_SECS + 1,
+            )
+            .await
+            .expect("seed final legacy cancellation")
+    );
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "deleted-session",
+            cycle_id: Uuid::from_u128(0xf200),
+            source_ref_id: "deleted-request-turn",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 11_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "deleted-request-turn").await;
+
+    for horizon in ["24h", "all"] {
+        let (summary, groups, rows) = fetch_visible_pages(&state, &principal_id, horizon, 1).await;
+        assert_eq!(rows.len(), 3, "{horizon}: {rows:?}");
+        assert_eq!(summary["renewing_now"], 0);
+        assert_eq!(summary["sessions_last_5m"], 3);
+        assert_eq!(summary["unlisted_sessions"], 1);
+        assert_json_dollars(&summary["total_spent"], 25_000);
+        assert_json_dollars(&summary["unlisted_spent"], 11_000);
+        assert_json_dollars(
+            &summary["total_spent"],
+            sum_group_micros(&groups, "total_spent").expect("known group spend") + 11_000,
+        );
+        assert_eq!(
+            groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group["sessions"].as_u64().unwrap())
+                .sum::<u64>(),
+            3
+        );
+        for row in rows {
+            let id = row["id"].as_str().unwrap();
+            let fresh = id.starts_with("fresh");
+            assert_eq!(row["state"], if fresh { "in_request" } else { "expired" });
+            assert_eq!(
+                row["reason"],
+                if fresh {
+                    "In request"
+                } else {
+                    "Request did not complete before its deadline"
+                }
+            );
+            assert!(row["cancel_reason"].is_null() && row["error"].is_null());
+            assert_eq!(row["is_active"], false);
+            let (status, detail) = get_json(&state, &keepalive_detail_uri(&principal_id, id)).await;
+            assert_eq!(status, StatusCode::OK, "{detail:?}");
+            assert_eq!(detail["state"], row["state"]);
+            assert_eq!(detail["reason"], row["reason"]);
+            assert!(detail["cancel_reason"].is_null() && detail["error"].is_null());
+            assert_eq!(detail["is_last_pending"], false);
+        }
+    }
+    for (filter, mut expected) in [
+        (
+            "visible",
+            vec!["fresh", "fresh-renewed", "incomplete-renewed"],
+        ),
+        (
+            "tracked",
+            vec!["fresh", "fresh-renewed", "incomplete-renewed"],
+        ),
+        ("in_request", vec!["fresh", "fresh-renewed"]),
+        ("renewed", vec!["fresh-renewed"]),
+        ("expired", vec!["incomplete", "incomplete-renewed"]),
+        ("scheduled", vec![]),
+        ("cancelled", vec![]),
+        ("failed", vec![]),
+        ("not_tracked", vec!["legacy"]),
+    ] {
+        let (status, body) = get_json(
+            &state,
+            &format!(
+                "/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&status={filter}"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filter}: {body:?}");
+        let mut actual = body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{filter}");
+    }
+    // A true completion replaces the marker's presentation and reason.
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "fresh-renewed",
+                None,
+                NOW_UNIX_SECS + 1,
+                CacheKeepaliveTerminalReason::Cancelled,
+                Some("user_turn_detected"),
+                NOW_UNIX_SECS + 2,
+            )
+            .await
+            .expect("finish request with a real user-turn cancellation")
+    );
+    let (status, detail) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, "fresh-renewed"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["state"], "cancelled");
+    assert_eq!(detail["cancel_reason"], "user_turn_detected");
+    assert_eq!(
+        detail["reason"],
+        "Cancelled: the agent is waiting for the user"
+    );
+}

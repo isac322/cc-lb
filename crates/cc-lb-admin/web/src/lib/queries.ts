@@ -2310,7 +2310,9 @@ export function useCacheKeepaliveSessionDetail(
     refetchInterval: (query) => {
       if (isHidden || isMissing(query.state.error)) return false;
       const detail = query.state.data as CacheKeepaliveDetail | undefined;
-      return detail?.is_active === true || detail?.evidence_status === 'pending'
+      return detail?.is_active === true ||
+        detail?.state === 'in_request' ||
+        detail?.evidence_status === 'pending'
         ? POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS
         : false;
     },

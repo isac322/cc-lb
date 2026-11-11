@@ -8,6 +8,7 @@ use serde::Serialize;
 pub enum CacheKeepaliveViewState {
     Renewed,
     Scheduled,
+    InRequest,
     Capped,
     Cancelled,
     Failed,
@@ -28,6 +29,10 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
         return CacheKeepaliveViewState::NotTracked;
     }
     match (item.status, item.terminal_reason) {
+        (Some(CacheKeepaliveSessionStatus::InRequest), _) => CacheKeepaliveViewState::InRequest,
+        (Some(CacheKeepaliveSessionStatus::Terminal), _) if item.request_incomplete => {
+            CacheKeepaliveViewState::Expired
+        }
         (Some(CacheKeepaliveSessionStatus::Active), _) => active_state(item.refresh_count),
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
@@ -94,7 +99,8 @@ pub fn next_renewal_display(
     let label = match state {
         CacheKeepaliveViewState::Scheduled => "first renewal",
         CacheKeepaliveViewState::Renewed => "next renewal",
-        CacheKeepaliveViewState::Capped
+        CacheKeepaliveViewState::InRequest
+        | CacheKeepaliveViewState::Capped
         | CacheKeepaliveViewState::Cancelled
         | CacheKeepaliveViewState::Failed
         | CacheKeepaliveViewState::Expired

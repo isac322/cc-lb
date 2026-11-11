@@ -40,6 +40,7 @@ pub(crate) struct ServerCacheKeepaliveEnqueuerDeps {
     pub pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     pub aead: Arc<AeadService>,
     pub clock: ClockHandle,
+    pub request_timeout: std::time::Duration,
 }
 
 pub(crate) struct ServerCacheKeepaliveEnqueuer {
@@ -47,6 +48,7 @@ pub(crate) struct ServerCacheKeepaliveEnqueuer {
     pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
+    request_timeout: std::time::Duration,
 }
 
 impl ServerCacheKeepaliveEnqueuer {
@@ -56,6 +58,7 @@ impl ServerCacheKeepaliveEnqueuer {
             pusher: deps.pusher,
             aead: deps.aead,
             clock: deps.clock,
+            request_timeout: deps.request_timeout,
         }
     }
 }
@@ -197,17 +200,30 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let now_unix_secs = unix_secs(self.clock.now());
         let cancel_anchor_at_unix_secs =
             now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
-        let accepted = match CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
-            self.storage.as_ref(),
-            &request.session_key_hash,
-            request.expected_generation,
-            cancel_anchor_at_unix_secs,
-            terminal_reason_from_cancel(request.reason),
-            Some(request.reason.as_str()),
-            now_unix_secs,
-        )
-        .await
-        {
+        let cancellation = if request.reason == CancelReason::NewRequest {
+            // The fence stops synthetic renewals immediately, but is only
+            // provisional until this real request is classified at completion.
+            CacheKeepaliveSessionStore::begin_cache_keepalive_request_fenced(
+                self.storage.as_ref(),
+                &request.session_key_hash,
+                request.expected_generation,
+                now_unix_secs,
+                now_unix_secs.saturating_add(self.request_timeout.as_secs().max(1)),
+            )
+            .await
+        } else {
+            CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
+                self.storage.as_ref(),
+                &request.session_key_hash,
+                request.expected_generation,
+                cancel_anchor_at_unix_secs,
+                terminal_reason_from_cancel(request.reason),
+                Some(request.reason.as_str()),
+                now_unix_secs,
+            )
+            .await
+        };
+        let accepted = match cancellation {
             Ok(accepted) => accepted,
             Err(error) => {
                 record_cancel_error();
@@ -266,6 +282,9 @@ fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalRe
     match reason {
         CancelReason::NewRequest
         | CancelReason::UserTurnDetected
+        | CancelReason::AmbiguousTurn
+        | CancelReason::RetentionRecorded
+        | CancelReason::RenewalNotBeneficial
         | CancelReason::SnapshotTooLarge
         | CancelReason::CachedPrefixTooSmall
         | CancelReason::ZeroTokenRenewalUnsupported => CacheKeepaliveTerminalReason::Cancelled,

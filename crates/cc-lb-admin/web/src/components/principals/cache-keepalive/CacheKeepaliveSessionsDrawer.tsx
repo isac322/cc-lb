@@ -133,6 +133,7 @@ export function DecimalAlignedUsd({
 
 function sessionDotTone(row: CacheKeepaliveRow): string {
   if (row.error != null) return 'danger';
+  if (row.state === 'in_request' || row.state === 'expired') return 'neutral';
   if (row.state === 'scheduled') return 'live';
   if (row.state === 'renewed' || (row.net_pnl != null && row.net_pnl > 0)) {
     return 'ok';
@@ -195,7 +196,11 @@ function SessionMasterRow({
         <span className="shrink-0 text-caption text-text-faint tabular-nums">
           {renewalLabel}
         </span>
-        {row.state === 'cancelled' ? (
+        {row.state === 'in_request' ? (
+          <span className="shrink-0 rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
+            In request
+          </span>
+        ) : row.state === 'cancelled' ? (
           <span className="shrink-0 rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
             Cancelled
           </span>

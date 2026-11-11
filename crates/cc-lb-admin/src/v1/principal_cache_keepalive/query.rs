@@ -175,6 +175,7 @@ fn parse_filter(
         "tracked" => CacheKeepaliveSessionFilter::Tracked,
         "renewed" => CacheKeepaliveSessionFilter::Renewed,
         "scheduled" => CacheKeepaliveSessionFilter::Scheduled,
+        "in_request" => CacheKeepaliveSessionFilter::InRequest,
         "capped" => CacheKeepaliveSessionFilter::Capped,
         "cancelled" => CacheKeepaliveSessionFilter::Cancelled,
         "failed" => CacheKeepaliveSessionFilter::Failed,

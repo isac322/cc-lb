@@ -357,6 +357,14 @@ fn cache_keepalive_batch_turn_reads_match_per_session_postgres() {
 }
 
 #[test]
+fn cache_keepalive_request_markers_project_consistently_postgres() {
+    run_postgres_scenario(
+        "cache_keepalive_request_markers_project_consistently",
+        cache_keepalive_session_reads::request_markers_project_consistently,
+    );
+}
+
+#[test]
 fn plugin_registry_store_postgres() {
     run_postgres_scenario("plugin_registry_store", plugin_registry_store::run_all);
 }

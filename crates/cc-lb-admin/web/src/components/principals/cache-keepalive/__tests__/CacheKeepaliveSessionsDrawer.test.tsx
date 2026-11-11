@@ -10,6 +10,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CacheKeepaliveRow } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
+import { apiRowFromFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import * as visibilityManager from '../../../../lib/visibilityManager';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
 import { CacheKeepaliveSessionsDrawer } from '../CacheKeepaliveSessionsDrawer';
@@ -693,6 +694,85 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       true,
     );
   });
+
+  it.each([
+    ['in_request', 'In request', 'neutral'],
+    ['expired', null, 'neutral'],
+    ['cancelled', 'Cancelled', 'neutral'],
+    ['failed', 'Failed', 'neutral'],
+  ] as const)(
+    'keeps a server-visible %s row without inventing a renewal or cancellation',
+    (state, badgeLabel, dotTone) => {
+      const row: CacheKeepaliveRow = {
+        ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+        id: 'request-lifecycle',
+        state,
+        is_active: false,
+        retained_renewals: 0,
+        attempts: 0,
+        error: null,
+        net_pnl: state === 'in_request' || state === 'expired' ? 0.12 : 0,
+      };
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        data: {
+          pages: [
+            {
+              summary: summaryBase,
+              groups: [
+                {
+                  key: row.group_key,
+                  label: row.group_label,
+                  kind: row.group_kind,
+                  sessions: 1,
+                  net_pnl: row.net_pnl,
+                  total_spent: row.total_spent,
+                  total_avoided: row.total_avoided,
+                },
+              ],
+              rows: [row],
+              next_cursor: null,
+            },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        hasNextPage: false,
+        isFetchingNextPage: false,
+        fetchNextPage: vi.fn(),
+      } as never);
+
+      renderWithProviders(
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />,
+      );
+
+      const button = screen.getByTitle(row.id);
+      expect(within(button).getByText('0×')).toBeDefined();
+      expect(within(button).queryByText('scheduled')).toBeNull();
+      expect(
+        button.querySelector('.status-dot')?.classList.contains(dotTone),
+      ).toBe(true);
+      if (badgeLabel) {
+        const badge = within(button).getByText(badgeLabel);
+        expect(badge).toBeDefined();
+        if (state === 'in_request') {
+          expect(badge.className).toContain('bg-overlay-5');
+          expect(badge.className).toContain('text-text-muted');
+        }
+      }
+      if (state === 'in_request' || state === 'expired') {
+        expect(within(button).queryByText(/Cancelled|Failed/)).toBeNull();
+      }
+      expect(queries.useCacheKeepaliveSessions).toHaveBeenCalledWith(
+        'p-123',
+        { horizon: '24h', status: 'visible' },
+        true,
+      );
+    },
+  );
   it('loads the next page only after the explicit control is clicked', async () => {
     const user = userEvent.setup();
     const fetchNextPage = vi.fn();

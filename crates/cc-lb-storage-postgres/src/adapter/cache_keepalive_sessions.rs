@@ -14,6 +14,14 @@ use crate::{
 };
 const TERMINAL_SESSION_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
+struct KeepaliveCancellation<'a> {
+    anchor: u64,
+    reason: CacheKeepaliveTerminalReason,
+    cancel_reason: Option<&'a str>,
+    now: u64,
+    request_deadline: Option<u64>,
+}
+
 #[async_trait]
 impl CacheKeepaliveSessionStore for PostgresStorage {
     async fn prune_cache_keepalive_history_before(
@@ -501,6 +509,27 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn begin_cache_keepalive_request_fenced(
+        &self,
+        session_key_hash: &str,
+        expected_ticket: Option<u64>,
+        now_unix_secs: u64,
+        request_deadline_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        self.cancel_keepalive(
+            session_key_hash,
+            expected_ticket,
+            KeepaliveCancellation {
+                anchor: now_unix_secs,
+                reason: CacheKeepaliveTerminalReason::Cancelled,
+                cancel_reason: Some("new_request"),
+                now: now_unix_secs,
+                request_deadline: Some(request_deadline_unix_secs),
+            },
+        )
+        .await
+    }
+
     async fn cancel_cache_keepalive_fenced(
         &self,
         session_key_hash: &str,
@@ -510,69 +539,18 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         cancel_reason: Option<&str>,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        if let Some(ticket) = expected_ticket {
-            let order_key = cache_keepalive_order_meta_key(session_key_hash);
-            sqlx::query(
-                "INSERT INTO meta (key, value) VALUES ($1, '0:0') ON CONFLICT (key) DO NOTHING",
-            )
-            .bind(&order_key)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            let order_raw =
-                sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = $1 FOR UPDATE")
-                    .bind(&order_key)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(map_sqlx_error)?;
-            let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
-            if ticket <= applied {
-                return Ok(false);
-            }
-            let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
-            sqlx::query("UPDATE meta SET value = $2 WHERE key = $1")
-                .bind(&order_key)
-                .bind(&updated_order)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
-        }
-        // Ticketed cancellation advances the stable logical boundary while
-        // leaving the synthetic scheduling/activity anchor unchanged.
-        let retained_expires_at = u64_to_i64(
-            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
-            "cache keepalive terminal expires_at",
-        )?;
-        let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, cancel_reason = $7, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = ''::bytea,
-             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN GREATEST(expires_at, $6) ELSE expires_at END,
-             updated_at = $2,
-             first_scheduled_at = CASE WHEN $4 THEN $5 ELSE first_scheduled_at END
-             WHERE session_key_hash = $3 AND status = 'active'
-               AND (CASE WHEN $4 THEN first_scheduled_at ELSE cache_anchor_at END) <= $5",
+        self.cancel_keepalive(
+            session_key_hash,
+            expected_ticket,
+            KeepaliveCancellation {
+                anchor: cancel_anchor_at_unix_secs,
+                reason,
+                cancel_reason,
+                now: now_unix_secs,
+                request_deadline: None,
+            },
         )
-        .bind(reason.as_str())
-        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
-        .bind(session_key_hash)
-        .bind(expected_ticket.is_some())
-        .bind(u64_to_i64(
-            cancel_anchor_at_unix_secs,
-            "cache keepalive cancel_anchor_at",
-        )?)
-        .bind(retained_expires_at)
-        .bind(cancel_reason)
-        .execute(&mut *tx)
         .await
-        .map_err(map_sqlx_error)?;
-        if result.rows_affected() == 0 {
-            // Rejecting a stale logical anchor must not consume its ticket.
-            tx.rollback().await.map_err(map_sqlx_error)?;
-            return Ok(false);
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(true)
     }
 
     async fn mark_latest_cache_keepalive_terminal(
@@ -722,6 +700,96 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
+    }
+}
+
+impl PostgresStorage {
+    async fn cancel_keepalive(
+        &self,
+        session_key_hash: &str,
+        expected_ticket: Option<u64>,
+        cancellation: KeepaliveCancellation<'_>,
+    ) -> StorageResult<bool> {
+        let KeepaliveCancellation {
+            anchor: cancel_anchor_at_unix_secs,
+            reason,
+            cancel_reason,
+            now: now_unix_secs,
+            request_deadline,
+        } = cancellation;
+        let request_started_at = request_deadline
+            .map(|_| u64_to_i64(now_unix_secs, "cache keepalive request started_at"))
+            .transpose()?;
+        let request_deadline = request_deadline
+            .map(|deadline| u64_to_i64(deadline, "cache keepalive request deadline"))
+            .transpose()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        if let Some(ticket) = expected_ticket {
+            let order_key = cache_keepalive_order_meta_key(session_key_hash);
+            sqlx::query(
+                "INSERT INTO meta (key, value) VALUES ($1, '0:0') ON CONFLICT (key) DO NOTHING",
+            )
+            .bind(&order_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            let order_raw =
+                sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = $1 FOR UPDATE")
+                    .bind(&order_key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
+            if ticket <= applied {
+                return Ok(false);
+            }
+            let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
+            sqlx::query("UPDATE meta SET value = $2 WHERE key = $1")
+                .bind(&order_key)
+                .bind(&updated_order)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
+        // Ticketed cancellation advances the stable logical boundary while
+        // leaving the synthetic scheduling/activity anchor unchanged.
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
+        let result = sqlx::query(
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, cancel_reason = $7, error = NULL, running_since_unix_secs = $8,
+             run_at = COALESCE($9, run_at), encrypted_payload = ''::bytea,
+             expires_at = GREATEST(CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN GREATEST(expires_at, $6) ELSE expires_at END, COALESCE($9, expires_at)),
+             updated_at = $2,
+             first_scheduled_at = CASE WHEN $4 THEN $5 ELSE first_scheduled_at END
+             WHERE session_key_hash = $3
+               AND (status = 'active' OR (status = 'terminal' AND terminal_reason = 'cancelled' AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL))
+               AND (CASE WHEN $4 THEN first_scheduled_at ELSE cache_anchor_at END) <= $5
+               AND (status = 'active' OR running_since_unix_secs <= $5)",
+        )
+        .bind(reason.as_str())
+        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(session_key_hash)
+        .bind(expected_ticket.is_some())
+        .bind(u64_to_i64(
+            cancel_anchor_at_unix_secs,
+            "cache keepalive cancel_anchor_at",
+        )?)
+        .bind(retained_expires_at)
+        .bind(cancel_reason)
+        .bind(request_started_at)
+        .bind(request_deadline)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            // Rejecting a stale logical anchor must not consume its ticket.
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(false);
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(true)
     }
 }
 

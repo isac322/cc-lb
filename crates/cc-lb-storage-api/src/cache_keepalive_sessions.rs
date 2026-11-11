@@ -28,6 +28,8 @@ pub use reads::*;
 #[serde(rename_all = "snake_case")]
 pub enum CacheKeepaliveSessionStatus {
     Active,
+    /// Read-only projection of a bounded real request; never persisted as a status.
+    InRequest,
     Terminal,
 }
 
@@ -35,6 +37,7 @@ impl CacheKeepaliveSessionStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
+            Self::InRequest => "in_request",
             Self::Terminal => "terminal",
         }
     }
@@ -113,6 +116,8 @@ pub struct CacheKeepaliveSessionRecord {
     pub refresh_count: u32,
     pub first_scheduled_at_unix_secs: u64,
     pub cache_anchor_at_unix_secs: u64,
+    /// Next keepalive time, or request deadline only for a terminal/cancelled/
+    /// new_request marker with a non-null `running_since_unix_secs`.
     pub run_at_unix_secs: u64,
     pub ttl: CacheTtl,
     pub status: CacheKeepaliveSessionStatus,
@@ -270,6 +275,29 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         self.replace_from_real_request(request).await.map(Some)
     }
 
+    /// Retires active keepalive work while a real request is in flight.
+    ///
+    /// Persists `terminal` / `cancelled` / `new_request`, with `running_since`
+    /// set to `now_unix_secs` and `run_at` set to the server's request deadline.
+    /// Only that marker interprets `run_at` as a request deadline. Its expiry is
+    /// extended through the deadline even without a previous keepalive turn.
+    /// Read models project this marker as `InRequest` before its deadline and
+    /// stale afterward; legacy `new_request` rows without a start remain terminal.
+    /// A newer request may replace an existing provisional marker. Final
+    /// cancellation or real-request replacement resolves it.
+    ///
+    /// Uses the same ticket and logical-anchor fences as final cancellation.
+    /// An accepted ticket is consumed, so completion must allocate a new ticket.
+    /// Returns false without consuming the ticket if no eligible row is matched.
+    async fn begin_cache_keepalive_request_fenced(
+        &self,
+        session_key_hash: &str,
+        expected_ticket: Option<u64>,
+        now_unix_secs: u64,
+        request_deadline_unix_secs: u64,
+    ) -> StorageResult<bool>;
+
+    /// Finalizes active work or a provisional in-request marker, clearing its start.
     async fn cancel_cache_keepalive_fenced(
         &self,
         session_key_hash: &str,
@@ -410,6 +438,17 @@ mod tests {
         assert_eq!(
             CacheKeepaliveTerminalReason::DecryptFailed.as_str(),
             "decrypt_failed"
+        );
+    }
+
+    #[test]
+    fn in_request_projection_serializes_as_in_request() {
+        let status = CacheKeepaliveSessionStatus::InRequest;
+        assert_eq!(status.as_str(), "in_request");
+        assert_eq!(serde_json::to_string(&status).unwrap(), "\"in_request\"");
+        assert_eq!(
+            serde_json::from_str::<CacheKeepaliveSessionStatus>("\"in_request\"").unwrap(),
+            status
         );
     }
 

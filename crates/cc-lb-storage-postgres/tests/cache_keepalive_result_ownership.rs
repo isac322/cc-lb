@@ -25,6 +25,234 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 #[test]
+fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
+    run_test(|fixture| async move {
+        let storage = &fixture.b;
+        let key = "request-marker";
+        let original = storage
+            .replace_from_real_request(&seed_request(key))
+            .await?;
+        storage
+            .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+                session_key_hash: key.to_owned(),
+                generation: original.generation,
+                cache_anchor_at_unix_secs: 371,
+                run_at_unix_secs: 641,
+                expires_at_unix_secs: 671,
+                encrypted_payload: None,
+                now_unix_secs: 371,
+            })
+            .await?
+            .context("synthetic hit accepted")?;
+        let older_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(key)
+            .await?;
+        let begin_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(key)
+            .await?;
+        ensure!(
+            storage
+                .begin_cache_keepalive_request_fenced(key, Some(begin_ticket), 370, 900)
+                .await?,
+            "begin must compare against logical rather than synthetic anchor"
+        );
+        let marker = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .context("marker")?;
+        ensure!(marker.status == CacheKeepaliveSessionStatus::Terminal);
+        ensure!(marker.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
+        ensure!(marker.cancel_reason.as_deref() == Some("new_request"));
+        ensure!(marker.running_since_unix_secs == Some(370));
+        ensure!(marker.run_at_unix_secs == 900);
+        ensure!(marker.expires_at_unix_secs >= 900);
+        ensure!(marker.first_scheduled_at_unix_secs == 370);
+        ensure!(marker.cache_anchor_at_unix_secs == 371);
+        ensure!(marker.enqueue_state == CacheKeepaliveEnqueueState::Pending);
+        ensure!(marker.encrypted_payload.is_empty());
+        ensure!(
+            !storage
+                .authorize_cache_keepalive_dispatch(key, marker.generation)
+                .await?
+        );
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, Some(older_ticket), 380, 910)
+                .await?
+        );
+        ensure!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    Some(older_ticket),
+                    380,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    381,
+                )
+                .await?
+        );
+        let next_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(key)
+            .await?;
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, Some(next_ticket), 369, 950)
+                .await?
+        );
+        ensure!(
+            storage
+                .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+                .await?
+                == Some(format!("{next_ticket}:{begin_ticket}")),
+            "rejected begin must roll back applied ticket"
+        );
+        ensure!(
+            storage
+                .begin_cache_keepalive_request_fenced(key, Some(next_ticket), 380, 950)
+                .await?
+        );
+        let extended = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .context("extended marker")?;
+        ensure!(extended.running_since_unix_secs == Some(380));
+        ensure!(extended.run_at_unix_secs == 950);
+        ensure!(extended.generation == marker.generation);
+        let final_ticket = storage
+            .allocate_cache_keepalive_completion_ticket(key)
+            .await?;
+        ensure!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    Some(final_ticket),
+                    379,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    400,
+                )
+                .await?
+        );
+        ensure!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    Some(final_ticket),
+                    380,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    400,
+                )
+                .await?
+        );
+        let finalized = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .context("final cancellation")?;
+        ensure!(finalized.status == CacheKeepaliveSessionStatus::Terminal);
+        ensure!(finalized.running_since_unix_secs.is_none());
+        ensure!(finalized.cancel_reason.as_deref() == Some("request_failed"));
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, None, 401, 960)
+                .await?
+        );
+        Ok(())
+    });
+}
+
+#[test]
+fn in_request_marker_replacement_and_legacy_terminal_states() {
+    run_test(|fixture| async move {
+        let storage = &fixture.b;
+        let key = "request-replacement";
+        storage
+            .replace_from_real_request(&seed_request(key))
+            .await?;
+        ensure!(
+            storage
+                .begin_cache_keepalive_request_fenced(key, None, 200, 900)
+                .await?
+        );
+        let fresh_marker = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .context("fresh marker")?;
+        ensure!(fresh_marker.refresh_count == 0);
+        ensure!(fresh_marker.expires_at_unix_secs >= 900);
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, None, 199, 950)
+                .await?
+        );
+        ensure!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    None,
+                    199,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    201,
+                )
+                .await?
+        );
+        let ticket = storage
+            .allocate_cache_keepalive_completion_ticket(key)
+            .await?;
+        let request =
+            replacement_request(key, b"new-prefix", 201, "principal", 7, "accounting", 30);
+        let active = storage
+            .replace_from_real_request_fenced(&request, Some(ticket))
+            .await?
+            .context("completion replaces marker")?;
+        ensure!(active.status == CacheKeepaliveSessionStatus::Active);
+        ensure!(active.running_since_unix_secs.is_none());
+        ensure!(active.terminal_reason.is_none());
+        ensure!(active.cancel_reason.is_none());
+        ensure!(active.encrypted_payload == b"new-prefix");
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, Some(ticket), 202, 950)
+                .await?,
+            "applied completion ticket cannot retire replacement"
+        );
+        ensure!(
+            storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    None,
+                    202,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("new_request"),
+                    202,
+                )
+                .await?
+        );
+        ensure!(
+            !storage
+                .begin_cache_keepalive_request_fenced(key, None, 203, 950)
+                .await?
+        );
+        ensure!(
+            !storage
+                .cancel_cache_keepalive_fenced(
+                    key,
+                    None,
+                    203,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    Some("request_failed"),
+                    203,
+                )
+                .await?,
+            "legacy terminal new_request without start remains final"
+        );
+        Ok(())
+    });
+}
+
+#[test]
 fn hit_reschedule_keeps_result_owned_when_real_request_supersedes() {
     run_test(|fixture| async move {
         for (suffix, encrypted_payload) in

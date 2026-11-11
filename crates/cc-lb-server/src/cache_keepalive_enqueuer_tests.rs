@@ -34,6 +34,7 @@ async fn enqueue_persists_session_payload_and_apalis_job() {
         pusher: Arc::new(backend.backend.clone()),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
 
     enqueuer
@@ -94,6 +95,7 @@ async fn enqueue_preserves_anchor_adjusted_initial_delay_for_both_ttls_and_satur
             pusher: Arc::new(backend.backend.clone()),
             aead: fixture.aead.clone(),
             clock: Arc::new(SystemClock),
+            request_timeout: std::time::Duration::from_secs(120),
         });
         let mut request = enqueue_request();
         let config = cc_lb_storage_api::CacheKeepaliveConfig {
@@ -154,6 +156,7 @@ async fn enqueue_failure_terminalizes_committed_pending_session() {
         pusher: Arc::new(FailingPusher),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
 
     let result = enqueuer.enqueue_cache_keepalive(enqueue_request()).await;
@@ -197,6 +200,7 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
         pusher: Arc::new(backend.backend.clone()),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
     enqueuer
         .enqueue_cache_keepalive(enqueue_request())
@@ -249,6 +253,7 @@ async fn not_tracked_writes_a_decision_projection_without_a_renewal_turn() {
         pusher: Arc::new(FailingPusher),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
     let request = enqueue_request();
 
@@ -415,6 +420,7 @@ async fn shape_injected_forced_tool_choice_is_durably_not_tracked_without_sessio
             pusher: Arc::new(backend.backend.clone()),
             aead: fixture.aead.clone(),
             clock: Arc::new(SystemClock),
+            request_timeout: std::time::Duration::from_secs(120),
         },
     )));
     let request = http::Request::builder()
@@ -649,12 +655,14 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
         pusher: Arc::new(backend.backend.clone()),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
     let replica_b = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
         storage: fixture.storage.clone(),
         pusher: Arc::new(backend.backend.clone()),
         aead: fixture.aead.clone(),
         clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(120),
     });
 
     replica_a
@@ -857,6 +865,9 @@ async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
     for reason in [
         CancelReason::NewRequest,
         CancelReason::UserTurnDetected,
+        CancelReason::AmbiguousTurn,
+        CancelReason::RetentionRecorded,
+        CancelReason::RenewalNotBeneficial,
         CancelReason::SnapshotTooLarge,
         CancelReason::CachedPrefixTooSmall,
         CancelReason::ZeroTokenRenewalUnsupported,
@@ -876,6 +887,7 @@ async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
             pusher: Arc::new(backend.backend),
             aead: fixture.aead.clone(),
             clock: Arc::new(SystemClock),
+            request_timeout: std::time::Duration::from_secs(120),
         });
         enqueuer
             .enqueue_cache_keepalive(enqueue_request())
@@ -906,4 +918,154 @@ async fn every_real_request_cancel_cause_survives_the_enqueue_boundary() {
             Some(CacheKeepaliveTerminalReason::Cancelled)
         );
     }
+}
+
+#[tokio::test]
+async fn request_fence_is_provisional_until_the_real_completion_resolves_it() {
+    for final_reason in [
+        CancelReason::UserTurnDetected,
+        CancelReason::AmbiguousTurn,
+        CancelReason::SnapshotTooLarge,
+        CancelReason::CachedPrefixTooSmall,
+        CancelReason::ZeroTokenRenewalUnsupported,
+    ] {
+        let fixture = Fixture::new().await;
+        let backend = crate::scheduler_factory::open_scheduler_storage(
+            &StorageConfig::Sqlite {
+                path: fixture.sqlite_path.clone(),
+            },
+            &SchedulerConfig::default(),
+            Arc::new(SystemClock),
+        )
+        .await
+        .expect("scheduler");
+        let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage: fixture.storage.clone(),
+            pusher: Arc::new(backend.backend),
+            aead: fixture.aead.clone(),
+            clock: Arc::new(SystemClock),
+            request_timeout: std::time::Duration::from_secs(47),
+        });
+        enqueuer
+            .enqueue_cache_keepalive(enqueue_request())
+            .await
+            .expect("initial schedule");
+        let ticket = enqueuer
+            .observe_session_generation("session-hash")
+            .await
+            .expect("start ticket");
+        enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: "session-hash".to_owned(),
+                reason: CancelReason::NewRequest,
+                expected_generation: ticket,
+                cache_anchor_age: std::time::Duration::ZERO,
+            })
+            .await
+            .expect("request fence");
+        let provisional = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("read")
+            .expect("session");
+        assert_eq!(
+            provisional.run_at_unix_secs,
+            provisional.running_since_unix_secs.expect("request start") + 47
+        );
+        assert!(provisional.encrypted_payload.is_empty());
+        let item = fixture
+            .storage
+            .get_cache_keepalive_list_item(&provisional.principal_id, "session-hash")
+            .await
+            .expect("list item")
+            .expect("session item");
+        assert_eq!(item.status, Some(CacheKeepaliveSessionStatus::InRequest));
+        assert_eq!(item.reason, "In request");
+
+        let completion_ticket = enqueuer
+            .observe_session_generation("session-hash")
+            .await
+            .expect("completion ticket");
+        enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: "session-hash".to_owned(),
+                reason: final_reason,
+                expected_generation: completion_ticket,
+                cache_anchor_age: std::time::Duration::ZERO,
+            })
+            .await
+            .expect("final completion");
+        let completed = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("read")
+            .expect("session");
+        assert_eq!(completed.status, CacheKeepaliveSessionStatus::Terminal);
+        assert_eq!(
+            completed.cancel_reason.as_deref(),
+            Some(final_reason.as_str())
+        );
+        assert_eq!(completed.running_since_unix_secs, None);
+    }
+}
+
+#[tokio::test]
+async fn agent_in_turn_completion_reactivates_a_provisional_request_fence() {
+    let fixture = Fixture::new().await;
+    let backend = crate::scheduler_factory::open_scheduler_storage(
+        &StorageConfig::Sqlite {
+            path: fixture.sqlite_path.clone(),
+        },
+        &SchedulerConfig::default(),
+        Arc::new(SystemClock),
+    )
+    .await
+    .expect("scheduler");
+    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: Arc::new(backend.backend),
+        aead: fixture.aead.clone(),
+        clock: Arc::new(SystemClock),
+        request_timeout: std::time::Duration::from_secs(47),
+    });
+    enqueuer
+        .enqueue_cache_keepalive(enqueue_request())
+        .await
+        .expect("initial schedule");
+    let ticket = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("start ticket");
+    enqueuer
+        .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: CancelReason::NewRequest,
+            expected_generation: ticket,
+            cache_anchor_age: std::time::Duration::ZERO,
+        })
+        .await
+        .expect("request fence");
+    let mut completion = enqueue_request();
+    completion.cache_anchor_age = std::time::Duration::ZERO;
+    completion.expected_generation = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("completion ticket");
+    enqueuer
+        .enqueue_cache_keepalive(completion)
+        .await
+        .expect("agent completion");
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("read")
+        .expect("session");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(record.cancel_reason, None);
+    assert_eq!(record.running_since_unix_secs, None);
+    assert!(!record.encrypted_payload.is_empty());
 }

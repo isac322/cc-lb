@@ -12,6 +12,7 @@ import { getJson } from './api';
 export const CACHE_KEEPALIVE_STATES = [
   'renewed',
   'scheduled',
+  'in_request',
   'capped',
   'expired',
   'cancelled',
@@ -47,6 +48,7 @@ export const CACHE_KEEPALIVE_STATUS_FILTERS = [
   'tracked',
   'renewed',
   'scheduled',
+  'in_request',
   'capped',
   'expired',
   'cancelled',

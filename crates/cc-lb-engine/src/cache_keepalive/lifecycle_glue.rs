@@ -644,6 +644,15 @@ impl LifecycleKeepalive {
                         "openai 12h retention is recorded without read re-anchoring",
                     )
                     .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::RetentionRecorded,
+                        expected_generation,
+                        cache_anchor_age,
+                        allow_sibling_backstop,
+                    )
+                    .await;
                     return;
                 }
                 if cache_metadata.cache_keepalive_surface.is_some()
@@ -664,6 +673,15 @@ impl LifecycleKeepalive {
                         ttl,
                         config,
                         "refresh expected value is unknown or non-positive",
+                    )
+                    .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::RenewalNotBeneficial,
+                        expected_generation,
+                        cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                     return;
@@ -738,7 +756,7 @@ impl LifecycleKeepalive {
                     self.cancel_session(
                         &session_key,
                         principal,
-                        CancelReason::UserTurnDetected,
+                        CancelReason::AmbiguousTurn,
                         expected_generation,
                         cache_anchor_age,
                         allow_sibling_backstop,

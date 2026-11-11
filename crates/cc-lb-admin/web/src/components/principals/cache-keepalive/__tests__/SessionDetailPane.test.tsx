@@ -375,6 +375,160 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   });
 
   it.each([
+    ['scheduled', true, 'scheduled_waiting', true],
+    ['renewed', true, 'scheduled_waiting', true],
+    ['renewed', true, 'followup_hit', false],
+    ['scheduled', false, 'scheduled_waiting', false],
+    ['in_request', false, 'scheduled_waiting', false],
+    ['expired', false, 'scheduled_waiting', false],
+    ['cancelled', false, 'scheduled_waiting', false],
+    ['failed', false, 'scheduled_waiting', false],
+    ['capped', false, 'scheduled_waiting', false],
+    ['not_tracked', false, 'scheduled_waiting', false],
+  ] as const)(
+    'only advertises a next renewal for an active waiting rail (%s, active=%s, ending=%s)',
+    (state, isActive, endingKind, expectsNextRenewal) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state,
+          is_active: isActive,
+          net_pnl: 0.12,
+          total_spent: 0.03,
+          total_avoided: 0.15,
+          turns: [],
+          gaps: [
+            {
+              cycle_id: 'retained-cycle',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: endingKind,
+              ending_at_ms: 1_700_000_300_000,
+              total_duration_sec: 300,
+              since_last_renewal_sec: null,
+              spent_usd: 0,
+              avoided_usd: 0.12,
+              net_pnl_usd: 0.12,
+            },
+          ],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="zero-renewal-history"
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+      expect(screen.queryByText(/Next renewal/) !== null).toBe(
+        expectsNextRenewal,
+      );
+      if (!expectsNextRenewal) {
+        expect(screen.getByText('0 renewals')).toBeDefined();
+      }
+      expect(screen.getByText('Net +$0.12')).toBeDefined();
+    },
+  );
+
+  it.each([false, true])(
+    'explains an in-request session without claiming cancellation (retained history: %s)',
+    (withHistory) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'in_request',
+          is_active: false,
+          cancel_reason: null,
+          reason: 'A real request is in progress',
+          turns: [],
+          gaps: withHistory
+            ? [
+                {
+                  cycle_id: 'retained-cycle',
+                  pause_at_ms: 1_700_000_000_000,
+                  cached_tokens: 20_000,
+                  pulses: [],
+                  ending_kind: 'followup_hit',
+                  ending_at_ms: 1_700_000_300_000,
+                  total_duration_sec: 300,
+                  since_last_renewal_sec: null,
+                  spent_usd: 0,
+                  avoided_usd: 0.12,
+                  net_pnl_usd: 0.12,
+                },
+              ]
+            : [],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="request-session"
+          onClose={() => {}}
+        />,
+      );
+
+      const badge = screen.getByText('In request');
+      expect(badge.className).toContain('bg-overlay-5');
+      expect(badge.className).toContain('text-text-muted');
+      expect(
+        screen.getByText(
+          'A real request is in progress. Keepalive renewals are paused until it completes.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.queryByText(/Cancelled|Failed|Next renewal|first renewal in/),
+      ).toBeNull();
+      expect(screen.queryByTestId('session-detail-time-rail') !== null).toBe(
+        withHistory,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'shows the expired request deadline neutrally (retained history: %s)',
+    (withHistory) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          state: 'expired',
+          is_active: false,
+          cancel_reason: null,
+          reason: 'Request did not complete before its deadline',
+          error: null,
+          turns: withHistory ? cacheKeepaliveRenewedDetailFixture.turns : [],
+          gaps: [],
+        }),
+      );
+
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="expired-request"
+          onClose={() => {}}
+        />,
+      );
+
+      const reason = screen.getByText(
+        'Request did not complete before its deadline',
+      );
+      expect(reason.className).toContain('text-text-muted');
+      expect(screen.queryByText('In request')).toBeNull();
+      expect(
+        screen.queryByText(/Cancelled|Failed|aborted|Next renewal/),
+      ).toBeNull();
+      expect(screen.queryByTestId('session-detail-time-rail') !== null).toBe(
+        withHistory,
+      );
+    },
+  );
+
+  it.each([
     ['new_request', 'Cancelled: new request'],
     ['user_turn_detected', 'Cancelled: user turn detected'],
     ['snapshot_too_large', 'Cancelled: snapshot too large'],

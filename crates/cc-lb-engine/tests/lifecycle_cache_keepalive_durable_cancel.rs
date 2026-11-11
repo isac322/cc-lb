@@ -535,22 +535,28 @@ async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
 
 #[tokio::test]
 async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let response = handle_keepalive_response(
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
         Bytes::from_static(
             br#"{"type":"message","id":"msg_ambiguous","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","usage":{"input_tokens":10,"output_tokens":2}}"#,
         ),
-        Arc::new(RecordingCancelEnqueuer {
-            calls: Arc::clone(&calls),
-        }),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "ambiguous-turn")],
+        false,
     )
     .await;
 
     let (status, _headers, body) = collect_body(response).await;
-    settle().await;
+    enqueuer.wait_for_completion().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_ambiguous"));
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(enqueuer.completion_cancellations().len(), 1);
+    assert_eq!(
+        enqueuer.completion_cancellations()[0].reason,
+        CancelReason::AmbiguousTurn
+    );
 }
 
 #[tokio::test]

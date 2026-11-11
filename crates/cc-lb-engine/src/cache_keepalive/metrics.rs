@@ -9,6 +9,9 @@ pub const CLASSIFIER_DECISIONS_TOTAL: &str = "cc_lb_cache_keepalive_classifier_d
 pub enum CancelReason {
     NewRequest,
     UserTurnDetected,
+    AmbiguousTurn,
+    RetentionRecorded,
+    RenewalNotBeneficial,
     SnapshotTooLarge,
     CachedPrefixTooSmall,
     ZeroTokenRenewalUnsupported,
@@ -19,6 +22,9 @@ impl CancelReason {
         match self {
             Self::NewRequest => "new_request",
             Self::UserTurnDetected => "user_turn_detected",
+            Self::AmbiguousTurn => "ambiguous_turn",
+            Self::RetentionRecorded => "retention_recorded",
+            Self::RenewalNotBeneficial => "renewal_not_beneficial",
             Self::SnapshotTooLarge => "snapshot_too_large",
             Self::CachedPrefixTooSmall => "cached_prefix_too_small",
             Self::ZeroTokenRenewalUnsupported => "zero_token_renewal_unsupported",

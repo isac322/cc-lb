@@ -383,6 +383,12 @@ describe('cacheKeepaliveSessionsPath', () => {
     );
   });
 
+  it('encodes the in-request status filter without treating it as scheduled', () => {
+    expect(cacheKeepaliveSessionsPath('p1', { status: 'in_request' })).toBe(
+      '/admin/v1/principals/p1/cache-keepalive?status=in_request',
+    );
+  });
+
   it('encodes the tracked-only default status filter', () => {
     expect(
       cacheKeepaliveSessionsPath('p1', {
@@ -427,6 +433,7 @@ describe('cache keepalive filter enums', () => {
       'tracked',
       'renewed',
       'scheduled',
+      'in_request',
       'capped',
       'expired',
       'cancelled',
@@ -449,6 +456,51 @@ describe('cache keepalive filter enums', () => {
   });
 });
 describe('cache keepalive wire additions', () => {
+  it('decodes an in-request row and detail independently of the stored terminal marker', () => {
+    const detail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: 'in_request',
+      is_active: false,
+      cancel_reason: null,
+      reason: 'A real request is in progress',
+      error: null,
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        status: 'terminal',
+      },
+    };
+    expect(CacheKeepaliveRowSchema.parse(detail)).toMatchObject({
+      state: 'in_request',
+      is_active: false,
+      cancel_reason: null,
+      error: null,
+    });
+    expect(CacheKeepaliveDetailSchema.parse(detail).raw_record?.status).toBe(
+      'terminal',
+    );
+    expect(
+      CacheKeepaliveListResponseSchema.parse({
+        ...cacheKeepaliveListResponseFixture,
+        rows: [detail],
+      }).rows[0].state,
+    ).toBe('in_request');
+  });
+
+  it('retains the neutral incomplete-request reason on an expired projection', () => {
+    const row = CacheKeepaliveRowSchema.parse({
+      ...apiRowFromFixture(cacheKeepaliveRows[0], 0),
+      state: 'expired',
+      is_active: false,
+      cancel_reason: null,
+      reason: 'Request did not complete before its deadline',
+      error: null,
+    });
+    expect(row.state).toBe('expired');
+    expect(row.reason).toBe('Request did not complete before its deadline');
+    expect(row.error).toBeNull();
+    expect(row.cancel_reason).toBeNull();
+  });
+
   it('accepts cancelled and failed row states', () => {
     const row = apiRowFromFixture(cacheKeepaliveRows[0], 0);
     expect(

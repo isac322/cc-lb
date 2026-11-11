@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
-    CacheKeepaliveTurnRow, CacheTtl, RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRecord, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use uuid::Uuid;
 
@@ -201,6 +204,265 @@ where
         Ok(())
     })
     .await
+}
+
+/// Identical assertions run against SQLite and Postgres, including legacy rows
+/// whose final cancellation must not turn back into a live request.
+pub async fn request_markers_project_consistently<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let raw_backend = Arc::clone(&backend);
+    with_conformance_fixture(backend, |storage| async move {
+        let request = |session: &str, now| CacheKeepaliveReplaceRequest {
+            session_key_hash: session.to_owned(),
+            principal_id: TARGET_PRINCIPAL.to_owned(),
+            accounting_key_id: None,
+            upstream_id: Uuid::from_u128(11),
+            cycle_id: Uuid::from_u128(1),
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: now,
+            run_at_unix_secs: now + 270,
+            expires_at_unix_secs: now + 300,
+            encrypted_payload: vec![1],
+            display_reason: "agent-in-turn".to_owned(),
+            config_snapshot: CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: now,
+        };
+        for session in [
+            "active", "fresh", "fresh-renewed", "incomplete", "legacy",
+            "user-cancelled", "renewal-stale",
+        ] {
+            storage.replace_from_real_request(&request(session, 1_000)).await?;
+        }
+        for (session, deadline) in [
+            ("fresh", 4_000_000_000),
+            ("fresh-renewed", 4_000_000_000),
+            ("incomplete", 0),
+        ] {
+            ensure!(
+                storage.begin_cache_keepalive_request_fenced(session, None, 1_001, deadline).await?,
+                "begin request marker for {session}"
+            );
+        }
+        for (session, reason) in [
+            ("legacy", "new_request"),
+            ("user-cancelled", "user_turn_detected"),
+        ] {
+            ensure!(
+                storage.cancel_cache_keepalive_fenced(
+                    session, None, 1_001, CacheKeepaliveTerminalReason::Cancelled,
+                    Some(reason), 1_001,
+                ).await?,
+                "final cancellation for {session}"
+            );
+        }
+        ensure!(
+            storage.mark_cache_keepalive_terminal(
+                "renewal-stale", 1, CacheKeepaliveTerminalReason::Stale, None, 1_001,
+            ).await?,
+            "seed an actual stale renewal"
+        );
+        for session in ["fresh-renewed", "user-cancelled"] {
+            let (event, mut projections, _) = turn_fixture(TurnSeed {
+                source_ref_id: session,
+                session_key_hash: session,
+                principal_id: TARGET_PRINCIPAL,
+                accounting_key_id: None,
+                upstream_id: Uuid::from_u128(11),
+                model: "claude-sonnet-4-5",
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_creation_input_tokens_5m: 0,
+                cache_creation_input_tokens_1h: 0,
+                cache_read_input_tokens: 20_000,
+                cost_micros: 7,
+                hit_miss: "hit",
+                ts: 1_000,
+            });
+            projections.decision.source_ref_id = session.to_owned();
+            storage.append_request_event_with_projections(&event, &projections).await?;
+        }
+        raw_backend.execute_raw_sql(
+            &storage,
+            "UPDATE cache_keepalive_sessions SET refresh_count = 1 WHERE session_key_hash IN ('fresh-renewed', 'user-cancelled')",
+        ).await?;
+        for session in ["fresh", "fresh-renewed"] {
+            let row = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, session).await?
+                .expect("fresh request exists");
+            ensure!(row.status == Some(CacheKeepaliveSessionStatus::InRequest));
+            ensure!(row.status.expect("status").as_str() == "in_request");
+            ensure!(row.terminal_reason.is_none() && row.cancel_reason.is_none());
+            ensure!(row.enqueue_state.is_none() && row.error.is_none());
+            ensure!(!row.request_incomplete && row.reason == "In request");
+        }
+        let incomplete = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, "incomplete").await?
+            .expect("incomplete request exists");
+        ensure!(incomplete.status == Some(CacheKeepaliveSessionStatus::Terminal));
+        ensure!(incomplete.terminal_reason == Some(CacheKeepaliveTerminalReason::Stale));
+        ensure!(incomplete.request_incomplete && incomplete.cancel_reason.is_none());
+        ensure!(incomplete.reason == "Request did not complete before its deadline");
+        ensure!(incomplete.error.is_none());
+        let legacy = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, "legacy").await?
+            .expect("legacy cancellation exists");
+        ensure!(legacy.status == Some(CacheKeepaliveSessionStatus::Terminal));
+        ensure!(legacy.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
+        ensure!(!legacy.request_incomplete && legacy.cancel_reason.as_deref() == Some("new_request"));
+        let summary_input = storage.read_cache_keepalive_summary_input(TARGET_PRINCIPAL, 0).await?;
+        ensure!(summary_input.sessions.iter().filter(|row| row.status == Some(CacheKeepaliveSessionStatus::InRequest)).count() == 2);
+        ensure!(summary_input.sessions.iter().filter(|row| row.request_incomplete).count() == 1);
+
+        // The projections and every filter must agree, including pagination and
+        // the cancellation-without-turns visibility rule.
+        for (filter, expected) in [
+            (CacheKeepaliveSessionFilter::All, vec!["active", "fresh", "fresh-renewed", "incomplete", "legacy", "renewal-stale", "user-cancelled"]),
+            (CacheKeepaliveSessionFilter::Visible, vec!["active", "fresh", "fresh-renewed", "renewal-stale", "user-cancelled"]),
+            (CacheKeepaliveSessionFilter::Tracked, vec!["active", "fresh", "fresh-renewed", "renewal-stale", "user-cancelled"]),
+            (CacheKeepaliveSessionFilter::InRequest, vec!["fresh", "fresh-renewed"]),
+            (CacheKeepaliveSessionFilter::Renewed, vec!["fresh-renewed"]),
+            (CacheKeepaliveSessionFilter::Scheduled, vec!["active"]),
+            (CacheKeepaliveSessionFilter::Expired, vec!["incomplete"]),
+            (CacheKeepaliveSessionFilter::Cancelled, vec!["user-cancelled"]),
+            (CacheKeepaliveSessionFilter::Failed, vec!["renewal-stale"]),
+            (CacheKeepaliveSessionFilter::NotTracked, vec!["legacy"]),
+            (CacheKeepaliveSessionFilter::Capped, vec![]),
+            (CacheKeepaliveSessionFilter::Error, vec![]),
+        ] {
+            for horizon_start_ms in [None, Some(0)] {
+                let mut query = CacheKeepaliveSessionListQuery {
+                    principal_id: TARGET_PRINCIPAL.to_owned(),
+                    horizon_start_ms,
+                    filter,
+                    cursor: None,
+                    limit: 1,
+                };
+                let mut ids = Vec::new();
+                loop {
+                    let page = storage.list_cache_keepalive_sessions(&query).await?;
+                    ids.extend(page.rows.into_iter().map(|row| row.id));
+                    query.cursor = page.next_cursor;
+                    if query.cursor.is_none() { break; }
+                }
+                ids.sort();
+                ensure!(ids == expected, "{filter:?} / {horizon_start_ms:?}: {ids:?} != {expected:?}");
+            }
+        }
+        for horizon in [None, Some(0)] {
+            let summary = storage.read_cache_keepalive_summary_aggregate_for_horizon(
+                TARGET_PRINCIPAL, 0, horizon,
+            ).await?;
+            ensure!(summary.renewing_now == 1, "requests must not count as scheduled renewals");
+            ensure!(summary.sessions_last_5m == 5, "only fresh request markers without turns must count");
+            ensure!(summary.total_spent_micros == 14 && summary.successful_hits == 2);
+            ensure!(summary.unlisted_sessions == 0 && summary.unlisted_spent_micros == 0);
+        }
+        storage.replace_from_real_request(&request("fresh", 1_002)).await?;
+        let completed = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, "fresh").await?
+            .expect("completed request exists");
+        ensure!(completed.status == Some(CacheKeepaliveSessionStatus::Active));
+        ensure!(!completed.request_incomplete && completed.terminal_reason.is_none());
+        ensure!(
+            storage.cancel_cache_keepalive_fenced(
+                "fresh-renewed", None, 1_001, CacheKeepaliveTerminalReason::Cancelled,
+                Some("user_turn_detected"), 1_002,
+            ).await?,
+            "real completion resolves the provisional marker"
+        );
+        let cancelled = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, "fresh-renewed").await?
+            .expect("final cancellation exists");
+        ensure!(cancelled.status == Some(CacheKeepaliveSessionStatus::Terminal));
+        ensure!(cancelled.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
+        ensure!(!cancelled.request_incomplete && cancelled.cancel_reason.as_deref() == Some("user_turn_detected"));
+        for (index, (cancel_reason, expected_reason)) in [
+            ("ambiguous_turn", "Cancelled: the agent turn could not be determined"),
+            ("retention_recorded", "Retention recorded without renewal"),
+            ("renewal_not_beneficial", "Refresh expected value is unknown or non-positive"),
+        ].into_iter().enumerate() {
+            let now = 1_100 + index as u64;
+            storage.replace_from_real_request(&request("final-reason", now)).await?;
+            ensure!(
+                storage.begin_cache_keepalive_request_fenced(
+                    "final-reason", None, now, 4_000_000_000,
+                ).await?
+            );
+            ensure!(
+                storage.cancel_cache_keepalive_fenced(
+                    "final-reason", None, now, CacheKeepaliveTerminalReason::Cancelled,
+                    Some(cancel_reason), now + 1,
+                ).await?
+            );
+            let final_row = storage.get_cache_keepalive_list_item(
+                TARGET_PRINCIPAL, "final-reason",
+            ).await?.expect("resolved cancellation");
+            ensure!(final_row.status == Some(CacheKeepaliveSessionStatus::Terminal));
+            ensure!(final_row.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
+            ensure!(!final_row.request_incomplete);
+            ensure!(final_row.cancel_reason.as_deref() == Some(cancel_reason));
+            ensure!(final_row.reason == expected_reason);
+        }
+        // A newly scheduled session with no renewal history stays visible while
+        // its real request runs, then follows normal no-turn horizon hiding.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let horizon_start_ms = now.saturating_sub(24 * 60 * 60).saturating_mul(1_000);
+        let baseline_summary = storage.read_cache_keepalive_summary_aggregate_for_horizon(
+            TARGET_PRINCIPAL, horizon_start_ms, Some(horizon_start_ms),
+        ).await?;
+        storage.replace_from_real_request(&request("zero-turn-live", now)).await?;
+        ensure!(
+            storage.begin_cache_keepalive_request_fenced(
+                "zero-turn-live", None, now, now.saturating_add(300),
+            ).await?
+        );
+        for filter in [CacheKeepaliveSessionFilter::Visible, CacheKeepaliveSessionFilter::Tracked] {
+            let page = storage.list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                principal_id: TARGET_PRINCIPAL.to_owned(),
+                horizon_start_ms: Some(horizon_start_ms),
+                filter,
+                cursor: None,
+                limit: 100,
+            }).await?;
+            ensure!(page.rows.len() == 1, "{filter:?}: expected only the recent zero-turn request");
+            ensure!(page.rows[0].id == "zero-turn-live");
+            ensure!(page.rows[0].status == Some(CacheKeepaliveSessionStatus::InRequest));
+            ensure!(page.rows[0].refresh_count == Some(0));
+        }
+        let fresh_summary = storage.read_cache_keepalive_summary_aggregate_for_horizon(
+            TARGET_PRINCIPAL, horizon_start_ms, Some(horizon_start_ms),
+        ).await?;
+        ensure!(fresh_summary.sessions_last_5m == 1);
+        ensure!(fresh_summary.renewing_now == baseline_summary.renewing_now);
+        raw_backend.execute_raw_sql(
+            &storage,
+            "UPDATE cache_keepalive_sessions SET run_at = 0 WHERE session_key_hash = 'zero-turn-live'",
+        ).await?;
+        for filter in [CacheKeepaliveSessionFilter::Visible, CacheKeepaliveSessionFilter::Tracked] {
+            let page = storage.list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                principal_id: TARGET_PRINCIPAL.to_owned(),
+                horizon_start_ms: Some(horizon_start_ms),
+                filter,
+                cursor: None,
+                limit: 100,
+            }).await?;
+            ensure!(page.rows.is_empty(), "{filter:?}: expired zero-turn request must be hidden");
+        }
+        let expired_summary = storage.read_cache_keepalive_summary_aggregate_for_horizon(
+            TARGET_PRINCIPAL, horizon_start_ms, Some(horizon_start_ms),
+        ).await?;
+        ensure!(expired_summary.sessions_last_5m == 0);
+        ensure!(expired_summary.renewing_now == baseline_summary.renewing_now);
+        ensure!(fresh_summary.total_spent_micros == expired_summary.total_spent_micros);
+        ensure!(fresh_summary.unlisted_spent_micros == expired_summary.unlisted_spent_micros);
+        Ok(())
+    }).await
 }
 
 fn canonical_sort(turns: &mut [CacheKeepaliveTurnRecord]) {

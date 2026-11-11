@@ -30,6 +30,7 @@ fn item(
         enqueue_state: None,
         terminal_reason,
         cancel_reason: None,
+        request_incomplete: false,
         decision: None,
         reason: "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned(),
         display_reason: None,
@@ -159,4 +160,35 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     assert_eq!(turn_action(false, true), "waiting for follow-up");
     assert_eq!(turn_action(true, false), "cache used by follow-up");
     assert_eq!(turn_action(false, false), "no follow-up (loss)");
+}
+
+#[test]
+fn request_markers_have_neutral_states_and_no_renewal_schedule() {
+    for refresh_count in [0, 2] {
+        let fresh = item(
+            CacheKeepaliveSessionEntrySource::Session,
+            Some(CacheKeepaliveSessionStatus::InRequest),
+            Some(refresh_count),
+            None,
+        );
+        assert_eq!(state_from_item(&fresh), CacheKeepaliveViewState::InRequest);
+        assert_eq!(
+            next_renewal_display(state_from_item(&fresh), 300_000, 0),
+            None
+        );
+        let mut expired = item(
+            CacheKeepaliveSessionEntrySource::Session,
+            Some(CacheKeepaliveSessionStatus::Terminal),
+            Some(refresh_count),
+            Some(CacheKeepaliveTerminalReason::Stale),
+        );
+        expired.request_incomplete = true;
+        assert_eq!(state_from_item(&expired), CacheKeepaliveViewState::Expired);
+        assert_eq!(
+            next_renewal_display(state_from_item(&expired), 300_000, 0),
+            None
+        );
+        expired.request_incomplete = false;
+        assert_eq!(state_from_item(&expired), CacheKeepaliveViewState::Failed);
+    }
 }

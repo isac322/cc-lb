@@ -408,6 +408,14 @@ The **Quota** section's `Reset quota` action (`LimitResetAction`) is always visi
 
 The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys**, and **Access**, each full width. Shape is a plain section, always expanded.
 
+Cache keepalive sessions use a neutral **In request** badge while a real request
+pauses renewal. The detail pane explains the pause even when retained renewal
+history is present; it never labels this provisional state Cancelled. When its
+request deadline passes without recorded completion, the session shows the
+neutral explanation “Request did not complete before its deadline” as Expired,
+without inferring an abort or error. In request stays visible but is not included
+in the Renewing now metric. Existing final cancellation causes remain visible.
+
 Router Basic shows **Prefer subscription upstreams** when an allowed OAuth upstream in the selected provider scope supports subscription quota. It selects using subscription quota and supported cache-cost evidence, with API keys as fallback. Provider scope controls visibility only; the switch changes the principal's single router chain across providers. API-key-only scopes hide the shortcut while saved entries remain editable in Advanced. The existing switch applies immediately with Undo.
 
 On both detail panes, **Recent requests** shows the feed's tail status as a `FeedLiveStatus` badge in its `DetailSection` action, on the title's line while both fit.

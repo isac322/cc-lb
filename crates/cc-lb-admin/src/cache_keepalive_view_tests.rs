@@ -104,6 +104,7 @@ fn summary_item(
         enqueue_state: None,
         terminal_reason: None,
         cancel_reason: None,
+        request_incomplete: false,
         decision: matches!(source, CacheKeepaliveSessionEntrySource::Decision)
             .then(|| "not_tracked".to_owned()),
         reason: "fixture".to_owned(),

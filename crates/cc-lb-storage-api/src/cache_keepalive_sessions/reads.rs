@@ -24,6 +24,7 @@ pub enum CacheKeepaliveSessionFilter {
     Visible,
     Renewed,
     Scheduled,
+    InRequest,
     Tracked,
     Capped,
     Cancelled,
@@ -40,6 +41,7 @@ impl CacheKeepaliveSessionFilter {
             Self::Visible => "visible",
             Self::Renewed => "renewed",
             Self::Scheduled => "scheduled",
+            Self::InRequest => "in_request",
             Self::Tracked => "tracked",
             Self::Capped => "capped",
             Self::Cancelled => "cancelled",
@@ -120,6 +122,9 @@ pub struct CacheKeepaliveSessionListItem {
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
     #[serde(default)]
     pub cancel_reason: Option<String>,
+    /// An expired provisional request marker, not a known renewal failure.
+    #[serde(default)]
+    pub request_incomplete: bool,
     pub decision: Option<String>,
     pub reason: String,
     #[serde(default)]
