@@ -119,6 +119,7 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  freshProviderPoolQuotaChartData,
   latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
@@ -1865,10 +1866,11 @@ export function ProviderOverviewPage({
   const visibleChartData = useMemo(
     () =>
       (liveProviderHistory
-        ? recordedPoolQuotaChartData(
+        ? freshProviderPoolQuotaChartData(
             chartData,
             poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
             poolHistoryNowUnixSecs,
+            normalizedPoolHistoryWindows,
           )
         : visiblePoolQuotaChartData(
             chartData,

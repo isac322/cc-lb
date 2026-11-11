@@ -18,6 +18,7 @@ import { formatInTimezone } from '../lib/timezone';
 import {
   buildPoolQuotaChartData,
   formatAgo,
+  freshProviderPoolQuotaChartData,
   latestPoolQuotaSnapshotUnix,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
@@ -26,7 +27,6 @@ import {
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
   poolWindowResets,
-  recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from '../routes/-overviewPoolQuota';
 
@@ -131,7 +131,12 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
             latestSnapshotUnixSecs,
             normalizedHistory,
           )
-        : recordedPoolQuotaChartData(chartData, rangeStartUnix, rangeEndUnix);
+        : freshProviderPoolQuotaChartData(
+            chartData,
+            rangeStartUnix,
+            rangeEndUnix,
+            normalizedHistory,
+          );
     return rows.map((row) => {
       const sparseRow: PoolQuotaChartRow = { unix: row.unix };
       for (const window of visibleWindows) {
