@@ -76,6 +76,10 @@ pub struct OAuthAccountIdentity {
     pub account_id: Option<String>,
     pub plan: Option<String>,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub account_name: Option<String>,
+    #[serde(default)]
+    pub plan_name: Option<String>,
 }
 
 pub fn openai_identity_from_token(token: &str) -> OAuthAccountIdentity {
@@ -106,6 +110,39 @@ pub fn openai_identity_from_token(token: &str) -> OAuthAccountIdentity {
         account_id: claim(auth.and_then(|value| value.get("chatgpt_account_id"))),
         plan: claim(auth.and_then(|value| value.get("chatgpt_plan_type"))),
         project_id: None,
+        account_name: claim(claims.get("name")),
+        plan_name: None,
+    }
+}
+
+/// Allowlisted display metadata from the existing Gemini setup endpoints.
+/// The paid tier's identifier and name must always come from the same tier.
+pub fn gemini_identity_from_responses(
+    load: &serde_json::Value,
+    userinfo: &serde_json::Value,
+) -> OAuthAccountIdentity {
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let tier = ["paidTier", "currentTier"].into_iter().find_map(|key| {
+        load.get(key).filter(|tier| {
+            tier.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+        })
+    });
+    let project = load.get("cloudaicompanionProject");
+    OAuthAccountIdentity {
+        account_email: text(userinfo.get("email")),
+        account_name: text(userinfo.get("name")),
+        plan: tier.and_then(|tier| text(tier.get("id"))),
+        plan_name: tier.and_then(|tier| text(tier.get("name"))),
+        project_id: text(project).or_else(|| text(project.and_then(|project| project.get("id")))),
+        ..OAuthAccountIdentity::default()
     }
 }
 
@@ -273,6 +310,46 @@ mod tests {
             "https://api.openai.com/profile": { "email": "alice@example.com" }
         })));
         assert_eq!(profile.account_email.as_deref(), Some("alice@example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn openai_identity_measured_claims_allowlist_name_without_unbound_organization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let token = jwt_access_token(serde_json::json!({
+            "email": "member@example.test",
+            "name": "Synthetic Member",
+            "picture": "https://example.test/private-picture",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "synthetic-workspace",
+                "chatgpt_plan_type": "prolite",
+                "chatgpt_user_id": "private-user",
+                "organizations": [
+                    {"id": "unrelated-org", "is_default": true, "title": "Unbound Org", "role": "owner"}
+                ]
+            }
+        }));
+        let value = serde_json::to_value(openai_identity_from_token(&token))?;
+        assert_eq!(value["account_name"], "Synthetic Member");
+        assert_eq!(value["plan"], "prolite");
+        assert!(value.get("organization_name").is_none());
+        let raw = value.to_string();
+        for private in [
+            "private-picture",
+            "private-user",
+            "Unbound Org",
+            token.as_str(),
+        ] {
+            assert!(!raw.contains(private));
+        }
+        let legacy: OAuthAccountIdentity = serde_json::from_value(serde_json::json!({
+            "account_email": "member@example.test",
+            "account_id": "synthetic-workspace", "plan": "team", "project_id": null
+        }))?;
+        assert_eq!(
+            serde_json::to_value(legacy)?["account_name"],
+            serde_json::Value::Null
+        );
         Ok(())
     }
 

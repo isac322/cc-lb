@@ -9,12 +9,13 @@ const providerReferenceSources: Record<string, true> = {
   'docs/runtime-management.md': true,
   'docs/upstream-warmup.md': true,
   'docs/plugin-author-guide.md': true,
+  'docs/consistency-contract.md': true,
 };
 
 export function findBlockedTerm(content: string, sourcePath: string): string | undefined {
   const blocked = content.match(blockedTerms)?.[0];
   if (blocked) return blocked;
-  // Runtime, warm-up, and plugin references document implemented provider operations, not site-wide positioning.
+  // Provider references describe implemented operations and consistency, not site-wide positioning.
   if (!providerReferenceSources[sourcePath]) return content.match(providerTerms)?.[0];
   return undefined;
 }

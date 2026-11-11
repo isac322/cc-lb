@@ -17,6 +17,7 @@ describe('source documentation policy', () => {
     'docs/runtime-management.md',
     'docs/upstream-warmup.md',
     'docs/plugin-author-guide.md',
+    'docs/consistency-contract.md',
   ])('allows implemented provider facts in provider reference sources: %s', (source) => {
     expect(findBlockedTerm('OpenAI Responses', source)).toBeUndefined();
     expect(findBlockedTerm('Gemini generation', source)).toBeUndefined();
@@ -24,7 +25,6 @@ describe('source documentation policy', () => {
 
   test.each([
     'docs/scheduler.md',
-    'docs/consistency-contract.md',
   ])('keeps provider claims blocked outside provider reference sources: %s', (source) => {
     expect(findBlockedTerm('OpenAI Responses', source)).toBe('OpenAI');
     expect(findBlockedTerm('Gemini generation', source)).toBe('Gemini');
@@ -56,6 +56,13 @@ describe('source documentation policy', () => {
   test('keeps unrelated provider-free reference prose accepted', () => {
     expect(findBlockedTerm('Database-backed runtime management.', 'docs/scheduler.md'))
       .toBeUndefined();
+  });
+
+  test('keeps private and unsupported claims blocked in consistency references', () => {
+    expect(findBlockedTerm('official OpenAI integration', 'docs/consistency-contract.md'))
+      .toBe('official');
+    expect(findBlockedTerm('/Users/operator/secret', 'docs/consistency-contract.md'))
+      .toBe('/Users/');
   });
 });
 

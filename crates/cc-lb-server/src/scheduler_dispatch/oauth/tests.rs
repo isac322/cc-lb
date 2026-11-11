@@ -46,6 +46,9 @@ use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, Laz
 use crate::scheduler_dispatch::{SchedulerDispatch, SchedulerDispatchDeps};
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
+#[path = "tests/provider_metadata.rs"]
+mod provider_metadata;
+
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 

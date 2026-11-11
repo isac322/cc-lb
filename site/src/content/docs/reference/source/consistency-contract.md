@@ -233,6 +233,18 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 
 Codex credit observations use these same delivery and freshness boundaries. Usage polls store the full credit state on `overage`; response headers store their partial credit state on `unified`. Each window keeps the existing whole-observation source selection. The router considers both windows, so a header that omits the usage-poll restriction cannot clear it. Explicit negative credit signals remain conservative blocks until that source reports a replacement; stale positive credit signals cannot establish availability.
 
+**Subscription display metadata.** OpenAI usage polls merge the plan and email
+from the usage response only after its account ID matches the current
+credential. Gemini polls collect the selected tier and userinfo through the
+credential profile's configured metadata endpoints when metadata is missing
+or the eight-hour metadata cadence is due. This work runs after successful
+quota observation, outside the proxy path. Metadata errors leave the quota
+outcome and previous valid fields intact. Admin metadata reads see the
+committed record; a proxy response does not guarantee that enrichment has run.
+Tests may call `SchedulerDispatch::poll_usage` directly and await its return
+before checking persisted display metadata, as the test-scoped
+`scheduler_dispatch::oauth::tests::provider_metadata` cases do.
+
 ## Writing tests against this contract
 
 Assert right after a 2xx admin response:

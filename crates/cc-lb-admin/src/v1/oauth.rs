@@ -17,7 +17,9 @@ use cc_lb_control::anthropic_compat::{
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
 use cc_lb_control::{AuditPayload, MetadataRefreshRecords, fetch_metadata_only};
-use cc_lb_oauth_protocol::{OAuthAccountIdentity, openai_identity_from_token};
+use cc_lb_oauth_protocol::{
+    OAuthAccountIdentity, gemini_identity_from_responses, openai_identity_from_token,
+};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
@@ -1826,24 +1828,28 @@ pub(super) async fn provider_account_identity(
     let mut identity = account_identity_from_metadata(metadata.as_ref());
     match upstream.kind {
         UpstreamKind::OpenaiOauth => {
-            if identity.account_id.as_deref() != bundle.account_id.as_deref() {
-                identity = OAuthAccountIdentity::default();
-            }
             let claims = openai_identity_from_token(&bundle.access_token);
-            identity.account_email = identity.account_email.or(claims.account_email);
-            identity.account_id = bundle
+            let account_id = bundle
                 .account_id
                 .clone()
-                .or(claims.account_id)
-                .or(identity.account_id);
-            identity.plan = identity.plan.or(claims.plan);
+                .or_else(|| claims.account_id.clone());
+            if account_id.is_none() || identity.account_id != account_id {
+                identity = OAuthAccountIdentity::default();
+            }
+            if claims.account_id == account_id {
+                identity.account_email = identity.account_email.or(claims.account_email);
+                identity.account_name = identity.account_name.or(claims.account_name);
+                identity.plan = identity.plan.or(claims.plan);
+            }
+            identity.account_id = account_id;
         }
         UpstreamKind::GeminiOauth => {
-            if identity
+            if !identity
                 .account_email
                 .as_deref()
                 .zip(bundle.account_id.as_deref())
-                .is_some_and(|(stored, current)| !stored.eq_ignore_ascii_case(current))
+                .is_some_and(|(stored, current)| stored.eq_ignore_ascii_case(current))
+                || identity.project_id != bundle.project_id
             {
                 identity = OAuthAccountIdentity::default();
             }
@@ -2539,7 +2545,7 @@ async fn complete_gemini_oauth(
     .await
     .map_err(ProviderCompletionError::token)?;
     let client = reqwest::Client::new();
-    let email = gemini_account_email(&client, config, &credentials.access_token).await?;
+    let mut identity = gemini_account_identity(&client, config, &credentials.access_token).await?;
     let base = config.code_assist_url.as_str().trim_end_matches('/');
     let endpoint = format!("{}/v1internal", base.trim_end_matches("/v1internal"));
     let load = provider_completion_json(
@@ -2573,15 +2579,8 @@ async fn complete_gemini_oauth(
         error.code = "account_validation_required";
         return Err(error);
     }
-    let plan = load
-        .get("paidTier")
-        .and_then(|tier| tier.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            current_tier
-                .and_then(|tier| tier.get("id"))
-                .and_then(serde_json::Value::as_str)
-        });
+    let tier_identity = gemini_identity_from_responses(&load, &serde_json::Value::Null);
+    let plan = tier_identity.plan.as_deref();
     let (project_id, plan) = if let Some(project_id) = gemini_project_from_response(&load) {
         (project_id, plan.unwrap_or("free-tier").to_owned())
     } else {
@@ -2654,23 +2653,20 @@ async fn complete_gemini_oauth(
             tier_id.to_owned(),
         )
     };
-    Ok((
-        credentials,
-        OAuthAccountIdentity {
-            account_email: Some(email),
-            account_id: None,
-            plan: Some(plan),
-            project_id: Some(project_id),
-        },
-    ))
+    identity.plan_name = (tier_identity.plan.as_deref() == Some(plan.as_str()))
+        .then_some(tier_identity.plan_name)
+        .flatten();
+    identity.plan = Some(plan);
+    identity.project_id = Some(project_id);
+    Ok((credentials, identity))
 }
 
-async fn gemini_account_email(
+async fn gemini_account_identity(
     client: &reqwest::Client,
     config: &AntigravityOAuthConfig,
     access_token: &str,
-) -> Result<String, ProviderCompletionError> {
-    provider_completion_json(
+) -> Result<OAuthAccountIdentity, ProviderCompletionError> {
+    let userinfo = provider_completion_json(
         client
             .get(config.userinfo_url.clone())
             .bearer_auth(access_token)
@@ -2679,19 +2675,19 @@ async fn gemini_account_email(
         "Google userinfo",
         access_token,
     )
-    .await?
-    .get("email")
-    .and_then(serde_json::Value::as_str)
-    .filter(|email| !email.trim().is_empty())
-    .map(str::to_owned)
-    .ok_or_else(|| ProviderCompletionError {
-        code: "missing_account_identity",
-        stage: "userinfo",
-        provider_code: None,
-        detail: "Google userinfo did not return an account email.".to_owned(),
-        status: StatusCode::BAD_REQUEST,
-        provider_status: None,
-    })
+    .await?;
+    let identity = gemini_identity_from_responses(&serde_json::Value::Null, &userinfo);
+    if identity.account_email.is_none() {
+        return Err(ProviderCompletionError {
+            code: "missing_account_identity",
+            stage: "userinfo",
+            provider_code: None,
+            detail: "Google userinfo did not return an account email.".to_owned(),
+            status: StatusCode::BAD_REQUEST,
+            provider_status: None,
+        });
+    }
+    Ok(identity)
 }
 
 fn gemini_project_id(value: Option<&serde_json::Value>) -> Option<String> {
@@ -3193,9 +3189,10 @@ async fn complete_provider_oauth(
                 cc_lb_oauth_protocol::account_id_from_access_token(&old_bundle.access_token)
             } else {
                 let config = state.config.oauth.antigravity.clone().unwrap_or_default();
-                gemini_account_email(&reqwest::Client::new(), &config, &old_bundle.access_token)
+                gemini_account_identity(&reqwest::Client::new(), &config, &old_bundle.access_token)
                     .await
                     .ok()
+                    .and_then(|identity| identity.account_email)
             };
         }
         let Some(old_account) = old_bundle.account_id.as_deref() else {
