@@ -46,6 +46,9 @@ use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, Laz
 use crate::scheduler_dispatch::{SchedulerDispatch, SchedulerDispatchDeps};
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
+#[path = "tests/provider_metadata.rs"]
+mod provider_metadata;
+
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 
@@ -489,6 +492,19 @@ async fn failed_provider_usage_polls_preserve_observation_age_and_stale_snapshot
         }
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+}
+
+type ProviderMetadataWriteHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+tokio::task_local! {
+    static BEFORE_PROVIDER_METADATA_WRITE: ProviderMetadataWriteHook;
+}
+
+pub(super) async fn before_provider_metadata_write() {
+    if let Ok(hook) = BEFORE_PROVIDER_METADATA_WRITE.try_with(Arc::clone) {
+        hook().await;
     }
 }
 

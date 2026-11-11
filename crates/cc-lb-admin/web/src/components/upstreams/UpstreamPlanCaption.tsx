@@ -1,15 +1,14 @@
-import { upstreamTypeLabel } from '../../lib/providers';
+import { providerPlanLabel } from '../../lib/providerPlan';
+import { providerOf, upstreamTypeLabel } from '../../lib/providers';
 import {
   type Upstream,
   useUpstreamSubscriptionMetadata,
 } from '../../lib/queries';
 import { CredentialIcon } from '../ui/ProviderLogo';
 import { Skeleton } from '../ui/primitives';
-import { subscriptionPlanLabel } from './UpstreamUsageTable';
 
 /**
- * The upstream's plan/kind caption shared by the Upstreams list rows and the
- * command palette: the Claude plan for Anthropic OAuth, or its credential kind.
+ * The upstream's provider plan/kind caption shared by list rows and search.
  */
 export function UpstreamPlanCaption({
   upstream,
@@ -19,9 +18,8 @@ export function UpstreamPlanCaption({
   showCredentialIcon?: boolean;
 }) {
   const subscription = upstream.kind.endsWith('_oauth');
-  const hasPlanMetadata = upstream.kind === 'anthropic_oauth';
   const meta = useUpstreamSubscriptionMetadata(
-    hasPlanMetadata ? upstream.id : '',
+    subscription ? upstream.id : null,
   );
   if (!subscription) {
     return (
@@ -29,19 +27,6 @@ export function UpstreamPlanCaption({
         {showCredentialIcon ? (
           <CredentialIcon
             credential="api_key"
-            className="shrink-0 text-text-muted"
-          />
-        ) : null}
-        <span className="truncate">{upstreamTypeLabel(upstream.kind)}</span>
-      </span>
-    );
-  }
-  if (!hasPlanMetadata) {
-    return (
-      <span className="inline-flex min-w-0 max-w-full items-center gap-1">
-        {showCredentialIcon ? (
-          <CredentialIcon
-            credential="subscription"
             className="shrink-0 text-text-muted"
           />
         ) : null}
@@ -61,7 +46,7 @@ export function UpstreamPlanCaption({
         />
       ) : null}
       <span className="truncate">
-        {subscriptionPlanLabel(meta.data?.organization_metadata) ??
+        {providerPlanLabel(providerOf(upstream.kind), meta.data) ??
           'Subscription'}
       </span>
     </span>

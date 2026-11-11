@@ -1389,8 +1389,10 @@ export interface UpstreamOAuthStatusResponse {
   can_refresh: boolean;
   scopes: string[];
   account_email?: string | null;
+  account_name?: string | null;
   account_id?: string | null;
   plan?: string | null;
+  plan_name?: string | null;
   project_id?: string | null;
 }
 
@@ -1433,8 +1435,10 @@ export interface SubscriptionMetadataResponse {
   subscription_metadata: SubscriptionMetadataInner | null;
   organization_metadata: OrganizationMetadataInner | null;
   account_email?: string | null;
+  account_name?: string | null;
   account_id?: string | null;
   plan?: string | null;
+  plan_name?: string | null;
   project_id?: string | null;
 }
 
@@ -1709,8 +1713,10 @@ export interface DraftCompleteResponse {
   granted_expires_in_secs: number | null;
   provider?: OAuthProvider;
   account_email?: string | null;
+  account_name?: string | null;
   account_id?: string | null;
   plan?: string | null;
+  plan_name?: string | null;
   project_id?: string | null;
 }
 

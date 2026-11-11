@@ -14,6 +14,7 @@ use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AntigravityOAuthConfig, Config, GeminiOAuthConfig, OpenAiOAuthConfig};
 use cc_lb_storage_api::{
     OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
@@ -326,7 +327,14 @@ async fn gemini_credentials(mock: &MockServer, email: &str) {
     Mock::given(method("GET"))
         .and(path("/userinfo"))
         .and(header("authorization", "Bearer new-gemini-access"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"email": email})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "synthetic-private-user",
+            "email": email,
+            "verified_email": true,
+            "name": "Synthetic Member",
+            "given_name": "Synthetic",
+            "picture": "https://example.test/private-picture"
+        })))
         .mount(mock)
         .await;
 }
@@ -718,7 +726,8 @@ async fn gemini_complete_form_and_load_code_assist_create_project_with_jobs() {
         &mock,
         "alice@example.com",
         json!({
-            "currentTier": {"id": "free-tier"},
+            "currentTier": {"id": "free-tier", "name": "Antigravity"},
+            "paidTier": {"id": "g1-ultra-tier", "name": "Google AI Ultra"},
             "cloudaicompanionProject": "gemini-project",
         }),
         None,
@@ -734,7 +743,9 @@ async fn gemini_complete_form_and_load_code_assist_create_project_with_jobs() {
     assert_eq!(status, StatusCode::OK, "{complete}");
     assert_eq!(complete["account_email"], "alice@example.com");
     assert_eq!(complete["project_id"], "gemini-project");
-    assert_eq!(complete["plan"], "free-tier");
+    assert_eq!(complete["plan"], "g1-ultra-tier");
+    assert_eq!(complete["plan_name"], "Google AI Ultra");
+    assert_eq!(complete["account_name"], "Synthetic Member");
     assert_eq!(complete["suggested_name"], "alice");
     let created = fixture.create(&start, "gemini-paste").await;
     assert_eq!(created.kind, UpstreamKind::GeminiOauth);
@@ -1234,6 +1245,7 @@ async fn identity_token(mock: &MockServer, account: &str, email: &str, plan: &st
     let claims = URL_SAFE_NO_PAD.encode(
         json!({
             "email": email,
+            "name": "Synthetic Member",
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": account,
                 "chatgpt_plan_type": plan,
@@ -1267,6 +1279,7 @@ async fn openai_identity_survives_create_and_updates_on_reconnect()
     assert_eq!(complete["account_email"], "alice@example.com");
     assert_eq!(complete["account_id"], "team-account");
     assert_eq!(complete["plan"], "team");
+    assert_eq!(complete["account_name"], "Synthetic Member");
     assert_eq!(complete["project_id"], Value::Null);
     let created = fixture.create(&start, "openai-identity").await;
     for surface in ["subscription-metadata", "oauth/status"] {
@@ -1277,6 +1290,7 @@ async fn openai_identity_survives_create_and_updates_on_reconnect()
         assert_eq!(body["account_email"], "alice@example.com");
         assert_eq!(body["account_id"], "team-account");
         assert_eq!(body["plan"], "team");
+        assert_eq!(body["account_name"], "Synthetic Member");
         assert!(!body.to_string().contains("identity-access"));
         assert!(!body.to_string().contains("identity-refresh"));
     }
@@ -1344,6 +1358,7 @@ async fn gemini_identity_tier_and_project_survive_create_and_reconnect()
         assert_eq!(body["account_email"], "alice@example.com");
         assert_eq!(body["plan"], "free-tier");
         assert_eq!(body["project_id"], "first-project");
+        assert_eq!(body["account_name"], "Synthetic Member");
         assert_eq!(body["account_id"], Value::Null);
     }
     mock.reset().await;
@@ -1379,6 +1394,61 @@ async fn gemini_identity_tier_and_project_survive_create_and_reconnect()
     assert_eq!(body["account_email"], "Alice@example.com");
     assert_eq!(body["plan"], "standard-tier");
     assert_eq!(body["project_id"], "paid-project");
+    Ok(())
+}
+
+#[tokio::test]
+async fn gemini_identity_names_stay_bound_to_selected_tier()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (tiers, expected_plan, expected_name) in [
+        (
+            json!({
+                "paidTier": {"id": "g1-ultra-tier"},
+                "currentTier": {"id": "free-tier", "name": "Antigravity"}
+            }),
+            "g1-ultra-tier",
+            Value::Null,
+        ),
+        (
+            json!({"currentTier": {"id": "future-tier", "name": "Future Provider Plan"}}),
+            "future-tier",
+            json!("Future Provider Plan"),
+        ),
+        (
+            json!({
+                "paidTier": {"id": "  ", "name": "Invalid Paid Tier"},
+                "currentTier": {"id": "free-tier", "name": "Antigravity"}
+            }),
+            "free-tier",
+            json!("Antigravity"),
+        ),
+    ] {
+        let mock = MockServer::start().await;
+        let mut load = tiers;
+        load["cloudaicompanionProject"] = json!("synthetic-project");
+        gemini_token(&mock, "member@example.test", load, None).await;
+        let fixture = Fixture::new(&mock).await;
+        let start = fixture.start("gemini").await;
+        let (status, complete) = fixture.complete(&start, Some("synthetic-code")).await;
+        assert_eq!(status, StatusCode::OK, "{complete}");
+        assert_eq!(complete["plan"], expected_plan);
+        assert_eq!(complete["plan_name"], expected_name);
+        let created = fixture.create(&start, "gemini-selected-tier").await;
+        let metadata = fixture
+            .storage
+            .get_upstream_subscription_metadata(created.id)
+            .await?
+            .ok_or("missing persisted identity")?;
+        let raw = metadata.raw_bootstrap.ok_or("missing display metadata")?;
+        for private in [
+            "synthetic-private-user",
+            "private-picture",
+            "new-gemini-access",
+            "new-refresh",
+        ] {
+            assert!(!raw.contains(private));
+        }
+    }
     Ok(())
 }
 
@@ -1444,5 +1514,153 @@ async fn gemini_load_code_assist_failure_reports_status_and_redacts_access_token
             .contains("loadCodeAssist")
     );
     assert!(!body.to_string().contains("new-gemini-access"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_identity_reads_remain_bound_to_current_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+        let mock = MockServer::start().await;
+        let fixture = Fixture::new(&mock).await;
+        let account = if kind == UpstreamKind::OpenaiOauth {
+            "synthetic-workspace"
+        } else {
+            "member@example.test"
+        };
+        let upstream = fixture.existing(kind, account).await;
+        let mut identity = json!({
+            "account_email": "member@example.test",
+            "account_name": "Synthetic Member",
+            "account_id": (kind == UpstreamKind::OpenaiOauth).then_some(account),
+            "project_id": (kind == UpstreamKind::GeminiOauth).then_some("old-project"),
+            "plan": "future-plan",
+            "plan_name": (kind == UpstreamKind::GeminiOauth).then_some("Provider Future Plan")
+        });
+        for stale in [false, true] {
+            if stale {
+                if kind == UpstreamKind::OpenaiOauth {
+                    identity["account_id"] = json!("another-workspace");
+                } else {
+                    identity["project_id"] = json!("another-project");
+                }
+            }
+            fixture
+                .storage
+                .put_upstream_subscription_metadata(
+                    &cc_lb_storage_api::UpstreamSubscriptionMetadataRecord {
+                        upstream_id: upstream.id,
+                        organization_uuid: None,
+                        organization_role: None,
+                        workspace_role: None,
+                        observed_at_unix_millis: i64::try_from(NOW * 1_000)?,
+                        last_error: None,
+                        raw_roles: None,
+                        raw_bootstrap: Some(json!({"oauth_account": identity}).to_string()),
+                    },
+                )
+                .await?;
+            for surface in ["subscription-metadata", "oauth/status"] {
+                let (status, body) = fixture
+                    .get(&format!("/admin/v1/upstreams/{}/{surface}", upstream.id))
+                    .await?;
+                assert_eq!(status, StatusCode::OK);
+                if stale {
+                    assert_eq!(body["account_name"], Value::Null);
+                    assert_eq!(body["plan"], Value::Null);
+                    assert_eq!(body["plan_name"], Value::Null);
+                } else {
+                    assert_eq!(body["account_name"], "Synthetic Member");
+                    assert_eq!(body["plan"], "future-plan");
+                    if kind == UpstreamKind::GeminiOauth {
+                        assert_eq!(body["plan_name"], "Provider Future Plan");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn documented_project_only_gemini_import_reads_credential_bound_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mock = MockServer::start().await;
+    let fixture = Fixture::new(&mock).await;
+    let (status, created) = fixture
+        .post(
+            "/admin/v1/upstreams",
+            json!({
+                "name": "project-only-import",
+                "kind": "gemini_oauth",
+                "project_id": "synthetic-project",
+                "oauth_tokens": {
+                    "access_token": "project-only-synthetic-access",
+                    "refresh_token": "project-only-synthetic-refresh",
+                    "expires_at_unix_secs": 1_900_000_000u64,
+                    "scopes": ["openid", "profile", "email"]
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"]
+        .as_str()
+        .ok_or("missing upstream id")?
+        .parse::<Uuid>()?;
+    let upstream = fixture
+        .storage
+        .get_by_id(id)
+        .await?
+        .ok_or("missing imported upstream")?;
+    let mut bundle = fixture.bundle(&upstream);
+    assert_eq!(
+        bundle.account_id, None,
+        "documented import does not invent an email"
+    );
+    assert_eq!(bundle.project_id.as_deref(), Some("synthetic-project"));
+    fixture.storage.put_upstream_subscription_metadata(
+        &cc_lb_storage_api::UpstreamSubscriptionMetadataRecord {
+            upstream_id: id, organization_uuid: None, organization_role: None, workspace_role: None,
+            observed_at_unix_millis: i64::try_from(NOW * 1_000)?,
+            last_error: None, raw_roles: None,
+            raw_bootstrap: Some(json!({
+                "oauth_account_generation": upstream.oauth_token_generation,
+                "oauth_account": {
+                    "account_email": "member@example.test", "account_name": "Synthetic Imported Member",
+                    "project_id": "synthetic-project", "plan": "g1-ultra-tier", "plan_name": "Google AI Ultra"
+                }
+            }).to_string()),
+        },
+    ).await?;
+    let mut current = upstream;
+    for replacement in [None, Some("synthetic-project"), Some("different-project")] {
+        if let Some(project) = replacement {
+            bundle.access_token = "replacement-project-only-synthetic-access".to_owned();
+            bundle.project_id = Some(project.to_owned());
+            let encrypted = AeadEncryptedField::encrypt(&fixture.aead, &bundle, id.as_bytes())?;
+            current = fixture
+                .storage
+                .store_oauth_tokens(id, current.revision, encrypted, false)
+                .await?;
+        }
+        for surface in ["subscription-metadata", "oauth/status"] {
+            let (status, body) = fixture
+                .get(&format!("/admin/v1/upstreams/{id}/{surface}"))
+                .await?;
+            assert_eq!(status, StatusCode::OK);
+            if replacement.is_some() {
+                assert_eq!(body["account_name"], Value::Null);
+                assert_eq!(body["account_email"], Value::Null);
+                assert_eq!(body["plan"], Value::Null);
+                assert_eq!(body["plan_name"], Value::Null);
+            } else {
+                assert_eq!(body["account_name"], "Synthetic Imported Member");
+                assert_eq!(body["account_email"], "member@example.test");
+                assert_eq!(body["plan"], "g1-ultra-tier");
+                assert_eq!(body["plan_name"], "Google AI Ultra");
+            }
+        }
+    }
     Ok(())
 }

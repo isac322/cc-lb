@@ -45,6 +45,7 @@ export interface AccountIdentity {
   organizationType: string | null;
   rateLimitTier: string | null;
   plan: string | null;
+  planName?: string | null;
   projectId: string | null;
 }
 export type IdentityVerdict =
@@ -88,8 +89,10 @@ export function identityOfResult(
         DraftCompleteResponse,
         | 'organization_metadata'
         | 'account_email'
+        | 'account_name'
         | 'account_id'
         | 'plan'
+        | 'plan_name'
         | 'project_id'
       >
     | null
@@ -101,22 +104,32 @@ export function identityOfResult(
     return {
       ...fromOrg,
       email: fromOrg.email ?? result.account_email ?? null,
+      displayName: fromOrg.displayName ?? result.account_name ?? null,
       accountUuid: fromOrg.accountUuid ?? result.account_id ?? null,
       rateLimitTier: fromOrg.rateLimitTier ?? result.plan ?? null,
       plan: result.plan ?? fromOrg.plan,
+      planName: result.plan_name ?? null,
       projectId: result.project_id ?? fromOrg.projectId,
     };
   }
-  if (!result.account_email && !result.account_id && !result.project_id)
+  if (
+    !result.account_email &&
+    !result.account_name &&
+    !result.account_id &&
+    !result.project_id &&
+    !result.plan &&
+    !result.plan_name
+  )
     return null;
   return {
     email: result.account_email ?? null,
-    displayName: null,
+    displayName: result.account_name ?? null,
     accountUuid: result.account_id ?? null,
     organizationName: null,
     organizationType: null,
     rateLimitTier: result.plan ?? null,
     plan: result.plan ?? null,
+    planName: result.plan_name ?? null,
     projectId: result.project_id ?? null,
   };
 }

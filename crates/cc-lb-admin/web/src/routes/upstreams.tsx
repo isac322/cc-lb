@@ -1,4 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQueryClient } from '@tanstack/react-query';
 import {
   createFileRoute,
   Link,
@@ -108,7 +108,6 @@ import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption
 import {
   countReconnectNudges,
   formatQuotaStamp,
-  subscriptionPlanLabel,
   UPSTREAM_LATEST_WINDOWS_BY_PROVIDER,
   type UpstreamUsageRow,
   useUpstreamUsageData,
@@ -139,6 +138,7 @@ import {
   REFRESH_EXPIRING_SOON_SECS,
 } from '../lib/oauthReconnect';
 import { useEffectiveProviders } from '../lib/previewControls';
+import { providerPlanLabel } from '../lib/providerPlan';
 import {
   capabilitiesOf,
   PROVIDER_FAMILIES,
@@ -151,9 +151,11 @@ import {
   upstreamTypeLabel,
 } from '../lib/providers';
 import {
+  POLLING_INTERVALS,
   qk,
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
+  upstreamSubscriptionMetadataQueryOptions,
   useDeleteUpstream,
   usePrincipalNameMap,
   useRecheckApiKey,
@@ -182,6 +184,7 @@ import {
   useSharedTimeRange,
 } from '../lib/timePresets';
 import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
+import { useVisibility } from '../lib/visibilityManager';
 
 const UPSTREAM_FILTERS = [
   'all',
@@ -472,13 +475,14 @@ function UpstreamsPage() {
   >(
     () => ({
       searchText: ({ upstream }) => {
-        const oauth = upstream.kind === 'anthropic_oauth';
-        // The plan is whatever the rows already fetched; no extra requests.
+        const oauth = upstream.kind.endsWith('_oauth');
+        // Search and captions share the same provider metadata cache.
         const plan = oauth
-          ? subscriptionPlanLabel(
+          ? providerPlanLabel(
+              providerOf(upstream.kind),
               queryClient.getQueryData<SubscriptionMetadataResponse>(
                 qk.upstreamSubscriptionMetadata(upstream.id),
-              )?.organization_metadata,
+              ),
             )
           : null;
         return [
@@ -513,6 +517,41 @@ function UpstreamsPage() {
   );
   const reconnectCount = countReconnectNudges(scopedRows);
   const flatListView = useEntityListView(scopedRows, view, viewConfig);
+  const visibility = useVisibility();
+  const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
+  const wasHiddenRef = useRef(isHidden);
+  // Mounted captions and the selected detail already own this query's cadence.
+  const mountedMetadataIds = new Set(
+    flatListView.visible.map((row) => row.upstream.id),
+  );
+  if (selectedId) mountedMetadataIds.add(selectedId);
+  const searchedRows = view.q.trim()
+    ? scopedRows.filter((row) => row.upstream.kind.endsWith('_oauth'))
+    : [];
+  const pollingSearchRows = searchedRows.filter(
+    (row) => !mountedMetadataIds.has(row.upstream.id),
+  );
+  useQueries({
+    queries: searchedRows.map((row) => ({
+      ...upstreamSubscriptionMetadataQueryOptions(row.upstream.id),
+      refetchInterval:
+        !isHidden && !mountedMetadataIds.has(row.upstream.id)
+          ? POLLING_INTERVALS.UPSTREAM_SUB_META_MS
+          : (false as const),
+    })),
+    combine: (results) => results.map((query) => query.data),
+  });
+  useEffect(() => {
+    if (wasHiddenRef.current && !isHidden) {
+      for (const row of pollingSearchRows) {
+        void queryClient.refetchQueries({
+          queryKey: qk.upstreamSubscriptionMetadata(row.upstream.id),
+          exact: true,
+        });
+      }
+    }
+    wasHiddenRef.current = isHidden;
+  }, [isHidden, pollingSearchRows, queryClient]);
   const providerCount = new Set(
     scopedRows.map((row) => providerOf(row.upstream.kind)),
   ).size;
@@ -1095,7 +1134,7 @@ export function DetailView({
 }) {
   const { action } = Route.useSearch();
   const capabilities = capabilitiesOf(upstream.kind);
-  const isOauth = capabilities.oauthBrowserConnect;
+  const canBrowserConnect = capabilities.oauthBrowserConnect;
   const isSubscription = upstream.kind.endsWith('_oauth');
   const isApiKey = upstream.kind.endsWith('_api_key');
   const navigate = useNavigate({ from: Route.fullPath });
@@ -1315,7 +1354,7 @@ export function DetailView({
   });
 
   const metadataPending =
-    isOauth &&
+    isSubscription &&
     subscriptionMetadataQ.data === undefined &&
     subscriptionMetadataQ.isPending;
   const quotaLatestPending =
@@ -1385,31 +1424,53 @@ export function DetailView({
       : 'Disabling...'
     : null;
 
-  const planLabel = isOauth
-    ? (subscriptionPlanLabel(orgMeta) ?? 'Subscription')
+  const planLabel = isSubscription
+    ? (providerPlanLabel(upstreamProvider, subscriptionMetadataQ.data) ??
+      'Subscription')
     : upstreamTypeLabel(upstream.kind);
   // The header carries plan, account and organization; the collapsed
   // metadata section keeps only what the header does not say. API-key
   // endpoint and key status live in Access, where they are edited.
-  const headerMeta: React.ReactNode[] = !isOauth
+  const accountEmail =
+    orgMeta?.account_email || subscriptionMetadataQ.data?.account_email;
+  const accountName =
+    orgMeta?.account_display_name || subscriptionMetadataQ.data?.account_name;
+  const accountIdentity = accountEmail || accountName;
+  const workspaceId =
+    upstreamProvider === 'openai'
+      ? subscriptionMetadataQ.data?.account_id
+      : null;
+  const projectId =
+    upstreamProvider === 'gemini'
+      ? subscriptionMetadataQ.data?.project_id
+      : null;
+  const headerValues = Array.from(
+    new Set(
+      [
+        accountIdentity,
+        orgMeta?.organization_name,
+        workspaceId,
+        projectId,
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  );
+  const headerMeta: React.ReactNode[] = !isSubscription
     ? []
     : metadataPending
       ? [<Skeleton key="meta" as="span" className="inline-block h-4 w-48" />]
-      : [
-          orgMeta?.account_email || orgMeta?.account_display_name,
-          orgMeta?.organization_name,
-        ];
+      : headerValues.map((value) => (
+          <span key={value} className="min-w-0 break-all">
+            {value === workspaceId
+              ? `Workspace: ${value}`
+              : value === projectId
+                ? `Project: ${value}`
+                : value}
+          </span>
+        ));
 
   const metadataFacts: { label: string; value: React.ReactNode }[] = [];
-  if (
-    orgMeta?.account_display_name &&
-    orgMeta.account_email &&
-    orgMeta.account_display_name !== orgMeta.account_email
-  )
-    metadataFacts.push({
-      label: 'Account name',
-      value: orgMeta.account_display_name,
-    });
+  if (accountName && !headerValues.includes(accountName))
+    metadataFacts.push({ label: 'Account name', value: accountName });
   if (subMeta?.organization_role)
     metadataFacts.push({ label: 'Role', value: subMeta.organization_role });
   if (subMeta?.workspace_role)
@@ -1437,38 +1498,44 @@ export function DetailView({
       // beside the taller Credential section so the shared row has no hole.
       defaultOpen={hasBoundToken}
       title="Account metadata"
-      description="Subscription details Anthropic reports for this account"
+      description={`Subscription details ${PROVIDER_LABELS[upstreamProvider]} reports for this account`}
       action={
-        <IconButton
-          label="Refresh subscription metadata"
-          disabled={triggerSubscriptionMetadataRefresh.isPending}
-          onClick={() => {
-            triggerSubscriptionMetadataRefresh.mutate(upstream.id, {
-              onSuccess: () => toast.success('Metadata refreshed'),
-              onError: (error) => {
-                const message =
-                  error instanceof ApiError
-                    ? error.message || `Request failed (${error.status})`
-                    : error instanceof Error
-                      ? error.message
-                      : String(error);
-                toast.error(`Metadata refresh failed: ${message}`);
-              },
-            });
-          }}
-        >
-          <RefreshCw
-            strokeWidth={1.75}
-            className={cx(
-              triggerSubscriptionMetadataRefresh.isPending && 'animate-spin',
-            )}
-          />
-        </IconButton>
+        upstreamProvider === 'anthropic' ? (
+          <IconButton
+            label="Refresh subscription metadata"
+            disabled={triggerSubscriptionMetadataRefresh.isPending}
+            onClick={() => {
+              triggerSubscriptionMetadataRefresh.mutate(upstream.id, {
+                onSuccess: () => toast.success('Metadata refreshed'),
+                onError: (error) => {
+                  const message =
+                    error instanceof ApiError
+                      ? error.message || `Request failed (${error.status})`
+                      : error instanceof Error
+                        ? error.message
+                        : String(error);
+                  toast.error(`Metadata refresh failed: ${message}`);
+                },
+              });
+            }}
+          >
+            <RefreshCw
+              strokeWidth={1.75}
+              className={cx(
+                triggerSubscriptionMetadataRefresh.isPending && 'animate-spin',
+              )}
+            />
+          </IconButton>
+        ) : undefined
       }
     >
       <div data-testid="upstream-metadata-strip" className="min-h-9">
         {metadataPending ? (
           <IdentitySkeleton />
+        ) : subscriptionMetadataQ.isError && !subscriptionMetadataQ.data ? (
+          <p className="text-body-sm text-danger-text">
+            Account details could not be loaded. Try again later.
+          </p>
         ) : metadataFacts.length ? (
           <DetailFacts>
             {metadataFacts.map((f) => (
@@ -2100,7 +2167,9 @@ export function DetailView({
                       oauthStatusPending ? (
                         <>
                           <Skeleton className="h-5 w-24" />
-                          {isOauth ? <Skeleton className="h-7 w-24" /> : null}
+                          {canBrowserConnect ? (
+                            <Skeleton className="h-7 w-24" />
+                          ) : null}
                         </>
                       ) : (
                         <>
@@ -2110,7 +2179,7 @@ export function DetailView({
                               label={oauthStatusBadge.label}
                             />
                           </span>
-                          {isOauth ? (
+                          {canBrowserConnect ? (
                             <Button
                               size="sm"
                               iconLeft={<KeyRound />}
@@ -2152,7 +2221,7 @@ export function DetailView({
                         </p>
                       ) : !hasBoundToken ? (
                         <p className="text-body-sm text-text-muted">
-                          {isOauth
+                          {canBrowserConnect
                             ? 'Use Connect to authorize this upstream with a Claude account.'
                             : `No ${PROVIDER_LABELS[providerOf(upstream.kind)]} subscription credential is bound.`}
                         </p>
@@ -2320,78 +2389,37 @@ export function DetailView({
                   {identity}
                 </>
               ) : (
-                <DetailSection title="Connection" span="full">
-                  <div
-                    data-testid="provider-oauth-connection"
-                    className="space-y-3"
-                  >
-                    {oauthStatusPending ? (
-                      <Skeleton className="h-4 w-36" />
-                    ) : (upstreamOAuthQ.isError || !upstreamOAuthQ.data) &&
-                      !reconnectNudge ? (
-                      <p className="text-body-sm text-danger-text">
-                        Connection status could not be loaded. Refresh this page
-                        to try again.
-                      </p>
-                    ) : null}
-                    {subscriptionMetadataQ.data === undefined &&
-                    subscriptionMetadataQ.isPending ? (
-                      <IdentitySkeleton />
-                    ) : subscriptionMetadataQ.isError ? (
-                      <p className="text-body-sm text-danger-text">
-                        Account details could not be loaded. Try again later.
-                      </p>
-                    ) : (
-                      <DetailFacts>
-                        {subscriptionMetadataQ.data?.account_email ? (
-                          <DetailFact label="Email">
-                            {subscriptionMetadataQ.data.account_email}
-                          </DetailFact>
-                        ) : null}
-                        {subscriptionMetadataQ.data?.plan ? (
-                          <DetailFact
-                            label={
-                              upstream.kind === 'openai_oauth' ? 'Plan' : 'Tier'
-                            }
-                          >
-                            {subscriptionMetadataQ.data.plan
-                              .replace(/[_-]/g, ' ')
-                              .replace(/\b\w/g, (letter) =>
-                                letter.toUpperCase(),
-                              )}
-                          </DetailFact>
-                        ) : null}
-                        {(
-                          upstream.kind === 'openai_oauth'
-                            ? subscriptionMetadataQ.data?.account_id
-                            : subscriptionMetadataQ.data?.project_id
-                        ) ? (
-                          <DetailFact
-                            label={
-                              upstream.kind === 'openai_oauth'
-                                ? 'Workspace'
-                                : 'Project'
-                            }
-                          >
-                            <span className="break-all font-mono text-data">
-                              {upstream.kind === 'openai_oauth'
-                                ? subscriptionMetadataQ.data?.account_id
-                                : subscriptionMetadataQ.data?.project_id}
-                            </span>
-                          </DetailFact>
-                        ) : null}
-                      </DetailFacts>
-                    )}
-                    <DetailRows>
-                      <EndpointRow
-                        upstream={upstream}
-                        kind="oauth"
-                        editing={activeEditor === 'endpoint'}
-                        onEditingChange={editorToggle('endpoint')}
-                      />
-                    </DetailRows>
-                  </div>
-                </DetailSection>
+                <>
+                  <DetailSection title="Connection" span="full">
+                    <div
+                      data-testid="provider-oauth-connection"
+                      className="space-y-3"
+                    >
+                      {oauthStatusPending ? (
+                        <Skeleton className="h-4 w-36" />
+                      ) : (upstreamOAuthQ.isError || !upstreamOAuthQ.data) &&
+                        !reconnectNudge ? (
+                        <p className="text-body-sm text-danger-text">
+                          Connection status could not be loaded. Refresh this
+                          page to try again.
+                        </p>
+                      ) : null}
+                      <DetailRows>
+                        <EndpointRow
+                          upstream={upstream}
+                          kind="oauth"
+                          editing={activeEditor === 'endpoint'}
+                          onEditingChange={editorToggle('endpoint')}
+                        />
+                      </DetailRows>
+                    </div>
+                  </DetailSection>
+                  {metadataFacts.length > 0 ||
+                  metadataPending ||
+                  subscriptionMetadataQ.isError
+                    ? identity
+                    : null}
+                </>
               )}
               {capabilities.warmup ? (
                 <WarmupCardMinimal

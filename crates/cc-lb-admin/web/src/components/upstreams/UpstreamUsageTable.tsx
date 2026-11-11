@@ -14,7 +14,6 @@ import {
 } from 'react';
 import type {
   LatestResponse,
-  OrganizationMetadataInner,
   QuotaSnapshot,
   SubscriptionQuotaWindow,
 } from '../../lib/api';
@@ -288,26 +287,6 @@ export function formatSpan(secs: number): string {
   if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
   if (m > 0) return `${m}m`;
   return '<1m';
-}
-
-// ─── Plan label ─────────────────────────────────────────────────────────────
-
-/** "Claude Max 20x" from the rate-limit tier, else the organization type. */
-export function subscriptionPlanLabel(
-  orgMeta:
-    | Pick<OrganizationMetadataInner, 'organization_type' | 'rate_limit_tier'>
-    | null
-    | undefined,
-): string | null {
-  const tier = orgMeta?.rate_limit_tier ?? '';
-  const type = orgMeta?.organization_type ?? '';
-  const multiplier = /max_(\d+)x/i.exec(tier)?.[1];
-  if (multiplier) return `Claude Max ${multiplier}x`;
-  if (/max/i.test(type)) return 'Claude Max';
-  if (/pro/i.test(type)) return 'Claude Pro';
-  if (/team/i.test(type)) return 'Claude Team';
-  if (/enterprise/i.test(type)) return 'Claude Enterprise';
-  return type ? type.replace(/_/g, ' ') : null;
 }
 
 // ─── Ordering ───────────────────────────────────────────────────────────────
