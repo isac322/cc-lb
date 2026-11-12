@@ -62,7 +62,6 @@ import {
   emptyCostComponents,
   sumCostMicros,
 } from '../../components/ui/usage/costCategories';
-import { CouponInventoryBadge } from '../../components/upstreams/CouponInventoryBadge';
 import {
   OAuthReconnectSummary,
   UpstreamApplyFailureSummary,
@@ -79,12 +78,6 @@ import {
 } from '../../lib/api';
 import { categoricalColor, getWindowColor } from '../../lib/colors';
 import {
-  aggregateCouponInventory,
-  type CouponInventory,
-  useCouponInventory,
-} from '../../lib/couponInventory';
-import { useCouponNow } from '../../lib/couponNudge';
-import {
   cacheHitRatio,
   cacheMissRatio,
   formatCount,
@@ -93,7 +86,6 @@ import {
   sumTokens,
 } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
-import { useEffectiveProviders } from '../../lib/previewControls';
 import {
   PROVIDER_FAMILIES,
   PROVIDER_LABELS,
@@ -806,9 +798,6 @@ export function TopPrincipalsSection({
   principals,
   idleCount = 0,
   loading,
-  inventoryByPrincipal,
-  inventoryLoading = false,
-  inventoryError = false,
 }: {
   /** The range as the control words it, e.g. "last 24h". */
   rangeWords: string;
@@ -817,9 +806,6 @@ export function TopPrincipalsSection({
   /** Known principals with no requests in the range: a footnote, not rows. */
   idleCount?: number;
   loading: boolean;
-  inventoryByPrincipal?: ReadonlyMap<string, CouponInventory>;
-  inventoryLoading?: boolean;
-  inventoryError?: boolean;
 }) {
   const [sortKey, setSortKey] = useState<TopPrincipalSortKey>('cost');
   const [direction, setDirection] = useState<SortDirection>('desc');
@@ -918,7 +904,6 @@ export function TopPrincipalsSection({
           </TableEmptyRow>
         ) : (
           rows.map((principal) => {
-            const inventory = inventoryByPrincipal?.get(principal.id);
             return (
               <PrincipalUsageRow
                 principalId={principal.id}
@@ -927,14 +912,9 @@ export function TopPrincipalsSection({
                 data-testid="top-principal-row"
               >
                 <TableCell className="w-full max-w-0">
-                  {/* Inventory has its own focus/touch target below the name;
-                      do not extend the name link over that button. */}
                   <Link
                     data-principal-link
-                    className={cx(
-                      'block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-                      !inventory && 'sm:max-md:-my-2.5 sm:max-md:py-2.5',
-                    )}
+                    className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 sm:max-md:-my-2.5 sm:max-md:py-2.5"
                     search={{ selectedId: principal.id }}
                     title={principal.name}
                     to="/principals"
@@ -952,15 +932,6 @@ export function TopPrincipalsSection({
                       ? 'No prompt tokens'
                       : `${fmtCacheHit(principal.cache_hit_ratio)} cache hit`}
                   </span>
-                  {inventory ? (
-                    <div className="flex min-w-0" data-slot="principal-coupons">
-                      <CouponInventoryBadge
-                        inventory={inventory}
-                        loading={inventoryLoading}
-                        error={inventoryError}
-                      />
-                    </div>
-                  ) : null}
                 </TableCell>
                 <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
                   {formatCount(principal.requests)}
@@ -1008,16 +979,7 @@ export function TopPrincipalsSection({
         </Link>
       }
       bleed
-      subtitle={
-        <>
-          {`Ranked by virtual cost · ${rangeWords}`}
-          {inventoryByPrincipal ? (
-            <span className="block text-caption">
-              Resets on allowed upstreams · current inventory
-            </span>
-          ) : null}
-        </>
-      }
+      subtitle={`Ranked by virtual cost · ${rangeWords}`}
       testId="overview-top-principals"
       title="Top principals"
     >
@@ -1749,11 +1711,6 @@ export function ProviderOverviewPage({
   const principalNameMap = usePrincipalNameMap();
   const principalConfig = usePrincipals();
   const principalCount = principalConfig.data?.principals.length;
-  const couponFleet = useCouponInventory();
-  const couponNow = useCouponNow();
-  const couponProviders = useEffectiveProviders(
-    scopedProvider ? [scopedProvider] : undefined,
-  );
   const poolWindows = providerPoolWindows(scopedProvider);
   const poolWindowLabels =
     scopedProvider === 'gemini' ? GEMINI_POOL_WINDOW_LABELS : undefined;
@@ -2045,35 +2002,6 @@ export function ProviderOverviewPage({
     }
     return { principals, idleCount };
   }, [principalUsage.data, principalNameMap]);
-  const inventoryByPrincipal = useMemo(() => {
-    const configs = new Map(
-      principalConfig.data?.principals.map((principal) => [
-        principal.id,
-        principal.allowed_upstreams,
-      ]),
-    );
-    return new Map(
-      principalRanking.principals.map((principal) => [
-        principal.id,
-        aggregateCouponInventory({
-          fleet: couponFleet.isPlaceholderData ? undefined : couponFleet.data,
-          allowedUpstreams: configs.get(principal.id),
-          providers: couponProviders,
-          nowMs: couponNow,
-          incomplete: couponFleet.isError || principalConfig.isError,
-        }),
-      ]),
-    );
-  }, [
-    couponFleet.data,
-    couponFleet.isError,
-    couponFleet.isPlaceholderData,
-    couponNow,
-    couponProviders,
-    principalConfig.data,
-    principalConfig.isError,
-    principalRanking.principals,
-  ]);
 
   return (
     <PageContainer>
@@ -2241,13 +2169,6 @@ export function ProviderOverviewPage({
 
               <div data-testid="overview-principal-area">
                 <TopPrincipalsSection
-                  inventoryByPrincipal={inventoryByPrincipal}
-                  inventoryLoading={
-                    couponFleet.isPending || principalConfig.isPending
-                  }
-                  inventoryError={
-                    couponFleet.isError || principalConfig.isError
-                  }
                   idleCount={principalRanking.idleCount}
                   loading={
                     principalUsage.data === undefined &&

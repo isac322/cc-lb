@@ -64,6 +64,8 @@ Most handlers audit only the success path. Validation and storage errors return 
 
 These routes still return some errors before the audited operation starts, and those write no operation row: a rejected request body, the upstream lookup failure or 404 for a claim, and the upload rate limit (429) or a failed rate-limit audit query for an upload. The save handler's own authorization check writes no `config_save_failed` row, but through the shipped router a caller without write permission is stopped earlier by `require_admin_auth`, which awaits an `authz_denied` audit row before returning 403 (a failed write there is logged and the 403 still returns).
 
+Limit-reset claim audit rows retain the stable upstream UUID, verified provider and selected coupon metadata when available, normalized provider result, and post-settlement usage-refresh outcome before the HTTP body is serialized. A local settlement failure preserves any known provider result; an uncertain claim remains `unknown`. Audit-write failure still returns `audit_write_failed` and can leave no recorded attempt after a provider side effect. The sensitive-read history endpoint filters this existing audit table by exact action and UUID claim route before limiting results (default 100, maximum 1000, with `has_more`). Its timestamp is the local audit-write time in milliseconds, not provider redemption time, and it cannot establish activity outside cc-lb or beyond retained audit rows.
+
 The plugin registry label update and WASM garbage collection write audit rows like the other mutating routes:
 
 - `PATCH /admin/v1/plugins/registry/{id}` updates the registry label, records `plugin_registry_label_update(id=<registry id>)`, and rebuilds the view.

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
 use cc_lb_control::anthropic_metadata::{
@@ -34,7 +34,8 @@ use cc_lb_control::openai_limit_resets::{
     settled_openai_limit_reset_epoch,
 };
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaSample, UpstreamKind, UpstreamRecord, UpstreamStore,
+    AuditEntry, AuditQueryScope, Storage, SubscriptionQuotaSample, UpstreamKind, UpstreamRecord,
+    UpstreamStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -49,7 +50,7 @@ use super::upstreams::{
 use crate::{
     AdminState, LimitResetUsageRefresh,
     audit::{AdminAuditEvent, record_admin_audit},
-    auth::AdminIdentity,
+    auth::{AdminAction, AdminIdentity, authorize},
 };
 
 #[derive(Debug, Serialize)]
@@ -129,6 +130,148 @@ struct LimitResetClaimResponse {
     windows_reset: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage_refresh: Option<LimitResetUsageRefresh>,
+}
+
+const CLAIM_AUDIT_ACTION: &str = "upstream_limit_reset_claim";
+
+#[derive(Debug, Default)]
+struct ClaimMetadata {
+    provider: Option<&'static str>,
+    coupon_type: Option<String>,
+    gives_back_weekly: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LimitResetHistoryQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LimitResetHistoryResponse {
+    items: Vec<LimitResetHistoryItem>,
+    has_more: bool,
+    limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct LimitResetHistoryItem {
+    id: String,
+    recorded_at_unix_millis: u64,
+    upstream_id: Uuid,
+    provider: Option<String>,
+    coupon_type: Option<String>,
+    gives_back_weekly: Option<bool>,
+    result: String,
+    usage_refresh: Option<String>,
+    actor: Option<String>,
+    request_id: Option<String>,
+    cleared: Option<Vec<String>>,
+    windows_reset: Option<i64>,
+}
+
+impl LimitResetHistoryItem {
+    fn from_audit(entry: AuditEntry, upstream_id: Uuid) -> Self {
+        let payload = entry.payload.as_ref();
+        let string = |key: &str| {
+            payload
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        // Old rows contain only an HTTP outcome ("ok" included), which
+        // cannot establish whether a provider consumed a reset.
+        let result = string("result")
+            .filter(|result| {
+                matches!(
+                    result.as_str(),
+                    "reset"
+                        | "already_used"
+                        | "not_limited"
+                        | "cooldown"
+                        | "ineligible"
+                        | "unavailable"
+                        | "unknown"
+                )
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        Self {
+            id: entry.request_id,
+            // Administrative audit timestamps are Unix seconds.
+            recorded_at_unix_millis: entry.ts.saturating_mul(1_000),
+            upstream_id,
+            provider: string("provider"),
+            coupon_type: string("coupon_type"),
+            gives_back_weekly: payload
+                .and_then(|value| value.get("gives_back_weekly"))
+                .and_then(serde_json::Value::as_bool),
+            result,
+            usage_refresh: string("usage_refresh"),
+            actor: entry.actor,
+            request_id: string("request_id"),
+            cleared: payload
+                .and_then(|value| value.get("cleared"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect()
+                }),
+            windows_reset: payload
+                .and_then(|value| value.get("windows_reset"))
+                .and_then(serde_json::Value::as_i64),
+        }
+    }
+}
+
+pub(crate) async fn get_upstream_limit_reset_history(
+    State(state): State<AdminState>,
+    Path(upstream_id): Path<Uuid>,
+    Extension(identity): Extension<AdminIdentity>,
+    Query(query): Query<LimitResetHistoryQuery>,
+) -> Result<Response, UpstreamError> {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return Ok((
+            axum::http::StatusCode::FORBIDDEN,
+            Json(json!({ "error": "forbidden" })),
+        )
+            .into_response());
+    }
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=1_000).contains(&limit) {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_limit",
+            detail: "limit must be between 1 and 1000".to_owned(),
+        });
+    }
+    let storage = storage_arc(&state)?;
+    UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+    let route = format!("/admin/v1/upstreams/{upstream_id}/limit-resets/claim");
+    let mut entries = storage
+        .query_recent_audit(
+            AuditQueryScope::AdminActionRoute {
+                action: CLAIM_AUDIT_ACTION,
+                route: &route,
+            },
+            0,
+            u64::MAX,
+            limit + 1,
+            true,
+        )
+        .await?;
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok(Json(LimitResetHistoryResponse {
+        items: entries
+            .into_iter()
+            .map(|entry| LimitResetHistoryItem::from_audit(entry, upstream_id))
+            .collect(),
+        has_more,
+        limit,
+    })
+    .into_response())
 }
 
 pub(crate) async fn list_upstream_limit_resets(
@@ -349,22 +492,32 @@ pub(crate) async fn claim_upstream_limit_reset(
     // Dispatch, fence settlement, usage refresh and audit belong to one
     // continuation, so dropping the HTTP request cannot abandon a dispatched claim.
     complete_after_commit(async move {
+        let mut metadata = ClaimMetadata::default();
         let dispatched =
-            dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body).await;
-        let result = match dispatched {
-            Ok((fence, claim)) => {
-                settle_limit_reset_claim(&state, storage.as_ref(), upstream.id, fence, claim).await
+            dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body, &mut metadata)
+                .await;
+        let (result, settlement) = match dispatched {
+            Ok((fence, mut claim)) => {
+                let settlement = settle_limit_reset_claim(
+                    &state,
+                    storage.as_ref(),
+                    upstream.id,
+                    fence,
+                    &mut claim,
+                )
+                .await;
+                (claim, settlement)
             }
-            Err(error) => Err(error),
+            Err(error) => (Err(error), Ok(())),
         };
-        // Audit every outcome, including errors: a 504/timeout may still have
-        // consumed the grant provider-side, so the request_id trail must exist
-        // even when the handler returns an error.
-        let (status, outcome) = match &result {
-            Ok(response) => (response.status().as_u16(), "ok"),
-            Err(error) => (error.status().as_u16(), error.error_code()),
-        };
-        let action = "upstream_limit_reset_claim";
+        // Keep the typed provider outcome even if local fence settlement
+        // fails. Neither a transport error nor an HTTP 2xx implies consumption.
+        let error = settlement.as_ref().err().or_else(|| result.as_ref().err());
+        let (status, outcome) = error.map_or((200, "ok"), |error| {
+            (error.status().as_u16(), error.error_code())
+        });
+        let claim = result.as_ref().ok();
+        let action = CLAIM_AUDIT_ACTION;
         let route = format!("/admin/v1/upstreams/{upstream_id}/limit-resets/claim");
         if let Err(error) = record_admin_audit(
             &state,
@@ -381,6 +534,14 @@ pub(crate) async fn claim_upstream_limit_reset(
                     "grant_id": body.grant_id,
                     "request_id": body.request_id,
                     "outcome": outcome,
+                    "upstream_id": upstream_id,
+                    "provider": metadata.provider,
+                    "coupon_type": metadata.coupon_type,
+                    "gives_back_weekly": metadata.gives_back_weekly,
+                    "result": claim.map_or("unknown", |claim| claim.result),
+                    "usage_refresh": claim.and_then(|claim| claim.usage_refresh),
+                    "cleared": claim.map(|claim| &claim.cleared),
+                    "windows_reset": claim.and_then(|claim| claim.windows_reset),
                 })),
             },
         )
@@ -389,7 +550,8 @@ pub(crate) async fn claim_upstream_limit_reset(
             tracing::error!(error = %error, action, "admin audit write failed");
             return Err(UpstreamError::AuditWriteFailed);
         }
-        result
+        settlement?;
+        result.map(|claim| Json(claim).into_response())
     })
     .await?
 }
@@ -417,9 +579,10 @@ async fn dispatch_limit_reset_claim(
     storage: Arc<dyn Storage>,
     upstream: &UpstreamRecord,
     body: &LimitResetClaimBody,
+    metadata: &mut ClaimMetadata,
 ) -> Result<(ClaimFence, Result<LimitResetClaimResponse, UpstreamError>), UpstreamError> {
     if upstream.kind == UpstreamKind::OpenaiOauth {
-        return dispatch_openai_limit_reset_claim(state, storage, upstream, body).await;
+        return dispatch_openai_limit_reset_claim(state, storage, upstream, body, metadata).await;
     }
     if !is_valid_grant_id(&body.grant_id) {
         return Err(UpstreamError::BadRequest {
@@ -463,6 +626,20 @@ async fn dispatch_limit_reset_claim(
         || body.organization_id.as_deref() != Some(organization_id.as_str())
     {
         return Err(UpstreamError::StaleIdentity);
+    }
+    metadata.provider = Some("anthropic");
+    // Reuse the credential-, identity-, epoch- and freshness-bound poll
+    // observation; metadata must not add a provider request or gate a claim.
+    if let Ok(snapshot) = load_cached_limit_resets(state, storage.as_ref(), upstream, &[]).await
+        && snapshot.account_id.as_deref() == Some(account_id.as_str())
+        && snapshot.organization_id.as_deref() == Some(organization_id.as_str())
+        && let Some(grant) = snapshot
+            .cedar_ember
+            .as_ref()
+            .and_then(|status| status.grants.iter().find(|grant| grant.id == body.grant_id))
+    {
+        metadata.coupon_type = grant.grant_type.clone();
+        metadata.gives_back_weekly = grant.gives_back_weekly;
     }
     // Durable per-attempt fence before the POST, compare-and-put over the
     // settled epoch just read: every snapshot is unservable (on every
@@ -521,6 +698,7 @@ async fn dispatch_openai_limit_reset_claim(
     storage: Arc<dyn Storage>,
     upstream: &UpstreamRecord,
     body: &LimitResetClaimBody,
+    metadata: &mut ClaimMetadata,
 ) -> Result<(ClaimFence, Result<LimitResetClaimResponse, UpstreamError>), UpstreamError> {
     if Uuid::parse_str(&body.request_id).is_err() {
         return Err(UpstreamError::BadRequest {
@@ -553,6 +731,7 @@ async fn dispatch_openai_limit_reset_claim(
     if body.account_id != account_id || bundle.access_token != access_token {
         return Err(UpstreamError::StaleIdentity);
     }
+    metadata.provider = Some("openai");
     let client = make_metadata_http_client();
     let base_url = current.base_url.clone().unwrap_or_else(|| {
         url::Url::parse("https://chatgpt.com/backend-api/codex")
@@ -572,15 +751,16 @@ async fn dispatch_openai_limit_reset_claim(
     let inventory = list_openai_limit_reset_credits(&client, &base_url, auth, &cancel)
         .await
         .map_err(openai_read_error)?;
-    if !inventory.credits.iter().any(|credit| {
+    let Some(credit) = inventory.credits.iter().find(|credit| {
         credit.id == body.grant_id
             && credit.status == "available"
             && credit.is_supported_by_plan == Some(true)
-    }) {
+    }) else {
         return Err(UpstreamError::Conflict {
             detail: "selected credit is unavailable or its plan support is unknown; refetch limit-resets".to_owned(),
         });
-    }
+    };
+    metadata.coupon_type = Some(credit.reset_type.clone());
     if UpstreamStore::read_oauth_token_generation(storage.as_ref(), upstream.id).await?
         != Some(current.oauth_token_generation)
     {
@@ -679,8 +859,8 @@ async fn settle_limit_reset_claim(
     storage: &dyn Storage,
     upstream_id: Uuid,
     ClaimFence { epoch_key, fence }: ClaimFence,
-    result: Result<LimitResetClaimResponse, UpstreamError>,
-) -> Result<Response, UpstreamError> {
+    result: &mut Result<LimitResetClaimResponse, UpstreamError>,
+) -> Result<(), UpstreamError> {
     // Settle our own fence with a fresh epoch after any outcome. Snapshots
     // from polls issued before the claim carry the old epoch and polls during
     // it wrote none (the fence was pending), so neither can match. If this
@@ -697,7 +877,9 @@ async fn settle_limit_reset_claim(
     if !settled {
         tracing::warn!(upstream_id = %upstream_id, "cedar_ember claim fence was already recovered");
     }
-    let mut result = result?;
+    let Ok(result) = result else {
+        return Ok(());
+    };
     if result.result == "reset" || result.result == "already_used" {
         let cancel = CancellationToken::new();
         result.usage_refresh = Some(match &state.limit_reset_usage_refresh {
@@ -716,7 +898,7 @@ async fn settle_limit_reset_claim(
             None => LimitResetUsageRefresh::Failed,
         });
     }
-    Ok(Json(result).into_response())
+    Ok(())
 }
 
 fn live_identity(

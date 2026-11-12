@@ -13,7 +13,6 @@ export function PrincipalUsageRow({
       event.defaultPrevented ||
       (event.type === 'auxclick' ? event.button !== 1 : event.button !== 0) ||
       !(event.target instanceof Element) ||
-      !event.currentTarget.contains(event.target) ||
       event.target.closest(
         'a, button, input, select, textarea, [role="button"]',
       ) ||

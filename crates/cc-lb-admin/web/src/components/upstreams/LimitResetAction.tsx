@@ -137,6 +137,8 @@ export function LimitResetAction({
   upstream,
   credentialsStored,
   quotaWindows = [],
+  renderTrigger,
+  defaultOpen = false,
 }: {
   upstream: Upstream;
   /** Whether OAuth credentials are stored (`has_credentials`); undefined
@@ -146,6 +148,13 @@ export function LimitResetAction({
   /** Quota snapshots the page already renders — the nudge reads the same
    *  numbers, never a second source. */
   quotaWindows?: readonly NudgeQuotaWindow[];
+  /** Compact entry points reuse this same action and confirmation flow. */
+  renderTrigger?: (props: {
+    onClick: () => void;
+    disabled: boolean;
+    loading: boolean;
+  }) => ReactNode;
+  defaultOpen?: boolean;
 }) {
   const isOpenAI = upstream.kind === 'openai_oauth';
   const isOauth = upstream.kind === 'anthropic_oauth' || isOpenAI;
@@ -161,7 +170,7 @@ export function LimitResetAction({
     );
   const claim = useClaimLimitReset();
 
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(defaultOpen);
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   // One request_id per confirmation, generated when the dialog opens.
   const [requestId, setRequestId] = useState(() => newUuid());
@@ -436,18 +445,26 @@ export function LimitResetAction({
 
   return (
     <>
-      <CouponActionButton
-        kind={buttonKind}
-        count={buttonCount}
-        disabled={actionDisabled}
-        disabledReason={disabledReason}
-        loading={claimInFlight || loading}
-        expiryLabel={expiryLabel}
-        title={buttonTitle}
-        onClick={openDialog}
-      >
-        {buttonLabel}
-      </CouponActionButton>
+      {renderTrigger ? (
+        renderTrigger({
+          onClick: openDialog,
+          disabled: actionDisabled,
+          loading: claimInFlight || loading,
+        })
+      ) : (
+        <CouponActionButton
+          kind={buttonKind}
+          count={buttonCount}
+          disabled={actionDisabled}
+          disabledReason={disabledReason}
+          loading={claimInFlight || loading}
+          expiryLabel={expiryLabel}
+          title={buttonTitle}
+          onClick={openDialog}
+        >
+          {buttonLabel}
+        </CouponActionButton>
+      )}
 
       <Modal
         open={dialogOpen}

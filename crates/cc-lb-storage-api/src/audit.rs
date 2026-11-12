@@ -19,6 +19,13 @@ pub enum AuditQueryScope<'a> {
         /// Actor identity subject.
         subject: &'a str,
     },
+    /// Include entries with an exact admin action and route.
+    AdminActionRoute {
+        /// Admin operation name.
+        action: &'a str,
+        /// Exact route recorded for the operation.
+        route: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

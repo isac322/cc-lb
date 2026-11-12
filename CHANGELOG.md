@@ -19,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Coupon selectors and confirmation dialogs now distinguish provider eligibility from observed target usage and show exact reset scopes. Fleet inventory and principal counts describe active resets on accessible upstreams without implying ownership or guaranteed model routing.
+- Coupon selectors and confirmation dialogs now distinguish provider eligibility from observed target usage and show exact reset scopes. Overview shows per-upstream coupon inventory in a small ticket-count column in the Upstreams table, without principal aggregation or cross-row account deduplication.
 - After a confirmed limit reset, the admin request now awaits an immediate upstream usage read and local routing-cache publication. The response reports quota-refresh failure separately from the reset outcome, without repeating redemption or assuming zero usage.
 
 - Router Basic now exposes “Prefer subscription upstreams” for allowed Anthropic, OpenAI, and Gemini OAuth upstreams in the selected provider scope. The shortcut describes subscription selection, hides for API-key-only scopes, and keeps one principal-wide chain editable in Advanced. ([#1235](https://github.com/isac322/cc-lb/issues/1235))

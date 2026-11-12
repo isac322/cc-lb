@@ -1,11 +1,6 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type * as ReactRouterModule from '@tanstack/react-router';
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  within,
-} from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   type AnchorHTMLAttributes,
@@ -15,8 +10,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DashboardUsageResponse } from '../lib/api';
 import type { CouponInventoryResponse } from '../lib/couponInventory';
-import * as couponInventory from '../lib/couponInventory';
 import type * as CouponNudgeModule from '../lib/couponNudge';
+import type * as LimitResetsModule from '../lib/limitResets';
 import type * as ProvidersModule from '../lib/providers';
 import type { ProviderFamily } from '../lib/providers';
 import * as queries from '../lib/queries';
@@ -30,6 +25,7 @@ import { MultiProviderOverview } from './MultiProviderOverview';
 const overviewMocks = vi.hoisted(() => ({
   providers: ['anthropic', 'openai', 'gemini'] as ProviderFamily[],
   navigate: vi.fn(),
+  inventoryQuery: vi.fn(),
 }));
 
 vi.mock('@tanstack/react-router', async (importOriginal) => ({
@@ -62,25 +58,32 @@ vi.mock('../lib/queries', async (importOriginal) => ({
   usePrincipals: vi.fn(),
   useUpstreams: vi.fn(),
   useUsage: vi.fn(),
+  useStatus: vi.fn(),
+  useSubscriptionQuotaLatest: vi.fn(),
+  useUpstreamOAuthStatus: vi.fn(),
 }));
-
+vi.mock('../lib/oauthReconnect', () => ({
+  useOAuthReconnectNudges: () => ({ nudges: new Map() }),
+  isTerminalOAuthReconnectReason: () => false,
+}));
 vi.mock('../lib/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof ProvidersModule>()),
   useInstallation: () => ({ providers: overviewMocks.providers }),
 }));
-
-vi.mock('../lib/couponInventory', async (importOriginal) => ({
-  ...(await importOriginal<typeof couponInventory>()),
-  useCouponInventory: vi.fn(),
+// Mock the polling boundary: the real inventory hook calls its module-local
+// fleet reader, so replacing only that exported reader cannot intercept it.
+vi.mock('../lib/usePolledData', () => ({
+  usePolledData: () => overviewMocks.inventoryQuery(),
 }));
-
 vi.mock('../lib/couponNudge', async (importOriginal) => ({
   ...(await importOriginal<typeof CouponNudgeModule>()),
   useCouponNow: () => Date.parse('2026-11-12T12:00:00Z'),
 }));
-
-// Keep the actual page, principal table, row and coupon popover real. Pool
-// charts and the request stream are independent sections of this regression.
+vi.mock('../lib/limitResets', async (importOriginal) => ({
+  ...(await importOriginal<typeof LimitResetsModule>()),
+  useLimitResets: () => successQuery(COUPON_FLEET.upstreams[0]),
+}));
+// The actual Overview, shared upstream table and action dialog stay real.
 vi.mock('./ProviderPoolCard', () => ({ ProviderPoolCard: () => null }));
 vi.mock('../lib/useRequestEventsFeed', () => ({
   useRequestEventsFeed: () => ({}),
@@ -89,36 +92,7 @@ vi.mock('../components/ui/RequestEventsFeed', () => ({
   FeedLiveStatus: () => null,
   RequestEventsFeed: () => null,
 }));
-
 afterEach(cleanup);
-
-function usage(
-  series: DashboardUsageResponse['series'],
-): DashboardUsageResponse {
-  return {
-    range: '24h',
-    step: 'hour',
-    group_by: 'principal',
-    window_start_unix_secs: 0,
-    window_end_unix_secs: 1,
-    series,
-    observed: true,
-  };
-}
-function bucket(request_count: number, cost: number) {
-  return {
-    bucket_start_unix_secs: 0,
-    request_count,
-    input_tokens: 100,
-    output_tokens: 20,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 80,
-    error_count: 0,
-    virtual_cost_micros: cost,
-    latency_ms_sum: 0,
-    latency_count: 0,
-  };
-}
 
 const COUPON_FLEET: CouponInventoryResponse = {
   upstreams: [
@@ -167,166 +141,201 @@ const COUPON_FLEET: CouponInventoryResponse = {
   ],
 };
 
-describe('actual multi-provider Overview coupon surface', () => {
+function page() {
+  return createElement(
+    QueryClientProvider,
+    { client: new QueryClient() },
+    createElement(MultiProviderOverview),
+  );
+}
+
+describe('actual Overview upstream coupon surface', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     overviewMocks.providers = ['anthropic', 'openai', 'gemini'];
-    const principals = [
-      {
-        id: 'all-access',
-        name: 'All access',
-        kind: 'human' as const,
-        enabled: true,
-        revision: 1,
-        allowed_models: [],
-        allowed_upstreams: [],
-        default_limits: [],
-      },
-      {
-        id: 'restricted',
-        name: 'Restricted',
-        kind: 'machine' as const,
-        enabled: true,
-        revision: 1,
-        allowed_models: [],
-        allowed_upstreams: ['claude-main'],
-        default_limits: [],
-      },
-    ];
     vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
-      new Map(principals.map((principal) => [principal.id, principal.name])),
-    );
-    vi.mocked(queries.usePrincipals).mockReturnValue(
-      successQuery({ principals }),
+      new Map([['person', 'Person']]),
     );
     vi.mocked(queries.useUpstreams).mockReturnValue(
-      successQuery({ upstreams: [] }),
+      successQuery({
+        upstreams: [
+          ['claude-main', 'anthropic_oauth'],
+          ['claude-duplicate', 'anthropic_oauth'],
+          ['codex-main', 'openai_oauth'],
+          ['key', 'anthropic_api_key'],
+        ].map(([id, kind]) => ({
+          id,
+          name: id,
+          kind,
+          enabled: true,
+          spec_revision: 1,
+          base_url: null,
+          warmup_enabled: false,
+          warmup_dialect_plugin: null,
+          status: {
+            last_apply_error: null,
+            last_apply_at_unix_secs: null,
+            last_warmup_at_unix_secs: null,
+          },
+        })) as queries.Upstream[],
+      }),
     );
-    vi.mocked(queries.useUsage).mockImplementation(
-      (_range, _step, _group, _upstream, _projection, options) =>
-        successQuery(
-          usage(
-            options?.providers?.length
-              ? principals.map((principal) => ({
-                  key: principal.id,
-                  buckets: [bucket(1, 100)],
-                }))
-              : [],
-          ),
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      successQuery({
+        upstreams: [],
+        now_unix_secs: 0,
+        max_staleness_secs: 300,
+      }),
+    );
+    vi.mocked(queries.useStatus).mockReturnValue(
+      successQuery({
+        version: 'test',
+        git_sha: 'test',
+        uptime_secs: 0,
+        generation: 1,
+        build: { rust_version: 'test', profile: 'test', target: 'test' },
+        upstreams: ['claude-main', 'claude-duplicate', 'codex-main', 'key'].map(
+          (id) => ({
+            id,
+            name: id,
+            status: 'active',
+            last_apply_at_unix_secs: null,
+            last_apply_error: null,
+          }),
         ),
+      }),
     );
-    vi.mocked(couponInventory.useCouponInventory).mockReturnValue(
-      successQuery(COUPON_FLEET),
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      successQuery({
+        upstream_id: 'claude-main',
+        kind: 'anthropic_oauth',
+        has_credentials: true,
+        status: 'connected',
+        expires_at_unix_secs: null,
+        refresh_token_present: false,
+        refresh_token_expires_at_unix_secs: null,
+        mode: null,
+        can_refresh: false,
+        scopes: [],
+      }),
     );
+    vi.mocked(queries.useUsage).mockReturnValue(
+      successQuery({
+        range: '24h',
+        step: 'hour',
+        group_by: 'principal',
+        window_start_unix_secs: 0,
+        window_end_unix_secs: 1,
+        series: [],
+        observed: true,
+      } as DashboardUsageResponse),
+    );
+    overviewMocks.inventoryQuery.mockReturnValue(successQuery(COUPON_FLEET));
   });
 
-  it('renders allowlist-scoped, account-deduplicated reset counts on the real page', () => {
-    render(createElement(MultiProviderOverview));
-
-    const rows = screen.getAllByTestId('multi-provider-principal-row');
-    expect(rows).toHaveLength(2);
-    expect(
-      within(rows[0]).getByTestId('coupon-inventory-badge').textContent,
-    ).toBe('5 resets');
-    expect(
-      within(rows[1]).getByTestId('coupon-inventory-badge').textContent,
-    ).toBe('3 resets');
-    expect(couponInventory.useCouponInventory).toHaveBeenCalledTimes(1);
-    expect(queries.usePrincipals).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    { providers: ['anthropic'], total: '3 resets' },
-    { providers: ['openai'], total: '2 resets' },
-    { providers: ['gemini'], total: 'Resets not reported' },
-  ] satisfies { providers: ProviderFamily[]; total: string }[])(
-    'keeps inventory within the visible $providers scope',
-    ({ providers, total }) => {
-      overviewMocks.providers = providers;
-      render(createElement(MultiProviderOverview));
-      const row = screen.getAllByTestId('multi-provider-principal-row')[0];
+  it('mounts one shared upstream table between principal usage and latest requests', () => {
+    render(page());
+    const headings = screen
+      .getAllByRole('heading')
+      .map((heading) => heading.textContent);
+    expect(headings.indexOf('Upstreams')).toBeGreaterThan(
+      headings.indexOf('Principal usage'),
+    );
+    expect(headings.indexOf('Upstreams')).toBeLessThan(
+      headings.indexOf('Latest requests (any time)'),
+    );
+    expect(screen.getAllByText('Coupons')).toHaveLength(1);
+    const rows = screen.getAllByTestId('upstream-usage-row');
+    expect(rows).toHaveLength(4);
+    for (const id of ['claude-main', 'claude-duplicate']) {
+      const link = screen.getByRole('link', { name: id });
+      expect(link.getAttribute('href')).toBe(`/upstreams?selectedId=${id}`);
       expect(
-        within(row).getByTestId('coupon-inventory-badge').textContent,
-      ).toBe(total);
-    },
-  );
+        within(link.closest('li')!).getByRole('button', {
+          name: `Coupons for ${id}: 3`,
+        }).textContent,
+      ).toBe('×3');
+    }
+    expect(
+      screen.getByRole('button', { name: 'Coupons for codex-main: 2' })
+        .textContent,
+    ).toBe('×2');
+    expect(queries.usePrincipals).not.toHaveBeenCalled();
+  });
 
-  it.each(['pointer', 'keyboard'] as const)(
-    'opens type details with %s without triggering principal navigation',
+  it.each(['pointer', 'Enter', 'Space'] as const)(
+    'opens the shared current action with %s without navigating',
     async (interaction) => {
       const user = userEvent.setup();
-      render(createElement(MultiProviderOverview));
-      const row = screen.getAllByTestId('multi-provider-principal-row')[0];
-      const badge = within(row).getByTestId('coupon-inventory-badge');
-      const nameLink = within(row).getByRole('link', { name: 'All access' });
-      expect(badge.closest('a')).toBeNull();
-      expect(nameLink.getAttribute('href')).toBe(
-        '/principals?selectedId=all-access',
-      );
-
-      if (interaction === 'pointer') {
-        await user.click(badge);
-      } else {
-        nameLink.focus();
-        await user.tab();
-        expect(document.activeElement).toBe(
-          within(row).getByTestId('coupon-inventory-badge'),
-        );
-        await user.keyboard('{Enter}');
-      }
-      const details = await screen.findByTestId('coupon-inventory-details');
-      expect(details.textContent).toContain('Weekly reset');
-      expect(details.textContent).toContain('3 resets');
-      expect(details.textContent).toContain('Type not reported');
-      expect(
-        within(details).getAllByRole('link', { name: 'claude-main' }).length,
-      ).toBeGreaterThan(0);
-      fireEvent.click(within(details).getByText('Resets on allowed upstreams'));
-      expect(overviewMocks.navigate).not.toHaveBeenCalled();
-
-      fireEvent.click(within(row).getAllByRole('cell')[1]);
-      expect(overviewMocks.navigate).toHaveBeenCalledWith({
-        to: '/principals',
-        search: { selectedId: 'all-access' },
+      render(page());
+      const button = screen.getByRole('button', {
+        name: 'Coupons for claude-main: 3',
       });
+      expect(button.closest('a')).toBeNull();
+      if (interaction === 'pointer') await user.click(button);
+      else {
+        button.focus();
+        await user.keyboard(interaction === 'Enter' ? '{Enter}' : ' ');
+      }
+      expect(await screen.findByRole('dialog')).toBeTruthy();
+      expect(screen.getByText('Reset subscription quota?')).toBeTruthy();
+      expect(overviewMocks.navigate).not.toHaveBeenCalled();
     },
   );
 
-  it('shows unknown rather than zero while reset inventory loads or fails', () => {
-    vi.mocked(couponInventory.useCouponInventory).mockReturnValue(
-      pendingQuery(),
-    );
-    const page = render(createElement(MultiProviderOverview));
-    expect(screen.getAllByTestId('coupon-inventory-badge')[0].textContent).toBe(
-      'Resets loading…',
-    );
-    vi.mocked(couponInventory.useCouponInventory).mockReturnValue(
+  it('preserves ordinary upstream navigation and leaves unsupported API keys empty', () => {
+    render(page());
+    const link = screen.getByRole('link', { name: /^key/ });
+    expect(link.getAttribute('href')).toBe('/upstreams?selectedId=key');
+    expect(within(link.closest('li')!).queryByRole('button')).toBeNull();
+  });
+
+  it('keeps loading, unknown and known zero distinct', () => {
+    overviewMocks.inventoryQuery.mockReturnValue(pendingQuery());
+    const view = render(page());
+    expect(
+      screen.getByRole('button', { name: 'Coupons for claude-main: loading' }),
+    ).toBeTruthy();
+    overviewMocks.inventoryQuery.mockReturnValue(
       failedQuery(new Error('Unavailable')),
     );
-    page.rerender(createElement(MultiProviderOverview));
-    expect(screen.getAllByTestId('coupon-inventory-badge')[0].textContent).toBe(
-      'Resets unknown',
+    view.rerender(page());
+    expect(
+      screen.getByRole('button', { name: 'Coupons for claude-main: unknown' })
+        .textContent,
+    ).toBe('—');
+    overviewMocks.inventoryQuery.mockReturnValue(
+      successQuery({
+        upstreams: [
+          {
+            ...COUPON_FLEET.upstreams[0]!,
+            cedar_ember: {
+              ...COUPON_FLEET.upstreams[0]!.cedar_ember!,
+              grants: [],
+            },
+          },
+        ],
+      }),
     );
+    view.rerender(page());
+    expect(
+      screen.getByRole('button', { name: 'Coupons for claude-main: 0' })
+        .textContent,
+    ).toBe('×0');
   });
 
-  it('does not assume unrestricted access before principal allowlists load', () => {
-    vi.mocked(queries.usePrincipals).mockReturnValue(pendingQuery());
-    render(createElement(MultiProviderOverview));
-    for (const badge of screen.getAllByTestId('coupon-inventory-badge')) {
-      expect(badge.textContent).toBe('Resets loading…');
-    }
-  });
-
-  it('does not present placeholder fleet data as a current inventory', () => {
+  it('does not present placeholder data as current inventory', () => {
     const snapshot = successQuery(COUPON_FLEET);
-    if (!snapshot.isSuccess) throw new Error('Expected a successful fixture');
-    vi.mocked(couponInventory.useCouponInventory).mockReturnValue({
+    if (!snapshot.isSuccess) {
+      throw new Error('Expected a successful inventory fixture');
+    }
+    overviewMocks.inventoryQuery.mockReturnValue({
       ...snapshot,
       isPlaceholderData: true,
     });
-    render(createElement(MultiProviderOverview));
-    for (const badge of screen.getAllByTestId('coupon-inventory-badge')) {
-      expect(badge.textContent).toBe('Resets unknown');
-    }
+    render(page());
+    expect(
+      screen.getByRole('button', { name: 'Coupons for claude-main: unknown' }),
+    ).toBeTruthy();
   });
 });

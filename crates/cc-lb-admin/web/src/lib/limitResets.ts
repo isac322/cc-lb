@@ -109,9 +109,36 @@ export interface LimitResetClaimResponse {
   usage_refresh?: 'refreshed' | 'failed' | 'not_applicable';
 }
 
+/** A claim attempt recorded by cc-lb, not a provider redemption ledger. */
+export interface LimitResetHistoryItem {
+  id: string;
+  /** Time cc-lb wrote the audit row, not provider redemption time. */
+  recorded_at_unix_millis: number;
+  upstream_id: string;
+  provider: 'anthropic' | 'openai' | null;
+  coupon_type: string | null;
+  gives_back_weekly: boolean | null;
+  /** Legacy HTTP success and uncertain errors remain unknown. */
+  result: LimitResetClaimResult;
+  usage_refresh: 'refreshed' | 'failed' | 'not_applicable' | null;
+  actor: string | null;
+  request_id: string | null;
+  cleared: string[] | null;
+  windows_reset: number | null;
+}
+
+export interface LimitResetHistoryResponse {
+  items: LimitResetHistoryItem[];
+  /** Older recorded attempts exist beyond this bounded recent result. */
+  has_more: boolean;
+  limit: number;
+}
+
 export const limitResetKeys = {
   all: ['limit-resets'] as const,
   detail: (upstreamId: string) => ['limit-resets', upstreamId] as const,
+  history: (upstreamId: string, limit: number) =>
+    ['limit-resets', upstreamId, 'history', limit] as const,
 };
 
 /** Read the snapshot populated by the shared quota poll; this GET does not
@@ -145,6 +172,32 @@ export function useLimitResets(upstreamId: string | null) {
   );
 }
 
+/** Read at most 1000 recent recorded attempts; never scan provider inventory
+ *  or infer redemption from a credit disappearing. */
+export function useLimitResetHistory(
+  upstreamId: string | null,
+  enabled: boolean,
+  limit = 100,
+) {
+  return usePolledData(
+    {
+      queryKey: limitResetKeys.history(upstreamId ?? '', limit),
+      queryFn: ({ signal }) =>
+        getJson<LimitResetHistoryResponse>(
+          `/admin/v1/upstreams/${upstreamId}/limit-resets/history?limit=${limit}`,
+          { signal },
+        ),
+      enabled: enabled && Boolean(upstreamId),
+      retry: (failureCount, error) =>
+        !(
+          error instanceof ApiError &&
+          (error.status === 400 || error.status === 403 || error.status === 404)
+        ) && failureCount < 3,
+    },
+    LIMIT_RESET_POLL_MS,
+  );
+}
+
 export function useClaimLimitReset() {
   const qc = useQueryClient();
   return useMutation({
@@ -161,8 +214,8 @@ export function useClaimLimitReset() {
         body,
       ),
     // Whatever the outcome, the quota picture may have moved: refetch the real
-    // latest/series data (never optimistic zeros) plus the sidebar
-    // sources so a consumed reset is visible everywhere.
+    // latest/series data (never optimistic zeros), recorded attempt history,
+    // and sidebar sources so a consumed reset is visible everywhere.
     onSettled: () => {
       qc.invalidateQueries({ queryKey: limitResetKeys.all });
       qc.invalidateQueries({ queryKey: ['subscription-quota'] });

@@ -10,8 +10,6 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
-import { CouponInventoryBadge } from '../components/upstreams/CouponInventoryBadge';
-import type { CouponInventory } from '../lib/couponInventory';
 import type { ProviderFamily } from '../lib/providers';
 import { PrincipalUsageRow } from './PrincipalUsageRow';
 import type {
@@ -83,17 +81,11 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
   rows,
   loading,
   error,
-  inventoryByPrincipal,
-  inventoryLoading = false,
-  inventoryError = false,
 }: {
   providers: readonly ProviderFamily[];
   rows: readonly MergedPrincipalUsage[];
   loading: boolean;
   error: boolean;
-  inventoryByPrincipal?: ReadonlyMap<string, CouponInventory>;
-  inventoryLoading?: boolean;
-  inventoryError?: boolean;
 }) {
   const [descending, setDescending] = useState(true);
   const [filter, setFilter] = useState('');
@@ -200,7 +192,6 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
               </TableEmptyRow>
             ) : (
               sortedRows.map((row) => {
-                const inventory = inventoryByPrincipal?.get(row.id);
                 return (
                   <PrincipalUsageRow
                     // Opaque fill instead of the shared translucent `interactive`
@@ -223,18 +214,6 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                       >
                         {row.name}
                       </Link>
-                      {inventory ? (
-                        <div
-                          className="flex min-w-0"
-                          data-slot="principal-coupons"
-                        >
-                          <CouponInventoryBadge
-                            inventory={inventory}
-                            loading={inventoryLoading}
-                            error={inventoryError}
-                          />
-                        </div>
-                      ) : null}
                     </TableCell>
                     <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
                       {fmtCost(row.totalCostMicros)}

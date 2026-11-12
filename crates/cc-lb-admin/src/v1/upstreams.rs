@@ -252,6 +252,10 @@ pub fn router() -> Router<AdminState> {
             get(super::limit_resets::get_upstream_limit_resets),
         )
         .route(
+            "/admin/v1/upstreams/{id}/limit-resets/history",
+            get(super::limit_resets::get_upstream_limit_reset_history),
+        )
+        .route(
             "/admin/v1/upstreams/{id}/limit-resets/claim",
             post(super::limit_resets::claim_upstream_limit_reset),
         )

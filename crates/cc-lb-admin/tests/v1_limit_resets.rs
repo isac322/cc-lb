@@ -20,7 +20,8 @@ use cc_lb_control::openai_limit_resets::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditQueryScope, AuditStore, MetaStore, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    AuditEntry, AuditQueryScope, AuditStore, MetaStore, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamUpdate,
 };
 use serde_json::{Value, json};
 use url::Url;
@@ -777,6 +778,18 @@ async fn claim_settle_write_failure_keeps_coupon_fenced() {
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (_, _, history) = server
+        .client
+        .get(&format!(
+            "/admin/v1/upstreams/{}/limit-resets/history",
+            upstream.id
+        ))
+        .await;
+    assert_eq!(
+        history["items"][0]["result"], "reset",
+        "local settlement failure must not erase a known provider outcome"
+    );
+    assert!(history["items"][0]["usage_refresh"].is_null());
 
     assert!(
         get_ok(&server, upstream.id).await["cedar_ember"].is_null(),
@@ -1002,6 +1015,12 @@ async fn claim_provider_5xx_reports_unknown_not_failure() {
     assert_eq!(payload["grant_id"], "grant_01");
     assert_eq!(payload["request_id"], REQUEST_ID);
     assert_eq!(payload["outcome"], "claim_outcome_unknown");
+    assert_eq!(payload["result"], "unknown");
+    assert_eq!(payload["upstream_id"], upstream.id.to_string());
+    assert_eq!(payload["provider"], "anthropic");
+    assert!(payload["usage_refresh"].is_null());
+    assert!(payload["cleared"].is_null());
+    assert!(payload["windows_reset"].is_null());
 }
 
 async fn claim_provider_4xx_is_a_definite_rejection() {
@@ -1055,6 +1074,14 @@ async fn claim_normalizes_unrecognized_provider_result() {
     assert_eq!(body["result"], "unknown");
     assert_eq!(body["reason"], "unknown");
     assert_eq!(body["resets_left"], 1);
+    let (_, _, history) = server
+        .client
+        .get(&format!(
+            "/admin/v1/upstreams/{}/limit-resets/history",
+            upstream.id
+        ))
+        .await;
+    assert_eq!(history["items"][0]["result"], "unknown");
 }
 
 async fn get_limit_resets_preserves_unknown_gate_and_fractional_percentages() {
@@ -1640,6 +1667,18 @@ async fn usage_refresh_completion_case(
             response["windows_reset"].is_null(),
             "absent count is not zero"
         );
+        let (_, _, history) = server
+            .client
+            .get(&format!(
+                "/admin/v1/upstreams/{}/limit-resets/history",
+                upstream.id
+            ))
+            .await;
+        assert_eq!(history["items"][0]["result"], response["result"]);
+        assert_eq!(
+            history["items"][0]["usage_refresh"],
+            response["usage_refresh"]
+        );
     }
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
     let requests = provider.received_requests().await.unwrap();
@@ -1764,6 +1803,29 @@ async fn openai_claim_maps_non_reset_and_uncertain_outcomes_without_refresh() {
         if expected_result == "not_limited" {
             assert_eq!(response["windows_reset"], 0);
         }
+        let (_, _, history) = server
+            .client
+            .get(&format!(
+                "/admin/v1/upstreams/{}/limit-resets/history",
+                upstream.id
+            ))
+            .await;
+        let item = &history["items"][0];
+        assert_eq!(item["provider"], "openai");
+        assert_eq!(item["coupon_type"], "codex_rate_limits");
+        assert!(item["gives_back_weekly"].is_null());
+        assert_eq!(
+            item["result"],
+            if status == StatusCode::OK {
+                expected_result
+            } else {
+                "unknown"
+            }
+        );
+        assert!(item["usage_refresh"].is_null());
+        if expected_result == "not_limited" {
+            assert_eq!(item["windows_reset"], 0);
+        }
         let epoch = server
             .storage
             .get_meta_value(&openai_limit_reset_epoch_meta_key(upstream.id))
@@ -1791,4 +1853,173 @@ async fn anthropic_claim_requires_organization_before_provider_request() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(response["error"], "invalid_organization_id");
     assert!(provider.received_requests().await.unwrap().is_empty());
+}
+
+async fn history_filters_before_limit_and_keeps_legacy_outcomes_unknown() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let upstream = seed_oauth_upstream(&server, "https://provider.invalid").await;
+    let route = format!("/admin/v1/upstreams/{}/limit-resets/claim", upstream.id);
+    for i in 0..3 {
+        server
+            .storage
+            .append_audit(&AuditEntry {
+                ts: 1_700_000_000 + i,
+                request_id: format!("legacy-{i}"),
+                upstream: upstream.name.clone(),
+                route: route.clone(),
+                status: 200,
+                admin_action: Some("upstream_limit_reset_claim".to_owned()),
+                actor: Some("original-admin".to_owned()),
+                payload: Some(json!({"outcome":"ok", "request_id": REQUEST_ID})),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    let renamed = UpstreamStore::update(
+        server.storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            name: Some("renamed-upstream".to_owned()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // More recent rows with the same name/action or the same route must not
+    // crowd out matching attempts, even at a small result limit.
+    for i in 0..8 {
+        server
+            .storage
+            .append_audit(&AuditEntry {
+                ts: 1_700_000_100 + i,
+                request_id: format!("unrelated-{i}"),
+                upstream: renamed.name.clone(),
+                route: if i % 2 == 0 {
+                    route.clone()
+                } else {
+                    format!("/admin/v1/upstreams/{}/limit-resets/claim", Uuid::new_v4())
+                },
+                status: 200,
+                admin_action: Some(if i % 2 == 0 {
+                    "unrelated_action".to_owned()
+                } else {
+                    "upstream_limit_reset_claim".to_owned()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    let history_route = format!("/admin/v1/upstreams/{}/limit-resets/history", upstream.id);
+    let (status, _, history) = server.client.get(&format!("{history_route}?limit=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history["limit"], 2);
+    assert_eq!(history["has_more"], true);
+    assert_eq!(history["items"].as_array().unwrap().len(), 2);
+    let item = &history["items"][0];
+    assert_eq!(item["id"], "legacy-2");
+    assert_eq!(item["recorded_at_unix_millis"], 1_700_000_002_000u64);
+    assert_eq!(item["upstream_id"], upstream.id.to_string());
+    assert_eq!(item["result"], "unknown");
+    assert_eq!(item["actor"], "original-admin");
+    assert_eq!(item["request_id"], REQUEST_ID);
+    for field in [
+        "provider",
+        "coupon_type",
+        "gives_back_weekly",
+        "usage_refresh",
+        "cleared",
+        "windows_reset",
+    ] {
+        assert!(item[field].is_null(), "{field} must remain unknown");
+    }
+    let (_, _, expanded) = server
+        .client
+        .get(&format!("{history_route}?limit=1000"))
+        .await;
+    assert_eq!(expanded["has_more"], false);
+    assert_eq!(expanded["items"].as_array().unwrap().len(), 3);
+    let (_, _, defaults) = server.client.get(&history_route).await;
+    assert_eq!(defaults["limit"], 100);
+    for limit in ["0", "1001"] {
+        let (status, _, body) = server
+            .client
+            .get(&format!("{history_route}?limit={limit}"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_limit");
+    }
+    let (status, _, _) = server.client.get_without_auth(&history_route).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = server
+        .client
+        .get(&format!(
+            "/admin/v1/upstreams/{}/limit-resets/history",
+            Uuid::new_v4()
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+async fn history_publishes_verified_coupon_and_normalized_claim_outcomes() {
+    for provider_result in ["reset", "not_limited"] {
+        let provider = MockServer::start().await;
+        mount_profile(&provider).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": provider_result,
+                "cleared": if provider_result == "reset" { vec!["five_hour"] } else { vec![] },
+            })))
+            .expect(1)
+            .mount(&provider)
+            .await;
+        let server = admin_test_common::spawn_admin_server().await;
+        let upstream = seed_oauth_upstream(&server, &provider.uri()).await;
+        use_production_staleness_window(&server);
+        seed_identity(&server, &upstream).await;
+        seed_coupon(&server, &upstream, cedar_ember_body()).await;
+        let (status, _, response) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/upstreams/{}/limit-resets/claim", upstream.id),
+                claim_body("grant_01"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, _, history) = server
+            .client
+            .get(&format!(
+                "/admin/v1/upstreams/{}/limit-resets/history",
+                upstream.id
+            ))
+            .await;
+        let item = &history["items"][0];
+        assert_eq!(item["provider"], "anthropic");
+        assert_eq!(item["coupon_type"], "weekly");
+        assert_eq!(item["gives_back_weekly"], false);
+        assert_eq!(item["result"], provider_result);
+        assert_eq!(item["cleared"], response["cleared"]);
+        assert_eq!(item["request_id"], REQUEST_ID);
+        if provider_result == "reset" {
+            assert_eq!(item["usage_refresh"], "failed");
+        } else {
+            assert!(item["usage_refresh"].is_null());
+        }
+        assert!(item["windows_reset"].is_null());
+        assert_eq!(history["has_more"], false);
+        let requests = provider.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "metadata/history add no provider requests"
+        );
+    }
+}
+
+#[tokio::test]
+async fn v1_limit_reset_history_suite() {
+    history_filters_before_limit_and_keeps_legacy_outcomes_unknown().await;
+    history_publishes_verified_coupon_and_normalized_claim_outcomes().await;
 }
