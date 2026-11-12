@@ -775,7 +775,7 @@ describe('/upstreams provider account metadata', () => {
         },
       },
     ],
-    ['openai_oauth', 'ChatGPT Pro (More)', { plan: 'pro' }],
+    ['openai_oauth', 'ChatGPT Pro 200', { plan: 'pro' }],
     ['openai_oauth', 'ChatGPT Proto', { plan: '__proto__' }],
     [
       'gemini_oauth',
@@ -829,7 +829,7 @@ describe('/upstreams provider account metadata', () => {
         },
       },
     ],
-    ['openai_oauth', 'ChatGPT Pro (More)', { plan: 'pro' }],
+    ['openai_oauth', 'ChatGPT Pro 200', { plan: 'pro' }],
     [
       'gemini_oauth',
       'Google AI Ultra',
@@ -983,7 +983,7 @@ describe('/upstreams provider account metadata', () => {
   });
 
   test.each([
-    ['openai_oauth', 'ChatGPT Pro (More)', 'Workspace', 'account-team-123'],
+    ['openai_oauth', 'ChatGPT Pro 200', 'Workspace', 'account-team-123'],
     ['gemini_oauth', 'Google AI Ultra', 'Project', 'gemini-project-123'],
   ] as const)(
     'puts %s identity in the header and remaining stable facts in metadata',

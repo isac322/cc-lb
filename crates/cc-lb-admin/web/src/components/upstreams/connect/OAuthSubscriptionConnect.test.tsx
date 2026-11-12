@@ -494,7 +494,7 @@ describe('provider subscription OAuth flows', () => {
     const name = (await within(dialog).findByLabelText(
       'Upstream name',
     )) as HTMLInputElement;
-    expect(name.value).toBe('ChatGPT Pro (More) · browser');
+    expect(name.value).toBe('ChatGPT Pro 200 · browser');
     expect(completeBody).toEqual({
       state_token: 'openai-state-token',
       code: callbackUrl,
@@ -892,10 +892,10 @@ describe('OAuth completion error messages', () => {
 describe('provider account cards', () => {
   test.each([
     ['team', 'ChatGPT Team'],
-    ['pro', 'ChatGPT Pro (More)'],
+    ['pro', 'ChatGPT Pro 200'],
     ['plus', 'ChatGPT Plus'],
-    ['prolite', 'ChatGPT Pro'],
-    ['promax', 'ChatGPT Pro (Max)'],
+    ['prolite', 'ChatGPT Pro 100'],
+    ['promax', 'ChatGPT Pro 500'],
     ['future_plan', 'ChatGPT Future Plan'],
   ])('renders ChatGPT %s email, plan and workspace', (plan, label) => {
     const account = identityOfResult({

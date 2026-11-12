@@ -115,9 +115,9 @@ describe('provider plan captions', () => {
       },
       'Claude Ultra',
     ],
-    ['openai_oauth', { plan: 'pro' }, 'ChatGPT Pro (More)'],
-    ['openai_oauth', { plan: 'prolite' }, 'ChatGPT Pro'],
-    ['openai_oauth', { plan: 'promax' }, 'ChatGPT Pro (Max)'],
+    ['openai_oauth', { plan: 'pro' }, 'ChatGPT Pro 200'],
+    ['openai_oauth', { plan: 'prolite' }, 'ChatGPT Pro 100'],
+    ['openai_oauth', { plan: 'promax' }, 'ChatGPT Pro 500'],
     ['openai_oauth', { plan: 'business' }, 'ChatGPT Business'],
     [
       'gemini_oauth',
