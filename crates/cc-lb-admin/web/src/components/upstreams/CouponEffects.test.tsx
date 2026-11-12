@@ -34,8 +34,6 @@ describe('expected quota changes', () => {
     expect(screen.getByRole('definition').textContent).toContain(
       'After use: 0% used',
     );
-    expect(screen.getByText('Current usage')).toBeDefined();
-    expect(screen.getByText('After use')).toBeDefined();
   });
 
   it('never labels an old stale percentage as current usage', () => {

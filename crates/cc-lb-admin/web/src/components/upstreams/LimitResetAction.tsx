@@ -582,83 +582,130 @@ export function LimitResetAction({
           }}
           title={pendingView ? 'Reset not confirmed' : 'Use a reset coupon?'}
           description={upstream.name}
-          size="sm"
+          size="md"
           preventDismiss={claimInFlight}
           footer={
-            <>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="mr-auto"
-                disabled={claimInFlight}
-                onClick={() => setHistoryOpen(true)}
-              >
-                <History aria-hidden="true" />
-                History
-              </Button>
-              <Button
-                autoFocus
-                size="sm"
-                disabled={claimInFlight}
-                onClick={() => setDialogOpen(false)}
-              >
-                Cancel
-              </Button>
-              {pendingView ? (
+            <div className="flex w-full flex-col gap-3 text-body-sm text-text-muted">
+              {!pendingView && displayGrant ? (
                 <>
-                  <Button
-                    size="sm"
-                    variant={dismissArmed ? 'danger' : 'secondary'}
-                    disabled={claimInFlight}
-                    onClick={() =>
-                      dismissArmed ? dismissPendingOp() : setDismissArmed(true)
-                    }
-                  >
-                    {dismissArmed ? 'Dismiss anyway' : 'Dismiss record'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    loading={resetsQ.isFetching}
-                    disabled={claimInFlight}
-                    onClick={() => resetsQ.refetch()}
-                  >
-                    Refresh status
-                  </Button>
+                  <p className="text-caption text-text-faint">
+                    Uses 1 coupon. Cannot be undone.
+                  </p>
+                  {displayBlocking ? (
+                    <Notice tone="warning" title="Not usable now">
+                      {displayBlocking.text}
+                      {displayBlocking.surface ? (
+                        <a
+                          href={surfaceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="ml-1 inline-flex items-center gap-1 underline underline-offset-2 hover:text-text"
+                        >
+                          Open {providerSurface}
+                          <ExternalLink className="size-3" aria-hidden="true" />
+                        </a>
+                      ) : null}
+                    </Notice>
+                  ) : cooldownActive && !inFlightView ? (
+                    <Notice tone="warning" title="Resets on cooldown">
+                      {ember?.cooldown_until ? (
+                        <>
+                          Available{' '}
+                          <ResetCountdown ts={new Date(ember.cooldown_until)} />
+                        </>
+                      ) : (
+                        'Try after the cooldown ends.'
+                      )}
+                    </Notice>
+                  ) : !selectedUsable && !inFlightView && eligible ? (
+                    <Notice tone="warning" title="Not usable now">
+                      The account identity or coupon availability is not
+                      confirmed.
+                    </Notice>
+                  ) : null}
                 </>
-              ) : (
+              ) : null}
+              <div className="flex w-full flex-wrap items-center justify-end gap-2">
                 <Button
-                  variant="primary"
+                  variant="ghost"
                   size="sm"
-                  loading={claimInFlight}
-                  disabled={!selectedUsable || !data || queryError}
-                  onClick={() => {
-                    if (!selected || !data || !selectedUsable || queryError)
-                      return;
-                    runClaim(
-                      { grant_id: selected.id, request_id: requestId },
-                      {
-                        grant: structuredClone(selected),
-                        presentation: presentCoupon(
-                          selected,
-                          quotaWindows,
-                          observationOptions,
-                        ),
-                        effects: presentCouponEffects(selected, quotaWindows, {
-                          ...observationOptions,
-                          provider,
-                          weeklyResetsAt: ember?.weekly_resets_at,
-                        }),
-                        grants: structuredClone(selectableGrants),
-                        activeCount: ownedCount ?? 0,
-                      },
-                    );
-                  }}
+                  className="mr-auto"
+                  disabled={claimInFlight}
+                  onClick={() => setHistoryOpen(true)}
                 >
-                  Use coupon
+                  <History aria-hidden="true" />
+                  History
                 </Button>
-              )}
-            </>
+                <Button
+                  autoFocus
+                  size="sm"
+                  disabled={claimInFlight}
+                  onClick={() => setDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                {pendingView ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant={dismissArmed ? 'danger' : 'secondary'}
+                      disabled={claimInFlight}
+                      onClick={() =>
+                        dismissArmed
+                          ? dismissPendingOp()
+                          : setDismissArmed(true)
+                      }
+                    >
+                      {dismissArmed ? 'Dismiss anyway' : 'Dismiss record'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={resetsQ.isFetching}
+                      disabled={claimInFlight}
+                      onClick={() => resetsQ.refetch()}
+                    >
+                      Refresh status
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={claimInFlight}
+                    disabled={!selectedUsable || !data || queryError}
+                    onClick={() => {
+                      if (!selected || !data || !selectedUsable || queryError)
+                        return;
+                      runClaim(
+                        { grant_id: selected.id, request_id: requestId },
+                        {
+                          grant: structuredClone(selected),
+                          presentation: presentCoupon(
+                            selected,
+                            quotaWindows,
+                            observationOptions,
+                          ),
+                          effects: presentCouponEffects(
+                            selected,
+                            quotaWindows,
+                            {
+                              ...observationOptions,
+                              provider,
+                              weeklyResetsAt: ember?.weekly_resets_at,
+                            },
+                          ),
+                          grants: structuredClone(selectableGrants),
+                          activeCount: ownedCount ?? 0,
+                        },
+                      );
+                    }}
+                  >
+                    Use coupon
+                  </Button>
+                )}
+              </div>
+            </div>
           }
         >
           <div className="flex flex-col gap-4 text-body-sm text-text-muted">
@@ -745,62 +792,60 @@ export function LimitResetAction({
                     submitted.
                   </Notice>
                 ) : null}
-                {displayGroups.length > 1 ||
-                unlistedCount > 0 ||
-                (!displayGrant && displayGroups.length > 0) ? (
-                  <Select
-                    aria-label="Coupon type"
-                    className="w-full max-md:min-h-11"
-                    value={displayGroup?.key ?? ''}
-                    disabled={claimInFlight}
-                    onChange={(key) => {
-                      const group = groups.find((item) => item.key === key);
-                      if (!group) return;
-                      setSelectedGroupKey(key);
-                      setSelectedGrantId(
-                        chooseCouponGroupGrant(group, readyGrants)?.id ?? null,
-                      );
-                    }}
-                    placeholder="Choose a coupon"
-                    options={[
-                      ...displayGroups.map((group) => ({
-                        value: group.key,
-                        label: <CouponTypeCount group={group} />,
-                      })),
-                      ...(unlistedCount > 0
-                        ? [
-                            {
-                              value: 'unlisted',
-                              label: (
-                                <span className="inline-flex items-center gap-2">
-                                  <Ticket
-                                    className="size-4"
-                                    strokeWidth={1.75}
-                                    aria-hidden="true"
-                                  />
-                                  Type not reported ×{unlistedCount}
-                                </span>
-                              ),
-                              disabled: true,
-                            },
-                          ]
-                        : []),
-                    ]}
-                  />
-                ) : displayGroup ? (
-                  <CouponTypeCount group={displayGroup} />
-                ) : ember && !loading ? (
-                  <p>No active reset coupons available.</p>
-                ) : null}
-                {displayGrant ? (
-                  <>
-                    {displayEffects ? (
-                      <CouponEffects effects={displayEffects} />
-                    ) : null}
-                    <dl className="space-y-2">
-                      <div className="flex items-baseline justify-between gap-4">
+                <div className="space-y-2">
+                  {displayGroups.length > 1 ||
+                  unlistedCount > 0 ||
+                  (!displayGrant && displayGroups.length > 0) ? (
+                    <Select
+                      aria-label="Coupon type"
+                      className="w-full max-md:min-h-11"
+                      value={displayGroup?.key ?? ''}
+                      disabled={claimInFlight}
+                      onChange={(key) => {
+                        const group = groups.find((item) => item.key === key);
+                        if (!group) return;
+                        setSelectedGroupKey(key);
+                        setSelectedGrantId(
+                          chooseCouponGroupGrant(group, readyGrants)?.id ??
+                            null,
+                        );
+                      }}
+                      placeholder="Choose a coupon"
+                      options={[
+                        ...displayGroups.map((group) => ({
+                          value: group.key,
+                          label: <CouponTypeCount group={group} />,
+                        })),
+                        ...(unlistedCount > 0
+                          ? [
+                              {
+                                value: 'unlisted',
+                                label: (
+                                  <span className="inline-flex items-center gap-2">
+                                    <Ticket
+                                      className="size-4"
+                                      strokeWidth={1.75}
+                                      aria-hidden="true"
+                                    />
+                                    Type not reported ×{unlistedCount}
+                                  </span>
+                                ),
+                                disabled: true,
+                              },
+                            ]
+                          : []),
+                      ]}
+                    />
+                  ) : displayGroup ? (
+                    <CouponTypeCount group={displayGroup} />
+                  ) : ember && !loading ? (
+                    <p>No active reset coupons available.</p>
+                  ) : null}
+                  {displayGrant ? (
+                    <dl className="text-caption text-text-faint">
+                      <div className="flex items-baseline gap-2">
                         <dt>Expires</dt>
-                        <dd className="text-right text-text">
+                        <dd className="text-text-muted">
                           {displayExpiry ? (
                             <RelativeTime ts={displayExpiry} />
                           ) : (
@@ -809,42 +854,12 @@ export function LimitResetAction({
                         </dd>
                       </div>
                     </dl>
-                    {displayBlocking ? (
-                      <Notice tone="warning" title="Not usable now">
-                        {displayBlocking.text}
-                        {displayBlocking.surface ? (
-                          <a
-                            href={surfaceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="ml-1 inline-flex items-center gap-1 underline underline-offset-2 hover:text-text"
-                          >
-                            Open {providerSurface}
-                            <ExternalLink
-                              className="size-3"
-                              aria-hidden="true"
-                            />
-                          </a>
-                        ) : null}
-                      </Notice>
-                    ) : cooldownActive && !inFlightView ? (
-                      <Notice tone="warning" title="Resets on cooldown">
-                        {ember?.cooldown_until ? (
-                          <>
-                            Available{' '}
-                            <ResetCountdown
-                              ts={new Date(ember.cooldown_until)}
-                            />
-                          </>
-                        ) : (
-                          'Try after the cooldown ends.'
-                        )}
-                      </Notice>
-                    ) : !selectedUsable && !inFlightView && eligible ? (
-                      <Notice tone="warning" title="Not usable now">
-                        The account identity or coupon availability is not
-                        confirmed.
-                      </Notice>
+                  ) : null}
+                </div>
+                {displayGrant ? (
+                  <>
+                    {displayEffects ? (
+                      <CouponEffects effects={displayEffects} />
                     ) : null}
                     <details className="group">
                       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-1 text-text-muted md:min-h-8">
@@ -927,9 +942,6 @@ export function LimitResetAction({
                         </a>
                       </div>
                     </details>
-                    <p className="text-caption text-text-faint">
-                      Uses 1 coupon. Cannot be undone.
-                    </p>
                   </>
                 ) : null}
               </>

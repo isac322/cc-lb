@@ -7,6 +7,9 @@ import type {
 import { formatQuotaPercent } from '../../lib/quotaSeverity';
 import { ResetCountdown } from '../ui/RelativeTime';
 
+const COMPARISON_GRID =
+  'grid grid-cols-[5.5rem_4rem_0.75rem_minmax(0,1fr)] gap-x-2 md:grid-cols-[6.5rem_4rem_1rem_minmax(0,1fr)] md:gap-x-3';
+
 function afterUse(row: CouponEffectRow): string {
   switch (row.effect) {
     case 'reset':
@@ -53,66 +56,73 @@ export function CouponEffects({ effects }: { effects: Effects }) {
     );
   }
   return (
-    <div className="space-y-3">
+    <div>
       <div
         aria-hidden="true"
-        className="grid grid-cols-[minmax(0,1fr)_1rem_minmax(0,1.3fr)] gap-2 text-caption text-text-faint"
+        className={`${COMPARISON_GRID} pb-2 text-caption text-text-faint`}
       >
-        <span>Current usage</span>
+        <span>Quota</span>
+        <span className="text-right">Now</span>
         <span />
         <span>After use</span>
       </div>
-      <dl aria-label="Expected quota changes" className="space-y-4">
+      <dl
+        aria-label="Expected quota changes"
+        className="divide-y divide-row border-t border-row"
+      >
         {effects.rows.map((row) => (
-          <div key={row.window} className="space-y-1">
-            <dt className="flex items-center gap-2 text-label text-text-muted">
+          <div
+            key={row.window}
+            className={`${COMPARISON_GRID} items-baseline gap-y-1 py-3`}
+          >
+            <dt className="flex min-w-0 items-baseline gap-2 text-label text-text">
               <span
                 aria-hidden="true"
-                className="size-2 shrink-0"
+                className="size-2 shrink-0 self-center"
                 style={{ backgroundColor: getWindowColor(row.window).stroke }}
               />
-              {row.label}
+              <span className="min-w-0">{row.label}</span>
             </dt>
-            <dd className="space-y-1">
-              {row.effect === 'conditional_5h' ? (
-                <p className="text-body-sm text-text">{afterUse(row)}</p>
-              ) : (
-                <div className="grid grid-cols-[minmax(0,1fr)_1rem_minmax(0,1.3fr)] items-start gap-2 text-body-sm text-text">
-                  <span>
-                    <span className="sr-only">Current usage: </span>
-                    {row.current.state === 'fresh' &&
-                    row.current.percentUsed != null
-                      ? `${formatQuotaPercent(row.current.percentUsed)} used`
-                      : 'Unknown'}
-                    {row.current.state === 'stale' ? (
-                      <span className="text-text-faint"> · stale</span>
-                    ) : null}
-                  </span>
-                  <ArrowRight
-                    className="mt-0.5 size-4 text-text-faint"
-                    strokeWidth={1.75}
-                    aria-hidden="true"
-                  />
-                  <span>
-                    <span className="sr-only">After use: </span>
-                    {afterUse(row)}
-                  </span>
-                </div>
-              )}
+            <dd className="contents">
+              <span className="min-w-0 text-right text-body-sm tabular-nums text-text-muted">
+                <span className="sr-only">Current usage: </span>
+                {row.current.state === 'fresh' &&
+                row.current.percentUsed != null
+                  ? `${formatQuotaPercent(row.current.percentUsed)} used`
+                  : 'Unknown'}
+                {row.current.state === 'stale' ? (
+                  <span className="text-text-faint"> · stale</span>
+                ) : null}
+              </span>
+              <ArrowRight
+                className="mt-1 size-3 self-start text-text-faint md:size-4"
+                strokeWidth={1.75}
+                aria-hidden="true"
+              />
+              <span
+                className={`min-w-0 break-words ${
+                  row.effect === 'unchanged' || row.effect === 'unknown'
+                    ? 'text-body-sm text-text-muted'
+                    : 'text-body font-medium text-text'
+                }`}
+              >
+                <span className="sr-only">After use: </span>
+                {afterUse(row)}
+              </span>
+              <p className="col-span-4 text-caption text-text-faint">
+                <ResetSchedule row={row} />
+              </p>
               {row.effect === 'fable_weekly' ? (
-                <p className="text-caption text-text-faint">
+                <p className="col-span-4 text-caption text-text-faint">
                   Other-model weekly usage unchanged.
                 </p>
               ) : null}
-              <p className="text-caption text-text-faint">
-                <ResetSchedule row={row} />
-              </p>
             </dd>
           </div>
         ))}
       </dl>
       {effects.otherLimitsUnchanged ? (
-        <p className="text-caption text-text-faint">
+        <p className="mt-2 text-caption text-text-faint">
           Other model and feature limits unchanged.
         </p>
       ) : null}
