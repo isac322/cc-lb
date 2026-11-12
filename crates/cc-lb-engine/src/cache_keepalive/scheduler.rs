@@ -158,4 +158,28 @@ mod tests {
 
         assert_eq!(params.delay, Duration::from_secs(1));
     }
+
+    #[test]
+    fn schedule_params_preserve_configured_max_refreshes_across_ttls() {
+        for max_refreshes_per_session in [4_u32, 12, 20] {
+            let config = CacheKeepaliveConfig {
+                enabled: true,
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 8_388_608,
+                min_cache_tokens: 10_000,
+                classifier: Default::default(),
+            };
+            for ttl in [CacheTtl::Ttl5m, CacheTtl::Ttl1h, CacheTtl::Ttl30m] {
+                let params =
+                    ScheduleParams::from_cache_anchor_age(&config, ttl, Duration::from_secs(5));
+                assert_eq!(
+                    params.max_refreshes, max_refreshes_per_session,
+                    "ttl={ttl:?}"
+                );
+            }
+        }
+    }
 }

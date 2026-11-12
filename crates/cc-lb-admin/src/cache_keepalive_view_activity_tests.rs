@@ -159,6 +159,7 @@ fn renewal_evidence(
         cost_micros: Some(0),
         request_ref: Some(format!("{source_ref_id}-request")),
         event_ref: Some(source_ref_id.to_owned()),
+        session_key_hash: None,
     }
 }
 
@@ -185,6 +186,7 @@ fn follow_up_evidence(
         cost_micros: Some(0),
         request_ref: Some("follow-up-request".to_owned()),
         event_ref: Some("follow-up".to_owned()),
+        session_key_hash: None,
     }
 }
 
@@ -830,6 +832,7 @@ fn cache_keepalive_activity_requires_matching_followup_evidence() {
             cost_micros: Some(1),
             request_ref: Some("request".to_owned()),
             event_ref: Some("renewal-with-followup".to_owned()),
+            session_key_hash: None,
         },
         CacheKeepaliveEvidenceRecord {
             evidence_id: "followup-evidence".to_owned(),
@@ -849,6 +852,7 @@ fn cache_keepalive_activity_requires_matching_followup_evidence() {
             cost_micros: Some(2),
             request_ref: Some("followup".to_owned()),
             event_ref: Some("followup".to_owned()),
+            session_key_hash: None,
         },
     ];
     let activity = derive_activity_view(
@@ -888,6 +892,7 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
             cost_micros: Some(1),
             request_ref: Some("request-a".to_owned()),
             event_ref: Some("renewal-a".to_owned()),
+            session_key_hash: None,
         },
         CacheKeepaliveEvidenceRecord {
             evidence_id: "renewal-b-evidence".to_owned(),
@@ -907,6 +912,7 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
             cost_micros: Some(1),
             request_ref: Some("request-b".to_owned()),
             event_ref: Some("renewal-b".to_owned()),
+            session_key_hash: None,
         },
         CacheKeepaliveEvidenceRecord {
             evidence_id: "followup-extension".to_owned(),
@@ -926,6 +932,7 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
             cost_micros: Some(2),
             request_ref: Some("followup".to_owned()),
             event_ref: Some("followup".to_owned()),
+            session_key_hash: None,
         },
     ];
 
@@ -1936,4 +1943,137 @@ fn attempts_never_fall_below_recorded_renewals_in_the_current_cycle() {
     assert_eq!(derive(&item, &turns), Some(12));
     item.refresh_count = None;
     assert_eq!(derive(&item, &turns), None);
+}
+
+#[test]
+fn session_follow_up_proves_cycle_and_credits_latest_renewal_once() {
+    for (renewal_prefix, follow_up_prefix, follow_up_tokens) in [
+        (Some("renewal-prefix"), None, 20_000),
+        (Some("renewal-prefix"), Some("serving-prefix"), 25_000),
+        (None, None, 20_000),
+    ] {
+        let cycle = Uuid::from_u128(90);
+        let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+        item.status = Some(CacheKeepaliveSessionStatus::Active);
+        item.cycle_id = Some(cycle);
+        let mut turns = [turn("session-early", 200), turn("session-late", 240)];
+        for turn in &mut turns {
+            turn.cycle_id = Some(cycle);
+            turn.cost_micros = Some(6_000);
+        }
+        let mut evidence = vec![
+            renewal_evidence(
+                "session-early",
+                cycle,
+                200_000,
+                CacheTtl::Ttl5m,
+                "hit",
+                "renewal-prefix",
+            ),
+            renewal_evidence(
+                "session-late",
+                cycle,
+                240_000,
+                CacheTtl::Ttl5m,
+                "hit",
+                "renewal-prefix",
+            ),
+        ];
+        for renewal in &mut evidence {
+            renewal.prefix_hash = renewal_prefix.map(str::to_owned);
+            renewal.session_key_hash = Some("session".to_owned());
+        }
+        let mut follow_up = follow_up_evidence(300_000, CacheTtl::Ttl5m, "unused");
+        follow_up.prefix_hash = follow_up_prefix.map(str::to_owned);
+        follow_up.session_key_hash = Some("session".to_owned());
+        follow_up.cache_read_input_tokens = Some(follow_up_tokens);
+        let derive = |evidence: &[CacheKeepaliveEvidenceRecord]| {
+            derive_activity_view(
+                CacheKeepaliveActivitySource {
+                    item: &item,
+                    session: None,
+                    turns: &turns,
+                    evidence,
+                    now_ms: 310_000,
+                    horizon_start_ms: None,
+                },
+                priced_catalog().as_ref(),
+            )
+        };
+        assert!(derive(&evidence).is_last_pending);
+        evidence.push(follow_up.clone());
+        follow_up.evidence_id = "duplicate-session-follow-up".to_owned();
+        evidence.push(follow_up);
+        let activity = derive(&evidence);
+        assert_eq!(activity.evidence_status, "observed");
+        assert_eq!(activity.unknown_cycles, 0);
+        assert!(!activity.is_last_pending);
+        assert!(activity.turns.iter().all(|turn| !turn.pending));
+        assert_eq!(activity.turns[0].source_ref_id, "session-late");
+        assert!(activity.turns[0].followed_up);
+        assert!(!activity.turns[1].followed_up);
+        assert_eq!(activity.total_avoided_micros, Some(69_000));
+        assert_eq!(activity.gaps[0].ending_kind, "followup_hit");
+        assert_eq!(activity.gaps[0].avoided_micros, Some(69_000));
+    }
+}
+
+#[test]
+fn session_follow_up_requires_full_cache_read_and_same_route_within_ttl() {
+    let cycle = Uuid::from_u128(91);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    item.cycle_id = Some(cycle);
+    let mut paid = turn("session-paid", 200);
+    paid.cycle_id = Some(cycle);
+    paid.cost_micros = Some(6_000);
+    let mut renewal = renewal_evidence(
+        "session-paid",
+        cycle,
+        200_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "renewal-prefix",
+    );
+    renewal.session_key_hash = Some("session".to_owned());
+    let mut valid = follow_up_evidence(300_000, CacheTtl::Ttl5m, "different-prefix");
+    valid.session_key_hash = Some("session".to_owned());
+    assert!(super::follow_up_matches(&renewal, &valid));
+    for invalid in 0..9 {
+        let mut renewal = renewal.clone();
+        let mut follow_up = valid.clone();
+        match invalid {
+            0 => follow_up.cache_read_input_tokens = Some(19_999),
+            1 => follow_up.upstream_id = Uuid::from_u128(1),
+            2 => follow_up.model = "claude-opus-4-6".to_owned(),
+            3 => follow_up.principal_id = "other-principal".to_owned(),
+            4 => follow_up.session_key_hash = Some("other-session".to_owned()),
+            5 => follow_up.request_start_ms = 200_000,
+            6 => follow_up.request_start_ms = 500_001,
+            7 => renewal.cache_read_input_tokens = Some(0),
+            8 => renewal.cache_read_input_tokens = None,
+            _ => unreachable!(),
+        }
+        let evidence = [renewal, follow_up];
+        let activity = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: None,
+                turns: std::slice::from_ref(&paid),
+                evidence: &evidence,
+                now_ms: 310_000,
+                horizon_start_ms: None,
+            },
+            priced_catalog().as_ref(),
+        );
+        assert!(activity.is_last_pending, "invalid case {invalid}");
+        assert!(!activity.turns[0].followed_up, "invalid case {invalid}");
+        assert_eq!(
+            activity.total_avoided_micros,
+            Some(0),
+            "invalid case {invalid}"
+        );
+    }
+    valid.request_start_ms = 500_000;
+    assert!(super::follow_up_matches(&renewal, &valid));
 }

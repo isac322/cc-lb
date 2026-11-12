@@ -640,6 +640,7 @@ async fn current_follow_up_evidence_matrix(
                     cost_micros: Some(1_000),
                     request_ref: Some(source.clone()),
                     event_ref: Some(source.clone()),
+                    session_key_hash: None,
                 };
                 seed_cycle_turn(
                     storage,
@@ -739,6 +740,7 @@ async fn current_follow_up_evidence_matrix(
                 cost_micros: Some(1_000),
                 request_ref: Some(source.clone()),
                 event_ref: Some(source.clone()),
+                session_key_hash: None,
             };
             seed_cycle_turn(storage, principal, id, source, now, None, vec![unknown]).await;
             let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
@@ -894,6 +896,7 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
                 cost_micros: Some(1_000),
                 request_ref: Some(source.clone()),
                 event_ref: Some(source.clone()),
+                session_key_hash: None,
             };
             if index < 2 {
                 evidence.push(CacheKeepaliveEvidenceRow {

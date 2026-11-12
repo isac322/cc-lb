@@ -38,6 +38,8 @@ const BUILTIN_WAIT_FOR_USER_TOOLS: &[&str] = &[
     "act_mode_respond",
     "report_bug",
     "StructuredOutput",
+    "SubagentHandback",
+    "EndConversation",
 ];
 
 pub struct HeuristicClassifier<'a> {
@@ -260,7 +262,13 @@ mod tests {
 
     #[test]
     fn end_turn_with_defined_completion_tool_is_still_user_turn() {
-        for tool_name in ["ExitPlanMode", "attempt_completion", "StructuredOutput"] {
+        for tool_name in [
+            "ExitPlanMode",
+            "attempt_completion",
+            "StructuredOutput",
+            "SubagentHandback",
+            "EndConversation",
+        ] {
             let req = json!({"tools": [{"name": tool_name}]});
             let resp =
                 json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]});
@@ -353,6 +361,58 @@ mod tests {
             }),
         );
         assert_eq!(d, TurnDecision::UserTurn);
+    }
+
+    #[test]
+    fn tool_use_with_only_handback_or_end_conversation_is_user_turn() {
+        for tool_name in ["SubagentHandback", "EndConversation"] {
+            for block_type in ["tool_use", "mcp_tool_use"] {
+                let decision = classify(
+                    &default_config(),
+                    json!({"tools": [{"name": tool_name}]}),
+                    json!({
+                        "stop_reason": "tool_use",
+                        "content": [
+                            {"type": block_type, "name": tool_name, "id": "t1", "input": {}}
+                        ],
+                    }),
+                );
+                assert_eq!(decision, TurnDecision::UserTurn, "{tool_name}/{block_type}");
+            }
+        }
+    }
+
+    #[test]
+    fn tool_use_with_handback_and_bash_is_agent_in_turn() {
+        let decision = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "SubagentHandback", "id": "a", "input": {}},
+                    {"type": "tool_use", "name": "Bash", "id": "b", "input": {}}
+                ],
+            }),
+        );
+        assert_eq!(decision, TurnDecision::AgentInTurn);
+    }
+
+    #[test]
+    fn handback_and_end_conversation_names_are_case_sensitive() {
+        for tool_name in ["subagenthandback", "Endconversation"] {
+            let decision = classify(
+                &default_config(),
+                json!({}),
+                json!({
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "tool_use", "name": tool_name, "id": "t1", "input": {}}
+                    ],
+                }),
+            );
+            assert_eq!(decision, TurnDecision::AgentInTurn, "{tool_name}");
+        }
     }
 
     #[test]

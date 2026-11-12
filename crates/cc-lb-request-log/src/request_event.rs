@@ -256,11 +256,26 @@ pub struct RequestEvent {
     pub upstream_stream_warning_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<JsonValue>,
+    #[serde(skip)]
+    pub keepalive_session_key_hash: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::RequestEvent;
+
+    #[test]
+    fn keepalive_session_key_is_internal_and_not_serialized() {
+        let event = RequestEvent {
+            keepalive_session_key_hash: Some("principal/thread:session".to_owned()),
+            ..RequestEvent::default()
+        };
+        let value = serde_json::to_value(&event).expect("serialize request event");
+        assert!(value.get("keepalive_session_key_hash").is_none());
+        let restored: RequestEvent =
+            serde_json::from_value(value).expect("deserialize request event");
+        assert_eq!(restored.keepalive_session_key_hash, None);
+    }
 
     #[test]
     fn request_event_source_metadata_roundtrips() {

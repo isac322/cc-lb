@@ -393,5 +393,6 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
         routing_trace: None,
         iterations: None,
         internal_errors: Vec::new(),
+        keepalive_session_key_hash: None,
     })
 }

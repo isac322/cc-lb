@@ -199,7 +199,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
     expect(inputs[0].value).toBe('30');
     expect(inputs[1].value).toBe('300');
-    expect(inputs[2].value).toBe('12');
+    expect(inputs[2].value).toBe('4');
     expect(inputs[3].value).toBe('14400');
     expect(inputs[4].value).toBe('8388608');
   });

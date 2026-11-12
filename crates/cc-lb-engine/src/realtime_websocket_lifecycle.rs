@@ -91,6 +91,7 @@ impl Lifecycle {
                     message_count: None,
                     cache_control_message_indices: Vec::new(),
                     native_cache: None,
+                    keepalive_session_key_hash: None,
                 }),
             });
         }

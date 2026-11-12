@@ -226,6 +226,7 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         routing_trace: None,
         internal_errors: Vec::new(),
         iterations: None,
+        keepalive_session_key_hash: None,
     })
 }
 

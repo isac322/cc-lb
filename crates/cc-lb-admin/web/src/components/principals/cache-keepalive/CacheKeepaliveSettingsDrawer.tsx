@@ -46,7 +46,7 @@ function getDraftSnapshot(principal: Principal): CacheKeepaliveDraftSnapshot {
     enabled: config?.enabled ?? false,
     lead5m: config?.refresh_lead_time_5m_secs ?? 30,
     lead1h: config?.refresh_lead_time_1h_secs ?? 300,
-    maxRenewals: config?.max_refreshes_per_session ?? 12,
+    maxRenewals: config?.max_refreshes_per_session ?? 4,
     maxDuration: config?.max_total_duration_secs ?? 14400,
     snapshotBytes: config?.snapshot_max_bytes ?? 8_388_608,
     extraTools: [...(config?.classifier?.extra_wait_for_user_tools ?? [])],
@@ -82,7 +82,7 @@ export function CacheKeepaliveSettingsDrawer({
   const [enabled, setEnabled] = useState(false);
   const [lead5m, setLead5m] = useState<number | null>(30);
   const [lead1h, setLead1h] = useState<number | null>(300);
-  const [maxRenewals, setMaxRenewals] = useState<number | null>(12);
+  const [maxRenewals, setMaxRenewals] = useState<number | null>(4);
   const [maxDuration, setMaxDuration] = useState<number | null>(14400);
   const [snapshotBytes, setSnapshotBytes] = useState<number | null>(8_388_608);
   const [extraTools, setExtraTools] = useState<string[]>([]);

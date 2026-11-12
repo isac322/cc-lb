@@ -53,12 +53,13 @@ async fn activity_evidence_bounds_id_and_prefix_parameters_and_deduplicates_unio
          ), kinds(kind) AS (SELECT 'renewal' UNION ALL SELECT 'follow_up')
          INSERT INTO cache_keepalive_evidence (
             evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
-            principal_id, upstream_id, model, ttl, event_ref, created_at_ms
+            session_key_hash, principal_id, upstream_id, model, ttl, event_ref, created_at_ms
          )
          SELECT kind || '-' || n,
             CASE WHEN kind = 'renewal' THEN printf('00000000-0000-0000-0000-%012x', n) END,
             kind, CASE WHEN kind = 'renewal' THEN 1000 ELSE 2000 END,
-            'prefix-' || n, 'principal-a', '00000000-0000-0000-0000-000000000007',
+            CASE WHEN kind = 'renewal' OR n % 2 = 0 THEN 'prefix-' || n END,
+            'session-' || n, 'principal-a', '00000000-0000-0000-0000-000000000007',
             'claude-sonnet-4-5', '5m',
             CASE WHEN kind = 'renewal' THEN 'source-' || n END, 1000
          FROM ids CROSS JOIN kinds",
@@ -1482,6 +1483,7 @@ fn economics_projection(
     projection
         .evidence
         .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+            session_key_hash: None,
             evidence_id: format!("evidence-{source_ref_id}"),
             cycle_id,
             evidence_kind: "renewal".to_owned(),
@@ -1509,6 +1511,7 @@ fn follow_up_evidence(
     model: &str,
 ) -> cc_lb_storage_api::CacheKeepaliveEvidenceRow {
     cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+        session_key_hash: None,
         evidence_id: format!("follow-up-{source_ref_id}"),
         cycle_id: None,
         evidence_kind: "follow_up".to_owned(),
@@ -2624,4 +2627,407 @@ async fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
             .expect("durable session");
         assert_eq!(session.cancel_reason.as_deref(), cause);
     }
+}
+
+#[derive(Default)]
+struct FollowUpRejectionMetrics {
+    counts: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RejectionCount>>>,
+}
+
+#[derive(Default)]
+struct RejectionCount(std::sync::atomic::AtomicU64);
+
+impl metrics::CounterFn for RejectionCount {
+    fn increment(&self, value: u64) {
+        self.0
+            .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn absolute(&self, value: u64) {
+        self.0
+            .fetch_max(value, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl FollowUpRejectionMetrics {
+    fn count(&self, reason: &str) -> u64 {
+        self.counts
+            .lock()
+            .expect("metric counts")
+            .get(reason)
+            .map_or(0, |counter| {
+                counter.0.load(std::sync::atomic::Ordering::Relaxed)
+            })
+    }
+}
+
+impl metrics::Recorder for FollowUpRejectionMetrics {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        if key.name() != "cc_lb_cache_keepalive_follow_up_rejected_total" {
+            return metrics::Counter::noop();
+        }
+        let reason = key
+            .labels()
+            .find(|label| label.key() == "reason")
+            .expect("rejection reason")
+            .value()
+            .to_owned();
+        let count = self
+            .counts
+            .lock()
+            .expect("metric counts")
+            .entry(reason)
+            .or_default()
+            .clone();
+        metrics::Counter::from_arc(count)
+    }
+
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+
+    fn register_histogram(
+        &self,
+        _: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
+}
+
+#[tokio::test]
+async fn session_only_follow_up_survives_purge_and_proves_cycle() {
+    let (_directory, storage) = storage().await;
+    let ts = live_evidence_base_secs();
+    let cycle_id = Uuid::from_u128(80_001);
+    let session_key = "session-only-evidence";
+    let source_ref = "session-only-renewal";
+    let mut replace = request(session_key, ts, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("seed session");
+    let mut projection = economics_projection(source_ref, Some(cycle_id), ts, "hit", 6_000);
+    projection.turn.as_mut().expect("turn").session_key_hash = session_key.to_owned();
+    projection.decision.session_key_hash = Some(session_key.to_owned());
+    projection.evidence[0].session_key_hash = Some(session_key.to_owned());
+    let model = projection.evidence[0].model.clone();
+    storage
+        .append_request_event_with_projections(&event(source_ref, ts), &projection)
+        .await
+        .expect("persist renewal");
+    assert_eq!(
+        storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("pending summary")
+            .evidence_status,
+        "pending"
+    );
+
+    let mut follow_up = follow_up_evidence("session-only-follow-up", ts, &model);
+    follow_up.prefix_hash = None;
+    follow_up.session_key_hash = Some(session_key.to_owned());
+    follow_up.cache_read_input_tokens = Some(20_001);
+    storage
+        .append_request_event_with_evidence(&event("session-only-follow-up", ts + 1), &[follow_up])
+        .await
+        .expect("persist session-only follow-up");
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("proven summary");
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].renewals, 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+
+    storage
+        .purge_cache_keepalive_expired(ts + 301)
+        .await
+        .expect("purge expired session");
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, session_key)
+        .await
+        .expect("read purged session")
+        .expect("reconstructed session");
+    assert_eq!(
+        item.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    let evidence = storage
+        .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle_id], &[], 0, 0)
+        .await
+        .expect("activity after purge");
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[1].prefix_hash, None);
+    assert_eq!(evidence[1].session_key_hash.as_deref(), Some(session_key));
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("purged summary");
+    assert_eq!(aggregate.groups[0].renewals, 1);
+}
+
+#[tokio::test]
+async fn session_match_requires_complete_renewed_cache() {
+    let (_directory, storage) = storage().await;
+    let metrics = FollowUpRejectionMetrics::default();
+    let _recorder = metrics::set_default_local_recorder(&metrics);
+    let ts = live_evidence_base_secs();
+    for (index, renewal_tokens, follow_up_tokens, same_session) in [
+        (0_u128, 20_000, 19_999, true),
+        (1, 0, 20_000, true),
+        (2, 20_000, 20_000, false),
+    ] {
+        let source = format!("rejected-session-{index}");
+        let cycle = Uuid::from_u128(80_010 + index);
+        let mut projection = economics_projection(&source, Some(cycle), ts, "hit", 6_000);
+        projection.evidence[0].session_key_hash = Some(source.clone());
+        projection.evidence[0].cache_read_input_tokens = Some(renewal_tokens);
+        let mut follow_up = follow_up_evidence(&source, ts, &projection.evidence[0].model);
+        follow_up.prefix_hash = None;
+        follow_up.session_key_hash = Some(if same_session {
+            source.clone()
+        } else {
+            "wrong-session".to_owned()
+        });
+        follow_up.cache_read_input_tokens = Some(follow_up_tokens);
+        storage
+            .append_request_event_with_projections(&event(&source, ts), &projection)
+            .await
+            .expect("append renewal projection");
+        storage
+            .append_request_event_with_evidence(
+                &event(&format!("{source}-follow-up"), ts + 1),
+                &[follow_up],
+            )
+            .await
+            .expect("append rejected session evidence");
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+            .await
+            .expect("rejected activity");
+        assert_eq!(evidence.len(), 1, "{source}");
+    }
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("rejected summary");
+    assert!(aggregate.groups.iter().all(|group| group.renewals == 0));
+    let mut ordinary = follow_up_evidence("ordinary-session", ts, "unrelated-model");
+    ordinary.prefix_hash = None;
+    ordinary.session_key_hash = Some("ordinary-session".to_owned());
+    ordinary.upstream_id = Uuid::from_u128(999);
+    storage
+        .append_request_event_with_evidence(&event("ordinary-session", ts), &[ordinary])
+        .await
+        .expect("ordinary session evidence");
+    assert_eq!(metrics.count("no_matching_renewal_prefix"), 0);
+    assert_eq!(metrics.count("outside_ttl"), 0);
+    assert_eq!(metrics.count("not_first_in_cycle"), 0);
+}
+
+#[tokio::test]
+async fn mixed_identity_follow_ups_credit_only_first_request() {
+    let (_directory, storage) = storage().await;
+    let metrics = FollowUpRejectionMetrics::default();
+    let _recorder = metrics::set_default_local_recorder(&metrics);
+    let ts = live_evidence_base_secs();
+    for (index, session_first) in [(0_u128, true), (1, false)] {
+        let source = format!("mixed-identity-{index}");
+        let cycle = Uuid::from_u128(80_020 + index);
+        let mut projection = economics_projection(&source, Some(cycle), ts, "hit", 6_000);
+        projection.evidence[0].prefix_hash = Some(source.clone());
+        projection.evidence[0].session_key_hash = Some(source.clone());
+        let mut first = follow_up_evidence(
+            &format!("{source}-first"),
+            ts,
+            &projection.evidence[0].model,
+        );
+        first.prefix_hash = if session_first {
+            None
+        } else {
+            Some(source.clone())
+        };
+        first.session_key_hash = Some(source.clone());
+        let mut sibling = first.clone();
+        // Prefix evidence sorts before its :session sibling for the same request.
+        sibling.evidence_id.push_str(":session");
+        sibling.prefix_hash = None;
+        storage
+            .append_request_event_with_projections(&event(&source, ts), &projection)
+            .await
+            .expect("append renewal projection");
+        let before = metrics.count("not_first_in_cycle");
+        storage
+            .append_request_event_with_evidence(
+                &event(&format!("{source}-first"), ts + 1),
+                &[first.clone(), sibling],
+            )
+            .await
+            .expect("append first follow-up plus session sibling");
+        assert_eq!(metrics.count("not_first_in_cycle"), before);
+        let mut second = follow_up_evidence(
+            &format!("{source}-second"),
+            ts + 1,
+            &projection.evidence[0].model,
+        );
+        second.prefix_hash = if session_first {
+            Some(source.clone())
+        } else {
+            None
+        };
+        second.session_key_hash = Some(source.clone());
+        storage
+            .append_request_event_with_evidence(
+                &event(&format!("{source}-second"), ts + 2),
+                &[second],
+            )
+            .await
+            .expect("append second follow-up");
+        assert_eq!(
+            metrics.count("not_first_in_cycle"),
+            before + u64::from(session_first)
+        );
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+            .await
+            .expect("deduplicated activity");
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[1].evidence_id, first.evidence_id);
+        storage
+            .purge_cache_keepalive_expired(0)
+            .await
+            .expect("dedup housekeeping");
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+            .await
+            .expect("deduplicated activity after housekeeping");
+        assert_eq!(evidence.len(), 2);
+    }
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("mixed identity summary");
+    assert_eq!(
+        aggregate
+            .groups
+            .iter()
+            .map(|group| group.renewals)
+            .sum::<u64>(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn session_evidence_honors_long_ttl_boundaries() {
+    let (_directory, storage) = storage().await;
+    let metrics = FollowUpRejectionMetrics::default();
+    let _recorder = metrics::set_default_local_recorder(&metrics);
+    let ts = live_evidence_base_secs();
+    for (index, ttl) in [(0_u128, CacheTtl::Ttl30m), (1, CacheTtl::Ttl12h)] {
+        for (offset, accepted) in [(0_u64, true), (1, false)] {
+            let source = format!("long-ttl-{index}-{offset}");
+            let cycle = Uuid::from_u128(80_030 + index * 2 + u128::from(offset));
+            let mut projection = economics_projection(&source, Some(cycle), ts, "hit", 6_000);
+            projection.evidence[0].ttl = ttl;
+            projection.evidence[0].prefix_hash = Some(source.clone());
+            projection.evidence[0].session_key_hash = Some(source.clone());
+            let mut follow_up = follow_up_evidence(&source, ts, &projection.evidence[0].model);
+            follow_up.prefix_hash = None;
+            follow_up.session_key_hash = Some(source.clone());
+            follow_up.request_start_ms = ts * 1_000 + ttl.as_secs() * 1_000 + offset;
+            storage
+                .append_request_event_with_projections(&event(&source, ts), &projection)
+                .await
+                .expect("append renewal projection");
+            storage
+                .append_request_event_with_evidence(
+                    &event(&format!("{source}-follow-up"), ts + 1),
+                    &[follow_up],
+                )
+                .await
+                .expect("append TTL boundary evidence");
+            let evidence = storage
+                .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+                .await
+                .expect("TTL boundary activity");
+            assert_eq!(evidence.len(), if accepted { 2 } else { 1 }, "{source}");
+            if accepted {
+                let mut duplicate = follow_up_evidence(
+                    &format!("{source}-duplicate"),
+                    ts,
+                    &projection.evidence[0].model,
+                );
+                duplicate.prefix_hash = Some(source.clone());
+                duplicate.request_start_ms = ts * 1_000 + ttl.as_secs() * 1_000;
+                storage
+                    .append_request_event_with_evidence(
+                        &event(&format!("{source}-duplicate"), ts),
+                        &[duplicate],
+                    )
+                    .await
+                    .expect("reject duplicate against long-lived session-only proof");
+            }
+            // Prefix candidates outside the window retain the existing rejection metric.
+            let mut outside = follow_up_evidence(
+                &format!("{source}-outside"),
+                ts,
+                &projection.evidence[0].model,
+            );
+            outside.prefix_hash = Some(source.clone());
+            outside.request_start_ms = ts * 1_000 + ttl.as_secs() * 1_000 + 1;
+            storage
+                .append_request_event_with_evidence(
+                    &event(&format!("{source}-outside"), ts),
+                    &[outside],
+                )
+                .await
+                .expect("append outside TTL prefix candidate");
+        }
+    }
+    storage
+        .purge_cache_keepalive_expired(0)
+        .await
+        .expect("TTL housekeeping");
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("TTL summary");
+    assert_eq!(
+        aggregate
+            .groups
+            .iter()
+            .map(|group| group.renewals)
+            .sum::<u64>(),
+        2
+    );
+    // A 12h + 1ms candidate is outside the bounded renewal lookback entirely.
+    assert_eq!(metrics.count("not_first_in_cycle"), 2);
+    assert_eq!(metrics.count("outside_ttl"), 2);
+    assert_eq!(metrics.count("no_matching_renewal_prefix"), 2);
 }

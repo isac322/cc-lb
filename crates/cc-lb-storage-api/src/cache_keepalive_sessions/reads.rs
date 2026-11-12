@@ -210,6 +210,8 @@ pub struct CacheKeepaliveEvidenceRecord {
     pub cost_micros: Option<i64>,
     pub request_ref: Option<String>,
     pub event_ref: Option<String>,
+    #[serde(default)]
+    pub session_key_hash: Option<String>,
 }
 /// Proven follow-up hits for one `(model, ttl, cache-read size)`.
 ///

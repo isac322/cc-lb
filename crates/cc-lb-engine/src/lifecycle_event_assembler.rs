@@ -764,7 +764,12 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    let evidence = follow_up_evidence(&row);
+    let effective_breakpoints = partial
+        .route
+        .as_ref()
+        .and_then(|route| route.cache_breakpoints.as_deref())
+        .unwrap_or(&row.cache_breakpoints);
+    let evidence = follow_up_evidence(&row, effective_breakpoints);
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
         if let Some(mut cache_breakpoints) = route.cache_breakpoints.clone() {
@@ -857,11 +862,16 @@ async fn write_finalized_rows(
 }
 const MAX_FOLLOW_UP_PREFIX_HASHES: usize = 32;
 
-fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
+fn follow_up_evidence(
+    row: &RequestEvent,
+    cache_breakpoints: &[RequestCacheBreakpoint],
+) -> Vec<CacheKeepaliveEvidenceRow> {
     let Some(cache_read_input_tokens) = row.cache_read_input_tokens else {
         return Vec::new();
     };
-    if cache_read_input_tokens == 0 || row.cache_breakpoints.is_empty() {
+    if cache_read_input_tokens == 0
+        || (cache_breakpoints.is_empty() && row.keepalive_session_key_hash.is_none())
+    {
         return Vec::new();
     }
     let Some(principal_id) = row.principal_id.clone() else {
@@ -876,23 +886,25 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
     let Some(request_start_ms) = row.ts_ms else {
         return Vec::new();
     };
-    let mut hasher = Sha256::new();
-    hasher.update(b"request-cache-breakpoint-v1");
-    for breakpoint in &row.cache_breakpoints {
-        hasher.update(breakpoint.block_index.to_le_bytes());
-        hasher.update(breakpoint.path.as_bytes());
-        hasher.update(breakpoint.prefix_hash.as_bytes());
-        if let Some(ttl) = breakpoint.ttl.as_deref() {
-            hasher.update(ttl.as_bytes());
+    let fingerprint = (!cache_breakpoints.is_empty()).then(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(b"request-cache-breakpoint-v1");
+        for breakpoint in cache_breakpoints {
+            hasher.update(breakpoint.block_index.to_le_bytes());
+            hasher.update(breakpoint.path.as_bytes());
+            hasher.update(breakpoint.prefix_hash.as_bytes());
+            if let Some(ttl) = breakpoint.ttl.as_deref() {
+                hasher.update(ttl.as_bytes());
+            }
         }
-    }
-    let fingerprint = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    });
     let mut prefix_hashes = Vec::new();
-    for breakpoint in row.cache_breakpoints.iter().rev() {
+    for breakpoint in cache_breakpoints.iter().rev() {
         if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
             break;
         }
@@ -908,12 +920,11 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
             }
         }
     }
-    prefix_hashes
+    let mut evidence: Vec<_> = prefix_hashes
         .into_iter()
         .enumerate()
         .map(|(index, prefix_hash)| {
-            let ttl = row
-                .cache_breakpoints
+            let ttl = cache_breakpoints
                 .iter()
                 .find(|breakpoint| {
                     breakpoint.prefix_hash == prefix_hash
@@ -931,7 +942,7 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
                 cycle_id: None,
                 evidence_kind: "follow_up".to_owned(),
                 request_start_ms,
-                prefix_fingerprint: Some(fingerprint.clone()),
+                prefix_fingerprint: fingerprint.clone(),
                 prefix_hash: Some(prefix_hash),
                 prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
                 prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
@@ -944,9 +955,40 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
                 cost_micros: row.cost_usd_micros,
                 request_ref: Some(row.request_id.clone()),
                 event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
+                session_key_hash: None,
             }
         })
-        .collect()
+        .collect();
+    if let Some(session_key_hash) = row.keepalive_session_key_hash.clone() {
+        evidence.push(CacheKeepaliveEvidenceRow {
+            evidence_id: format!(
+                "follow-up-evidence:{}:session",
+                row.event_id.as_deref().unwrap_or(&row.request_id)
+            ),
+            cycle_id: None,
+            evidence_kind: "follow_up".to_owned(),
+            request_start_ms,
+            prefix_fingerprint: fingerprint,
+            prefix_hash: None,
+            prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
+            prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
+            principal_id,
+            upstream_id,
+            model,
+            ttl: cache_breakpoints
+                .last()
+                .and_then(|breakpoint| breakpoint.ttl.as_deref())
+                .map(|ttl| cc_lb_storage_api::CacheTtl::from_ttl_str(Some(ttl)))
+                .unwrap_or(cc_lb_storage_api::CacheTtl::Ttl5m),
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(cache_read_input_tokens),
+            cost_micros: row.cost_usd_micros,
+            request_ref: Some(row.request_id.clone()),
+            event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
+            session_key_hash: Some(session_key_hash),
+        });
+    }
+    evidence
 }
 
 async fn flush_expired_terminations(
@@ -1711,6 +1753,10 @@ fn finalize_base(
         internal_errors: partial.internal_errors.clone(),
         iterations: partial.usage.iterations.clone(),
         event_id: Some(partial.event_id.clone()),
+        keepalive_session_key_hash: partial
+            .parse
+            .as_ref()
+            .and_then(|parse| parse.keepalive_session_key_hash.clone()),
     }
 }
 
@@ -1832,6 +1878,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingStore {
         rows: StdMutex<Vec<RequestEvent>>,
+        evidence: StdMutex<Vec<CacheKeepaliveEvidenceRow>>,
         cursor: AtomicU64,
         /// Number of `append_request_event` calls that fail before
         /// succeeding; exercises the retry path in `write_finalized_rows`.
@@ -1854,6 +1901,16 @@ mod tests {
             }
             self.rows.lock().unwrap().push(event.clone());
             Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+
+        async fn append_request_event_with_evidence(
+            &self,
+            event: &RequestEvent,
+            evidence: &[CacheKeepaliveEvidenceRow],
+        ) -> StorageResult<u64> {
+            let cursor = self.append_request_event(event).await?;
+            self.evidence.lock().unwrap().extend_from_slice(evidence);
+            Ok(cursor)
         }
     }
 
@@ -5792,7 +5849,7 @@ mod tests {
             ..RequestEvent::default()
         };
 
-        let evidence = follow_up_evidence(&row);
+        let evidence = follow_up_evidence(&row, &row.cache_breakpoints);
         let hashes: Vec<&str> = evidence
             .iter()
             .filter_map(|item| item.prefix_hash.as_deref())
@@ -5858,7 +5915,7 @@ mod tests {
             ..RequestEvent::default()
         };
 
-        let evidence = follow_up_evidence(&row);
+        let evidence = follow_up_evidence(&row, &row.cache_breakpoints);
         let shared = evidence
             .iter()
             .find(|item| item.prefix_hash.as_deref() == Some("shared-lookback"))
@@ -5870,6 +5927,139 @@ mod tests {
                 .all(|item| item.prefix_fingerprint.as_deref()
                     == Some("2f17cbc300efb947b8e8e27d65053030b35d33ff4eae4841e6b9a7ba8f8f8cb2"))
         );
+    }
+
+    #[test]
+    fn follow_up_evidence_emits_session_candidate_without_breakpoints() {
+        let mut row = RequestEvent {
+            ts_ms: Some(1_700_000_000_000),
+            request_id: "req-session".to_owned(),
+            event_id: Some("event-session".to_owned()),
+            source_ref_id: Some("source-session".to_owned()),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-4-5".to_owned()),
+            cache_read_input_tokens: Some(100),
+            cost_usd_micros: Some(20),
+            keepalive_session_key_hash: Some("principal-1/thread:session-1".to_owned()),
+            ..RequestEvent::default()
+        };
+        let evidence = follow_up_evidence(&row, &[]);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0],
+            CacheKeepaliveEvidenceRow {
+                evidence_id: "follow-up-evidence:event-session:session".to_owned(),
+                cycle_id: None,
+                evidence_kind: "follow_up".to_owned(),
+                request_start_ms: 1_700_000_000_000,
+                prefix_fingerprint: None,
+                prefix_hash: None,
+                prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
+                prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
+                principal_id: "principal-1".to_owned(),
+                upstream_id: Uuid::from_u128(1),
+                model: "claude-sonnet-4-5".to_owned(),
+                ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(100),
+                cost_micros: Some(20),
+                request_ref: Some("req-session".to_owned()),
+                event_ref: Some("source-session".to_owned()),
+                session_key_hash: Some("principal-1/thread:session-1".to_owned()),
+            },
+        );
+        row.cache_read_input_tokens = Some(0);
+        assert!(follow_up_evidence(&row, &[]).is_empty());
+        row.cache_read_input_tokens = None;
+        assert!(follow_up_evidence(&row, &[]).is_empty());
+        row.cache_read_input_tokens = Some(100);
+        row.keepalive_session_key_hash = None;
+        assert!(follow_up_evidence(&row, &[]).is_empty());
+    }
+
+    #[test]
+    fn follow_up_evidence_appends_session_after_unchanged_prefix_candidates() {
+        let partial = partial_with_diagnostics(&eid("prefix-and-session"));
+        let row = RequestEvent {
+            ts_ms: Some(partial.ts_ms),
+            request_id: "req-prefix-and-session".to_owned(),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-4-5".to_owned()),
+            cache_read_input_tokens: Some(100),
+            ..RequestEvent::default()
+        };
+        let prefixes = follow_up_evidence(&row, &partial.cache_breakpoints);
+        assert_eq!(prefixes.len(), 2);
+        let mut with_session = row;
+        with_session.keepalive_session_key_hash = Some("session-key".to_owned());
+        let evidence = follow_up_evidence(&with_session, &partial.cache_breakpoints);
+        assert_eq!(evidence.len(), prefixes.len() + 1);
+        assert_eq!(&evidence[..prefixes.len()], prefixes.as_slice());
+        let session = evidence.last().unwrap();
+        assert_eq!(
+            session.evidence_id,
+            "follow-up-evidence:req-prefix-and-session:session"
+        );
+        assert_eq!(session.session_key_hash.as_deref(), Some("session-key"));
+        assert_eq!(session.prefix_hash, None);
+        assert_eq!(session.prefix_fingerprint, prefixes[0].prefix_fingerprint);
+        assert_eq!(session.ttl, cc_lb_storage_api::CacheTtl::Ttl5m);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn routed_follow_up_evidence_uses_serving_breakpoints_before_row_stripping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = CapturingStore::default();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let event_id = eid("routed-follow-up");
+        let mut partial = partial_with_diagnostics(&event_id);
+        partial.auth = Some(cc_lb_lifecycle::AuthInfo {
+            principal_id: "principal-1".to_owned(),
+            key_id: None,
+            principal_kind: None,
+            auth_ms: None,
+        });
+        partial.usage_seen = true;
+        partial.usage.cache_read_input_tokens = 100;
+        partial.parse.as_mut().unwrap().keepalive_session_key_hash = Some("session-key".to_owned());
+        let mut route = diagnostic_match_cold_route()?;
+        let mut serving = partial.cache_breakpoints.clone();
+        serving[0].prefix_hash = "serving-prefix".to_owned();
+        serving[0].ttl = Some("1h".to_owned());
+        route.cache_breakpoints = Some(serving.clone());
+        partial.route = Some(route);
+        let base = finalize_base(&partial, &TerminationReason::Success, 200, 42, false);
+        assert_eq!(base.cache_breakpoints[0].prefix_hash, "prefix-hash");
+        let expected = follow_up_evidence(&base, &serving);
+        assert_eq!(expected.len(), 3);
+        assert_eq!(expected[0].prefix_hash.as_deref(), Some("serving-prefix"));
+        assert_eq!(expected[2].session_key_hash.as_deref(), Some("session-key"));
+        assert_eq!(expected[2].ttl, cc_lb_storage_api::CacheTtl::Ttl1h);
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
+        assert_eq!(*store.evidence.lock().unwrap(), expected);
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].cache_breakpoints.is_empty());
+        assert_eq!(
+            rows[0].keepalive_session_key_hash.as_deref(),
+            Some("session-key")
+        );
+        Ok(())
     }
 }
 
@@ -5915,6 +6105,7 @@ mod keepalive_filter_diagnostics_tests {
                             cost_micros: Some(1),
                             request_ref: Some(id.to_owned()),
                             event_ref: Some(id.to_owned()),
+                            session_key_hash: None,
                         }
                     };
                     storage

@@ -727,7 +727,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                AND (
                    f.cache_read_input_tokens IS NULL
                    OR f.cache_read_input_tokens <= 0
-                   OR f.prefix_hash IS NULL
+                   OR (f.prefix_hash IS NULL AND f.session_key_hash IS NULL)
                    OR NOT EXISTS (
                        SELECT 1
                        FROM cache_keepalive_evidence AS r
@@ -738,7 +738,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                          AND r.principal_id = f.principal_id
                          AND r.upstream_id = f.upstream_id
                          AND r.model = f.model
-                         AND r.prefix_hash = f.prefix_hash
+                         AND (
+                             (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
+                                 OR (
+                                     r.session_key_hash IS NOT NULL
+                                     AND f.session_key_hash = r.session_key_hash
+                                     AND COALESCE(r.cache_read_input_tokens, 0) > 0
+                                     AND COALESCE(f.cache_read_input_tokens, 0) >= r.cache_read_input_tokens
+                                 )
+                         )
                          AND f.request_start_ms > r.request_start_ms
                          AND f.request_start_ms <= r.request_start_ms + ",
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
@@ -748,7 +756,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                              FROM cache_keepalive_evidence AS e
                              WHERE e.evidence_kind = 'follow_up'
                                AND e.cache_read_input_tokens > 0
-                               AND e.prefix_hash IS NOT NULL
+                               AND (e.prefix_hash IS NOT NULL OR e.session_key_hash IS NOT NULL)
                                AND e.principal_id = r.principal_id
                                AND e.upstream_id = r.upstream_id
                                AND e.model = r.model
@@ -765,7 +773,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                                      AND r2.principal_id = r.principal_id
                                      AND r2.upstream_id = r.upstream_id
                                      AND r2.model = r.model
-                                     AND r2.prefix_hash = e.prefix_hash
+                                     AND (
+                                         (r2.prefix_hash IS NOT NULL AND e.prefix_hash = r2.prefix_hash)
+                                             OR (
+                                                 r2.session_key_hash IS NOT NULL
+                                                 AND e.session_key_hash = r2.session_key_hash
+                                                 AND COALESCE(r2.cache_read_input_tokens, 0) > 0
+                                                 AND COALESCE(e.cache_read_input_tokens, 0) >= r2.cache_read_input_tokens
+                                             )
+                                     )
                                      AND e.request_start_ms > r2.request_start_ms
                                      AND e.request_start_ms <= r2.request_start_ms + ",
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r2.ttl"),

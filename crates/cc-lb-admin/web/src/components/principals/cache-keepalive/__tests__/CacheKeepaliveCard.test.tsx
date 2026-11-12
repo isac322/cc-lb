@@ -197,6 +197,7 @@ describe('CacheKeepaliveCard', () => {
     expect(mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         cache_keepalive: expect.objectContaining({
+          max_refreshes_per_session: 4,
           snapshot_max_bytes: 8_388_608,
           min_cache_tokens: 10_000,
           classifier: expect.objectContaining({

@@ -966,7 +966,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         .filter(|row| {
             row.evidence_kind == "follow_up"
                 && row.cache_read_input_tokens.is_some_and(|tokens| tokens > 0)
-                && row.prefix_hash.is_some()
+                && (row.prefix_hash.is_some() || row.session_key_hash.is_some())
         })
         .collect::<Vec<_>>();
     candidates.sort_unstable_by(|a, b| {
@@ -990,7 +990,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         .map(|row| row.request_start_ms)
         .min()
         .unwrap_or(0);
-    let min_renewal_start_ms = min_request_start_ms.saturating_sub(3_600_000);
+    let min_renewal_start_ms = min_request_start_ms.saturating_sub(43_200_000);
     let max_request_start_ms = candidates
         .iter()
         .map(|row| row.request_start_ms)
@@ -1068,7 +1068,12 @@ async fn insert_filtered_keepalive_evidence_in_tx(
             "cc_lb_cache_keepalive_follow_up_rejected_total",
             "reason" => "no_matching_renewal_prefix"
         )
-        .increment(candidates.len() as u64);
+        .increment(
+            candidates
+                .iter()
+                .filter(|row| row.prefix_hash.is_some())
+                .count() as u64,
+        );
         return Ok(());
     }
     let mut existing = Vec::new();
@@ -1076,7 +1081,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let renewal_rows = sqlx::query(
             "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
                     prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
-                    model, ttl, cache_read_input_tokens
+                    model, ttl, cache_read_input_tokens, session_key_hash
              FROM cache_keepalive_evidence
              WHERE evidence_kind = 'renewal'
                AND cycle_id = ANY($1)
@@ -1099,7 +1104,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let follow_up_rows = sqlx::query(
             "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
                     prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
-                    model, ttl, cache_read_input_tokens
+                    model, ttl, cache_read_input_tokens, session_key_hash
              FROM cache_keepalive_evidence
              WHERE evidence_kind = 'follow_up'
                AND principal_id = ANY($1)
@@ -1129,7 +1134,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let running =
             running_pairs.contains(&(candidate.principal_id.clone(), candidate.upstream_id));
         let mut qualifying_cycles = std::collections::HashSet::new();
-        let mut matching_prefix = false;
+        let mut matching_identity = false;
         if !running {
             for renewal in &existing {
                 if renewal
@@ -1165,26 +1170,37 @@ async fn insert_filtered_keepalive_evidence_in_tx(
                         .try_get::<String, _>("model")
                         .map_err(map_sqlx_error)?
                         != candidate.model
-                    || renewal
-                        .try_get::<Option<String>, _>("prefix_hash")
-                        .map_err(map_sqlx_error)?
-                        .as_deref()
-                        != candidate.prefix_hash.as_deref()
                 {
                     continue;
                 }
-                matching_prefix = true;
+                let renewal_prefix = renewal
+                    .try_get::<Option<String>, _>("prefix_hash")
+                    .map_err(map_sqlx_error)?;
+                let renewal_session = renewal
+                    .try_get::<Option<String>, _>("session_key_hash")
+                    .map_err(map_sqlx_error)?;
+                let renewal_cache_read = renewal
+                    .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                    .map_err(map_sqlx_error)?
+                    .unwrap_or(0);
+                let prefix_matches = renewal_prefix.is_some()
+                    && renewal_prefix.as_deref() == candidate.prefix_hash.as_deref();
+                let session_matches = renewal_session.is_some()
+                    && renewal_session.as_deref() == candidate.session_key_hash.as_deref()
+                    && renewal_cache_read > 0
+                    && candidate.cache_read_input_tokens.unwrap_or(0) >= renewal_cache_read as u64;
+                if !prefix_matches && !session_matches {
+                    continue;
+                }
+                matching_identity = true;
                 let renewal_start = renewal
                     .try_get::<i64, _>("request_start_ms")
                     .map_err(map_sqlx_error)?;
-                let ttl_ms = match renewal
-                    .try_get::<String, _>("ttl")
-                    .map_err(map_sqlx_error)?
-                    .as_str()
-                {
-                    "1h" => 60 * 60 * 1_000,
-                    _ => 300_000,
-                };
+                let ttl_ms = keepalive_evidence_ttl_millis(
+                    &renewal
+                        .try_get::<String, _>("ttl")
+                        .map_err(map_sqlx_error)?,
+                );
                 if candidate_start <= renewal_start
                     || candidate_start > renewal_start.saturating_add(ttl_ms)
                 {
@@ -1213,11 +1229,16 @@ async fn insert_filtered_keepalive_evidence_in_tx(
                             .ok()
                             .flatten()
                             .is_some_and(|tokens| tokens > 0)
-                        || follow_up
+                        || (follow_up
                             .try_get::<Option<String>, _>("prefix_hash")
                             .ok()
                             .flatten()
                             .is_none()
+                            && follow_up
+                                .try_get::<Option<String>, _>("session_key_hash")
+                                .ok()
+                                .flatten()
+                                .is_none())
                     {
                         return false;
                     }
@@ -1264,7 +1285,39 @@ async fn insert_filtered_keepalive_evidence_in_tx(
                         let Ok(ttl) = renewal.try_get::<String, _>("ttl") else {
                             return false;
                         };
-                        let ttl_ms = if ttl == "1h" { 3_600_000 } else { 300_000 };
+                        let ttl_ms = keepalive_evidence_ttl_millis(&ttl);
+                        let renewal_prefix = renewal
+                            .try_get::<Option<String>, _>("prefix_hash")
+                            .ok()
+                            .flatten();
+                        let follow_up_prefix = follow_up
+                            .try_get::<Option<String>, _>("prefix_hash")
+                            .ok()
+                            .flatten();
+                        let renewal_session = renewal
+                            .try_get::<Option<String>, _>("session_key_hash")
+                            .ok()
+                            .flatten();
+                        let follow_up_session = follow_up
+                            .try_get::<Option<String>, _>("session_key_hash")
+                            .ok()
+                            .flatten();
+                        let renewal_cache_read = renewal
+                            .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        let follow_up_cache_read = follow_up
+                            .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        let prefix_matches =
+                            renewal_prefix.is_some() && renewal_prefix == follow_up_prefix;
+                        let session_matches = renewal_session.is_some()
+                            && renewal_session == follow_up_session
+                            && renewal_cache_read > 0
+                            && follow_up_cache_read >= renewal_cache_read;
                         follow_up_start > renewal_start
                             && follow_up_start <= renewal_start.saturating_add(ttl_ms)
                             && follow_up.try_get::<String, _>("principal_id").ok()
@@ -1273,8 +1326,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
                                 == renewal.try_get::<uuid::Uuid, _>("upstream_id").ok()
                             && follow_up.try_get::<String, _>("model").ok()
                                 == renewal.try_get::<String, _>("model").ok()
-                            && follow_up.try_get::<Option<String>, _>("prefix_hash").ok()
-                                == renewal.try_get::<Option<String>, _>("prefix_hash").ok()
+                            && (prefix_matches || session_matches)
                     })
                 });
                 if !earlier_follow_up {
@@ -1288,10 +1340,10 @@ async fn insert_filtered_keepalive_evidence_in_tx(
             if !running {
                 accepted_cycles.extend(qualifying_cycles);
             }
-        } else {
+        } else if candidate.prefix_hash.is_some() {
             let reason = if !qualifying_cycles.is_empty() {
                 "not_first_in_cycle"
-            } else if matching_prefix {
+            } else if matching_identity {
                 "outside_ttl"
             } else {
                 "no_matching_renewal_prefix"
@@ -1313,8 +1365,8 @@ async fn insert_keepalive_evidence_in_tx(
     sqlx::query(
         "INSERT INTO cache_keepalive_evidence \
          (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint, prefix_hash, prefix_policy_version, prefix_schema_version,
-          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms, session_key_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          ON CONFLICT(evidence_id) DO NOTHING",
     )
     .bind(&row.evidence_id)
@@ -1345,10 +1397,21 @@ async fn insert_keepalive_evidence_in_tx(
         row.request_start_ms,
         "cache keepalive evidence created_at_ms",
     )?)
+    .bind(row.session_key_hash.as_deref())
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+fn keepalive_evidence_ttl_millis(ttl: &str) -> i64 {
+    match ttl {
+        "5m" => 300_000,
+        "1h" => 3_600_000,
+        "30m" => 1_800_000,
+        "12h" => 43_200_000,
+        _ => 300_000,
+    }
 }
 
 fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {

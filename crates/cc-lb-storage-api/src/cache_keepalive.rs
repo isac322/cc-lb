@@ -36,7 +36,7 @@ pub struct CacheKeepaliveConfig {
 
     /// Hard cap on how many keep-alive fires may happen for a single
     /// session before the tracker gives up. Protects against runaway loops
-    /// when a client silently hangs.
+    /// when a client silently hangs. Default 4.
     #[serde(default = "default_max_refreshes")]
     pub max_refreshes_per_session: u32,
 
@@ -164,7 +164,7 @@ fn default_lead_1h() -> u32 {
     300
 }
 fn default_max_refreshes() -> u32 {
-    12
+    4
 }
 fn default_max_duration() -> u64 {
     14400
@@ -290,13 +290,21 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.refresh_lead_time_5m_secs, 30);
         assert_eq!(cfg.refresh_lead_time_1h_secs, 300);
-        assert_eq!(cfg.max_refreshes_per_session, 12);
+        assert_eq!(cfg.max_refreshes_per_session, 4);
         assert_eq!(cfg.max_total_duration_secs, 14400);
         assert_eq!(cfg.snapshot_max_bytes, 8_388_608);
         assert_eq!(cfg.min_cache_tokens, 10_000);
         assert!(cfg.classifier.extra_wait_for_user_tools.is_empty());
         assert!(!cfg.classifier.treat_end_turn_as_ambiguous);
         assert!(cfg.classifier.llm_judge.is_none());
+        for max_refreshes in [12, 20] {
+            let cfg: CacheKeepaliveConfig = serde_json::from_value(serde_json::json!({
+                "enabled": true,
+                "max_refreshes_per_session": max_refreshes,
+            }))
+            .unwrap();
+            assert_eq!(cfg.max_refreshes_per_session, max_refreshes);
+        }
     }
 
     #[test]
