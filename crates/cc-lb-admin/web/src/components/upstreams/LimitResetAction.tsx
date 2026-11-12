@@ -4,9 +4,16 @@
 // surrounding page stays untouched.
 
 import { ChevronRight, ExternalLink, History, Ticket } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
+import { type CouponAdvice, deriveCouponAdvice } from '../../lib/couponAdvice';
 import { formatWait, type NudgeQuotaWindow } from '../../lib/couponNudge';
 import {
   type CouponEffects as CouponEffectsView,
@@ -41,6 +48,16 @@ import { Select } from '../ui/Select';
 import { CouponEffects } from './CouponEffects';
 import { CouponActionButton, useCouponNudge } from './CouponNudge';
 import { ResetHistoryPanel } from './ResetHistoryPanel';
+
+const ADVICE_TITLES: Record<CouponAdvice['kind'], string> = {
+  nothing_to_restore: 'No usage to restore',
+  wait: 'You can wait',
+  save: 'Enough unused quota',
+  expiry: 'Check coupon expiry',
+  unknown: 'Not enough information',
+  scope: 'Does not restore this limit',
+  useful_now: 'Restores a full limit',
+};
 
 interface GrantBlock {
   /** Plain-text explanation, reused as the disabled-button popover. */
@@ -182,6 +199,8 @@ export function LimitResetAction({
   renderTrigger,
   defaultOpen = false,
   onOpenChange,
+  initialOwnedCount,
+  returnFocus,
 }: {
   upstream: Upstream;
   /** Whether OAuth credentials are stored (`has_credentials`); undefined
@@ -199,6 +218,8 @@ export function LimitResetAction({
   }) => ReactNode;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
+  initialOwnedCount?: number | null;
+  returnFocus?: HTMLElement | null;
 }) {
   const isOpenAI = upstream.kind === 'openai_oauth';
   const isOauth = upstream.kind === 'anthropic_oauth' || isOpenAI;
@@ -214,18 +235,46 @@ export function LimitResetAction({
     );
   const claim = useClaimLimitReset();
 
-  const [dialogOpen, setDialogOpen] = useState(defaultOpen);
+  const [dialogOpen, updateDialogOpen] = useState(defaultOpen);
+  const workflowOpenRef = useRef(defaultOpen);
+  const returnFocusRef = useRef<HTMLElement | null>(returnFocus ?? null);
+  const setDialogOpen = useCallback((open: boolean) => {
+    workflowOpenRef.current = open;
+    updateDialogOpen(open);
+  }, []);
+  const restoreFocus = useCallback(() => {
+    // A surface swap unmounts one overlay while the workflow stays open.
+    // Only a real close returns focus to the original coupon entry point.
+    if (workflowOpenRef.current) return false;
+    return returnFocusRef.current?.isConnected ? returnFocusRef.current : true;
+  }, []);
   useEffect(() => {
     onOpenChange?.(dialogOpen);
   }, [dialogOpen, onOpenChange]);
-  const [historyOpen, setHistoryOpen] = useState(defaultOpen && notConnected);
+  const [pendingOp, setPendingOp] = useState<PendingLimitResetOp | null>(() =>
+    loadPendingLimitResetOp(upstream.id),
+  );
+  const [surface, setSurface] = useState<'coupon' | 'history'>(() => {
+    if (pendingOp != null) return 'coupon';
+    if (credentialsStored === false) return 'history';
+    if (initialOwnedCount !== undefined)
+      return initialOwnedCount != null && initialOwnedCount > 0
+        ? 'coupon'
+        : 'history';
+    const owned = isOpenAI
+      ? resetsQ.data?.openai?.available_count
+      : derived?.activeCount;
+    return credentialsStored === true &&
+      !resetsQ.isError &&
+      owned != null &&
+      owned > 0
+      ? 'coupon'
+      : 'history';
+  });
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   // One request_id per confirmation, generated when the dialog opens.
   const [requestId, setRequestId] = useState(() => newUuid());
-  const [pendingOp, setPendingOp] = useState<PendingLimitResetOp | null>(() =>
-    loadPendingLimitResetOp(upstream.id),
-  );
   // Frozen confirmation view captured when a fresh claim is dispatched: the
   // modal keeps showing exactly what the user confirmed while the request is
   // in flight instead of swapping to the pending-op surface mid-request.
@@ -233,6 +282,7 @@ export function LimitResetAction({
     grant: LimitResetGrant;
     presentation: CouponPresentation;
     effects: CouponEffectsView;
+    advice: CouponAdvice | null;
     grants: LimitResetGrant[];
     activeCount: number;
   } | null>(null);
@@ -275,6 +325,14 @@ export function LimitResetAction({
   // Expired/depleted/not-yet-started grants never appear as a usable count or
   // a selectable option — activeGrants is the single filtered list.
   const selectableGrants = derived?.activeGrants ?? [];
+  const ownedInventoryCount = isOpenAI
+    ? data?.openai?.available_count
+    : derived?.activeCount;
+  const hasOwnedCoupons =
+    credentialsStored === true &&
+    !queryError &&
+    ownedInventoryCount != null &&
+    ownedInventoryCount > 0;
   // Account-level cooldown blocks every grant, matching the nudge's usable
   // definition (an unparseable cooldown fails closed).
   const cooldownMs =
@@ -348,16 +406,32 @@ export function LimitResetAction({
     selected != null &&
     grantReady(selected) &&
     !selectedBlocking;
+  const selectedAdvice =
+    selected && selectedEffects
+      ? deriveCouponAdvice({
+          grant: selected,
+          effects: selectedEffects,
+          nowMs,
+          blocked: !selectedUsable || queryError || pendingOp != null,
+        })
+      : null;
 
   // Recorded activity is local admin data, independent of provider credentials
   // and inventory loading. Only an actual claim locks the entry point.
   const actionDisabled = claimInFlight;
 
-  const openDialog = () => {
+  const openDialog = (event?: { currentTarget: EventTarget | null }) => {
     if (actionDisabled) return;
+    returnFocusRef.current =
+      returnFocus ??
+      (event?.currentTarget instanceof HTMLElement
+        ? event.currentTarget
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null);
     setSelectedGrantId(null);
     setSelectedGroupKey(null);
-    setHistoryOpen(notConnected);
+    setSurface(pendingOp != null || hasOwnedCoupons ? 'coupon' : 'history');
     setRequestId(newUuid());
     setDismissArmed(false);
     setDialogOpen(true);
@@ -491,6 +565,8 @@ export function LimitResetAction({
   const displayPresentation =
     inFlightView?.presentation ?? selectedPresentation;
   const displayEffects = inFlightView?.effects ?? selectedEffects;
+  const displayAdvice = inFlightView ? inFlightView.advice : selectedAdvice;
+  const historyOpen = surface === 'history' && inFlightView == null;
   const displayGrants = inFlightView?.grants ?? selectableGrants;
   const displayGroups = groupCouponGrants(displayGrants, provider);
   const displayGroup = displayGrant
@@ -557,9 +633,10 @@ export function LimitResetAction({
       {historyOpen ? (
         <Drawer
           open={dialogOpen}
+          finalFocus={restoreFocus}
           onOpenChange={(open) => {
             if (!open) {
-              setHistoryOpen(false);
+              setSurface('history');
               setDialogOpen(false);
             }
           }}
@@ -567,18 +644,42 @@ export function LimitResetAction({
           description={upstream.name}
           width="md"
           footer={
-            <Button size="sm" onClick={() => setHistoryOpen(false)}>
-              Back to coupon
-            </Button>
+            hasOwnedCoupons || pendingOp != null ? (
+              <Button
+                size="sm"
+                disabled={claimInFlight}
+                onClick={() => setSurface('coupon')}
+              >
+                {pendingOp != null ? 'Review pending reset' : 'View coupons'}
+              </Button>
+            ) : undefined
           }
         >
+          <p className="px-4 pt-4 text-body-sm text-text-muted">
+            {notConnected
+              ? 'Connect this account to check current coupons.'
+              : queryError
+                ? 'Coupon inventory could not be loaded.'
+                : credentialsStored === undefined ||
+                    (resetsQ.isPending && !data)
+                  ? 'Checking current coupon inventory…'
+                  : ownedInventoryCount === 0
+                    ? 'No active coupons available.'
+                    : hasOwnedCoupons
+                      ? 'Coupons are available for this account.'
+                      : 'Coupon inventory is not reported.'}
+          </p>
           <ResetHistoryPanel upstreamId={upstream.id} open={dialogOpen} />
         </Drawer>
       ) : (
         <Modal
           open={dialogOpen}
+          finalFocus={restoreFocus}
           onOpenChange={(open) => {
-            if (!open && !claimInFlight) setDialogOpen(false);
+            if (!open && !claimInFlight) {
+              setDialogOpen(false);
+              setSurface('history');
+            }
           }}
           title={pendingView ? 'Reset not confirmed' : 'Use a reset coupon?'}
           description={upstream.name}
@@ -622,6 +723,20 @@ export function LimitResetAction({
                       The account identity or coupon availability is not
                       confirmed.
                     </Notice>
+                  ) : displayAdvice ? (
+                    <div role="group" aria-label="Coupon guidance">
+                      <Notice
+                        tone={
+                          displayAdvice.kind === 'useful_now'
+                            ? 'info'
+                            : 'warning'
+                        }
+                        title={ADVICE_TITLES[displayAdvice.kind]}
+                        role="status"
+                      >
+                        {displayAdvice.message}
+                      </Notice>
+                    </div>
                   ) : null}
                 </>
               ) : null}
@@ -631,7 +746,7 @@ export function LimitResetAction({
                   size="sm"
                   className="mr-auto"
                   disabled={claimInFlight}
-                  onClick={() => setHistoryOpen(true)}
+                  onClick={() => setSurface('history')}
                 >
                   <History aria-hidden="true" />
                   History
@@ -695,6 +810,7 @@ export function LimitResetAction({
                               weeklyResetsAt: ember?.weekly_resets_at,
                             },
                           ),
+                          advice: selectedAdvice ? { ...selectedAdvice } : null,
                           grants: structuredClone(selectableGrants),
                           activeCount: ownedCount ?? 0,
                         },

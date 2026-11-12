@@ -232,13 +232,6 @@ describe('reset activity entry availability', () => {
     expect(
       screen.getByText('No reset attempts recorded in cc-lb.'),
     ).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Back to coupon' }));
-    expect(
-      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
-    ).toBeDefined();
-    const useCoupon = screen.getByRole('button', { name: 'Use coupon' });
-    expect((useCoupon as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(useCoupon);
     expect(mutate).not.toHaveBeenCalled();
   });
 
@@ -276,12 +269,9 @@ describe('reset activity entry availability', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Coupons' }));
     expect(
-      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
-    ).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'History' }));
-    expect(
       await screen.findByRole('dialog', { name: 'Reset activity' }),
     ).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'View coupons' })).toBeNull();
     expect(
       screen.queryByRole('dialog', { name: 'Use a reset coupon?' }),
     ).toBeNull();
@@ -311,6 +301,13 @@ describe('manual native coupon availability', () => {
       observed: true,
       coverageUnreported: false,
       sibling: 'none',
+    },
+    {
+      used: 21,
+      failedRefresh: true,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'positive-entry',
     },
     {
       used: 21,
@@ -419,8 +416,23 @@ describe('manual native coupon availability', () => {
           upstream={makeOauthUpstream({ kind: 'openai_oauth' })}
           credentialsStored
           defaultOpen
+          initialOwnedCount={sibling === 'positive-entry' ? 1 : undefined}
         />,
       );
+      if (failedRefresh && sibling !== 'positive-entry') {
+        expect(
+          screen.getByRole('dialog', { name: 'Reset activity' }),
+        ).toBeDefined();
+        expect(
+          screen.getByText('Coupon inventory could not be loaded.'),
+        ).toBeDefined();
+        expect(screen.queryByRole('button', { name: 'Use coupon' })).toBeNull();
+        expect(
+          screen.queryByRole('button', { name: 'View coupons' }),
+        ).toBeNull();
+        expect(mutate).not.toHaveBeenCalled();
+        return;
+      }
       const useCoupon = screen.getByRole('button', { name: 'Use coupon' });
       const enabled =
         used > 20 && observed && !failedRefresh && !coverageUnreported;
@@ -429,7 +441,13 @@ describe('manual native coupon availability', () => {
       expect(mutate).not.toHaveBeenCalled();
       if (used === 20)
         expect(screen.getByText(/less than 80% remaining/)).toBeDefined();
-      if (failedRefresh) expect(screen.queryByText(/21% used/)).toBeNull();
+      if (failedRefresh) {
+        expect(
+          screen.getByRole('dialog', { name: 'Use a reset coupon?' }),
+        ).toBeDefined();
+        expect(screen.getByText('Could not load reset status')).toBeDefined();
+        expect(screen.queryByText(/21% used/)).toBeNull();
+      }
       if (coverageUnreported) {
         expect(
           screen.getByText(/Covered allowances could not be confirmed/),

@@ -668,16 +668,24 @@ export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
   const [active, setActive] = useState<{
     row: UpstreamUsageRow;
     instance: number;
+    initialOwnedCount: number | null;
+    returnFocus: HTMLButtonElement;
   } | null>(null);
   const workflowOpen = useRef(false);
   const onOpenChange = useCallback((open: boolean) => {
     workflowOpen.current = open;
   }, []);
-  const openCoupon = (row: UpstreamUsageRow) => {
+  const openCoupon = (
+    row: UpstreamUsageRow,
+    returnFocus: HTMLButtonElement,
+  ) => {
     if (workflowOpen.current) return;
     workflowOpen.current = true;
     setActive((previous) => ({
       row,
+      returnFocus,
+      initialOwnedCount:
+        props.data.coupons?.get(row.upstream.id)?.total ?? null,
       instance: (previous?.instance ?? 0) + 1,
     }));
   };
@@ -696,6 +704,8 @@ export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
           key={active.instance}
           upstream={activeRow.upstream}
           windows={activeRow.windows}
+          initialOwnedCount={active.initialOwnedCount}
+          returnFocus={active.returnFocus}
           onOpenChange={onOpenChange}
         />
       ) : null}
@@ -716,7 +726,10 @@ function UpstreamUsageRows({
   collapsedRows = 8,
   onCouponClick,
 }: UpstreamUsageTableProps & {
-  onCouponClick: (row: UpstreamUsageRow) => void;
+  onCouponClick: (
+    row: UpstreamUsageRow,
+    returnFocus: HTMLButtonElement,
+  ) => void;
 }) {
   const { effective: timeZone } = useTimezone();
   const nowUnixSecs = Math.floor(Date.now() / 1000);
@@ -838,7 +851,7 @@ function UpstreamUsageRows({
                 upstream={row.upstream}
                 inventory={data.coupons?.get(row.upstream.id)}
                 loading={data.couponsLoading}
-                onClick={() => onCouponClick(row)}
+                onClick={(trigger) => onCouponClick(row, trigger)}
               />
             </div>
           </li>

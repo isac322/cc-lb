@@ -361,6 +361,11 @@ describe('Overview coupon action lifetime', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
         requests.push(path);
+        if (
+          path.endsWith('/limit-resets/history?limit=100') &&
+          init?.method !== 'POST'
+        )
+          return jsonResponse({ items: [], has_more: false, limit: 100 });
         const match = ACTION_STATUS_PATH.exec(path);
         if (init?.method === 'POST' || !match) {
           throw new Error(
@@ -393,15 +398,39 @@ describe('Overview coupon action lifetime', () => {
       await user.click(trigger);
       const dialog = await screen.findByRole('dialog');
       expect(within(dialog).getByText(name)).toBeTruthy();
-      await waitFor(() =>
+      if (name === TARGET) {
+        await waitFor(() =>
+          expect(
+            within(dialog)
+              .getByRole('button', { name: CONFIRM_ACTION_NAME })
+              .hasAttribute('disabled'),
+          ).toBe(false),
+        );
+        await user.click(
+          within(dialog).getByRole('button', { name: 'History' }),
+        );
+        const history = await screen.findByRole('dialog', {
+          name: 'Reset activity',
+        });
+        await waitFor(() =>
+          expect(history.contains(document.activeElement)).toBe(true),
+        );
+        expect(document.activeElement).not.toBe(trigger);
+        await user.tab();
+        expect(history.contains(document.activeElement)).toBe(true);
+      } else {
         expect(
-          within(dialog)
-            .getByRole('button', { name: CONFIRM_ACTION_NAME })
-            .hasAttribute('disabled'),
-        ).toBe(false),
-      );
+          await screen.findByRole('dialog', { name: 'Reset activity' }),
+        ).toBeTruthy();
+        expect(
+          within(screen.getByRole('dialog')).queryByRole('button', {
+            name: CONFIRM_ACTION_NAME,
+          }),
+        ).toBeNull();
+      }
       await user.keyboard('{Escape}');
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
     }
     expect(requests.some((path) => path.endsWith('/claim'))).toBe(false);
     expect(loadPendingLimitResetOp(TARGET)).toBeNull();

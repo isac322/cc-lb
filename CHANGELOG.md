@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Coupon confirmations show each allowance's expected change and reset-time behavior, with relative expiry and separate activity history. Overview's Upstreams table shows each upstream's remaining coupons in content-sized controls, and active confirmations survive live table reordering.
+- Coupon confirmations add nonblocking guidance about current usage, natural resets, coupon expiry and uncertain benefits. Empty or unavailable coupon inventory opens recorded reset activity directly, while positive inventory remains inspectable even when redemption is blocked.
 - After a confirmed limit reset, the admin request now awaits an immediate upstream usage read and local routing-cache publication. The response reports quota-refresh failure separately from the reset outcome, without repeating redemption or assuming zero usage.
 - Reset activity records each upstream's consumption and quota-refresh outcomes. Legacy entries without a recorded result remain unknown.
 - Manual OpenAI banked resets require a covered main allowance to have less than 80% remaining. The dialog reports eligibility, and the server checks fresh provider usage before redeeming a credit.

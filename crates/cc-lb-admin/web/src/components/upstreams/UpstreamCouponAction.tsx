@@ -16,10 +16,14 @@ export function UpstreamCouponAction({
   upstream,
   windows,
   onOpenChange,
+  initialOwnedCount,
+  returnFocus,
 }: {
   upstream: Upstream;
   windows: readonly QuotaSnapshot[];
   onOpenChange: (open: boolean) => void;
+  initialOwnedCount: number | null;
+  returnFocus: HTMLButtonElement;
 }) {
   const credential = useUpstreamOAuthStatus(upstream.id);
   return (
@@ -28,6 +32,8 @@ export function UpstreamCouponAction({
       credentialsStored={credential.data?.has_credentials}
       quotaWindows={windows}
       defaultOpen
+      initialOwnedCount={initialOwnedCount}
+      returnFocus={returnFocus}
       onOpenChange={onOpenChange}
       renderTrigger={() => null}
     />
@@ -40,7 +46,10 @@ export function UpstreamCouponTrigger({
   loading,
   onClick,
   disabled = false,
-}: Props & { onClick: () => void; disabled?: boolean }) {
+}: Props & {
+  onClick: (trigger: HTMLButtonElement) => void;
+  disabled?: boolean;
+}) {
   if (upstream.kind !== 'anthropic_oauth' && upstream.kind !== 'openai_oauth') {
     return null;
   }
@@ -64,7 +73,7 @@ export function UpstreamCouponTrigger({
       )}
       data-testid="upstream-coupons"
       disabled={disabled}
-      onClick={onClick}
+      onClick={(event) => onClick(event.currentTarget)}
       title={
         breakdown ||
         (count === null ? 'Coupon inventory not reported' : 'No active coupons')
