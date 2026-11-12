@@ -327,7 +327,7 @@ async fn openai_existing_poll_backfills_real_plan_and_preserves_name_and_quota()
     );
     let recorded = requests.lock().expect("log");
     assert_eq!(recorded.len(), 8);
-    for pair in recorded.chunks_exact(2) {
+    for pair in recorded.as_chunks::<2>().0 {
         assert_eq!(pair[0], "/backend-api/wham/usage");
         assert_eq!(pair[1], "/backend-api/wham/rate-limit-reset-credits");
     }

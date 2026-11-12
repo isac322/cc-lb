@@ -36,25 +36,22 @@ impl SchedulerDispatch {
         &self,
         upstream: &UpstreamRecord,
     ) -> SchedulerResult<UsagePollFence> {
-        let (key, recovery_after, started_at): (String, u64, fn(&str) -> Option<u64>) =
-            match upstream.kind {
-                UpstreamKind::AnthropicOauth => (
-                    cedar_ember_epoch_meta_key(upstream.id),
-                    CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS,
-                    cedar_ember_fence_started_at_millis,
-                ),
-                UpstreamKind::OpenaiOauth => (
-                    openai_limit_reset_epoch_meta_key(upstream.id),
-                    OPENAI_LIMIT_RESET_FENCE_RECOVERY_AFTER_MILLIS,
-                    openai_limit_reset_fence_started_at_millis,
-                ),
-                _ => {
-                    return Ok(UsagePollFence {
-                        epoch: None,
-                        epoch_key: None,
-                    });
-                }
-            };
+        let (key, recovery_after) = match upstream.kind {
+            UpstreamKind::AnthropicOauth => (
+                cedar_ember_epoch_meta_key(upstream.id),
+                CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS,
+            ),
+            UpstreamKind::OpenaiOauth => (
+                openai_limit_reset_epoch_meta_key(upstream.id),
+                OPENAI_LIMIT_RESET_FENCE_RECOVERY_AFTER_MILLIS,
+            ),
+            _ => {
+                return Ok(UsagePollFence {
+                    epoch: None,
+                    epoch_key: None,
+                });
+            }
+        };
         let raw = self
             .storage
             .get_meta_value(&key)
@@ -66,8 +63,13 @@ impl SchedulerDispatch {
                 epoch_key: Some(key),
             });
         }
+        let started_at = raw.as_deref().and_then(|raw| match upstream.kind {
+            UpstreamKind::AnthropicOauth => cedar_ember_fence_started_at_millis(raw),
+            UpstreamKind::OpenaiOauth => openai_limit_reset_fence_started_at_millis(raw),
+            _ => None,
+        });
         if let Some(raw) = raw
-            && started_at(&raw).is_some_and(|started| {
+            && started_at.is_some_and(|started| {
                 now_unix_millis(&*self.clock).saturating_sub(started) >= recovery_after
             })
         {
