@@ -139,6 +139,7 @@ export function LimitResetAction({
   quotaWindows = [],
   renderTrigger,
   defaultOpen = false,
+  onOpenChange,
 }: {
   upstream: Upstream;
   /** Whether OAuth credentials are stored (`has_credentials`); undefined
@@ -155,6 +156,8 @@ export function LimitResetAction({
     loading: boolean;
   }) => ReactNode;
   defaultOpen?: boolean;
+  /** Reports the whole coupon workflow, including any history surface. */
+  onOpenChange?: (open: boolean) => void;
 }) {
   const isOpenAI = upstream.kind === 'openai_oauth';
   const isOauth = upstream.kind === 'anthropic_oauth' || isOpenAI;
@@ -171,6 +174,9 @@ export function LimitResetAction({
   const claim = useClaimLimitReset();
 
   const [dialogOpen, setDialogOpen] = useState(defaultOpen);
+  useEffect(() => {
+    onOpenChange?.(dialogOpen);
+  }, [dialogOpen, onOpenChange]);
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   // One request_id per confirmation, generated when the dialog opens.
   const [requestId, setRequestId] = useState(() => newUuid());

@@ -8,8 +8,10 @@ import { Link } from '@tanstack/react-router';
 import {
   type CSSProperties,
   type ReactNode,
+  useCallback,
   useId,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type {
@@ -51,7 +53,10 @@ import {
   selectCodexCredits,
 } from './codexCredits';
 import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
-import { UpstreamCouponAction } from './UpstreamCouponAction';
+import {
+  UpstreamCouponAction,
+  UpstreamCouponTrigger,
+} from './UpstreamCouponAction';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
 /** The windows shown in each provider's subscription row, in column order. */
@@ -658,18 +663,61 @@ export interface UpstreamUsageTableProps {
   collapsedRows?: number;
 }
 
+/** The operation owner must outlive the sorted, optionally collapsed rows. */
+export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
+  const [active, setActive] = useState<{
+    row: UpstreamUsageRow;
+    instance: number;
+  } | null>(null);
+  const workflowOpen = useRef(false);
+  const onOpenChange = useCallback((open: boolean) => {
+    workflowOpen.current = open;
+  }, []);
+  const openCoupon = (row: UpstreamUsageRow) => {
+    if (workflowOpen.current) return;
+    workflowOpen.current = true;
+    setActive((previous) => ({
+      row,
+      instance: (previous?.instance ?? 0) + 1,
+    }));
+  };
+  const activeRow =
+    active &&
+    (props.data.rows.find(
+      (row) => row.upstream.id === active.row.upstream.id,
+    ) ??
+      active.row);
+
+  return (
+    <>
+      <UpstreamUsageRows {...props} onCouponClick={openCoupon} />
+      {active && activeRow ? (
+        <UpstreamCouponAction
+          key={active.instance}
+          upstream={activeRow.upstream}
+          windows={activeRow.windows}
+          onOpenChange={onOpenChange}
+        />
+      ) : null}
+    </>
+  );
+}
+
 /**
  * Every upstream's usage per window, most-used first. Rows link into the
  * upstream's detail. Past `collapsedRows` the rest sit behind an inline
  * "Show all N" toggle.
  */
-export function UpstreamUsageTable({
+function UpstreamUsageRows({
   data,
   ariaLabel = 'Upstream usage per window',
   className,
   empty = null,
   collapsedRows = 8,
-}: UpstreamUsageTableProps) {
+  onCouponClick,
+}: UpstreamUsageTableProps & {
+  onCouponClick: (row: UpstreamUsageRow) => void;
+}) {
   const { effective: timeZone } = useTimezone();
   const nowUnixSecs = Math.floor(Date.now() / 1000);
   const [expanded, setExpanded] = useState(false);
@@ -786,11 +834,11 @@ export function UpstreamUsageTable({
               />
             </Link>
             <div className="absolute right-0 top-1 w-16 @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
-              <UpstreamCouponAction
+              <UpstreamCouponTrigger
                 upstream={row.upstream}
-                windows={row.windows}
                 inventory={data.coupons?.get(row.upstream.id)}
                 loading={data.couponsLoading}
+                onClick={() => onCouponClick(row)}
               />
             </div>
           </li>

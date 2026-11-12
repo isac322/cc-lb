@@ -1,5 +1,4 @@
 import { Ticket } from 'lucide-react';
-import { useState } from 'react';
 import type { QuotaSnapshot } from '../../lib/api';
 import type { CouponInventory } from '../../lib/couponInventory';
 import { type Upstream, useUpstreamOAuthStatus } from '../../lib/queries';
@@ -8,44 +7,43 @@ import { LimitResetAction } from './LimitResetAction';
 
 interface Props {
   upstream: Upstream;
-  windows: readonly QuotaSnapshot[];
   inventory?: CouponInventory;
   loading?: boolean;
 }
 
-/** The inventory poll is fleet-wide; the individual action loads only on demand. */
-export function UpstreamCouponAction(props: Props) {
-  const [activated, setActivated] = useState(false);
-  const supported =
-    props.upstream.kind === 'anthropic_oauth' ||
-    props.upstream.kind === 'openai_oauth';
-  if (!supported) return null;
-  if (activated) return <OpenedCouponAction {...props} />;
-  return <CouponTrigger {...props} onClick={() => setActivated(true)} />;
-}
-
-function OpenedCouponAction(props: Props) {
-  const credential = useUpstreamOAuthStatus(props.upstream.id);
+/** One table-level owner survives row reordering and collapsed-list changes. */
+export function UpstreamCouponAction({
+  upstream,
+  windows,
+  onOpenChange,
+}: {
+  upstream: Upstream;
+  windows: readonly QuotaSnapshot[];
+  onOpenChange: (open: boolean) => void;
+}) {
+  const credential = useUpstreamOAuthStatus(upstream.id);
   return (
     <LimitResetAction
-      upstream={props.upstream}
+      upstream={upstream}
       credentialsStored={credential.data?.has_credentials}
-      quotaWindows={props.windows}
+      quotaWindows={windows}
       defaultOpen
-      renderTrigger={({ onClick, disabled }) => (
-        <CouponTrigger {...props} onClick={onClick} disabled={disabled} />
-      )}
+      onOpenChange={onOpenChange}
+      renderTrigger={() => null}
     />
   );
 }
 
-function CouponTrigger({
+export function UpstreamCouponTrigger({
   upstream,
   inventory,
   loading,
   onClick,
   disabled = false,
 }: Props & { onClick: () => void; disabled?: boolean }) {
+  if (upstream.kind !== 'anthropic_oauth' && upstream.kind !== 'openai_oauth') {
+    return null;
+  }
   const count = inventory?.total ?? null;
   const summary =
     loading && count === null

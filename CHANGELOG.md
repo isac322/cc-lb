@@ -19,8 +19,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Coupon selectors and confirmation dialogs now distinguish provider eligibility from observed target usage and show exact reset scopes. Overview shows per-upstream coupon inventory in a small ticket-count column in the Upstreams table, without principal aggregation or cross-row account deduplication.
+- Coupon selectors and confirmations distinguish reset types and provider eligibility from observed usage. Overview's Upstreams table shows each upstream's remaining coupons, and active confirmations survive live table reordering.
 - After a confirmed limit reset, the admin request now awaits an immediate upstream usage read and local routing-cache publication. The response reports quota-refresh failure separately from the reset outcome, without repeating redemption or assuming zero usage.
+- Reset activity records each upstream's consumption and quota-refresh outcomes. Legacy entries without a recorded result remain unknown.
 
 - Router Basic now exposes “Prefer subscription upstreams” for allowed Anthropic, OpenAI, and Gemini OAuth upstreams in the selected provider scope. The shortcut describes subscription selection, hides for API-key-only scopes, and keeps one principal-wide chain editable in Advanced. ([#1235](https://github.com/isac322/cc-lb/issues/1235))
 - Admin detail lookups now use `GET /admin/v1/principals/{principal_id}/cache-keepalive/detail?id=<encoded ID>` and `GET /admin/v1/events/detail?id=<encoded ID>`. The old per-ID path routes are removed; migrate direct scripts and API clients using `URLSearchParams` or an equivalent query encoder, passing the original ID without pre-encoding it. Composite IDs, authentication, principal scoping, and response shapes are unchanged. Event-detail audit entries now use the static `/admin/v1/events/detail` route and retain the original ID in `payload.event_id`. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
