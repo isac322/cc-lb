@@ -56,6 +56,8 @@ pub struct ParseInfo {
     pub message_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_session_key_hash: Option<String>,
 }
 
 /// Reason the body parser rejected the request.

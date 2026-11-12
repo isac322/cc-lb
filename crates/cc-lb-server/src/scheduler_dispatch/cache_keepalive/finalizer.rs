@@ -99,6 +99,7 @@ impl SchedulerDispatch {
                 cost_micros: actual_cost_micros,
                 request_ref: Some(event_id.clone()),
                 event_ref: Some(source_ref_id.to_owned()),
+                session_key_hash: Some(record.session_key_hash.clone()),
             });
         }
         RequestEventStore::append_request_event_with_projections(

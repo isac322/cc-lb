@@ -312,10 +312,13 @@ lifetime total and do not imply that a session is still active.
 
 - `total_spent` is the exact persisted renewal spend from retained turn rows.
   It includes misses and remains available after session reset or purge.
-- Avoided savings are credited at most once per cycle. A credit is assigned to
-  the latest renewal whose TTL window contains the first positive-cache-read
-  follow-up whose effective prefix evidence matches one of the renewal's
-  candidate prefixes.
+- Avoided savings are credited at most once per cycle, to the latest qualifying
+  renewal before the first matching positive-cache-read follow-up within its TTL.
+  The follow-up must use the same principal, upstream, and model, and match either
+  a candidate prefix hash or the keep-alive session key. A session-key match also
+  requires a positive renewal cache read and a follow-up cache read at least as
+  large as the renewal's. Follow-up evidence uses the routed serving cache
+  breakpoints.
   Evidence retention uses that same full TTL window, including long-retention
   renewals; housekeeping does not shorten it to five minutes.
   Avoided value is `renewal tokens × (cache-creation price − cache-read price)`:
@@ -430,7 +433,7 @@ defaults; every field is optional except `enabled`.
 | `enabled` | required | Master switch on this principal. |
 | `refresh_lead_time_5m_secs` | `30` | Fire 30 s before the 5-minute TTL expires. Schedule = 4m30s after `message_start` / response begin. |
 | `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after `message_start` / response begin. |
-| `max_refreshes_per_session` | `12` | Hard cap on keep-alive fires per session. |
+| `max_refreshes_per_session` | `4` | Hard cap on keep-alive fires per session. OpenAI 30-minute keep-alive requires raising this to at least `13` for GPT-5.6. |
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
 | `snapshot_max_bytes` | `8388608` (8 MiB) | Shaped and trimmed body larger than this is not tracked. |
 | `min_cache_tokens` | `10000` (10,000 tokens) | Minimum cached input tokens (`cache_read_input_tokens + cache_creation_input_tokens`) required before an `AgentInTurn` response schedules renewals. |
@@ -440,7 +443,8 @@ defaults; every field is optional except `enabled`.
 
 The built-in wait-for-user tool allow-list matches Claude Code, Oh My Pi,
 Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
-`AskUserQuestion`, `ExitPlanMode`, `StructuredOutput`, `ask`,
+`AskUserQuestion`, `ExitPlanMode`, `StructuredOutput`, `SubagentHandback`,
+`EndConversation`, `ask`,
 `ask_followup_question`, `ask_question`, `cursor_ask_question`,
 `question`, `attempt_completion`, `submit_and_exit`, `finish`,
 `plan_mode_respond`, `act_mode_respond`, `report_bug`.

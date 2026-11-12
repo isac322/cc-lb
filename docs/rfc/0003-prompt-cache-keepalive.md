@@ -181,7 +181,8 @@ mapping table. Key rules:
 - `stop_reason == "refusal"` or `"model_context_window_exceeded"` →
   **UserTurn**.
 - `tool_use` with only wait-for-user tools
-  (`attempt_completion`, `ExitPlanMode`, `ask_followup_question`, `ask`, …) or
+  (`attempt_completion`, `ExitPlanMode`, `SubagentHandback`, `EndConversation`,
+  `ask_followup_question`, `ask`, …) or
   only `server_tool_use` → **UserTurn**.
 - `stop_reason == "end_turn"` → **UserTurn** (unless
   `treat_end_turn_as_ambiguous` opts in). No tool is executing for this stop
@@ -293,8 +294,8 @@ config surface is JSON persisted through the admin API):
   circuits — no snapshot, no schedule, no classify).
 - `refresh_lead_time_5m_secs: u32` (default `30`) — fire at TTL − lead.
 - `refresh_lead_time_1h_secs: u32` (default `300`).
-- `max_refreshes_per_session: u32` (default `12`) — hard cap; then the
-  session self-cancels with `reason=MaxRefreshes`.
+- `max_refreshes_per_session: u32` (default `4`, amended 2026-11-12 from `12`):
+  hard cap; then the session self-cancels with `reason=MaxRefreshes`.
 - `max_total_duration_secs: u64` (default `14400` = 4 h) — wall-clock cap.
 - `snapshot_max_bytes: u32` (default `8388608` = 8 MiB) — snapshot rejected
   if the shaped and trimmed body exceeds this.
