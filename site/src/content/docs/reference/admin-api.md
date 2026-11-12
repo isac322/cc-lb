@@ -43,7 +43,15 @@ Creating an upstream from a completed draft stores the provider-specific credent
 
 `warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. `POST /admin/v1/upstreams` and OAuth sign-in create these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
 
-The admin upstream detail exposes the Warm-up toggle, status, manual **Fire now** action, and history for supported OAuth upstreams. `warmup_dialect_plugin` remains available only for `anthropic_oauth`.
+The admin upstream detail exposes the Warm-up toggle, status, manual **Fire now** action, and history for supported OAuth upstreams. `warmup_dialect_plugin` is available for all three OAuth kinds; the plugin must export the upstream provider's shape hook.
+
+Warm-up runs in lanes, one per quota group. Every supported upstream has a `primary` lane. `gemini_oauth` upstreams also have a `third_party` lane for the Claude and GPT-OSS models, which only the Antigravity profile can serve.
+
+- `GET /admin/v1/upstreams/{id}/warmup` returns `upstream_id`, `dialect_plugin`, and a `lanes` array. Each lane entry has `lane`, `eligible`, `ineligible_reason` (`null`, `profile_unsupported`, or `quota_group_absent`), `target_windows`, `next_scheduled_at_unix_secs`, `last_attempt`, and `recent_attempts` (the lane's last 10).
+- `GET /admin/v1/upstreams/{id}/warmup/attempts` accepts an optional `lane` filter. Every attempt includes `lane`; rows recorded before lanes existed read as `primary`.
+- `POST /admin/v1/upstreams/{id}/warmup/fire-now` accepts an optional `lane` query parameter and defaults to `primary`. A lane the upstream kind does not have returns `400 warmup_lane_unsupported`; an unknown lane name returns `400 invalid_warmup_lane`. An ineligible lane sends nothing and records a `quota_group_unavailable` skip. The response includes `lane`.
+
+`status.last_warmup_at_unix_secs` is the time any lane last succeeded. See [Upstream warm-up source notes](/docs/reference/source/upstream-warmup/) for scheduling details.
 
 ## Plugin chains
 

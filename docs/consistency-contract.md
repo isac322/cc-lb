@@ -51,8 +51,8 @@ If step 2 fails, the handler returns `500` with `{"error": "audit_write_failed"}
 
 A few other failures after the commit also attempt a serving-view rebuild before returning their original error, because the committed change stays in storage. A failed rebuild is logged and does not change the response:
 
-- `PUT`/`PATCH /admin/v1/upstreams/{id}`, when seeding the warmup bootstrap job fails.
-- `POST /admin/v1/upstreams/{id}/oauth/complete`, when seeding the refresh and warmup jobs fails.
+- `PUT`/`PATCH /admin/v1/upstreams/{id}`, when seeding a warmup bootstrap job fails.
+- `POST /admin/v1/upstreams/{id}/oauth/complete`, when seeding the refresh or warmup jobs fails.
 - `POST /admin/v1/upstreams/from-oauth-draft`, when deleting the PKCE flow row fails after the upstream and its metadata are stored.
 - `DELETE /admin/v1/plugins/registry/{id}`, `PUT`/`DELETE /admin/v1/plugin-chain-entries/{id}`, and `POST /admin/v1/principals/{principal_id}/plugin-chain/reorder` and `/rebalance`, when a storage read that follows the commit fails.
 
@@ -87,7 +87,7 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 | `POST /admin/v1/principals`; `PUT`, `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys` | Committed | After state; on failure, revocation of the key is attempted but can fail | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys/{key_id}/revoke` | Committed | After state | Rebuilt |
-| `POST /admin/v1/upstreams`; `PUT`, `PATCH`, `DELETE /admin/v1/upstreams/{id}`; `POST /admin/v1/upstreams/{id}/enable`, `/disable`; `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin` | Committed (an update that turns warmup on for an OAuth upstream also enqueues a warmup job) | After state | Rebuilt |
+| `POST /admin/v1/upstreams`; `PUT`, `PATCH`, `DELETE /admin/v1/upstreams/{id}`; `POST /admin/v1/upstreams/{id}/enable`, `/disable`; `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin` | Committed (an update that turns warmup on for an OAuth upstream also enqueues one warmup job per lane the credential supports) | After state | Rebuilt |
 | `POST /admin/v1/upstreams/from-oauth-draft`; `POST /admin/v1/upstreams/{id}/oauth/complete` | Committed, and refresh/warmup jobs enqueued as applicable; for `from-oauth-draft`, a failed onboarding step triggers a hard delete that can itself fail | After state | Rebuilt |
 | `POST /admin/v1/principals/{principal_id}/plugin-chain`, `/reorder`, `/rebalance`; `PUT`, `DELETE /admin/v1/plugin-chain-entries/{id}` | Committed | After state | Rebuilt |
 | `DELETE /admin/v1/plugins/registry/{id}`; `POST /admin/v1/plugins/wasm` | Committed | After state (upload audits failures of the upload itself, not its prechecks) | Rebuilt |
@@ -141,9 +141,9 @@ Code: `crates/cc-lb-scheduler/src/worker/backend_api.rs`, `crates/cc-lb-schedule
 
 **Async guaranteed.** `push_adaptive_task` and `push_cron_task` insert a `Pending` job row directly and await the insert. Admin handlers that enqueue jobs await this insert before responding:
 
-- `PUT`/`PATCH /admin/v1/upstreams/{id}` when the update turns warmup on for an OAuth upstream with credentials.
-- `POST /admin/v1/upstreams/{id}/oauth/complete`, which enqueues the refresh and warmup jobs.
-- `POST /admin/v1/upstreams/from-oauth-draft`, which enqueues the refresh bootstrap job (skipped for `never_refresh` credentials) and, when warmup is on, the warmup bootstrap job.
+- `PUT`/`PATCH /admin/v1/upstreams/{id}` when the update turns warmup on for an OAuth upstream with credentials. It enqueues one bootstrap job per lane the credential supports; a Gemini OAuth credential on the Antigravity profile gets both the primary and third-party lanes.
+- `POST /admin/v1/upstreams/{id}/oauth/complete`, which enqueues the refresh job and the warmup bootstrap jobs.
+- `POST /admin/v1/upstreams/from-oauth-draft`, which enqueues the refresh bootstrap job (skipped for `never_refresh` credentials) and, when warmup is on, the warmup bootstrap jobs.
 
 A duplicate idempotency key returns `Conflict`, which handlers treat as already queued. Any other enqueue error returns an error response, but the domain write is already committed. `from-oauth-draft` is the exception: it attempts to delete the new upstream. After a 2xx, the job row exists (or an earlier row with the same idempotency key does). The row is not guaranteed to still be `Pending` when the client sees the response. Bootstrap jobs are enqueued with a run time of now, and the workers run concurrently with the request, so a worker can claim or even finish the job first.
 
@@ -165,7 +165,7 @@ OpenAI coupon inventory is independent of routing-window support. A valid monthl
 
 A valid provider observation without a supported main routing quota is still a successful scheduled poll: it records the normal `200` attempt cursor and success classification. The observation separately records whether an affected main quota was published; the post-reset refresh requires that flag before reporting `refreshed`.
 
-**Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-engine/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists.
+**Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-engine/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists. Fire-now warms one lane per request (`?lane=`, default `primary`).
 
 `GET /admin/scheduler/status`, `GET /admin/scheduler/failures`, and `GET /admin/v1/upstreams/{id}/warmup` read committed job rows directly.
 
