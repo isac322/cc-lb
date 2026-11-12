@@ -898,3 +898,38 @@ fn antigravity_summary_response_maps_shared_windows_and_resets()
     }
     Ok(())
 }
+
+#[test]
+fn openai_refresh_success_requires_a_published_native_main_window() {
+    for (duration, with_credits, with_additional, expected_main) in [
+        (2_592_000, false, false, false),
+        (2_592_000, true, false, false),
+        (2_592_000, true, true, false),
+        (18_000, false, false, true),
+        (604_800, false, false, true),
+    ] {
+        let mut body = serde_json::json!({"rate_limit":{"primary_window":{
+            "limit_window_seconds":duration,"used_percent":100,"reset_at":1_700_500_000
+        }}});
+        if with_credits {
+            body["credits"] = serde_json::json!({"has_credits":true,"balance":"1"});
+        }
+        if with_additional {
+            body["additional_rate_limits"] = serde_json::json!([{"rate_limit":{"primary_window":{
+                "limit_window_seconds":604800,"used_percent":100,"reset_at":1_700_500_000
+            }}}]);
+        }
+        let (_, main_published) = parse_provider_usage_body(
+            ProviderUsageContext {
+                upstream_id: Uuid::nil(),
+                kind: UpstreamKind::OpenaiOauth,
+                profile: GeminiOAuthProfile::Antigravity,
+                project_id: None,
+            },
+            &serde_json::to_vec(&body).unwrap(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(main_published, expected_main, "{body}");
+    }
+}

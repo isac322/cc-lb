@@ -3,7 +3,7 @@
 // fetchWithAuth/getJson so auth, timeouts and ApiError semantics are identical
 // to the rest of the admin API.
 //
-// Anthropic owns all coupon state: this client stores no quota numbers and
+// The provider owns all coupon state: this client stores no quota numbers and
 // keeps no idempotency ledger. The only local record is the pending-op
 // marker below, which preserves evidence of a claim whose outcome never
 // reached the client.
@@ -16,6 +16,13 @@ import { usePolledData } from './usePolledData';
 export interface LimitResetGrant {
   id: string;
   label: string;
+  type: string | null;
+  gives_back_weekly: boolean | null;
+  unavailable_reason: string | null;
+  /** Present only on the local adapter for native OpenAI inventory. */
+  openai_credit?: OpenAILimitResetCredit;
+  /** Native manual-redemption observation attached by the presentation adapter. */
+  openai_manual_redemption?: OpenAIManualRedemption | null;
   /** Null when the provider does not report a total; resets_left stays
    *  authoritative. */
   resets_total: number | null;
@@ -39,7 +46,8 @@ export interface LimitResetGrant {
 export interface CedarEmberLimitResets {
   eligible: boolean;
   ineligible_reason: string | null;
-  at_limit: boolean;
+  /** Provider account-level gate, not a summary of target-window usage. */
+  at_limit: boolean | null;
   grants: LimitResetGrant[];
   /** Server-recommended grant to offer; null when nothing is usable. */
   next_grant_id: string | null;
@@ -49,11 +57,45 @@ export interface CedarEmberLimitResets {
   cooldown_until: string | null;
 }
 
+export interface OpenAILimitResetCredit {
+  id: string;
+  reset_type: string;
+  status: string;
+  is_supported_by_plan: boolean | null;
+  granted_at: string | null;
+  expires_at: string | null;
+  title: string | null;
+  description: string | null;
+}
+
+export interface OpenAIManualResetWindow {
+  window: '5h' | '7d' | 'monthly';
+  used_percent: number | null;
+  resets_at_unix_secs: number | null;
+  duration_seconds: number | null;
+}
+
+export interface OpenAIManualRedemption {
+  eligible: boolean;
+  reason: string | null;
+  windows: OpenAIManualResetWindow[];
+}
+
+export interface OpenAILimitResets {
+  available_count: number;
+  applicable_available_count?: number | null;
+  /** Missing on older servers; an unknown manual gate must not enable a claim. */
+  manual_redemption?: OpenAIManualRedemption | null;
+  credits: OpenAILimitResetCredit[];
+}
+
 export interface LimitResetsResponse {
+  provider: 'anthropic' | 'openai';
   account_id: string | null;
   organization_id: string | null;
   /** Null when no fresh, identity-bound coupon observation is available. */
   cedar_ember: CedarEmberLimitResets | null;
+  openai: OpenAILimitResets | null;
 }
 
 export type LimitResetClaimResult =
@@ -67,7 +109,7 @@ export type LimitResetClaimResult =
 
 export interface LimitResetClaimRequest {
   account_id: string;
-  organization_id: string;
+  organization_id: string | null;
   grant_id: string;
   /** Provider idempotency key for this claim attempt. */
   request_id: string;
@@ -80,11 +122,40 @@ export interface LimitResetClaimResponse {
   resets_left: number | null;
   weekly_resets_at: string | null;
   cooldown_until: string | null;
+  windows_reset: number | null;
+  usage_refresh?: 'refreshed' | 'failed' | 'not_applicable';
+}
+
+/** A claim attempt recorded by cc-lb, not a provider redemption ledger. */
+export interface LimitResetHistoryItem {
+  id: string;
+  /** Time cc-lb wrote the audit row, not provider redemption time. */
+  recorded_at_unix_millis: number;
+  upstream_id: string;
+  provider: 'anthropic' | 'openai' | null;
+  coupon_type: string | null;
+  gives_back_weekly: boolean | null;
+  /** Legacy HTTP success and uncertain errors remain unknown. */
+  result: LimitResetClaimResult;
+  usage_refresh: 'refreshed' | 'failed' | 'not_applicable' | null;
+  actor: string | null;
+  request_id: string | null;
+  cleared: string[] | null;
+  windows_reset: number | null;
+}
+
+export interface LimitResetHistoryResponse {
+  items: LimitResetHistoryItem[];
+  /** Older recorded attempts exist beyond this bounded recent result. */
+  has_more: boolean;
+  limit: number;
 }
 
 export const limitResetKeys = {
   all: ['limit-resets'] as const,
   detail: (upstreamId: string) => ['limit-resets', upstreamId] as const,
+  history: (upstreamId: string, limit: number) =>
+    ['limit-resets', upstreamId, 'history', limit] as const,
 };
 
 /** Read the snapshot populated by the shared quota poll; this GET does not
@@ -118,6 +189,32 @@ export function useLimitResets(upstreamId: string | null) {
   );
 }
 
+/** Read at most 1000 recent recorded attempts; never scan provider inventory
+ *  or infer redemption from a credit disappearing. */
+export function useLimitResetHistory(
+  upstreamId: string | null,
+  enabled: boolean,
+  limit = 100,
+) {
+  return usePolledData(
+    {
+      queryKey: limitResetKeys.history(upstreamId ?? '', limit),
+      queryFn: ({ signal }) =>
+        getJson<LimitResetHistoryResponse>(
+          `/admin/v1/upstreams/${upstreamId}/limit-resets/history?limit=${limit}`,
+          { signal },
+        ),
+      enabled: enabled && Boolean(upstreamId),
+      retry: (failureCount, error) =>
+        !(
+          error instanceof ApiError &&
+          (error.status === 400 || error.status === 403 || error.status === 404)
+        ) && failureCount < 3,
+    },
+    LIMIT_RESET_POLL_MS,
+  );
+}
+
 export function useClaimLimitReset() {
   const qc = useQueryClient();
   return useMutation({
@@ -134,12 +231,10 @@ export function useClaimLimitReset() {
         body,
       ),
     // Whatever the outcome, the quota picture may have moved: refetch the real
-    // latest/series data (never optimistic zeros) plus the sidebar
-    // sources so a consumed reset is visible everywhere.
-    onSettled: (_data, _error, vars) => {
-      qc.invalidateQueries({
-        queryKey: limitResetKeys.detail(vars.upstreamId),
-      });
+    // latest/series data (never optimistic zeros), recorded attempt history,
+    // and sidebar sources so a consumed reset is visible everywhere.
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: limitResetKeys.all });
       qc.invalidateQueries({ queryKey: ['subscription-quota'] });
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.status });
@@ -175,7 +270,7 @@ export function newUuid(): string {
 export interface PendingLimitResetOp {
   upstream_id: string;
   account_id: string;
-  organization_id: string;
+  organization_id: string | null;
   grant_id: string;
   request_id: string;
   started_at_unix_secs: number;
@@ -193,7 +288,8 @@ export function loadPendingLimitResetOp(
     if (
       typeof parsed.upstream_id !== 'string' ||
       typeof parsed.account_id !== 'string' ||
-      typeof parsed.organization_id !== 'string' ||
+      (parsed.organization_id !== null &&
+        typeof parsed.organization_id !== 'string') ||
       typeof parsed.grant_id !== 'string' ||
       typeof parsed.request_id !== 'string'
     ) {

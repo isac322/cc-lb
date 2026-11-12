@@ -2,6 +2,7 @@ mod api_key_usage;
 mod cache_keepalive;
 mod cron;
 mod http;
+mod limit_resets;
 mod oauth;
 mod outcomes;
 mod storage;
@@ -94,14 +95,20 @@ pub(super) struct SchedulerDispatch {
     pub(super) openai_org_api: OpenAiOrgApi,
 }
 
-pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
+pub(crate) fn build_scheduler_ctx(
+    deps: SchedulerDispatchDeps,
+) -> (
+    SchedulerCtx,
+    Arc<dyn cc_lb_admin::LimitResetUsageRefreshPort>,
+) {
     let dispatch = SchedulerDispatch::new(deps);
-    SchedulerCtx::new(
+    let ctx = SchedulerCtx::new(
         dispatch.config.scheduler.clone(),
         dispatch.clone().adaptive_dispatch(),
         dispatch.clone().cron_dispatch(),
         dispatch.clock.clone(),
-    )
+    );
+    (ctx, Arc::new(dispatch))
 }
 
 impl SchedulerDispatch {

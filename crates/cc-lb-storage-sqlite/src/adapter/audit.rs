@@ -96,6 +96,13 @@ impl AuditStore for SqliteStorage {
                     .push(" AND actor_subject = ")
                     .push_bind(subject);
             }
+            AuditQueryScope::AdminActionRoute { action, route } => {
+                query
+                    .push(" AND admin_action = ")
+                    .push_bind(action)
+                    .push(" AND route = ")
+                    .push_bind(route);
+            }
         }
         if admin_only {
             query.push(" AND admin_action IS NOT NULL");

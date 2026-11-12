@@ -903,65 +903,65 @@ export function TopPrincipalsSection({
             {`No principals match "${query.trim()}"`}
           </TableEmptyRow>
         ) : (
-          rows.map((principal) => (
-            <PrincipalUsageRow
-              principalId={principal.id}
-              key={principal.id}
-              className="cursor-pointer hover:bg-hover-bg"
-              data-testid="top-principal-row"
-            >
-              <TableCell className="w-full max-w-0">
-                {/* From `sm` to `md` the name link spans the row's 40px
-                height; phones stack it over the cache-hit line instead. */}
-                <Link
-                  data-principal-link
-                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 sm:max-md:-my-2.5 sm:max-md:py-2.5"
-                  search={{ selectedId: principal.id }}
-                  title={principal.name}
-                  to="/principals"
-                >
-                  {principal.name}
-                </Link>
-                <span
-                  className={cx(
-                    'block text-caption tabular-nums sm:hidden',
-                    principalCacheHitClass(principal.cache_hit_ratio),
-                  )}
-                  data-slot="principal-cache-hit"
-                >
-                  {principal.cache_hit_ratio == null
-                    ? 'No prompt tokens'
-                    : `${fmtCacheHit(principal.cache_hit_ratio)} cache hit`}
-                </span>
-              </TableCell>
-              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
-                {formatCount(principal.requests)}
-              </TableCell>
-              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
-                <PrincipalTokenFigure tokens={principal.tokens} />
-              </TableCell>
-              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
-                {principal.cache_hit_ratio == null ? (
-                  <EmptyValue label="No prompt tokens" />
-                ) : (
-                  <span
-                    className={principalCacheHitClass(
-                      principal.cache_hit_ratio,
-                    )}
+          rows.map((principal) => {
+            return (
+              <PrincipalUsageRow
+                principalId={principal.id}
+                key={principal.id}
+                className="cursor-pointer hover:bg-hover-bg"
+                data-testid="top-principal-row"
+              >
+                <TableCell className="w-full max-w-0">
+                  <Link
+                    data-principal-link
+                    className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 sm:max-md:-my-2.5 sm:max-md:py-2.5"
+                    search={{ selectedId: principal.id }}
+                    title={principal.name}
+                    to="/principals"
                   >
-                    {fmtCacheHit(principal.cache_hit_ratio)}
+                    {principal.name}
+                  </Link>
+                  <span
+                    className={cx(
+                      'block text-caption tabular-nums sm:hidden',
+                      principalCacheHitClass(principal.cache_hit_ratio),
+                    )}
+                    data-slot="principal-cache-hit"
+                  >
+                    {principal.cache_hit_ratio == null
+                      ? 'No prompt tokens'
+                      : `${fmtCacheHit(principal.cache_hit_ratio)} cache hit`}
                   </span>
-                )}
-              </TableCell>
-              <PrincipalCostCell
-                principal={principal}
-                maxTotalMicros={maxTotalMicros}
-              />
-              <TableCell className="text-text-muted" numeric>
-                {fmtPercent(principal.share_pct)}
-              </TableCell>
-            </PrincipalUsageRow>
-          ))
+                </TableCell>
+                <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                  {formatCount(principal.requests)}
+                </TableCell>
+                <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                  <PrincipalTokenFigure tokens={principal.tokens} />
+                </TableCell>
+                <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                  {principal.cache_hit_ratio == null ? (
+                    <EmptyValue label="No prompt tokens" />
+                  ) : (
+                    <span
+                      className={principalCacheHitClass(
+                        principal.cache_hit_ratio,
+                      )}
+                    >
+                      {fmtCacheHit(principal.cache_hit_ratio)}
+                    </span>
+                  )}
+                </TableCell>
+                <PrincipalCostCell
+                  principal={principal}
+                  maxTotalMicros={maxTotalMicros}
+                />
+                <TableCell className="text-text-muted" numeric>
+                  {fmtPercent(principal.share_pct)}
+                </TableCell>
+              </PrincipalUsageRow>
+            );
+          })
         )}
       </tbody>
     </Table>
@@ -1709,7 +1709,8 @@ export function ProviderOverviewPage({
     live: true,
   });
   const principalNameMap = usePrincipalNameMap();
-  const principalCount = usePrincipals().data?.principals.length;
+  const principalConfig = usePrincipals();
+  const principalCount = principalConfig.data?.principals.length;
   const poolWindows = providerPoolWindows(scopedProvider);
   const poolWindowLabels =
     scopedProvider === 'gemini' ? GEMINI_POOL_WINDOW_LABELS : undefined;

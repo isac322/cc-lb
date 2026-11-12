@@ -19,6 +19,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Coupon confirmations show each allowance's expected change and reset-time behavior, with relative expiry and separate activity history. Overview's Upstreams table shows each upstream's remaining coupons in content-sized controls, and active confirmations survive live table reordering.
+- Coupon confirmations add nonblocking guidance about current usage, natural resets, coupon expiry and uncertain benefits. Empty or unavailable coupon inventory opens recorded reset activity directly, while positive inventory remains inspectable even when redemption is blocked.
+- After a confirmed limit reset, the admin request now awaits an immediate upstream usage read, a quota transaction fenced by the OAuth generation and reset epoch, and local routing-cache publication. Cache request ordering prevents delayed older polls from overwriting newer publication; peer caches still converge asynchronously. The response reports quota-refresh failure separately from the reset outcome, without repeating redemption or assuming zero usage. OpenAI monthly usage retains coupon inventory independently of routing support; inventory or ordinary usage credits alone never count as a refreshed affected main quota. No schema or migration is added.
+- Reset activity records each upstream's consumption and quota-refresh outcomes. Legacy entries without a recorded result remain unknown.
+- Manual OpenAI banked resets require a covered main allowance to have less than 80% remaining. The dialog reports eligibility, and the server checks fresh provider usage before redeeming a credit.
+
 - Lowered the default cache keep-alive `max_refreshes_per_session` from `12` to `4`. Explicitly configured caps are unchanged.
 - The cache keep-alive sessions sheet now scrolls its list and detail independently, keeps controls and the desktop detail header visible, and uses a compact Net / Saved / Spent summary with clearer status badges. Renewal details open from timeline pulses instead of a duplicate table; sessions without a timeline keep their renewal list.
 - Cache keep-alive session reasons now explain why renewals ended without a cancellation prefix; legacy rows without a cause use “Renewals ended”.

@@ -136,6 +136,7 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),

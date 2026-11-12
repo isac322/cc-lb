@@ -485,6 +485,7 @@ async fn fixture() -> Fixture {
         runtime: Some(runtime),
         data_dir: Some(dir.path().to_path_buf()),
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: holder.clone(),
         config: Arc::new(cc_lb_config::Config::default()),
         dynamic_view_rebinder: Some(rebinder as Arc<dyn DynamicViewRebinder>),

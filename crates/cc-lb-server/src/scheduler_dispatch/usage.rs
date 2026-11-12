@@ -1,5 +1,6 @@
 use cc_lb_control::anthropic_metadata::CedarEmberStatus;
 use cc_lb_domain::SubscriptionQuotaCredits;
+#[cfg(test)]
 use cc_lb_engine::SubscriptionQuotaSink;
 use cc_lb_oauth_protocol::GeminiOAuthProfile;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
@@ -10,6 +11,7 @@ use cc_lb_storage_api::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+#[cfg(test)]
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 #[derive(Debug, Deserialize)]
@@ -75,13 +77,11 @@ struct ExtraUsage {
     used_credits: Option<f64>,
 }
 
-pub(super) fn observe_usage_body(
+pub(super) fn parse_usage_body(
     upstream_id: Uuid,
     body: &[u8],
     observed_at_unix_millis: u64,
-    sink: &SubscriptionQuotaSink,
-    cache: &SubscriptionQuotaCache,
-) -> SchedulerResult<Option<CedarEmberStatus>> {
+) -> SchedulerResult<(Vec<SubscriptionQuotaSample>, Option<CedarEmberStatus>)> {
     let mut usage: UsageBody = sonic_rs::from_slice(body)
         .map_err(|error| SchedulerError::Job(format!("oauth usage JSON parse failed: {error}")))?;
     // The provider omits the block entirely for unenrolled accounts; an
@@ -98,12 +98,10 @@ pub(super) fn observe_usage_body(
         },
         _ => None,
     };
-    for record in records_from_usage(upstream_id, usage, observed_at_unix_millis) {
-        cache.upsert_observation(upstream_id, &record);
-        sink.enqueue(record)
-            .map_err(|error| SchedulerError::Job(error.to_string()))?;
-    }
-    Ok(cedar_ember)
+    Ok((
+        records_from_usage(upstream_id, usage, observed_at_unix_millis),
+        cedar_ember,
+    ))
 }
 
 fn records_from_usage(
@@ -300,13 +298,11 @@ pub(super) struct ProviderUsageContext<'a> {
 
 /// Parse provider-native OAuth quota responses into the shared subscription
 /// quota sample shape. This runs only in the scheduler worker.
-pub(super) fn observe_provider_usage_body(
+pub(super) fn parse_provider_usage_body(
     context: ProviderUsageContext<'_>,
     body: &[u8],
     observed_at_unix_millis: u64,
-    sink: &SubscriptionQuotaSink,
-    cache: &SubscriptionQuotaCache,
-) -> SchedulerResult<()> {
+) -> SchedulerResult<(Vec<SubscriptionQuotaSample>, bool)> {
     let ProviderUsageContext {
         upstream_id,
         kind,
@@ -327,8 +323,53 @@ pub(super) fn observe_provider_usage_body(
         },
         _ => Vec::new(),
     };
+    let affected_main_published = kind != UpstreamKind::OpenaiOauth
+        || ["primary_window", "secondary_window"].iter().any(|key| {
+            value
+                .get("rate_limit")
+                .and_then(|rate_limit| rate_limit.get(*key))
+                .is_some_and(|window| {
+                    window
+                        .get("limit_window_seconds")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(codex_window_from_duration_secs)
+                        .is_some()
+                        && window
+                            .get("used_percent")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_some()
+                })
+        });
+    Ok((records, affected_main_published))
+}
+
+#[cfg(test)]
+fn observe_usage_body(
+    upstream_id: Uuid,
+    body: &[u8],
+    observed_at_unix_millis: u64,
+    sink: &SubscriptionQuotaSink,
+    cache: &SubscriptionQuotaCache,
+) -> SchedulerResult<Option<CedarEmberStatus>> {
+    let (records, cedar_ember) = parse_usage_body(upstream_id, body, observed_at_unix_millis)?;
     for record in records {
         cache.upsert_observation(upstream_id, &record);
+        sink.enqueue(record)
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    }
+    Ok(cedar_ember)
+}
+
+#[cfg(test)]
+fn observe_provider_usage_body(
+    context: ProviderUsageContext<'_>,
+    body: &[u8],
+    observed_at_unix_millis: u64,
+    sink: &SubscriptionQuotaSink,
+    cache: &SubscriptionQuotaCache,
+) -> SchedulerResult<()> {
+    for record in parse_provider_usage_body(context, body, observed_at_unix_millis)?.0 {
+        cache.upsert_observation(record.upstream_id, &record);
         sink.enqueue(record)
             .map_err(|error| SchedulerError::Job(error.to_string()))?;
     }

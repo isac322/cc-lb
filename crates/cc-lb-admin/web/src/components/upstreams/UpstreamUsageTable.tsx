@@ -8,8 +8,10 @@ import { Link } from '@tanstack/react-router';
 import {
   type CSSProperties,
   type ReactNode,
+  useCallback,
   useId,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type {
@@ -18,6 +20,10 @@ import type {
   SubscriptionQuotaWindow,
 } from '../../lib/api';
 import { windowLabel } from '../../lib/api';
+import {
+  type CouponInventory,
+  useUpstreamCouponInventory,
+} from '../../lib/couponInventory';
 import { sumTokens } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
 import {
@@ -47,6 +53,10 @@ import {
   selectCodexCredits,
 } from './codexCredits';
 import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
+import {
+  UpstreamCouponAction,
+  UpstreamCouponTrigger,
+} from './UpstreamCouponAction';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
 /** The windows shown in each provider's subscription row, in column order. */
@@ -122,6 +132,8 @@ export interface UpstreamUsageData {
   quotaError: boolean;
   /** Rows carrying a reconnect nudge (warn or danger). */
   reconnectCount: number;
+  coupons?: ReadonlyMap<string, CouponInventory>;
+  couponsLoading?: boolean;
 }
 
 interface RuntimeStatusEntry {
@@ -186,6 +198,7 @@ export function useUpstreamUsageData(
       ),
     [provider, upstreamsQ.data],
   );
+  const coupons = useUpstreamCouponInventory(upstreams);
   const upstreamIds = useMemo(
     () => upstreams.map((u) => u.id).join(','),
     [upstreams],
@@ -238,6 +251,8 @@ export function useUpstreamUsageData(
 
   return {
     rows,
+    coupons: coupons.inventories,
+    couponsLoading: coupons.loading,
     isLoading: upstreamsQ.isLoading,
     quotaPending: latestQ.isLoading,
     statusPending: statusQ.data === undefined && statusQ.isPending,
@@ -542,13 +557,6 @@ const ROW_GRID_BY_COUNT: Record<number, string> = {
   3: ROW_GRID_THREE,
   4: ROW_GRID_MANY,
 };
-const NO_QUOTA_SPAN_CLASS: Record<number, string> = {
-  0: '@4xl:col-span-1',
-  1: '@4xl:col-span-1',
-  2: '@4xl:col-span-2',
-  3: '@4xl:col-span-3',
-  4: '@4xl:col-span-4',
-};
 
 function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
   if (window === 'unified') {
@@ -595,16 +603,17 @@ function RowBody({
   // desktop slot for a row that does not report the shared window.
   return (
     <>
-      <div className="col-span-full min-w-0 @4xl:col-span-1">
+      <div className="col-span-full min-w-0 pr-20 @4xl:col-span-1 @4xl:pr-0">
         <NameCell row={row} />
       </div>
       {row.upstream.kind.endsWith('_oauth') ? (
         windows.map((w) => {
           const snapshot = row.windows.find((s) => s.window === w);
-          return snapshot?.state !== 'absent' &&
-            provider !== 'anthropic' &&
-            !pending &&
-            !hasReportedUsageWindow(row, w) ? (
+          return !USAGE_WINDOWS_BY_PROVIDER[provider].includes(w) ||
+            (snapshot?.state !== 'absent' &&
+              provider !== 'anthropic' &&
+              !pending &&
+              !hasReportedUsageWindow(row, w)) ? (
             <span
               key={w}
               aria-hidden="true"
@@ -630,7 +639,7 @@ function RowBody({
         <span
           className={cx(
             'col-span-full text-body-sm text-text-muted',
-            NO_QUOTA_SPAN_CLASS[windows.length],
+            '@4xl:[grid-column:span_var(--quota-window-count)]',
           )}
           data-testid="usage-no-quota"
         >
@@ -654,18 +663,74 @@ export interface UpstreamUsageTableProps {
   collapsedRows?: number;
 }
 
+/** The operation owner must outlive the sorted, optionally collapsed rows. */
+export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
+  const [active, setActive] = useState<{
+    row: UpstreamUsageRow;
+    instance: number;
+    initialOwnedCount: number | null;
+    returnFocus: HTMLButtonElement;
+  } | null>(null);
+  const workflowOpen = useRef(false);
+  const onOpenChange = useCallback((open: boolean) => {
+    workflowOpen.current = open;
+  }, []);
+  const openCoupon = (
+    row: UpstreamUsageRow,
+    returnFocus: HTMLButtonElement,
+  ) => {
+    if (workflowOpen.current) return;
+    workflowOpen.current = true;
+    setActive((previous) => ({
+      row,
+      returnFocus,
+      initialOwnedCount:
+        props.data.coupons?.get(row.upstream.id)?.total ?? null,
+      instance: (previous?.instance ?? 0) + 1,
+    }));
+  };
+  const activeRow =
+    active &&
+    (props.data.rows.find(
+      (row) => row.upstream.id === active.row.upstream.id,
+    ) ??
+      active.row);
+
+  return (
+    <>
+      <UpstreamUsageRows {...props} onCouponClick={openCoupon} />
+      {active && activeRow ? (
+        <UpstreamCouponAction
+          key={active.instance}
+          upstream={activeRow.upstream}
+          windows={activeRow.windows}
+          initialOwnedCount={active.initialOwnedCount}
+          returnFocus={active.returnFocus}
+          onOpenChange={onOpenChange}
+        />
+      ) : null}
+    </>
+  );
+}
+
 /**
  * Every upstream's usage per window, most-used first. Rows link into the
  * upstream's detail. Past `collapsedRows` the rest sit behind an inline
  * "Show all N" toggle.
  */
-export function UpstreamUsageTable({
+function UpstreamUsageRows({
   data,
   ariaLabel = 'Upstream usage per window',
   className,
   empty = null,
   collapsedRows = 8,
-}: UpstreamUsageTableProps) {
+  onCouponClick,
+}: UpstreamUsageTableProps & {
+  onCouponClick: (
+    row: UpstreamUsageRow,
+    returnFocus: HTMLButtonElement,
+  ) => void;
+}) {
   const { effective: timeZone } = useTimezone();
   const nowUnixSecs = Math.floor(Date.now() / 1000);
   const [expanded, setExpanded] = useState(false);
@@ -718,23 +783,33 @@ export function UpstreamUsageTable({
   const candidateWindows =
     sameProvider && firstProvider !== undefined
       ? USAGE_WINDOWS_BY_PROVIDER[firstProvider]
-      : DEFAULT_USAGE_WINDOWS;
+      : QUOTA_WINDOW_ORDER.filter((window) =>
+          sorted.some((row) =>
+            USAGE_WINDOWS_BY_PROVIDER[providerOf(row.upstream.kind)].includes(
+              window,
+            ),
+          ),
+        );
   const tableWindows = data.quotaPending
     ? candidateWindows
     : candidateWindows.filter((window) =>
         sorted.some((row) => hasReportedUsageWindow(row, window)),
       );
-  const rowGrid = ROW_GRID_BY_COUNT[tableWindows.length];
+  const rowGrid = ROW_GRID_BY_COUNT[tableWindows.length] ?? ROW_GRID_MANY;
 
   return (
     <div
       className={cx('@container flex flex-col', className)}
-      style={{ '--quota-window-count': tableWindows.length } as CSSProperties}
+      style={
+        {
+          '--quota-window-count': Math.max(1, tableWindows.length),
+        } as CSSProperties
+      }
     >
       <div
         aria-hidden="true"
         className={cx(
-          'hidden border-b border-row px-3 pb-2 text-label text-text-faint @4xl:grid',
+          'relative hidden border-b border-row py-2 pl-3 pr-20 text-label text-text-faint @4xl:grid',
           rowGrid,
         )}
       >
@@ -744,16 +819,21 @@ export function UpstreamUsageTable({
             {windowLabel(w)}
           </span>
         ))}
+        <span className="absolute right-3 top-2 w-16 text-right">Coupons</span>
       </div>
       <ul aria-label={ariaLabel} className="flex flex-col" id={listId}>
         {shown.map((row) => (
           <li
             key={row.upstream.id}
-            className="border-t border-row first:border-t-0"
+            className="relative border-t border-row first:border-t-0"
             data-testid="upstream-usage-row"
           >
             <Link
-              className={cx(ROW_CLASS, rowGrid, 'hover:bg-overlay-2')}
+              className={cx(
+                ROW_CLASS,
+                rowGrid,
+                'hover:bg-overlay-2 @4xl:pr-20',
+              )}
               search={{ selectedId: row.upstream.id }}
               title={row.runtimeError ?? undefined}
               to="/upstreams"
@@ -763,9 +843,17 @@ export function UpstreamUsageTable({
                 pending={data.quotaPending}
                 row={row}
                 timeZone={timeZone}
-                tableWindows={sameProvider ? tableWindows : undefined}
+                tableWindows={tableWindows}
               />
             </Link>
+            <div className="absolute right-0 top-1 w-max @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
+              <UpstreamCouponTrigger
+                upstream={row.upstream}
+                inventory={data.coupons?.get(row.upstream.id)}
+                loading={data.couponsLoading}
+                onClick={(trigger) => onCouponClick(row, trigger)}
+              />
+            </div>
           </li>
         ))}
       </ul>

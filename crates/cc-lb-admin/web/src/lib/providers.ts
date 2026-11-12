@@ -133,6 +133,7 @@ export const PROVIDER_CAPABILITIES: Record<
     ...NONE,
     subscriptionQuota: true,
     quotaHistory: true,
+    limitReset: true,
     warmup: true,
     cacheKeepalive: true,
   },

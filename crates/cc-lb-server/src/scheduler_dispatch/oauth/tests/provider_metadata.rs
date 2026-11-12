@@ -195,7 +195,7 @@ fn gemini_partial_metadata_preserves_fields_and_new_plan_clears_old_name() {
     assert_eq!(identity, before);
 }
 
-async fn create_provider(
+pub(super) async fn create_provider(
     fixture: &DispatchFixture,
     kind: UpstreamKind,
     base: Url,
@@ -326,12 +326,11 @@ async fn openai_existing_poll_backfills_real_plan_and_preserves_name_and_quota()
             .any(|snapshot| snapshot.window == "overage" && snapshot.credits.is_some())
     );
     let recorded = requests.lock().expect("log");
-    assert_eq!(recorded.len(), 4);
-    assert!(
-        recorded
-            .iter()
-            .all(|path| path == "/backend-api/wham/usage")
-    );
+    assert_eq!(recorded.len(), 8);
+    for pair in recorded.as_chunks::<2>().0 {
+        assert_eq!(pair[0], "/backend-api/wham/usage");
+        assert_eq!(pair[1], "/backend-api/wham/rate-limit-reset-credits");
+    }
     drop(recorded);
     assert_eq!(fixture.refresh_entry_calls.load(Ordering::SeqCst), 0);
     server.abort();

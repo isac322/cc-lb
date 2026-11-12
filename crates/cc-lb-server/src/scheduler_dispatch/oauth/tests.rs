@@ -52,6 +52,9 @@ mod provider_metadata;
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 
+#[path = "tests/limit_resets.rs"]
+mod limit_resets;
+
 #[tokio::test]
 async fn pool_quota_snapshot_tick_records_provider_freshness_and_cache_recovery() {
     use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
@@ -1772,9 +1775,9 @@ async fn poll_usage_uses_latest_fallback_before_first_compat_refresh() {
     );
 }
 
-/// A live claim fence makes the poll skip its coupon write (quota still
-/// lands); an expired fence is settled by compare-and-put with a fresh epoch
-/// BEFORE the provider request, and the snapshot carries that epoch.
+/// A live claim fence blocks both quota and coupon publication; an expired
+/// fence is settled by compare-and-put with a fresh epoch BEFORE the provider
+/// request, and the snapshot carries that epoch.
 #[tokio::test]
 async fn poll_usage_skips_live_fence_and_recovers_expired_fence_before_request() {
     use cc_lb_control::anthropic_metadata::{
@@ -1859,23 +1862,29 @@ async fn poll_usage_skips_live_fence_and_recovers_expired_fence_before_request()
         );
     }
 
-    // Live fence: a claim may be in flight. Quota lands, no coupon is
-    // written, and the fence is untouched.
+    // Live fence: a claim may be in flight. Neither quota nor coupon may
+    // publish an observation from that interval, and the fence is untouched.
     let live = cedar_ember_epoch_fence(Uuid::new_v4(), NOW_MILLIS - 1_000);
     fixture
         .storage
         .put_meta_value(&epoch_key, &live)
         .await
         .expect("seed live fence");
-    poll(&fixture, upstream.id).await;
+    assert!(
+        fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .is_err()
+    );
     assert!(
         fixture
             .dispatch
             .subscription_quota_cache
             .snapshot_for_upstream(upstream.id, NOW_MILLIS, 60)
             .iter()
-            .any(|snapshot| snapshot.window == "5h"),
-        "quota must land even while the coupon is fenced"
+            .all(|snapshot| snapshot.utilization.is_none()),
+        "no quota body may publish while a reset is fenced"
     );
     assert_eq!(
         fixture
@@ -1916,7 +1925,7 @@ async fn poll_usage_skips_live_fence_and_recovers_expired_fence_before_request()
     let recovered_uuid = Uuid::parse_str(&recovered).expect("recovered epoch is settled");
     assert_eq!(
         *epochs_at_request.lock().expect("epochs lock"),
-        vec![Some(live), Some(recovered)],
+        vec![Some(recovered)],
         "recovery must land before the provider request"
     );
     let record = serde_json::from_str::<CedarEmberPollRecord>(

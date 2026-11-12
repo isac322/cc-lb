@@ -497,6 +497,17 @@ mod slim_projection_tests {
     }
 }
 
+/// Request-captured identity for an OAuth usage poll. A durable publication
+/// must validate this identity and the reset epoch in the same transaction
+/// that writes quota observations.
+#[derive(Debug, Clone)]
+pub struct SubscriptionQuotaPollFence {
+    pub upstream_id: Uuid,
+    pub oauth_token_generation: u64,
+    pub epoch_key: String,
+    pub epoch_value: Option<String>,
+}
+
 #[async_trait]
 pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
     /// Atomically upserts the latest sidecar row and inserts change-only
@@ -508,6 +519,15 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()>;
+
+    /// Records a poll only while its OAuth generation and reset epoch still
+    /// match. Returns false without writing latest rows or checkpoints when
+    /// either fence has changed. This transaction serializes with epoch CAS.
+    async fn record_subscription_quota_poll(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool>;
 
     /// Returns the latest sidecar row for each `(upstream_id, window, source)`
     /// intersected with the given upstream IDs. Empty input returns empty.

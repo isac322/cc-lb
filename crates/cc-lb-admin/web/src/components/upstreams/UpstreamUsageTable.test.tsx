@@ -12,6 +12,7 @@ import type {
   QuotaSnapshot,
   SubscriptionQuotaWindow,
 } from '../../lib/api';
+import type { CouponInventory } from '../../lib/couponInventory';
 import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
 import type { Upstream } from '../../lib/queries';
 import {
@@ -153,6 +154,56 @@ const rowNames = () =>
     .map((row) => row.querySelector('[title]')?.getAttribute('title'));
 
 describe('UpstreamUsageTable', () => {
+  it('adds one compact coupon column to a provider-scoped upstream table', () => {
+    const usageData = data([
+      ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
+    ]);
+    const inventory: CouponInventory = {
+      total: 4,
+      complete: true,
+      supported: true,
+      groups: [],
+      credentialsStored: true,
+    };
+    render(
+      <UpstreamUsageTable
+        data={{ ...usageData, coupons: new Map([['claude', inventory]]) }}
+      />,
+    );
+    expect(screen.getAllByText('Coupons')).toHaveLength(1);
+    const button = screen.getByRole('button', {
+      name: 'Coupons for claude: 4',
+    });
+    expect(button.textContent).toBe('×4');
+    expect(button.closest('a')).toBeNull();
+    expect(button.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(
+      screen.getByRole('link', { name: /claude/ }).getAttribute('href'),
+    ).toBe('/upstreams?selectedId=claude');
+  });
+
+  it('aligns mixed provider rows to the union of their observed windows', () => {
+    const usageData = data([
+      ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[1]!.windows = [snap('gemini_5h', 0.3)];
+    render(<UpstreamUsageTable data={usageData} />);
+    const claude = screen.getByRole('link', { name: /claude/ });
+    const gemini = screen.getByRole('link', { name: /gemini/ });
+    expect(claude.querySelectorAll('[data-window]')).toHaveLength(3);
+    expect(gemini.querySelectorAll('[data-window]')).toHaveLength(3);
+    expect(
+      claude
+        .querySelector('[data-window="gemini_5h"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(
+      gemini.querySelector('[data-window="5h"]')?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(screen.getAllByText('Coupons')).toHaveLength(1);
+  });
+
   it('counts reconnect nudges only from the provider-scoped rows', () => {
     const usageData = data(
       [
@@ -257,9 +308,6 @@ describe('UpstreamUsageTable', () => {
     expect(screen.getByTestId('usage-no-quota').textContent).toBe(
       'No subscription quota',
     );
-    expect(screen.getByTestId('usage-no-quota').className).toContain(
-      '@4xl:col-span-1',
-    );
   });
 
   it('keeps an inert desktop cell for absent 5h in a mixed fleet and hides it when stacked', () => {
@@ -277,19 +325,17 @@ describe('UpstreamUsageTable', () => {
     const absent = within(weekly).getByTestId('usage-absent-cell');
     expect(absent.getAttribute('data-window')).toBe('5h');
     expect(absent.getAttribute('aria-hidden')).toBe('true');
-    expect(absent.className).toBe('hidden @4xl:block');
     expect(absent.textContent).toBe('');
     expect(within(absent).queryByRole('meter')).toBeNull();
     expect(within(weekly).queryAllByText('No reading')).toHaveLength(0);
     expect(within(weekly).queryByText('0%')).toBeNull();
     expect(within(weekly).getAllByTestId('usage-cell')).toHaveLength(1);
     expect(within(normal).getAllByTestId('usage-cell')).toHaveLength(2);
-    expect(weekly.className).toBe(normal.className);
-    expect(weekly.className).toContain(
-      '@4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(2,minmax(0,1fr))]',
-    );
-    expect(screen.getByTestId('usage-no-quota').className).toContain(
-      '@4xl:col-span-2',
+    const apiKeyRow = screen.getByTestId('usage-no-quota').closest('li');
+    expect(apiKeyRow).not.toBeNull();
+    expect(within(apiKeyRow!).queryByRole('meter')).toBeNull();
+    expect(screen.getByTestId('usage-no-quota').textContent).toBe(
+      'No subscription quota',
     );
   });
 

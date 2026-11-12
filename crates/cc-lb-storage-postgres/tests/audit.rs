@@ -293,6 +293,59 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
         .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW + 1, 200, true)
         .await?;
     assert_request_ids(&bounded_admin_rows, &["admin-kind-only"]);
+    run_admin_action_route_contract(&storage).await?;
+    Ok(())
+}
+
+async fn run_admin_action_route_contract(storage: &PostgresStorage) -> Result<()> {
+    let action = "upstream_limit_reset_claim";
+    let route = "/admin/v1/upstreams/target/limit-resets/claim";
+    let claim = |request_id: &str, ts: u64| AuditEntry {
+        admin_action: Some(action.to_owned()),
+        route: route.to_owned(),
+        ..audit_entry(request_id, ts, AUTHORITY, SUBJECT)
+    };
+    let mut entries = vec![
+        claim("before-range", NOW - 1),
+        claim("target-tie-first", NOW + 2),
+        claim("target-tie-second", NOW + 2),
+        claim("after-range", NOW + 100),
+    ];
+    for index in 0..6 {
+        let mut unrelated_action = claim(&format!("other-action-{index}"), NOW + 10 + index);
+        unrelated_action.admin_action = Some("upstream_update".to_owned());
+        entries.push(unrelated_action);
+        let mut other_upstream = claim(&format!("other-upstream-{index}"), NOW + 20 + index);
+        other_upstream.route = "/admin/v1/upstreams/other/limit-resets/claim".to_owned();
+        entries.push(other_upstream);
+    }
+    let mut non_admin = claim("non-admin", NOW + 30);
+    non_admin.admin_action = None;
+    entries.push(non_admin);
+    // Append order must not override timestamp ordering.
+    entries.push(claim("target-old", NOW));
+    storage.append_audit_entries(&entries).await?;
+
+    let scope = AuditQueryScope::AdminActionRoute { action, route };
+    for admin_only in [false, true] {
+        let limited = storage
+            .query_recent_audit(scope, NOW, NOW + 50, 2, admin_only)
+            .await?;
+        assert_request_ids(&limited, &["target-tie-second", "target-tie-first"]);
+
+        let all_matches = storage
+            .query_recent_audit(scope, NOW, NOW + 50, 10, admin_only)
+            .await?;
+        assert_request_ids(
+            &all_matches,
+            &["target-tie-second", "target-tie-first", "target-old"],
+        );
+
+        let same_timestamp = storage
+            .query_recent_audit(scope, NOW + 2, NOW + 2, 10, admin_only)
+            .await?;
+        assert_request_ids(&same_timestamp, &["target-tie-second", "target-tie-first"]);
+    }
     Ok(())
 }
 

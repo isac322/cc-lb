@@ -36,6 +36,9 @@ pub enum OAuthUsagePollObservation {
         observed_at_unix_secs: u64,
         window_start_unix_millis: u64,
         window_end_unix_millis: u64,
+        /// Provider usage was observed successfully, but only a supported main
+        /// quota publication establishes post-reset routing freshness.
+        affected_main_quota_published: bool,
     },
     Throttled {
         observed_at_unix_secs: u64,

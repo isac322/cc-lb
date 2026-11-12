@@ -27,10 +27,9 @@ use cc_lb_control::anthropic_compat::{
 };
 
 use cc_lb_control::anthropic_metadata::{
-    CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS, CedarEmberIdentityRecord, CedarEmberPollRecord,
-    CedarEmberStatus, cedar_ember_epoch_meta_key, cedar_ember_fence_started_at_millis,
+    CedarEmberIdentityRecord, CedarEmberPollRecord, CedarEmberStatus,
     cedar_ember_identity_meta_key, cedar_ember_meta_key, fetch_oauth_profile_at,
-    make_metadata_http_client, settled_cedar_ember_epoch,
+    make_metadata_http_client,
 };
 
 use crate::scheduler_dispatch::http::{
@@ -39,7 +38,7 @@ use crate::scheduler_dispatch::http::{
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 use crate::scheduler_dispatch::time::now_unix_millis;
-use crate::scheduler_dispatch::usage::observe_usage_body;
+use crate::scheduler_dispatch::usage::parse_usage_body;
 
 use super::SchedulerDispatch;
 
@@ -262,11 +261,8 @@ impl SchedulerDispatch {
         } else {
             String::new()
         };
-        let epoch = if is_anthropic {
-            self.cedar_ember_epoch(upstream.id).await
-        } else {
-            None
-        };
+        let fence = self.capture_usage_poll_fence(&upstream).await?;
+        let poll_sequence = self.subscription_quota_cache.begin_poll();
         let observed_at_unix_secs = unix_secs(self.clock.now());
         let first_response = match self
             .fetch_usage_with_current_token(&upstream, &user_agent)
@@ -312,18 +308,18 @@ impl SchedulerDispatch {
                 status: response.status.as_u16(),
             });
         }
+        let openai_inventory = self
+            .fetch_openai_reset_inventory(&upstream, &fence, &response.body)
+            .await?;
+        self.validate_usage_poll_fence(&upstream, &fence).await?;
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
-        let cedar_ember = if is_anthropic {
-            observe_usage_body(
-                upstream.id,
-                &response.body,
-                observed_at_unix_millis,
-                &self.subscription_quota_sink,
-                self.subscription_quota_cache.as_ref(),
-            )?
+        let (records, cedar_ember, affected_main_published) = if is_anthropic {
+            let (records, cedar_ember) =
+                parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;
+            (records, cedar_ember, true)
         } else {
             let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
-            super::usage::observe_provider_usage_body(
+            let (records, affected_main_published) = super::usage::parse_provider_usage_body(
                 super::usage::ProviderUsageContext {
                     upstream_id: upstream.id,
                     kind: upstream.kind,
@@ -332,9 +328,13 @@ impl SchedulerDispatch {
                 },
                 &response.body,
                 observed_at_unix_millis,
-                &self.subscription_quota_sink,
-                self.subscription_quota_cache.as_ref(),
             )?;
+            (records, None, affected_main_published)
+        };
+        self.publish_usage_poll(&upstream, &fence, poll_sequence, &records)
+            .await?;
+        if !is_anthropic {
+            let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
             self.enrich_provider_account_metadata(
                 &upstream,
                 &bundle,
@@ -342,14 +342,18 @@ impl SchedulerDispatch {
                 observed_at_unix_millis,
             )
             .await;
-            None
-        };
-        if let Some(epoch) = epoch {
+        }
+        if is_anthropic
+            && self
+                .validate_usage_poll_fence(&upstream, &fence)
+                .await
+                .is_ok()
+        {
             let fingerprint = upstream.oauth_credential_fingerprint().unwrap_or_default();
             self.persist_cedar_ember(
                 upstream.id,
                 fingerprint,
-                epoch,
+                fence.epoch(),
                 cedar_ember.clone(),
                 observed_at_unix_millis,
             )
@@ -359,6 +363,10 @@ impl SchedulerDispatch {
                     .await;
             }
         }
+        if let Some(record) = openai_inventory {
+            self.persist_openai_reset_inventory(&upstream, &fence, &record)
+                .await;
+        }
         if is_anthropic && upstream.oauth_never_refresh {
             self.enqueue_metadata_refresh_for_long_lived(&upstream, traceparent)
                 .await?;
@@ -367,6 +375,7 @@ impl SchedulerDispatch {
             observed_at_unix_secs,
             window_start_unix_millis: observed_at_unix_millis,
             window_end_unix_millis: observed_at_unix_millis,
+            affected_main_quota_published: affected_main_published,
         })
     }
 
@@ -458,59 +467,6 @@ impl SchedulerDispatch {
             .await
         {
             tracing::warn!(upstream_id = %upstream.id, %error, "provider display metadata write failed");
-        }
-    }
-
-    /// Reads the claim-invalidation epoch. `Some(inner)` is the settled epoch
-    /// to embed in the snapshot (`None` when no claim has ever run); `None`
-    /// — a live claim fence, an unreadable value, a lost recovery race, or a
-    /// failed read — fails closed: the coupon write is skipped entirely.
-    ///
-    /// A well-formed fence older than [`CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS`]
-    /// belongs to an abandoned claim (cancelled handler or failed settle
-    /// write). The poll settles it with a fresh epoch via compare-and-put and
-    /// only then issues its provider request, so the snapshot it stamps with
-    /// that epoch is observed after any consumption the abandoned claim may
-    /// have caused. The claim POST itself is never replayed.
-    async fn cedar_ember_epoch(&self, upstream_id: uuid::Uuid) -> Option<Option<uuid::Uuid>> {
-        let key = cedar_ember_epoch_meta_key(upstream_id);
-        let raw = match self.storage.get_meta_value(&key).await {
-            Ok(raw) => raw,
-            Err(error) => {
-                tracing::warn!(%upstream_id, %error, "cedar_ember epoch read failed; skipping coupon write");
-                return None;
-            }
-        };
-        if let Some(epoch) = settled_cedar_ember_epoch(raw.as_deref()) {
-            return Some(epoch);
-        }
-        let raw = raw?;
-        let expired = cedar_ember_fence_started_at_millis(&raw).is_some_and(|started| {
-            now_unix_millis(&*self.clock).saturating_sub(started)
-                >= CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS
-        });
-        if !expired {
-            tracing::info!(%upstream_id, "cedar_ember epoch not settled; skipping coupon write");
-            return None;
-        }
-        let recovered = uuid::Uuid::new_v4();
-        match self
-            .storage
-            .compare_and_put_meta_value(&key, Some(&raw), &recovered.to_string())
-            .await
-        {
-            Ok(true) => {
-                tracing::warn!(%upstream_id, "settled abandoned cedar_ember claim fence");
-                Some(Some(recovered))
-            }
-            Ok(false) => {
-                tracing::info!(%upstream_id, "cedar_ember fence changed during recovery; skipping coupon write");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(%upstream_id, %error, "cedar_ember fence recovery failed; skipping coupon write");
-                None
-            }
         }
     }
 

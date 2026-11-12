@@ -14,6 +14,7 @@ import {
   type UpstreamConnectTarget,
 } from '../components/upstreams/connect/UpstreamConnectDialog';
 import * as api from '../lib/api';
+import type { CouponInventoryResponse } from '../lib/couponInventory';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
 import { pendingQuery } from '../lib/test-utils/hook-results';
@@ -649,6 +650,17 @@ describe('/upstreams disabled list rows', () => {
 });
 
 describe('/upstreams provider account metadata', () => {
+  function mockPlanSearchApi(metadata: () => api.SubscriptionMetadataResponse) {
+    const metadataUrl = `/admin/v1/upstreams/${upstream.id}/subscription-metadata`;
+    return vi.spyOn(api, 'getJson').mockImplementation(async (path) => {
+      if (path === metadataUrl) return metadata();
+      if (path === '/admin/v1/upstreams/limit-resets') {
+        return { upstreams: [] } satisfies CouponInventoryResponse;
+      }
+      throw new Error(`Unexpected plan-search GET: ${path}`);
+    });
+  }
+
   function setSearchVisibility(state: DocumentVisibilityState) {
     Object.defineProperty(document, 'visibilityState', {
       value: state,
@@ -685,7 +697,8 @@ describe('/upstreams provider account metadata', () => {
       plan: initialPlan,
       plan_name: null,
     };
-    const getMetadata = vi.spyOn(api, 'getJson').mockResolvedValue(initial);
+    let currentMetadata = initial;
+    const getMetadata = mockPlanSearchApi(() => currentMetadata);
     const metadataUrl = `/admin/v1/upstreams/${upstream.id}/subscription-metadata`;
     const metadataRequestCount = () =>
       getMetadata.mock.calls.filter(([path]) => path === metadataUrl).length;
@@ -698,11 +711,11 @@ describe('/upstreams provider account metadata', () => {
     return {
       metadataRequestCount,
       backfill: () => {
-        getMetadata.mockResolvedValue({
+        currentMetadata = {
           ...initial,
           plan: 'g1-ultra-tier',
           plan_name: 'Google AI Ultra',
-        } satisfies api.SubscriptionMetadataResponse);
+        };
       },
       dispose: () => {
         rendered.unmount();
@@ -770,6 +783,10 @@ describe('/upstreams provider account metadata', () => {
       'Claude Ultra',
       {
         organization_metadata: {
+          ...subscriptionMetadataResponse(upstream, {
+            email: 'operator@example.com',
+            uuid: 'cold-plan-account',
+          }).organization_metadata,
           organization_type: 'claude_max',
           rate_limit_tier: 'default_claude_max_20x',
         },
@@ -798,12 +815,12 @@ describe('/upstreams provider account metadata', () => {
           ],
         }),
       );
-      const getMetadata = vi.spyOn(api, 'getJson').mockResolvedValue({
+      const getMetadata = mockPlanSearchApi(() => ({
         upstream_id: upstream.id,
         subscription_metadata: null,
         organization_metadata: null,
         ...metadata,
-      });
+      }));
       renderRoute();
       expect(
         await screen.findByRole('button', { name: new RegExp(upstream.name) }),

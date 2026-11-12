@@ -1020,9 +1020,9 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     const additional = screen.getByRole('region', {
       name: 'Additional renewal evidence',
     });
-    expect(additional.querySelector('time')?.textContent).toContain(
-      '11 Nov 2026, 09:02:00',
-    );
+    const evidenceTime = additional.querySelector('time')?.textContent;
+    expect(evidenceTime).toContain('11 Nov 2026');
+    expect(evidenceTime).toContain('09:02:00');
     expect(screen.queryByText(/11-11 /)).toBeNull();
   });
 

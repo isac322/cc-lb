@@ -410,6 +410,7 @@ export function Modal({
   footer,
   size = 'md',
   preventDismiss = false,
+  finalFocus,
 }: {
   open: boolean;
   onOpenChange: (
@@ -422,6 +423,8 @@ export function Modal({
   footer?: ReactNode;
   size?: 'sm' | 'md' | 'lg';
   preventDismiss?: boolean;
+  /** Optional focus owner for workflows opened without a Dialog.Trigger. */
+  finalFocus?: BaseDialog.Popup.Props['finalFocus'];
 }) {
   const sizeClass =
     size === 'sm' ? 'max-w-sm' : size === 'lg' ? 'max-w-2xl' : 'max-w-md';
@@ -438,6 +441,7 @@ export function Modal({
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseDialog.Popup
+          finalFocus={finalFocus}
           className={cx(
             'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] outline-none',
             'bg-bg-sub border border-subtle-strong rounded-md shadow-overlay flex flex-col max-h-[85vh]',
@@ -1157,6 +1161,7 @@ export function Drawer({
   children,
   footer,
   bodyScroll = true,
+  finalFocus,
 }: {
   open: boolean;
   onOpenChange: (
@@ -1170,12 +1175,15 @@ export function Drawer({
   footer?: ReactNode;
   /** Set false when the drawer content owns its scroll containers. */
   bodyScroll?: boolean;
+  /** Optional focus owner for workflows opened without a Dialog.Trigger. */
+  finalFocus?: BaseDialog.Popup.Props['finalFocus'];
 }) {
   return (
     <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseDialog.Popup
+          finalFocus={finalFocus}
           className={cx(
             'fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-x-hidden bg-bg-sub border-l border-subtle-strong shadow-overlay outline-none',
             'duration-200 ease-out',

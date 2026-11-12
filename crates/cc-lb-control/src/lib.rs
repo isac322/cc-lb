@@ -12,6 +12,7 @@ pub mod audit_payload;
 pub mod audit_writer;
 pub mod dynamic_view;
 pub mod event_bus;
+pub mod openai_limit_resets;
 pub mod openai_org_api;
 pub mod subscription_metadata_hook;
 pub mod traits;

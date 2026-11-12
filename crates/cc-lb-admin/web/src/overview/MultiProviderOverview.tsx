@@ -10,6 +10,10 @@ import {
   FeedLiveStatus,
   RequestEventsFeed,
 } from '../components/ui/RequestEventsFeed';
+import {
+  UpstreamUsageTable,
+  useUpstreamUsageData,
+} from '../components/upstreams/UpstreamUsageTable';
 import type { DashboardUsageResponse } from '../lib/api';
 import { GENERATION_REQUEST_EVENT_KINDS } from '../lib/logRows';
 import {
@@ -140,7 +144,6 @@ function PrincipalUsageSection({
     (provider) => usageQueries[provider].isPending,
   );
   const anyError = providers.some((provider) => usageQueries[provider].isError);
-
   return (
     <Section
       title="Principal usage"
@@ -159,6 +162,7 @@ function PrincipalUsageSection({
 export function MultiProviderOverview() {
   const installation = useInstallation();
   const upstreams = useUpstreams();
+  const upstreamUsage = useUpstreamUsageData();
   const providers = installation.providers;
   const search = useSearch({ from: '/' }) as {
     range?: TimePreset;
@@ -238,6 +242,19 @@ export function MultiProviderOverview() {
           providers={providers}
           range={range}
         />
+        <Section
+          title="Upstreams"
+          action={<Link to="/upstreams">Manage upstreams</Link>}
+        >
+          <UpstreamUsageTable
+            data={upstreamUsage}
+            empty={
+              <p className="text-body text-text-muted">
+                No upstreams configured.
+              </p>
+            }
+          />
+        </Section>
         <LiveRequestsSection
           principalNameMap={principalNames}
           providers={providers}

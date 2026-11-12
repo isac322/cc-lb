@@ -1,24 +1,24 @@
 // Pure derivation for the coupon ("limit reset") nudge. Counts and
-// recommendations come only from the limit-resets payload plus the quota
-// snapshots the page already renders — quota stays the single source of
-// truth for usage and nothing here invents numbers, consumes grants, or
-// pressures the user.
+// recommendations come from provider eligibility and exact target-window
+// observations. The page's existing quota snapshots supply reset times;
+// grant.percent_used supplies usage for provider keys absent from quota.
+// Nothing here invents readings or consumes a grant.
 //
 // Thresholds are display hints, not provider policy: an expiry notice
 // appears within 24h of ends_at, and a limit hint only when the natural
 // reset is at least 1h away.
 
 import { useSyncExternalStore } from 'react';
+import {
+  type CouponQuotaWindow,
+  couponWindowLabel,
+  isFullCouponWindow,
+  presentCoupon,
+} from './couponPresentation';
 import type { CedarEmberLimitResets, LimitResetGrant } from './limitResets';
 
-/** Structural subset of QuotaSnapshot the nudge derivation needs. */
-export interface NudgeQuotaWindow {
-  window: string;
-  /** 0–1 fraction; null when the window carries no utilization number. */
-  utilization: number | null;
-  state: string;
-  resets_at_unix_secs: number | null;
-}
+/** Structural subset of the page's existing QuotaSnapshot. */
+export type NudgeQuotaWindow = CouponQuotaWindow;
 
 export type CouponNudgeKind = 'quiet' | 'expiry' | 'limit';
 
@@ -54,7 +54,7 @@ function parseMs(iso: string): number | null {
 /** Owned and still countable: started, not ended, resets left, valid dates.
  *  A null starts_at means the provider did not report one; the grant counts
  *  as started rather than being hidden. */
-function isActiveGrant(grant: LimitResetGrant, nowMs: number): boolean {
+export function isActiveGrant(grant: LimitResetGrant, nowMs: number): boolean {
   if (grant.resets_left <= 0) return false;
   if (grant.starts_at != null) {
     const startsMs = parseMs(grant.starts_at);
@@ -145,11 +145,12 @@ export function deriveCouponNudge(
   let limitedWindow: string | null = null;
   let limitedWaitMs = -1;
   for (const g of usableGrants) {
-    for (const name of g.clears) {
+    const presentation = presentCoupon(g, windows, { providerFresh: true });
+    for (const reading of presentation.targets) {
+      if (!isFullCouponWindow(reading)) continue;
+      const name = reading.window;
       const w = byWindow.get(name);
-      if (w?.state !== 'fresh') continue;
-      if (w.utilization == null || !Number.isFinite(w.utilization)) continue;
-      if (w.utilization < 1 || w.resets_at_unix_secs == null) continue;
+      if (w?.state !== 'fresh' || w.resets_at_unix_secs == null) continue;
       const wait = w.resets_at_unix_secs * 1000 - nowMs;
       // A natural reset inside the hour is left to happen on its own.
       if (wait >= LIMIT_MIN_WAIT_MS && wait > limitedWaitMs) {
@@ -162,8 +163,8 @@ export function deriveCouponNudge(
     return {
       ...base,
       kind: 'limit',
-      label: 'At your limit',
-      detail: `${limitedWindow} window resets on its own ${formatWait(limitedWaitMs)} — a reset clears it now.`,
+      label: 'Quota window full',
+      detail: `${couponWindowLabel(limitedWindow)} window resets on its own ${formatWait(limitedWaitMs)} — a reset clears it now.`,
     };
   }
 

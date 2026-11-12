@@ -103,6 +103,16 @@ impl UpstreamSubscriptionQuotaStore for SwitchableQuotaStore {
         self.inner.record_subscription_quota_samples(records).await
     }
 
+    async fn record_subscription_quota_poll(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &cc_lb_storage_api::SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool> {
+        self.inner
+            .record_subscription_quota_poll(records, fence)
+            .await
+    }
+
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         upstream_ids: &[Uuid],
@@ -353,6 +363,7 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: peer.holder.clone(),
         config: Arc::new(config),
         dynamic_view_rebinder: None,
