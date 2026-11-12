@@ -2,7 +2,7 @@ use anyhow::Result;
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptCursor, WarmupAttemptListFilters,
     WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptStatus, WarmupAttemptTrigger,
-    WarmupDispatchKind,
+    WarmupDispatchKind, WarmupLane,
     upstream::{UpstreamCreate, UpstreamKind, UpstreamRecord},
 };
 use uuid::Uuid;
@@ -47,6 +47,7 @@ pub fn attempt(
         completed_at_unix_secs: Some(attempted_at_unix_secs + 5),
         scheduled_for_unix_secs: attempted_at_unix_secs - 60,
         trigger: WarmupAttemptTrigger::Scheduled,
+        lane: WarmupLane::Primary,
         outcome,
         dispatch_kind: Some(WarmupDispatchKind::NotDispatched),
         http_status: None,
@@ -58,6 +59,19 @@ pub fn attempt(
         upstream_spec_revision: 1,
         dialect_plugin_snapshot: None,
         error_detail: None,
+    }
+}
+
+pub fn lane_attempt(
+    upstream_id: Uuid,
+    id_seed: u128,
+    attempted_at_unix_secs: i64,
+    lane: WarmupLane,
+    outcome: WarmupAttemptOutcome,
+) -> WarmupAttemptRecord {
+    WarmupAttemptRecord {
+        lane,
+        ..attempt(upstream_id, id_seed, attempted_at_unix_secs, outcome)
     }
 }
 
@@ -84,11 +98,13 @@ pub fn filters(
     limit: Option<u32>,
     before: Option<WarmupAttemptCursor>,
     status: Option<WarmupAttemptStatus>,
+    lane: Option<WarmupLane>,
 ) -> WarmupAttemptListFilters {
     WarmupAttemptListFilters {
         limit,
         before,
         status,
+        lane,
     }
 }
 

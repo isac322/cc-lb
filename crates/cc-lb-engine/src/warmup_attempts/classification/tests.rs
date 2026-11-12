@@ -140,6 +140,7 @@ fn success_without_target_headers_preserves_the_candidate_cycle() {
         for expected_cycle_key in [None, Some(FIVE_HOUR_RESET)] {
             let fields = response_attempt_fields(
                 kind,
+                WarmupLane::Primary,
                 StatusCode::OK,
                 &[],
                 expected_cycle_key,
@@ -182,6 +183,7 @@ fn successful_response_without_reset_is_authoritative_despite_exhaustion_observa
         }];
         let fields = response_attempt_fields(
             kind,
+            WarmupLane::Primary,
             StatusCode::OK,
             &observations,
             Some(SCHEDULED_FOR),
@@ -208,6 +210,7 @@ fn success_with_five_hour_headers_advances_the_cycle() {
     )];
     let fields = response_attempt_fields(
         UpstreamKind::AnthropicOauth,
+        WarmupLane::Primary,
         StatusCode::OK,
         &observations,
         Some(SCHEDULED_FOR),
@@ -234,6 +237,7 @@ fn success_with_only_seven_day_headers_advances_weekly_only_accounts() {
         )];
         let fields = response_attempt_fields(
             kind,
+            WarmupLane::Primary,
             StatusCode::OK,
             &observations,
             Some(SCHEDULED_FOR),
@@ -268,6 +272,7 @@ fn success_chooses_earliest_future_target_and_ignores_expired_resets() {
         ];
         let fields = response_attempt_fields(
             kind,
+            WarmupLane::Primary,
             StatusCode::OK,
             &observations,
             Some(SCHEDULED_FOR),
@@ -292,6 +297,7 @@ fn success_chooses_earliest_future_target_and_ignores_expired_resets() {
         ];
         let fields = response_attempt_fields(
             kind,
+            WarmupLane::Primary,
             StatusCode::OK,
             &observations,
             Some(SCHEDULED_FOR),
@@ -327,6 +333,7 @@ fn gemini_success_uses_only_gemini_group_resets() {
     ];
     let fields = response_attempt_fields(
         UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
         StatusCode::OK,
         &observations,
         Some(SCHEDULED_FOR),
@@ -355,6 +362,7 @@ fn gemini_429_with_active_target_is_transient() {
     ];
     let fields = response_attempt_fields(
         UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
         StatusCode::TOO_MANY_REQUESTS,
         &observations,
         None,
@@ -376,6 +384,7 @@ fn gemini_429_exhausted_weekly_is_skipped() {
     )];
     let fields = response_attempt_fields(
         UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
         StatusCode::TOO_MANY_REQUESTS,
         &observations,
         None,
@@ -448,6 +457,95 @@ fn idle_does_not_use_seven_day_reset_for_unobserved_five_hour() {
     );
 }
 
+#[test]
+fn third_party_lane_success_uses_only_third_party_group_resets() {
+    let observations = [
+        quota_observation(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            FIVE_HOUR_RESET - 1,
+            None,
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            FIVE_HOUR_RESET,
+            None,
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            SEVEN_DAY_RESET,
+            None,
+            None,
+        ),
+    ];
+
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        StatusCode::OK,
+        &observations,
+        Some(SCHEDULED_FOR),
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+
+    assert_eq!(
+        fields.outcome,
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
+    );
+    assert_eq!(fields.cycle_key, Some(FIVE_HOUR_RESET));
+}
+
+#[test]
+fn third_party_lane_429_exhausted_third_party_weekly_is_skipped() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::ThirdPartySevenDay,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Rejected),
+        Some(1.0),
+    )];
+
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        StatusCode::TOO_MANY_REQUESTS,
+        &observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+
+    assert_eq!(fields.outcome, SEVEN_DAY_SKIPPED.outcome);
+    assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
+}
+
+#[test]
+fn third_party_lane_429_ignores_exhausted_gemini_weekly() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::GeminiSevenDay,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Rejected),
+        Some(1.0),
+    )];
+
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        StatusCode::TOO_MANY_REQUESTS,
+        &observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+
+    assert_eq!(fields.outcome, MISSING_CYCLE_KEY.outcome);
+    assert_eq!(fields.cycle_key, None);
+}
+
 fn quota_sample(
     window: SubscriptionQuotaWindow,
     sample_kind: SubscriptionQuotaSampleKind,
@@ -490,6 +588,7 @@ fn openai_429_with_active_target_is_transient() {
     )];
     let fields = response_attempt_fields(
         UpstreamKind::OpenaiOauth,
+        WarmupLane::Primary,
         StatusCode::TOO_MANY_REQUESTS,
         &observations,
         None,
@@ -504,6 +603,7 @@ fn openai_429_with_active_target_is_transient() {
 fn assert_429(observations: &[UnifiedQuotaObservation], expected: ExpectedAttempt) {
     let fields = response_attempt_fields(
         UpstreamKind::AnthropicOauth,
+        WarmupLane::Primary,
         StatusCode::TOO_MANY_REQUESTS,
         observations,
         None,

@@ -115,6 +115,7 @@ impl WarmupPort for ServerWarmupPort {
         let record = execute_warmup_attempt(WarmupAttemptExecution {
             storage: input.storage,
             upstream: input.upstream,
+            lane: input.lane,
             scheduled_for_unix_secs: input.scheduled_for_unix_secs,
             trigger: WarmupAttemptTrigger::Manual,
             replica_id: None,

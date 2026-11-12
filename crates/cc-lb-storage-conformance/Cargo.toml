@@ -27,7 +27,6 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 futures = "0.3"
 anyhow = { workspace = true }
-chrono = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }

@@ -38,7 +38,7 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord, WarmupDispatchKind, WarmupPermanentFailureReason,
+    Storage, UpstreamRecord, WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason,
     WarmupTransientFailureReason,
 };
 
@@ -117,11 +117,13 @@ pub trait WarmupDialectDispatcher: Send + Sync {
         runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
         upstream: &UpstreamRecord,
+        lane: WarmupLane,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError>;
 
     async fn dispatch_warmup_native(
         &self,
         upstream: &UpstreamRecord,
+        lane: WarmupLane,
     ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError>;
 }
 

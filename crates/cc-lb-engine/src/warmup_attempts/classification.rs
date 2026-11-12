@@ -1,7 +1,7 @@
 use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupLane,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
     WarmupTransientFailureReason,
 };
@@ -44,6 +44,7 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
             error_detail,
         } => response_attempt_fields(
             execution.upstream.kind,
+            execution.lane,
             status,
             observations,
             execution.expected_cycle_key,
@@ -90,8 +91,10 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn response_attempt_fields(
     kind: UpstreamKind,
+    lane: WarmupLane,
     status: StatusCode,
     observations: &[UnifiedQuotaObservation],
     expected_cycle_key: Option<i64>,
@@ -104,6 +107,7 @@ fn response_attempt_fields(
     let owned_detail = error_detail.map(ToOwned::to_owned);
     match classify_response(
         kind,
+        lane,
         status,
         observations,
         candidate_cycle_key,
@@ -150,6 +154,7 @@ fn response_attempt_fields(
 
 fn classify_response(
     kind: UpstreamKind,
+    lane: WarmupLane,
     status: StatusCode,
     observations: &[UnifiedQuotaObservation],
     candidate_cycle_key: i64,
@@ -157,14 +162,14 @@ fn classify_response(
 ) -> ResponseClassification {
     if status.is_success() {
         return ResponseClassification::SuccessNewCycle {
-            cycle_key: target_cycle_key(kind, observations, now_unix_secs)
+            cycle_key: target_cycle_key(kind, lane, observations, now_unix_secs)
                 .unwrap_or(candidate_cycle_key),
         };
     }
     match status {
         StatusCode::TOO_MANY_REQUESTS => {
             if let Some(cycle_key) =
-                seven_day_exhausted_cycle_key(kind, observations, now_unix_secs)
+                seven_day_exhausted_cycle_key(kind, lane, observations, now_unix_secs)
             {
                 return ResponseClassification::SevenDayExhausted { cycle_key };
             }
@@ -174,7 +179,7 @@ fn classify_response(
                     reason: WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
                 };
             }
-            match target_cycle_key(kind, observations, now_unix_secs) {
+            match target_cycle_key(kind, lane, observations, now_unix_secs) {
                 Some(cycle_key) => ResponseClassification::WindowAlreadyActive { cycle_key },
                 None => ResponseClassification::Transient {
                     reason: WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
@@ -204,21 +209,11 @@ fn classify_response(
 
 fn target_cycle_key(
     kind: UpstreamKind,
+    lane: WarmupLane,
     observations: &[UnifiedQuotaObservation],
     now_unix_secs: i64,
 ) -> Option<i64> {
-    let windows: &[SubscriptionQuotaWindow] = match kind {
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth => &[
-            SubscriptionQuotaWindow::FiveHour,
-            SubscriptionQuotaWindow::SevenDay,
-        ],
-        UpstreamKind::GeminiOauth => &[
-            SubscriptionQuotaWindow::GeminiFiveHour,
-            SubscriptionQuotaWindow::GeminiSevenDay,
-        ],
-        _ => &[],
-    };
-    windows
+    lane.target_windows(kind)
         .iter()
         .filter_map(|window| cycle_key_for_window(observations, *window))
         .filter(|reset| *reset > now_unix_secs)
@@ -227,21 +222,11 @@ fn target_cycle_key(
 
 fn seven_day_exhausted_cycle_key(
     kind: UpstreamKind,
+    lane: WarmupLane,
     observations: &[UnifiedQuotaObservation],
     now_unix_secs: i64,
 ) -> Option<i64> {
-    let windows: &[SubscriptionQuotaWindow] = match kind {
-        UpstreamKind::AnthropicOauth => &[
-            SubscriptionQuotaWindow::SevenDay,
-            SubscriptionQuotaWindow::SevenDaySonnet,
-            SubscriptionQuotaWindow::SevenDayOpus,
-            SubscriptionQuotaWindow::SevenDayFable,
-        ],
-        UpstreamKind::OpenaiOauth => &[SubscriptionQuotaWindow::SevenDay],
-        UpstreamKind::GeminiOauth => &[SubscriptionQuotaWindow::GeminiSevenDay],
-        _ => &[],
-    };
-    windows
+    lane.weekly_windows(kind)
         .iter()
         .filter_map(|window| exhausted_cycle_key_for_window(observations, *window))
         .find(|reset| *reset > now_unix_secs)

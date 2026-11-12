@@ -4,13 +4,19 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use cc_lb_aead::OAuthTokenBundle;
 use cc_lb_scheduler::error::SchedulerError;
-use cc_lb_storage_api::upstream::{UpstreamRecord, UpstreamStore, UpstreamWarmupDialectPlugin};
+use cc_lb_storage_api::upstream::{
+    UpstreamKind, UpstreamRecord, UpstreamStore, UpstreamWarmupDialectPlugin,
+};
 use cc_lb_storage_api::warmup_attempts::{
     WarmupAttemptCursor, WarmupAttemptListFilters, WarmupAttemptRecord, WarmupAttemptStatus,
-    WarmupAttemptSummary,
+    WarmupLane,
 };
-use cc_lb_storage_api::{Storage, StorageError};
+use cc_lb_storage_api::{
+    Storage, StorageError, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaWindow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -20,24 +26,42 @@ use crate::AdminState;
 const RECENT_ATTEMPT_LIMIT: u32 = 10;
 const ATTEMPT_DEFAULT_LIMIT: u32 = 50;
 const ATTEMPT_MAX_LIMIT: u32 = 200;
-const RECENT_SUMMARY_WINDOW_SECS: i64 = 7 * 86_400;
-const WARMUP_JOB_KIND: &str = "warmup";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WarmupAttemptsQuery {
     limit: Option<u32>,
     before: Option<String>,
     status: Option<WarmupAttemptStatus>,
+    lane: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WarmupSummaryResponse {
     upstream_id: Uuid,
+    dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    lanes: Vec<WarmupLaneSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct WarmupLaneSummary {
+    lane: WarmupLane,
+    eligible: bool,
+    ineligible_reason: Option<WarmupLaneIneligibleReason>,
+    target_windows: Vec<SubscriptionQuotaWindow>,
+    next_scheduled_at_unix_secs: Option<i64>,
     last_attempt: Option<WarmupAttemptRecord>,
     recent_attempts: Vec<WarmupAttemptRecord>,
-    next_scheduled_at_unix_secs: Option<i64>,
-    recent_summary_7d: WarmupAttemptSummary,
-    dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+}
+
+/// Why a lane cannot be warmed right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WarmupLaneIneligibleReason {
+    /// The credential profile does not serve the lane's quota group
+    /// (e.g. a Gemini CLI grant has no Claude/GPT-OSS quota).
+    ProfileUnsupported,
+    /// Every lane target window's latest stored quota sample is `Absent`.
+    QuotaGroupAbsent,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,41 +131,53 @@ pub(crate) async fn get_upstream_warmup(
     let storage = storage(&state)?;
     let upstream_id = parse_upstream_id(&id)?;
     let upstream = load_upstream(storage, upstream_id).await?;
-    let last_attempt = storage
-        .latest_warmup_attempt_for_upstream(upstream_id)
-        .await?;
-    let recent_attempts = storage
-        .list_warmup_attempts_for_upstream(
-            upstream_id,
-            WarmupAttemptListFilters {
-                limit: Some(RECENT_ATTEMPT_LIMIT),
-                before: None,
-                status: None,
-            },
-        )
-        .await?;
-    let next_scheduled_at_unix_secs = next_scheduled_at_unix_secs(&state, upstream_id).await?;
-    let now_unix_secs = i64::try_from(cc_lb_clock::unix_secs(state.clock.now())).map_err(|_| {
-        WarmupReadError::Internal {
-            detail: "clock now overflowed i64 unix seconds".to_owned(),
-        }
-    })?;
-    let cutoff_unix_secs = now_unix_secs
-        .checked_sub(RECENT_SUMMARY_WINDOW_SECS)
-        .ok_or_else(|| WarmupReadError::Internal {
-            detail: "recent summary cutoff overflow".to_owned(),
-        })?;
-    let recent_summary_7d = storage
-        .summarize_recent_warmup_attempts(upstream_id, cutoff_unix_secs)
-        .await?;
+    let lanes = WarmupLane::lanes_for_kind(upstream.kind);
+    let bundle = if lanes.iter().any(|lane| *lane != WarmupLane::Primary) {
+        decrypt_lane_bundle(&state, &upstream)
+    } else {
+        None
+    };
+    let latest_quota = if lanes.is_empty() {
+        Vec::new()
+    } else {
+        storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+            .await?
+    };
+
+    let mut summaries = Vec::with_capacity(lanes.len());
+    for &lane in lanes {
+        let target_windows = lane_reported_windows(upstream.kind, lane, &latest_quota);
+        let ineligible_reason =
+            lane_ineligible_reason(upstream.kind, lane, bundle.as_ref(), &target_windows);
+        let recent_attempts = storage
+            .list_warmup_attempts_for_upstream(
+                upstream_id,
+                WarmupAttemptListFilters {
+                    limit: Some(RECENT_ATTEMPT_LIMIT),
+                    before: None,
+                    status: None,
+                    lane: Some(lane),
+                },
+            )
+            .await?;
+        summaries.push(WarmupLaneSummary {
+            lane,
+            eligible: ineligible_reason.is_none(),
+            ineligible_reason,
+            target_windows,
+            next_scheduled_at_unix_secs: next_scheduled_at_unix_secs(&state, upstream_id, lane)
+                .await?,
+            // Attempts are ordered newest first, so the latest attempt is the head.
+            last_attempt: recent_attempts.first().cloned(),
+            recent_attempts,
+        });
+    }
 
     Ok(Json(WarmupSummaryResponse {
         upstream_id,
-        last_attempt,
-        recent_attempts,
-        next_scheduled_at_unix_secs,
-        recent_summary_7d,
         dialect_plugin: upstream.warmup_dialect_plugin,
+        lanes: summaries,
     }))
 }
 
@@ -153,6 +189,15 @@ pub(crate) async fn list_upstream_warmup_attempts(
     let storage = storage(&state)?;
     let upstream_id = parse_upstream_id(&id)?;
     load_upstream(storage, upstream_id).await?;
+    let lane = query
+        .lane
+        .as_deref()
+        .map(parse_lane)
+        .transpose()
+        .map_err(|detail| WarmupReadError::BadRequest {
+            error: "invalid_warmup_lane",
+            detail,
+        })?;
     let limit = normalized_limit(query.limit);
     let before = decode_before(query.before.as_deref())?;
     let attempts = storage
@@ -162,6 +207,7 @@ pub(crate) async fn list_upstream_warmup_attempts(
                 limit: Some(limit),
                 before,
                 status: query.status,
+                lane,
             },
         )
         .await?;
@@ -203,13 +249,107 @@ async fn load_upstream(
 async fn next_scheduled_at_unix_secs(
     state: &AdminState,
     upstream_id: Uuid,
+    lane: WarmupLane,
 ) -> Result<Option<i64>, WarmupReadError> {
     match state.scheduler.as_ref() {
         Some(scheduler) => Ok(scheduler
-            .next_run_for_upstream(upstream_id, WARMUP_JOB_KIND)
+            .next_run_for_upstream(upstream_id, lane.job_kind())
             .await?),
         None => Ok(None),
     }
+}
+
+/// Parses a `lane` query value; the error is the 400 detail.
+pub(crate) fn parse_lane(value: &str) -> Result<WarmupLane, String> {
+    WarmupLane::parse(value).ok_or_else(|| {
+        format!("unknown warmup lane `{value}`; expected `primary` or `third_party`")
+    })
+}
+
+/// Decrypted OAuth credential used only to decide lane eligibility. A missing
+/// or undecryptable credential supports the primary lane alone; a decrypt
+/// failure is logged so the resulting `profile_unsupported` is never silent.
+pub(crate) fn decrypt_lane_bundle(
+    state: &AdminState,
+    upstream: &UpstreamRecord,
+) -> Option<OAuthTokenBundle> {
+    match upstream
+        .oauth_credentials
+        .as_ref()?
+        .decrypt(state.aead.as_ref(), upstream.id.as_bytes())
+    {
+        Ok(bundle) => Some(bundle),
+        Err(error) => {
+            tracing::warn!(
+                target: "warmup",
+                upstream_id = %upstream.id,
+                error = %error,
+                "oauth credential decrypt failed; non-primary warmup lanes treated as profile_unsupported"
+            );
+            None
+        }
+    }
+}
+
+/// Whether the credential can serve `lane` for `kind`.
+pub(crate) fn lane_supported_by_credential(
+    kind: UpstreamKind,
+    lane: WarmupLane,
+    bundle: Option<&OAuthTokenBundle>,
+) -> bool {
+    match bundle {
+        Some(bundle) => lane.credential_supports(kind, bundle),
+        None => lane == WarmupLane::Primary && WarmupLane::lanes_for_kind(kind).contains(&lane),
+    }
+}
+
+/// Lane target windows whose latest stored quota sample is not `Absent`.
+/// Missing, unobserved, or stale windows still count as reported.
+pub(crate) fn lane_reported_windows(
+    kind: UpstreamKind,
+    lane: WarmupLane,
+    latest_quota: &[SubscriptionQuotaSample],
+) -> Vec<SubscriptionQuotaWindow> {
+    lane.target_windows(kind)
+        .iter()
+        .copied()
+        .filter(|window| !window_reported_absent(latest_quota, *window))
+        .collect()
+}
+
+fn window_reported_absent(
+    latest_quota: &[SubscriptionQuotaSample],
+    window: SubscriptionQuotaWindow,
+) -> bool {
+    latest_quota
+        .iter()
+        .filter(|sample| sample.window == window)
+        .max_by_key(|sample| sample.observed_at_unix_millis)
+        .is_some_and(|sample| sample.sample_kind == SubscriptionQuotaSampleKind::Absent)
+}
+
+/// `None` when the lane can be warmed. `reported_windows` comes from
+/// [`lane_reported_windows`].
+///
+/// `quota_group_absent` applies only to `gemini_oauth`, whose quota groups can
+/// be missing from an account; Anthropic/OpenAI primary lanes stay eligible
+/// even when both windows are reported absent.
+pub(crate) fn lane_ineligible_reason(
+    kind: UpstreamKind,
+    lane: WarmupLane,
+    bundle: Option<&OAuthTokenBundle>,
+    reported_windows: &[SubscriptionQuotaWindow],
+) -> Option<WarmupLaneIneligibleReason> {
+    if !lane_supported_by_credential(kind, lane, bundle) {
+        return Some(WarmupLaneIneligibleReason::ProfileUnsupported);
+    }
+    if kind == UpstreamKind::GeminiOauth
+        && !lane.target_windows(kind).is_empty()
+        && reported_windows.is_empty()
+    {
+        return Some(WarmupLaneIneligibleReason::QuotaGroupAbsent);
+    }
+    None
 }
 
 fn normalized_limit(limit: Option<u32>) -> u32 {

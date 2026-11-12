@@ -127,6 +127,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
         _runtime: &Arc<cc_lb_runtime_wasmtime::WasmtimeRuntime>,
         _data_dir: &std::path::Path,
         _upstream: &cc_lb_storage_api::UpstreamRecord,
+        _lane: cc_lb_storage_api::WarmupLane,
     ) -> Result<WarmupDialectDispatchOutcome, cc_lb_admin::WarmupDialectDispatchError> {
         Ok(WarmupDialectDispatchOutcome {
             status: StatusCode::OK,
@@ -137,6 +138,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
     async fn dispatch_warmup_native(
         &self,
         _upstream: &cc_lb_storage_api::UpstreamRecord,
+        _lane: cc_lb_storage_api::WarmupLane,
     ) -> Result<WarmupNativeDispatchOutcome, cc_lb_admin::WarmupDialectDispatchError> {
         Ok(WarmupNativeDispatchOutcome::Response {
             status: StatusCode::OK,

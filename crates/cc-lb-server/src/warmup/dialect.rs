@@ -16,7 +16,7 @@ use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
 use cc_lb_storage_api::{
-    PluginSlotKind, StorageError, UpstreamKind, UpstreamRecord, WasmRegistryEntry,
+    PluginSlotKind, StorageError, UpstreamKind, UpstreamRecord, WarmupLane, WasmRegistryEntry,
 };
 use cc_lb_upstream::{
     DialectShapeContext, SignerFactory, UpstreamDialect, shape_request, sign_request,
@@ -46,6 +46,7 @@ pub struct WarmupDialectDispatchParams<'a> {
     pub aead: Arc<AeadService>,
     pub lazy_refresher: Option<Arc<LazyRefresher>>,
     pub upstream: &'a UpstreamRecord,
+    pub lane: WarmupLane,
     pub http: &'a WarmupHttpClient,
     pub clock: cc_lb_clock::ClockHandle,
     pub config: &'a Config,
@@ -97,6 +98,13 @@ impl WarmupDispatchError {
 pub async fn dispatch_warmup_with_dialect(
     params: WarmupDialectDispatchParams<'_>,
 ) -> Result<WarmupDispatchOutcome, WarmupDispatchError> {
+    if !WarmupLane::lanes_for_kind(params.upstream.kind).contains(&params.lane) {
+        return Err(WarmupDispatchError::Shape(format!(
+            "warmup lane {} is not available for {} upstreams",
+            params.lane.as_str(),
+            params.upstream.kind.as_str()
+        )));
+    }
     let plugin_ref = params
         .upstream
         .warmup_dialect_plugin
@@ -217,6 +225,7 @@ pub async fn dispatch_warmup_with_dialect(
             &ProviderWarmupDispatchParams {
                 http: params.http,
                 upstream: params.upstream,
+                lane: params.lane,
                 aead: params.aead.as_ref(),
                 config: params.config,
                 clock: params.clock,

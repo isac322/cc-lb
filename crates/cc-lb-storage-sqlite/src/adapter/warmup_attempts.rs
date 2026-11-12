@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters,
-    WarmupAttemptRecord, WarmupAttemptStatus, WarmupAttemptSummary,
+    WarmupAttemptRecord,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -11,17 +11,17 @@ use uuid::Uuid;
 use crate::{
     SqliteStorage,
     adapter::warmup_attempt_mapping::{
-        dispatch_kind_from_str, dispatch_kind_to_str, outcome_components, parse_reason,
-        status_from_str, status_to_str,
+        dispatch_kind_from_str, dispatch_kind_to_str, lane_from_str, outcome_components,
+        parse_reason, status_from_str, status_to_str,
     },
     map_sqlx_error,
 };
 
 const DEFAULT_LIST_LIMIT: u32 = 50;
 const WARMUP_ATTEMPT_COLUMNS: &str = "id, upstream_id, attempted_at_unix_secs, \
-    completed_at_unix_secs, scheduled_for_unix_secs, trigger, outcome, reason, dispatch_kind, \
-    http_status, cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, \
-    lease_holder, upstream_spec_revision, dialect_plugin_snapshot, error_detail";
+    completed_at_unix_secs, scheduled_for_unix_secs, trigger, lane, outcome, reason, \
+    dispatch_kind, http_status, cycle_key, expected_cycle_key, idle_secs_since_prev_window, \
+    replica_id, lease_holder, upstream_spec_revision, dialect_plugin_snapshot, error_detail";
 
 #[async_trait]
 impl UpstreamWarmupAttemptStore for SqliteStorage {
@@ -30,10 +30,10 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         sqlx::query(
             "INSERT INTO warmup_attempts_v1 \
              (id, upstream_id, attempted_at_unix_secs, completed_at_unix_secs, \
-              scheduled_for_unix_secs, trigger, outcome, reason, dispatch_kind, http_status, \
-              cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, lease_holder, \
-              upstream_spec_revision, dialect_plugin_snapshot, error_detail) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              scheduled_for_unix_secs, trigger, lane, outcome, reason, dispatch_kind, \
+              http_status, cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, \
+              lease_holder, upstream_spec_revision, dialect_plugin_snapshot, error_detail) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(attempt.id.to_string())
         .bind(attempt.upstream_id.to_string())
@@ -41,6 +41,7 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         .bind(attempt.completed_at_unix_secs)
         .bind(attempt.scheduled_for_unix_secs)
         .bind(enum_to_db(attempt.trigger, "trigger")?)
+        .bind(attempt.lane.as_str())
         .bind(outcome)
         .bind(reason)
         .bind(attempt.dispatch_kind.map(dispatch_kind_to_str))
@@ -70,6 +71,9 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         if filters.status.is_some() {
             sql.push_str(" AND outcome = ?");
         }
+        if filters.lane.is_some() {
+            sql.push_str(" AND lane = ?");
+        }
         if filters.before.is_some() {
             sql.push_str(
                 " AND (attempted_at_unix_secs < ? \
@@ -81,6 +85,9 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         let mut query = sqlx::query(AssertSqlSafe(sql)).bind(upstream_id.to_string());
         if let Some(status) = filters.status {
             query = query.bind(status_to_str(status));
+        }
+        if let Some(lane) = filters.lane {
+            query = query.bind(lane.as_str());
         }
         if let Some(cursor) = filters.before {
             query = query
@@ -95,59 +102,6 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_record).collect()
-    }
-
-    async fn summarize_recent_warmup_attempts(
-        &self,
-        upstream_id: Uuid,
-        cutoff_unix_secs: i64,
-    ) -> StorageResult<WarmupAttemptSummary> {
-        let rows = sqlx::query(
-            "SELECT outcome, COUNT(*) AS attempt_count \
-             FROM warmup_attempts_v1 \
-             WHERE upstream_id = ? AND attempted_at_unix_secs >= ? \
-             GROUP BY outcome",
-        )
-        .bind(upstream_id.to_string())
-        .bind(cutoff_unix_secs)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        let mut summary = WarmupAttemptSummary::default();
-        for row in rows {
-            let status = status_from_str(
-                &row.try_get::<String, _>("outcome")
-                    .map_err(map_sqlx_error)?,
-            )?;
-            let count = i64_to_u64(
-                row.try_get::<i64, _>("attempt_count")
-                    .map_err(map_sqlx_error)?,
-                "warmup attempt summary count",
-            )?;
-            match status {
-                WarmupAttemptStatus::Success => summary.success = count,
-                WarmupAttemptStatus::Skipped => summary.skipped = count,
-                WarmupAttemptStatus::TransientFailure => summary.transient_failure = count,
-                WarmupAttemptStatus::PermanentFailure => summary.permanent_failure = count,
-            }
-        }
-        Ok(summary)
-    }
-
-    async fn latest_warmup_attempt_for_upstream(
-        &self,
-        upstream_id: Uuid,
-    ) -> StorageResult<Option<WarmupAttemptRecord>> {
-        let row = sqlx::query(AssertSqlSafe(format!(
-            "SELECT {WARMUP_ATTEMPT_COLUMNS} FROM warmup_attempts_v1 \
-             WHERE upstream_id = ? ORDER BY attempted_at_unix_secs DESC, id DESC LIMIT 1"
-        )))
-        .bind(upstream_id.to_string())
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        row.map(row_to_record).transpose()
     }
 }
 
@@ -184,6 +138,7 @@ fn row_to_record(row: SqliteRow) -> StorageResult<WarmupAttemptRecord> {
             &row.try_get::<String, _>("trigger")
                 .map_err(map_sqlx_error)?,
         )?,
+        lane: lane_from_str(&row.try_get::<String, _>("lane").map_err(map_sqlx_error)?)?,
         outcome: parse_reason(status_from_str(&outcome)?, &reason)?,
         dispatch_kind: dispatch_kind
             .as_deref()
@@ -248,11 +203,5 @@ fn json_from_db(value: Option<String>) -> StorageResult<Option<Value>> {
 fn uuid_from_db(value: &str, field: &str) -> StorageResult<Uuid> {
     Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
         message: format!("invalid {field} {value}: {error}"),
-    })
-}
-
-fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
-    u64::try_from(value).map_err(|_| StorageError::Corrupted {
-        message: format!("{field} is negative in sqlite storage"),
     })
 }

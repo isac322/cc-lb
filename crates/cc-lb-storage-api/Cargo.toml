@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }

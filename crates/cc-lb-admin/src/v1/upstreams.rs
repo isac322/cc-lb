@@ -35,7 +35,7 @@ use cc_lb_storage_api::{
     SubscriptionQuotaSample, SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord,
     UpstreamApiKeyStore, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
-    WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
+    WarmupLane, WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -466,6 +466,7 @@ struct SubscriptionMetadataResponse {
 #[derive(Debug, Serialize)]
 struct FireNowFiredResponse {
     fired: bool,
+    lane: WarmupLane,
     cycle_key: i64,
     outcome: WarmupAttemptOutcome,
 }
@@ -473,8 +474,14 @@ struct FireNowFiredResponse {
 #[derive(Debug, Serialize)]
 struct FireNowNotFiredResponse {
     fired: bool,
+    lane: WarmupLane,
     #[serde(flatten)]
     outcome: WarmupAttemptOutcome,
+}
+
+#[derive(Debug, Deserialize)]
+struct FireNowQuery {
+    lane: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1261,23 +1268,40 @@ async fn refresh_upstream_subscription_metadata(
 async fn fire_now_upstream_warmup(
     State(state): State<AdminState>,
     Path(upstream_id): Path<Uuid>,
+    Query(query): Query<FireNowQuery>,
     Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
+    let lane = match query.lane.as_deref() {
+        None => WarmupLane::Primary,
+        Some(value) => super::upstream_warmup::parse_lane(value).map_err(|detail| {
+            UpstreamError::BadRequest {
+                error: "invalid_warmup_lane",
+                detail,
+            }
+        })?,
+    };
     let storage = storage_arc(&state)?;
     let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
         .await?
         .ok_or(UpstreamError::NotFound)?;
     let target_upstream = upstream.name.clone();
     let stage =
-        fire_now_upstream_warmup_inner(&state, storage.clone(), upstream_id, upstream).await?;
+        fire_now_upstream_warmup_inner(&state, storage.clone(), upstream_id, upstream, lane)
+            .await?;
     // Every stage has committed a warmup attempt row (or needs no write);
     // the remaining persistence and the audit outlive a dropped request.
     complete_after_commit(async move {
         let response = match stage {
             FireNowStage::Finished(response) => response,
             FireNowStage::Attempted(attempted) => {
-                match finish_fire_now_attempt(&state, storage.as_ref(), upstream_id, attempted)
-                    .await
+                match finish_fire_now_attempt(
+                    &state,
+                    storage.as_ref(),
+                    upstream_id,
+                    lane,
+                    attempted,
+                )
+                .await
                 {
                     Ok(response) => response,
                     Err(error) => return Err(error),
@@ -1332,11 +1356,10 @@ async fn fire_now_upstream_warmup_inner(
     storage: Arc<dyn Storage>,
     upstream_id: Uuid,
     upstream: UpstreamRecord,
+    lane: WarmupLane,
 ) -> Result<FireNowStage, UpstreamError> {
-    if !matches!(
-        upstream.kind,
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-    ) {
+    let kind_lanes = WarmupLane::lanes_for_kind(upstream.kind);
+    if kind_lanes.is_empty() {
         return Ok(FireNowStage::Finished(
             (
                 StatusCode::BAD_REQUEST,
@@ -1348,12 +1371,26 @@ async fn fire_now_upstream_warmup_inner(
                 .into_response(),
         ));
     }
+    if !kind_lanes.contains(&lane) {
+        return Ok(FireNowStage::Finished(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "warmup_lane_unsupported",
+                    "kind": upstream.kind.as_str(),
+                    "lane": lane.as_str(),
+                })),
+            )
+                .into_response(),
+        ));
+    }
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
         let _ = record_fire_now_skip(
             state,
             storage.as_ref(),
             &upstream,
+            lane,
             now_unix_secs,
             WarmupSkipReason::UpstreamDisabled,
             None,
@@ -1372,6 +1409,7 @@ async fn fire_now_upstream_warmup_inner(
             state,
             storage.as_ref(),
             &upstream,
+            lane,
             now_unix_secs,
             now_unix_secs,
             None,
@@ -1383,16 +1421,84 @@ async fn fire_now_upstream_warmup_inner(
         .await?;
         return Ok(FireNowStage::Finished(fire_now_not_fired_response(
             StatusCode::BAD_REQUEST,
+            lane,
             outcome,
         )));
     }
 
     let holder = format!("fire-now:{}", Uuid::new_v4());
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "dispatch_requested");
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), action = "dispatch_requested");
 
-    let latest = latest_five_hour_quota(storage.as_ref(), upstream_id).await?;
-    let candidate_cycle_key = latest
-        .as_ref()
+    // Only non-primary lanes depend on the credential profile; the primary
+    // lane never needs the plaintext credential here.
+    let bundle = if lane == WarmupLane::Primary {
+        None
+    } else {
+        match decrypt_oauth_bundle(state, &upstream) {
+            Ok(bundle) => Some(bundle),
+            Err(_) => {
+                let outcome = record_fire_now_failure(
+                    state,
+                    storage.as_ref(),
+                    &upstream,
+                    lane,
+                    now_unix_secs,
+                    now_unix_secs,
+                    Some(holder.as_str()),
+                    WarmupPermanentFailureReason::CredentialDecryptFailed,
+                    WarmupDispatchKind::NotDispatched,
+                    Some(StatusCode::BAD_GATEWAY),
+                    Some("upstream oauth credential decrypt failed"),
+                )
+                .await?;
+                return Ok(FireNowStage::Finished(fire_now_not_fired_response(
+                    StatusCode::BAD_GATEWAY,
+                    lane,
+                    outcome,
+                )));
+            }
+        }
+    };
+    let latest_quota = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await?;
+    let reported_windows =
+        super::upstream_warmup::lane_reported_windows(upstream.kind, lane, &latest_quota);
+    if let Some(reason) = super::upstream_warmup::lane_ineligible_reason(
+        upstream.kind,
+        lane,
+        bundle.as_ref(),
+        &reported_windows,
+    ) {
+        let detail = match reason {
+            super::upstream_warmup::WarmupLaneIneligibleReason::ProfileUnsupported => {
+                "credential profile does not serve this quota group"
+            }
+            super::upstream_warmup::WarmupLaneIneligibleReason::QuotaGroupAbsent => {
+                "every target window of this quota group is reported absent"
+            }
+        };
+        tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), reason = detail, action = "dispatch_skipped");
+        let outcome = record_fire_now_skip(
+            state,
+            storage.as_ref(),
+            &upstream,
+            lane,
+            now_unix_secs,
+            WarmupSkipReason::QuotaGroupUnavailable,
+            Some(detail),
+        )
+        .await?;
+        return Ok(FireNowStage::Finished(fire_now_not_fired_response(
+            StatusCode::ACCEPTED,
+            lane,
+            outcome,
+        )));
+    }
+    let candidate_cycle_key = lane
+        .target_windows(upstream.kind)
+        .first()
+        .and_then(|window| latest_window_quota(&latest_quota, *window))
         .and_then(cycle_key_from_latest_observation)
         .unwrap_or(now_unix_secs);
     if upstream.warmup_dialect_plugin.is_some()
@@ -1405,6 +1511,7 @@ async fn fire_now_upstream_warmup_inner(
             state,
             storage.as_ref(),
             &upstream,
+            lane,
             now_unix_secs,
             candidate_cycle_key,
             Some(holder.as_str()),
@@ -1416,6 +1523,7 @@ async fn fire_now_upstream_warmup_inner(
         .await?;
         return Ok(FireNowStage::Finished(fire_now_not_fired_response(
             StatusCode::BAD_GATEWAY,
+            lane,
             outcome,
         )));
     }
@@ -1426,11 +1534,11 @@ async fn fire_now_upstream_warmup_inner(
         Some((runtime, data_dir, dispatcher))
     });
     let dialect_plugin_used = dialect_dispatch_bundle.is_some();
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
     let dispatch_attempt = if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
         match tokio::time::timeout(
             Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatcher.dispatch_warmup_with_dialect(runtime, data_dir, &upstream),
+            dispatcher.dispatch_warmup_with_dialect(runtime, data_dir, &upstream, lane),
         )
         .await
         {
@@ -1468,7 +1576,7 @@ async fn fire_now_upstream_warmup_inner(
     } else if let Some(dispatcher) = state.warmup_dialect_dispatcher.as_deref() {
         match tokio::time::timeout(
             Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatcher.dispatch_warmup_native(&upstream),
+            dispatcher.dispatch_warmup_native(&upstream, lane),
         )
         .await
         {
@@ -1494,6 +1602,7 @@ async fn fire_now_upstream_warmup_inner(
         WarmupAttemptInput {
             storage: storage.as_ref(),
             upstream: &upstream,
+            lane,
             scheduled_for_unix_secs: now_unix_secs,
             lease_holder: Some(holder.as_str()),
             expected_cycle_key: Some(candidate_cycle_key),
@@ -1518,6 +1627,7 @@ async fn finish_fire_now_attempt(
     state: &AdminState,
     storage: &dyn Storage,
     upstream_id: Uuid,
+    lane: WarmupLane,
     FireNowAttempted {
         holder,
         candidate_cycle_key,
@@ -1549,6 +1659,7 @@ async fn finish_fire_now_attempt(
             write_warmup_status_after_success(storage, upstream_id, &*state.clock).await;
             Ok(Json(FireNowFiredResponse {
                 fired: true,
+                lane,
                 cycle_key: response_cycle_key,
                 outcome: record.outcome,
             })
@@ -1558,42 +1669,47 @@ async fn finish_fire_now_attempt(
             tracing::warn!(target: "warmup", upstream_id = %upstream_id, reason = ?reason, action = "cycle_abandoned");
             Ok(fire_now_not_fired_response(
                 StatusCode::BAD_GATEWAY,
+                lane,
                 record.outcome,
             ))
         }
         WarmupAttemptOutcome::TransientFailure(_) => Ok(fire_now_not_fired_response(
             StatusCode::SERVICE_UNAVAILABLE,
+            lane,
             record.outcome,
         )),
         WarmupAttemptOutcome::Skipped(_) => Ok(fire_now_not_fired_response(
             StatusCode::ACCEPTED,
+            lane,
             record.outcome,
         )),
     }
 }
 
-fn fire_now_not_fired_response(status: StatusCode, outcome: WarmupAttemptOutcome) -> Response {
+fn fire_now_not_fired_response(
+    status: StatusCode,
+    lane: WarmupLane,
+    outcome: WarmupAttemptOutcome,
+) -> Response {
     (
         status,
         Json(FireNowNotFiredResponse {
             fired: false,
+            lane,
             outcome,
         }),
     )
         .into_response()
 }
 
-async fn latest_five_hour_quota(
-    storage: &dyn Storage,
-    upstream_id: Uuid,
-) -> Result<Option<SubscriptionQuotaSample>, UpstreamError> {
-    let latest = storage
-        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
-        .await?;
-    Ok(latest
-        .into_iter()
-        .filter(|record| record.window == SubscriptionQuotaWindow::FiveHour)
-        .max_by_key(|record| record.observed_at_unix_millis))
+fn latest_window_quota(
+    latest_quota: &[SubscriptionQuotaSample],
+    window: SubscriptionQuotaWindow,
+) -> Option<&SubscriptionQuotaSample> {
+    latest_quota
+        .iter()
+        .filter(|record| record.window == window)
+        .max_by_key(|record| record.observed_at_unix_millis)
 }
 
 fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaSample) -> Option<i64> {
@@ -1808,6 +1924,7 @@ async fn record_fire_now_skip(
     state: &AdminState,
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
+    lane: WarmupLane,
     now_unix_secs: i64,
     reason: WarmupSkipReason,
     error_detail: Option<&str>,
@@ -1817,6 +1934,7 @@ async fn record_fire_now_skip(
         WarmupAttemptInput {
             storage,
             upstream,
+            lane,
             scheduled_for_unix_secs: now_unix_secs,
             lease_holder: None,
             expected_cycle_key: None,
@@ -1839,6 +1957,7 @@ async fn record_fire_now_failure(
     state: &AdminState,
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
+    lane: WarmupLane,
     now_unix_secs: i64,
     candidate_cycle_key: i64,
     holder: Option<&str>,
@@ -1852,6 +1971,7 @@ async fn record_fire_now_failure(
         WarmupAttemptInput {
             storage,
             upstream,
+            lane,
             scheduled_for_unix_secs: now_unix_secs,
             lease_holder: holder,
             expected_cycle_key: Some(candidate_cycle_key),
@@ -2368,39 +2488,62 @@ async fn seed_warmup_if_toggled(
     if !toggled_on {
         return Ok(());
     }
-    if !matches!(
-        after.kind,
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-    ) || after.oauth_credentials.is_none()
-    {
+    if WarmupLane::lanes_for_kind(after.kind).is_empty() || after.oauth_credentials.is_none() {
         return Ok(());
     }
+    let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
+    push_warmup_bootstrap_tasks(state, after, seed_secs)
+        .await
+        .map_err(Into::into)
+}
+
+/// Seeds one bootstrap warm-up task per lane the upstream's credential
+/// supports. Conflicts mean the task already exists and are not errors.
+pub(super) async fn push_warmup_bootstrap_tasks(
+    state: &AdminState,
+    upstream: &UpstreamRecord,
+    seed_secs: u64,
+) -> Result<(), SchedulerError> {
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
-    match scheduler
-        .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
-        .await
-    {
-        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
-        Err(error) => Err(error.into()),
+    let lanes = WarmupLane::lanes_for_kind(upstream.kind);
+    let bundle = if lanes.iter().any(|lane| *lane != WarmupLane::Primary) {
+        super::upstream_warmup::decrypt_lane_bundle(state, upstream)
+    } else {
+        None
+    };
+    for task in warmup_bootstrap_tasks(upstream.kind, upstream.id, bundle.as_ref(), seed_secs) {
+        match scheduler.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
     }
+    Ok(())
 }
 
-pub(super) fn warmup_bootstrap_task(
+/// Bootstrap tasks for every lane of `kind` that `bundle` supports; a missing
+/// or undecryptable credential seeds the primary lane alone.
+fn warmup_bootstrap_tasks(
+    kind: UpstreamKind,
     upstream_id: Uuid,
+    bundle: Option<&OAuthTokenBundle>,
     seed_secs: u64,
-) -> SchedulerPushTask<AdaptiveJob> {
-    let job = UpstreamWarmupJob::new(upstream_id, seed_secs);
-    SchedulerPushTask {
-        args: AdaptiveJob::Warmup(job),
-        idempotency_key: Some(format!(
-            "adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}"
-        )),
-        run_at_unix_secs: Some(seed_secs),
-        max_attempts: None,
-    }
+) -> Vec<SchedulerPushTask<AdaptiveJob>> {
+    WarmupLane::lanes_for_kind(kind)
+        .iter()
+        .copied()
+        .filter(|lane| super::upstream_warmup::lane_supported_by_credential(kind, *lane, bundle))
+        .map(|lane| {
+            let job = UpstreamWarmupJob::new_for_lane(upstream_id, seed_secs, lane);
+            SchedulerPushTask {
+                args: AdaptiveJob::Warmup(job),
+                idempotency_key: Some(job.bootstrap_idempotency_key(seed_secs)),
+                run_at_unix_secs: Some(seed_secs),
+                max_attempts: None,
+            }
+        })
+        .collect()
 }
 
 async fn enable_upstream(
@@ -2974,7 +3117,10 @@ mod tests {
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
     use cc_lb_domain::Upstream;
-    use cc_lb_storage_api::{MetaStore, OAuthTokensCreate, UpstreamStore};
+    use cc_lb_storage_api::{
+        MetaStore, OAuthTokensCreate, SubscriptionQuotaSampleKind, UpstreamStore,
+        UpstreamSubscriptionQuotaStore,
+    };
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
         SignerFactory, SigningCapability, UpstreamError,
@@ -3063,6 +3209,10 @@ mod tests {
         state: AdminState,
         storage: Arc<TestStorage>,
         aead: Arc<AeadService>,
+        /// `(lane, outcome)` of every attempt recorded through the warmup port.
+        recorded_attempts: Arc<std::sync::Mutex<Vec<(WarmupLane, WarmupAttemptOutcome)>>>,
+        /// Lane of every provider dispatch (native or dialect).
+        dispatched_lanes: Arc<std::sync::Mutex<Vec<WarmupLane>>>,
     }
 
     struct TestSignerFactory;
@@ -3100,7 +3250,10 @@ mod tests {
         }
     }
 
-    struct TestWarmupPort;
+    #[derive(Default)]
+    struct TestWarmupPort {
+        recorded: Arc<std::sync::Mutex<Vec<(WarmupLane, WarmupAttemptOutcome)>>>,
+    }
 
     #[async_trait]
     impl crate::ports::WarmupPort for TestWarmupPort {
@@ -3166,6 +3319,10 @@ mod tests {
                     error_detail.map(str::to_owned),
                 ),
             };
+            self.recorded
+                .lock()
+                .expect("recorded attempts lock")
+                .push((input.lane, outcome));
             crate::ports::WarmupAttemptOutcomeSnapshot {
                 outcome,
                 cycle_key,
@@ -3176,6 +3333,7 @@ mod tests {
 
     struct TestNativeDispatcher {
         status: StatusCode,
+        lanes: Arc<std::sync::Mutex<Vec<WarmupLane>>>,
     }
 
     #[async_trait]
@@ -3185,8 +3343,10 @@ mod tests {
             _runtime: &Arc<cc_lb_runtime_wasmtime::WasmtimeRuntime>,
             _data_dir: &std::path::Path,
             _upstream: &UpstreamRecord,
+            lane: WarmupLane,
         ) -> Result<crate::WarmupDialectDispatchOutcome, crate::WarmupDialectDispatchError>
         {
+            self.lanes.lock().expect("dispatched lanes lock").push(lane);
             Ok(crate::WarmupDialectDispatchOutcome {
                 status: self.status,
                 headers: HeaderMap::new(),
@@ -3196,6 +3356,7 @@ mod tests {
         async fn dispatch_warmup_native(
             &self,
             upstream: &UpstreamRecord,
+            lane: WarmupLane,
         ) -> Result<WarmupNativeDispatchOutcome, crate::WarmupDialectDispatchError> {
             assert!(matches!(
                 upstream.kind,
@@ -3203,6 +3364,7 @@ mod tests {
                     | UpstreamKind::OpenaiOauth
                     | UpstreamKind::GeminiOauth
             ));
+            self.lanes.lock().expect("dispatched lanes lock").push(lane);
             Ok(WarmupNativeDispatchOutcome::Response {
                 status: self.status,
                 dispatch_kind: WarmupDispatchKind::Http,
@@ -3224,6 +3386,7 @@ mod tests {
             context.storage.clone(),
             upstream.id,
             upstream,
+            WarmupLane::Primary,
         )
         .await
         .expect("native bridge dispatch");
@@ -3277,7 +3440,309 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["fired"], true);
+        assert_eq!(body["lane"], "primary");
         assert!(body["cycle_key"].as_i64().is_some());
+        assert_eq!(
+            *context.dispatched_lanes.lock().expect("lock"),
+            vec![WarmupLane::Primary]
+        );
+        assert_eq!(
+            context.recorded_attempts.lock().expect("lock")[0].0,
+            WarmupLane::Primary
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_rejects_unknown_lane_400() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("gpt_oss")).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_warmup_lane");
+        assert!(context.dispatched_lanes.lock().expect("lock").is_empty());
+        assert!(context.recorded_attempts.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_now_rejects_third_party_lane_for_anthropic_400() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("third_party"))
+                .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "warmup_lane_unsupported");
+        assert_eq!(body["kind"], "anthropic_oauth");
+        assert_eq!(body["lane"], "third_party");
+        assert!(context.dispatched_lanes.lock().expect("lock").is_empty());
+        assert!(context.recorded_attempts.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_now_third_party_lane_skips_gemini_cli_profile_without_dispatch() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli,
+        )
+        .await;
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("third_party"))
+                .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["lane"], "third_party");
+        assert_eq!(body["status"], "skipped");
+        assert_eq!(body["reason"], "quota_group_unavailable");
+        assert!(context.dispatched_lanes.lock().expect("lock").is_empty());
+        assert_eq!(
+            *context.recorded_attempts.lock().expect("lock"),
+            vec![(
+                WarmupLane::ThirdParty,
+                WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable)
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_third_party_lane_skips_when_every_target_window_absent() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+        context
+            .storage
+            .record_subscription_quota_samples(&[
+                quota_sample(
+                    upstream.id,
+                    SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                    SubscriptionQuotaSampleKind::Absent,
+                ),
+                quota_sample(
+                    upstream.id,
+                    SubscriptionQuotaWindow::ThirdPartySevenDay,
+                    SubscriptionQuotaSampleKind::Absent,
+                ),
+            ])
+            .await
+            .expect("quota samples record");
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("third_party"))
+                .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["reason"], "quota_group_unavailable");
+        assert!(context.dispatched_lanes.lock().expect("lock").is_empty());
+
+        // The primary lane is unaffected by third-party absence.
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("primary")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lane"], "primary");
+        assert_eq!(
+            *context.dispatched_lanes.lock().expect("lock"),
+            vec![WarmupLane::Primary]
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_third_party_lane_dispatches_antigravity_with_lane() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+        // One reported window keeps the group eligible.
+        context
+            .storage
+            .record_subscription_quota_samples(&[quota_sample(
+                upstream.id,
+                SubscriptionQuotaWindow::ThirdPartySevenDay,
+                SubscriptionQuotaSampleKind::Absent,
+            )])
+            .await
+            .expect("quota samples record");
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("third_party"))
+                .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fired"], true);
+        assert_eq!(body["lane"], "third_party");
+        assert_eq!(
+            *context.dispatched_lanes.lock().expect("lock"),
+            vec![WarmupLane::ThirdParty]
+        );
+        assert_eq!(
+            context.recorded_attempts.lock().expect("lock")[0].0,
+            WarmupLane::ThirdParty
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_third_party_cycle_key_uses_lane_five_hour_reset() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+        let mut gemini = quota_sample(
+            upstream.id,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            SubscriptionQuotaSampleKind::Sample,
+        );
+        gemini.resets_at_unix_secs = Some(4_000_000_000);
+        let mut third_party = quota_sample(
+            upstream.id,
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            SubscriptionQuotaSampleKind::Sample,
+        );
+        third_party.resets_at_unix_secs = Some(4_000_000_777);
+        context
+            .storage
+            .record_subscription_quota_samples(&[gemini, third_party])
+            .await
+            .expect("quota samples record");
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, Some("third_party"))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cycle_key"], 4_000_000_777i64);
+
+        let (status, body) =
+            fire_now_response_for_lane(context.state.clone(), upstream.id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lane"], "primary");
+        assert_eq!(body["cycle_key"], 4_000_000_000i64);
+    }
+
+    #[tokio::test]
+    async fn fire_now_anthropic_dispatches_even_when_both_windows_absent() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+        context
+            .storage
+            .record_subscription_quota_samples(&[
+                quota_sample(
+                    upstream.id,
+                    SubscriptionQuotaWindow::FiveHour,
+                    SubscriptionQuotaSampleKind::Absent,
+                ),
+                quota_sample(
+                    upstream.id,
+                    SubscriptionQuotaWindow::SevenDay,
+                    SubscriptionQuotaSampleKind::Absent,
+                ),
+            ])
+            .await
+            .expect("quota samples record");
+
+        let (status, body) = fire_now_response(context.state.clone(), upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fired"], true);
+        assert_eq!(body["lane"], "primary");
+        assert_eq!(
+            *context.dispatched_lanes.lock().expect("lock"),
+            vec![WarmupLane::Primary]
+        );
+    }
+
+    async fn create_gemini_oauth_upstream(
+        storage: &TestStorage,
+        aead: &AeadService,
+        profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
+    ) -> UpstreamRecord {
+        let id = Uuid::new_v4();
+        let bundle = OAuthTokenBundle {
+            oauth_profile: profile,
+            access_token: "test-access-token".to_owned(),
+            refresh_token: "test-refresh-token".to_owned(),
+            expires_at_unix_secs: u64::MAX / 2,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: Some("test-project".to_owned()),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        let tokens = AeadEncryptedField::<OAuthTokenBundle>::encrypt(aead, &bundle, id.as_bytes())
+            .expect("token encryption succeeds");
+        storage
+            .create(UpstreamCreate {
+                id,
+                name: format!("gemini-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::GeminiOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: Some(OAuthTokensCreate {
+                    tokens,
+                    never_refresh: false,
+                }),
+                warmup_enabled: true,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            })
+            .await
+            .expect("upstream create succeeds")
+    }
+
+    fn quota_sample(
+        upstream_id: Uuid,
+        window: SubscriptionQuotaWindow,
+        sample_kind: SubscriptionQuotaSampleKind,
+    ) -> SubscriptionQuotaSample {
+        let observed_at_unix_millis =
+            u64::try_from(cc_lb_clock::unix_millis(std::time::SystemTime::now()))
+                .expect("now fits u64");
+        SubscriptionQuotaSample {
+            upstream_id,
+            window,
+            source: cc_lb_storage_api::SubscriptionQuotaSource::Api,
+            sample_kind,
+            observed_at_unix_millis,
+            sample_id: Uuid::new_v4(),
+            utilization: (sample_kind == SubscriptionQuotaSampleKind::Sample).then_some(0.0),
+            status: None,
+            resets_at_unix_secs: None,
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
+        }
     }
 
     #[tokio::test]
@@ -3310,7 +3775,10 @@ mod tests {
 
     async fn test_context_with_dispatcher(status: StatusCode) -> TestContext {
         let mut context = test_context().await;
-        context.state.warmup_dialect_dispatcher = Some(Arc::new(TestNativeDispatcher { status }));
+        context.state.warmup_dialect_dispatcher = Some(Arc::new(TestNativeDispatcher {
+            status,
+            lanes: context.dispatched_lanes.clone(),
+        }));
         context
     }
 
@@ -3324,6 +3792,8 @@ mod tests {
         storage.initialize().await.expect("storage initializes");
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
+        let warmup_port = TestWarmupPort::default();
+        let recorded_attempts = warmup_port.recorded.clone();
         let state = AdminState {
             config_path: None,
             build: crate::AdminBuildInfo {
@@ -3341,7 +3811,7 @@ mod tests {
                 Arc::new(cc_lb_clock::SystemClock),
             ),
             lifecycle: Some(crate::AdminPorts {
-                warmup: Some(Arc::new(TestWarmupPort)),
+                warmup: Some(Arc::new(warmup_port)),
                 ..crate::AdminPorts::default()
             }),
             lazy_refresher: None,
@@ -3366,6 +3836,8 @@ mod tests {
             state,
             storage,
             aead,
+            recorded_attempts,
+            dispatched_lanes: Arc::default(),
         }
     }
 
@@ -3463,12 +3935,24 @@ mod tests {
     }
 
     async fn fire_now_response(state: AdminState, upstream_id: Uuid) -> (StatusCode, Value) {
+        fire_now_response_for_lane(state, upstream_id, None).await
+    }
+
+    async fn fire_now_response_for_lane(
+        state: AdminState,
+        upstream_id: Uuid,
+        lane: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let uri = match lane {
+            Some(lane) => format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now?lane={lane}"),
+            None => format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"),
+        };
         let response = router()
             .with_state(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .uri(uri)
                     .extension(test_admin_identity())
                     .body(AxumBody::empty())
                     .expect("request builds"),
@@ -3913,24 +4397,111 @@ mod tests {
         assert!(stored.warmup_enabled);
     }
 
+    fn bootstrap_bundle(profile: cc_lb_oauth_protocol::GeminiOAuthProfile) -> OAuthTokenBundle {
+        OAuthTokenBundle {
+            oauth_profile: profile,
+            access_token: "test-access-token".to_owned(),
+            refresh_token: "test-refresh-token".to_owned(),
+            expires_at_unix_secs: u64::MAX / 2,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: Vec::new(),
+            never_refresh: false,
+        }
+    }
+
+    fn bootstrap_task_summary(
+        tasks: &[SchedulerPushTask<AdaptiveJob>],
+    ) -> Vec<(String, WarmupLane, u64, Option<u64>)> {
+        tasks
+            .iter()
+            .map(|task| {
+                let AdaptiveJob::Warmup(job) = &task.args else {
+                    panic!("expected warmup job");
+                };
+                (
+                    task.idempotency_key.clone().expect("bootstrap key"),
+                    job.lane,
+                    job.cycle_key,
+                    task.run_at_unix_secs,
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn warmup_bootstrap_task_uses_seed_suffix_as_key_and_cycle() {
+    fn warmup_bootstrap_tasks_seed_primary_only_for_single_lane_kinds() {
         let upstream_id =
             Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
         let seed_secs = 1_800_000_000;
+        let antigravity = bootstrap_bundle(cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity);
 
-        let task = warmup_bootstrap_task(upstream_id, seed_secs);
-
-        assert_eq!(
-            task.idempotency_key.as_deref(),
-            Some("adaptive:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
+        for kind in [UpstreamKind::AnthropicOauth, UpstreamKind::OpenaiOauth] {
+            for bundle in [None, Some(&antigravity)] {
+                let tasks = warmup_bootstrap_tasks(kind, upstream_id, bundle, seed_secs);
+                assert_eq!(
+                    bootstrap_task_summary(&tasks),
+                    vec![(
+                        "adaptive:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000"
+                            .to_owned(),
+                        WarmupLane::Primary,
+                        seed_secs,
+                        Some(seed_secs),
+                    )],
+                    "{kind:?}"
+                );
+            }
+        }
+        assert!(
+            warmup_bootstrap_tasks(UpstreamKind::AnthropicApiKey, upstream_id, None, seed_secs)
+                .is_empty()
         );
-        assert_eq!(task.run_at_unix_secs, Some(seed_secs));
-        let cc_lb_scheduler::worker::AdaptiveJob::Warmup(job) = task.args else {
-            panic!("expected warmup job");
-        };
-        assert_eq!(job.upstream_id, upstream_id);
-        assert_eq!(job.cycle_key, seed_secs);
+    }
+
+    #[test]
+    fn warmup_bootstrap_tasks_seed_third_party_only_for_antigravity_gemini() {
+        let upstream_id =
+            Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
+        let seed_secs = 1_800_000_000;
+        let primary = (
+            "adaptive:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000".to_owned(),
+            WarmupLane::Primary,
+            seed_secs,
+            Some(seed_secs),
+        );
+        let third_party = (
+            "adaptive:warmup_third_party:12345678-1234-5678-1234-567812345678:bootstrap:1800000000"
+                .to_owned(),
+            WarmupLane::ThirdParty,
+            seed_secs,
+            Some(seed_secs),
+        );
+
+        let antigravity = bootstrap_bundle(cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity);
+        let tasks = warmup_bootstrap_tasks(
+            UpstreamKind::GeminiOauth,
+            upstream_id,
+            Some(&antigravity),
+            seed_secs,
+        );
+        assert_eq!(
+            bootstrap_task_summary(&tasks),
+            vec![primary.clone(), third_party]
+        );
+
+        let gemini_cli = bootstrap_bundle(cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli);
+        let tasks = warmup_bootstrap_tasks(
+            UpstreamKind::GeminiOauth,
+            upstream_id,
+            Some(&gemini_cli),
+            seed_secs,
+        );
+        assert_eq!(bootstrap_task_summary(&tasks), vec![primary.clone()]);
+
+        // An undecryptable credential never seeds the third-party lane.
+        let tasks = warmup_bootstrap_tasks(UpstreamKind::GeminiOauth, upstream_id, None, seed_secs);
+        assert_eq!(bootstrap_task_summary(&tasks), vec![primary]);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use apalis_core::backend::Filter;
+use cc_lb_storage_api::WarmupLane;
 use uuid::Uuid;
 
 use crate::error::{Result, SchedulerError};
@@ -19,32 +20,55 @@ const ACTIVE_STATUSES: [TaskStatus; 4] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchdogEntityKind {
     Warmup,
+    WarmupThirdParty,
     OAuthRefresh,
 }
 
 impl WatchdogEntityKind {
+    pub const fn for_warmup_lane(lane: WarmupLane) -> Self {
+        match lane {
+            WarmupLane::Primary => Self::Warmup,
+            WarmupLane::ThirdParty => Self::WarmupThirdParty,
+        }
+    }
+
     pub const fn as_key_part(self) -> &'static str {
+        match self.warmup_lane() {
+            Some(lane) => lane.job_kind(),
+            None => "oauth_refresh",
+        }
+    }
+
+    /// Warm-up lane seeded by this watchdog kind, if it is a warm-up kind.
+    pub const fn warmup_lane(self) -> Option<WarmupLane> {
         match self {
-            Self::Warmup => "warmup",
-            Self::OAuthRefresh => "oauth_refresh",
+            Self::Warmup => Some(WarmupLane::Primary),
+            Self::WarmupThirdParty => Some(WarmupLane::ThirdParty),
+            Self::OAuthRefresh => None,
         }
     }
 
     pub fn bootstrap_key(self, upstream_id: Uuid, tick_unix_secs: u64) -> String {
-        format!(
-            "adaptive:{}:{}:bootstrap:{}",
-            self.as_key_part(),
-            upstream_id,
-            tick_unix_secs
-        )
+        match self.warmup_lane() {
+            Some(lane) => UpstreamWarmupJob::new_for_lane(upstream_id, tick_unix_secs, lane)
+                .bootstrap_idempotency_key(tick_unix_secs),
+            None => format!(
+                "adaptive:{}:{}:bootstrap:{}",
+                self.as_key_part(),
+                upstream_id,
+                tick_unix_secs
+            ),
+        }
     }
 
     fn job(self, upstream_id: Uuid, tick_unix_secs: u64) -> AdaptiveJob {
-        match self {
-            Self::Warmup => {
-                AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs))
-            }
-            Self::OAuthRefresh => AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+        match self.warmup_lane() {
+            Some(lane) => AdaptiveJob::Warmup(UpstreamWarmupJob::new_for_lane(
+                upstream_id,
+                tick_unix_secs,
+                lane,
+            )),
+            None => AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
         }
     }
 }

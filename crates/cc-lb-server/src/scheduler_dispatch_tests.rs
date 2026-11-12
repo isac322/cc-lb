@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "scheduler_dispatch_tests/support.rs"]
 mod support;
+#[path = "scheduler_dispatch_tests/warmup_lanes.rs"]
+mod warmup_lanes;
 
 use ::http::StatusCode;
 use async_trait::async_trait;

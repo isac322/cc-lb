@@ -4,20 +4,27 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 
 use cc_lb_clock::SystemClock;
+use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::AdaptiveJob;
 use cc_lb_scheduler::worker::{SchedulerBackend, SchedulerPushTask, SqliteSchedulerBackend};
+use cc_lb_storage_api::WarmupLane;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 const TICK_UNIX_SECS: u64 = 1_800_000_000;
 const RUN_AT_UNIX_SECS: u64 = 1_800_000_001;
+const ALL_KINDS: [WatchdogEntityKind; 3] = [
+    WatchdogEntityKind::Warmup,
+    WatchdogEntityKind::WarmupThirdParty,
+    WatchdogEntityKind::OAuthRefresh,
+];
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
 async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
-    for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
+    for kind in ALL_KINDS {
         for scenario in scenarios() {
             let fixture = Fixture::new().await?;
             let upstream_id = Uuid::new_v4();
@@ -61,7 +68,7 @@ async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
 
 #[tokio::test]
 async fn watchdog_concurrent_same_tick_uses_one_bootstrap_key() -> TestResult<()> {
-    for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
+    for kind in ALL_KINDS {
         let fixture = Fixture::new().await?;
         let upstream_id = Uuid::new_v4();
         let upstream_ids = [upstream_id];
@@ -88,6 +95,82 @@ async fn watchdog_concurrent_same_tick_uses_one_bootstrap_key() -> TestResult<()
         assert_eq!(fixture.count_key(&key).await?, 1, "{kind:?} bootstrap rows");
     }
     Ok(())
+}
+
+/// An active job of one warm-up lane must not hide a missing job of the other
+/// lane for the same upstream.
+#[tokio::test]
+async fn warmup_lanes_are_seeded_independently() -> TestResult<()> {
+    for (active, missing) in [
+        (
+            WatchdogEntityKind::Warmup,
+            WatchdogEntityKind::WarmupThirdParty,
+        ),
+        (
+            WatchdogEntityKind::WarmupThirdParty,
+            WatchdogEntityKind::Warmup,
+        ),
+    ] {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
+        fixture
+            .insert_existing(active, upstream_id, "Pending", 0, 5)
+            .await?;
+
+        let missing_stats = run_entity_watchdog(
+            &fixture.backend,
+            missing,
+            &[upstream_id],
+            TICK_UNIX_SECS,
+            RUN_AT_UNIX_SECS,
+        )
+        .await?;
+        let active_stats = run_entity_watchdog(
+            &fixture.backend,
+            active,
+            &[upstream_id],
+            TICK_UNIX_SECS,
+            RUN_AT_UNIX_SECS,
+        )
+        .await?;
+
+        assert_eq!(
+            missing_stats.seeded, 1,
+            "{missing:?} seeded beside {active:?}"
+        );
+        assert_eq!(active_stats.seeded, 0, "{active:?} already active");
+        let seeded_key = missing.bootstrap_key(upstream_id, TICK_UNIX_SECS);
+        assert_eq!(fixture.count_key(&seeded_key).await?, 1);
+        let seeded_job = fixture.job_payload(&seeded_key).await?;
+        assert_eq!(
+            seeded_job,
+            serde_json::to_value(entity_job(missing, upstream_id))?,
+            "{missing:?} seeds its own lane"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn warmup_bootstrap_keys_match_job_key_helpers() {
+    let upstream_id = Uuid::new_v4();
+    assert_eq!(
+        WatchdogEntityKind::Warmup.bootstrap_key(upstream_id, TICK_UNIX_SECS),
+        format!("adaptive:warmup:{upstream_id}:bootstrap:{TICK_UNIX_SECS}")
+    );
+    assert_eq!(
+        WatchdogEntityKind::WarmupThirdParty.bootstrap_key(upstream_id, TICK_UNIX_SECS),
+        format!("adaptive:warmup_third_party:{upstream_id}:bootstrap:{TICK_UNIX_SECS}")
+    );
+    assert_eq!(
+        WatchdogEntityKind::WarmupThirdParty.bootstrap_key(upstream_id, TICK_UNIX_SECS),
+        UpstreamWarmupJob::new_for_lane(upstream_id, TICK_UNIX_SECS, WarmupLane::ThirdParty)
+            .bootstrap_idempotency_key(TICK_UNIX_SECS)
+    );
+    assert_eq!(
+        WatchdogEntityKind::for_warmup_lane(WarmupLane::ThirdParty),
+        WatchdogEntityKind::WarmupThirdParty
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -215,14 +298,24 @@ impl Fixture {
                 .await?,
         )
     }
+
+    async fn job_payload(&self, key: &str) -> TestResult<serde_json::Value> {
+        let bytes: Vec<u8> = sqlx::query_scalar("SELECT job FROM Jobs WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
 }
 
 fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> AdaptiveJob {
-    match kind {
-        WatchdogEntityKind::Warmup => AdaptiveJob::Warmup(
-            cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob::new(upstream_id, TICK_UNIX_SECS),
-        ),
-        WatchdogEntityKind::OAuthRefresh => AdaptiveJob::OAuthRefresh(
+    match kind.warmup_lane() {
+        Some(lane) => AdaptiveJob::Warmup(UpstreamWarmupJob::new_for_lane(
+            upstream_id,
+            TICK_UNIX_SECS,
+            lane,
+        )),
+        None => AdaptiveJob::OAuthRefresh(
             cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::new(upstream_id),
         ),
     }

@@ -9,6 +9,7 @@ use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::{
     AdaptiveJob, SchedulerBackend, SchedulerPushTask, SqliteSchedulerBackend,
 };
+use cc_lb_storage_api::WarmupLane;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -20,63 +21,118 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
 async fn watchdog_keeps_future_cycle_keyed_warmup_from_being_pulled_forward() -> TestResult<()> {
-    for scenario in active_cycle_key_scenarios() {
-        let fixture = Fixture::new().await?;
-        let upstream_id = Uuid::new_v4();
-        fixture
-            .insert_warmup_cycle(upstream_id, scenario.into_existing_cycle())
-            .await?;
+    for lane in WarmupLane::ALL {
+        for scenario in active_cycle_key_scenarios() {
+            let fixture = Fixture::new().await?;
+            let upstream_id = Uuid::new_v4();
+            fixture
+                .insert_warmup_cycle(upstream_id, lane, scenario.into_existing_cycle())
+                .await?;
 
-        let stats = fixture.run_warmup_watchdog(upstream_id).await?;
+            let stats = fixture.run_warmup_watchdog(upstream_id, lane).await?;
 
-        assert_eq!(stats.seeded, 0, "{} should remain active", scenario.status);
-        assert_eq!(fixture.warmup_task_count(upstream_id).await?, 1);
-        assert_eq!(
-            fixture.cycle_run_at(upstream_id).await?,
-            Some(SEVEN_DAY_RESET)
-        );
+            assert_eq!(
+                stats.seeded, 0,
+                "{lane:?} {} should remain active",
+                scenario.status
+            );
+            assert_eq!(fixture.warmup_task_count(upstream_id, lane).await?, 1);
+            assert_eq!(
+                fixture.cycle_run_at(upstream_id, lane).await?,
+                Some(SEVEN_DAY_RESET)
+            );
+        }
     }
     Ok(())
 }
 
 #[tokio::test]
 async fn watchdog_bootstraps_warmup_when_only_cycle_keyed_dlq_remains() -> TestResult<()> {
-    let fixture = Fixture::new().await?;
-    let upstream_id = Uuid::new_v4();
-    fixture
-        .insert_warmup_cycle(
-            upstream_id,
-            ExistingWarmupCycle {
-                status: "Failed",
-                attempts: 5,
-                max_attempts: 5,
-            },
-        )
-        .await?;
+    for lane in WarmupLane::ALL {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
+        fixture
+            .insert_warmup_cycle(
+                upstream_id,
+                lane,
+                ExistingWarmupCycle {
+                    status: "Failed",
+                    attempts: 5,
+                    max_attempts: 5,
+                },
+            )
+            .await?;
 
-    let stats = fixture.run_warmup_watchdog(upstream_id).await?;
+        let stats = fixture.run_warmup_watchdog(upstream_id, lane).await?;
 
-    assert_eq!(stats.seeded, 1);
-    assert_eq!(fixture.warmup_task_count(upstream_id).await?, 2);
-    assert_eq!(
-        fixture.bootstrap_run_at(upstream_id).await?,
-        Some(RUN_AT_UNIX_SECS)
-    );
+        assert_eq!(stats.seeded, 1, "{lane:?}");
+        assert_eq!(fixture.warmup_task_count(upstream_id, lane).await?, 2);
+        assert_eq!(
+            fixture.bootstrap_run_at(upstream_id, lane).await?,
+            Some(RUN_AT_UNIX_SECS)
+        );
+    }
     Ok(())
 }
 
 #[tokio::test]
 async fn watchdog_bootstrap_for_idle_warmup_runs_at_current_tick() -> TestResult<()> {
-    let fixture = Fixture::new().await?;
-    let upstream_id = Uuid::new_v4();
+    for lane in WarmupLane::ALL {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
 
-    let stats = fixture.run_warmup_watchdog(upstream_id).await?;
+        let stats = fixture.run_warmup_watchdog(upstream_id, lane).await?;
 
-    assert_eq!(stats.seeded, 1);
-    assert_eq!(
-        fixture.bootstrap_run_at(upstream_id).await?,
-        Some(RUN_AT_UNIX_SECS)
-    );
+        assert_eq!(stats.seeded, 1, "{lane:?}");
+        assert_eq!(
+            fixture.bootstrap_run_at(upstream_id, lane).await?,
+            Some(RUN_AT_UNIX_SECS)
+        );
+    }
+    Ok(())
+}
+
+/// A cycle-keyed job parked at one lane's reset must not stop the other lane
+/// from bootstrapping, and must not be counted as that lane's task.
+#[tokio::test]
+async fn cycle_keyed_warmup_of_one_lane_does_not_hide_the_other_lane() -> TestResult<()> {
+    for (parked, missing) in [
+        (WarmupLane::Primary, WarmupLane::ThirdParty),
+        (WarmupLane::ThirdParty, WarmupLane::Primary),
+    ] {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
+        fixture
+            .insert_warmup_cycle(
+                upstream_id,
+                parked,
+                ExistingWarmupCycle {
+                    status: "Pending",
+                    attempts: 0,
+                    max_attempts: 5,
+                },
+            )
+            .await?;
+
+        let missing_stats = fixture.run_warmup_watchdog(upstream_id, missing).await?;
+        let parked_stats = fixture.run_warmup_watchdog(upstream_id, parked).await?;
+
+        assert_eq!(
+            missing_stats.seeded, 1,
+            "{missing:?} beside parked {parked:?}"
+        );
+        assert_eq!(parked_stats.seeded, 0, "{parked:?} stays parked");
+        assert_eq!(fixture.warmup_task_count(upstream_id, missing).await?, 1);
+        assert_eq!(fixture.warmup_task_count(upstream_id, parked).await?, 1);
+        assert_eq!(
+            fixture.bootstrap_run_at(upstream_id, missing).await?,
+            Some(RUN_AT_UNIX_SECS)
+        );
+        assert_eq!(
+            fixture.cycle_run_at(upstream_id, parked).await?,
+            Some(SEVEN_DAY_RESET)
+        );
+    }
     Ok(())
 }
 
@@ -147,9 +203,10 @@ impl Fixture {
     async fn insert_warmup_cycle(
         &self,
         upstream_id: Uuid,
+        lane: WarmupLane,
         cycle: ExistingWarmupCycle,
     ) -> TestResult<()> {
-        let job = UpstreamWarmupJob::new(upstream_id, SEVEN_DAY_RESET);
+        let job = UpstreamWarmupJob::new_for_lane(upstream_id, SEVEN_DAY_RESET, lane);
         let key = job.idempotency_key(SEVEN_DAY_RESET);
         self.backend
             .push_adaptive_task(SchedulerPushTask {
@@ -174,10 +231,11 @@ impl Fixture {
     async fn run_warmup_watchdog(
         &self,
         upstream_id: Uuid,
+        lane: WarmupLane,
     ) -> TestResult<cc_lb_scheduler::jobs::watchdog::WatchdogSeedStats> {
         Ok(run_entity_watchdog(
             &self.backend,
-            WatchdogEntityKind::Warmup,
+            WatchdogEntityKind::for_warmup_lane(lane),
             &[upstream_id],
             TICK_UNIX_SECS,
             RUN_AT_UNIX_SECS,
@@ -185,8 +243,8 @@ impl Fixture {
         .await?)
     }
 
-    async fn warmup_task_count(&self, upstream_id: Uuid) -> TestResult<i64> {
-        let pattern = format!("adaptive:warmup:{upstream_id}:%");
+    async fn warmup_task_count(&self, upstream_id: Uuid, lane: WarmupLane) -> TestResult<i64> {
+        let pattern = format!("adaptive:{}:{upstream_id}:%", lane.job_kind());
         Ok(
             sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key LIKE ?1")
                 .bind(pattern)
@@ -195,15 +253,21 @@ impl Fixture {
         )
     }
 
-    async fn cycle_run_at(&self, upstream_id: Uuid) -> TestResult<Option<u64>> {
-        let key =
-            UpstreamWarmupJob::new(upstream_id, SEVEN_DAY_RESET).idempotency_key(SEVEN_DAY_RESET);
+    async fn cycle_run_at(&self, upstream_id: Uuid, lane: WarmupLane) -> TestResult<Option<u64>> {
+        let key = UpstreamWarmupJob::new_for_lane(upstream_id, SEVEN_DAY_RESET, lane)
+            .idempotency_key(SEVEN_DAY_RESET);
         self.run_at_for_key(key).await
     }
 
-    async fn bootstrap_run_at(&self, upstream_id: Uuid) -> TestResult<Option<u64>> {
-        self.run_at_for_key(WatchdogEntityKind::Warmup.bootstrap_key(upstream_id, TICK_UNIX_SECS))
-            .await
+    async fn bootstrap_run_at(
+        &self,
+        upstream_id: Uuid,
+        lane: WarmupLane,
+    ) -> TestResult<Option<u64>> {
+        self.run_at_for_key(
+            WatchdogEntityKind::for_warmup_lane(lane).bootstrap_key(upstream_id, TICK_UNIX_SECS),
+        )
+        .await
     }
 
     async fn run_at_for_key(&self, key: String) -> TestResult<Option<u64>> {

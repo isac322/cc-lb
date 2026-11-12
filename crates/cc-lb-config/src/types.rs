@@ -334,6 +334,7 @@ impl Default for PostgresPoolConfig {
 pub struct WarmupConfig {
     pub openai_model: String,
     pub gemini_model: String,
+    pub gemini_third_party_model: String,
 }
 
 impl Default for WarmupConfig {
@@ -341,6 +342,7 @@ impl Default for WarmupConfig {
         Self {
             openai_model: "gpt-6.1-sol".to_owned(),
             gemini_model: "gemini-2.5-flash-lite".to_owned(),
+            gemini_third_party_model: "gpt-oss-120b-medium".to_owned(),
         }
     }
 }
@@ -1217,6 +1219,42 @@ mod tests {
             load_config("[warmup]\ngemini_model = \"custom-gemini\"\n").expect("warmup config");
         assert_eq!(overridden.warmup.openai_model, "gpt-6.1-sol");
         assert_eq!(overridden.warmup.gemini_model, "custom-gemini");
+    }
+
+    #[test]
+    fn warmup_gemini_third_party_model_defaults_and_accepts_claude_or_gpt_oss() {
+        let defaults = load_config("").expect("default config");
+        assert_eq!(
+            defaults.warmup.gemini_third_party_model,
+            "gpt-oss-120b-medium"
+        );
+
+        for model in ["claude-sonnet-5-5-low", "gpt-oss-20b"] {
+            let config = load_config(&format!(
+                "[warmup]\ngemini_third_party_model = \"{model}\"\n"
+            ))
+            .expect("third-party warmup model accepted");
+            assert_eq!(config.warmup.gemini_third_party_model, model);
+            assert_eq!(config.warmup.gemini_model, "gemini-2.5-flash-lite");
+        }
+    }
+
+    #[test]
+    fn warmup_gemini_third_party_model_rejects_models_outside_the_third_party_group() {
+        for model in ["gemini-2.5-flash-lite", "gpt-6.1-sol", ""] {
+            let error = load_config(&format!(
+                "[warmup]\ngemini_third_party_model = \"{model}\"\n"
+            ))
+            .expect_err("non third-party model rejected");
+            assert!(
+                matches!(
+                    &error,
+                    crate::ConfigError::Validation(validation)
+                        if validation.field == "warmup.gemini_third_party_model"
+                ),
+                "unexpected error for {model:?}: {error}"
+            );
+        }
     }
 
     #[test]
