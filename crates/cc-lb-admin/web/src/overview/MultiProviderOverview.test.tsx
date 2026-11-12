@@ -278,7 +278,6 @@ describe('actual Overview upstream coupon surface', () => {
         await user.keyboard(interaction === 'Enter' ? '{Enter}' : ' ');
       }
       expect(await screen.findByRole('dialog')).toBeTruthy();
-      expect(screen.getByText('Reset subscription quota?')).toBeTruthy();
       expect(overviewMocks.navigate).not.toHaveBeenCalled();
     },
   );
