@@ -939,6 +939,79 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
     ).toBeDefined();
   });
+  it('upgrades a bare prefix label when a peer sharing the prefix loads later', () => {
+    const ids = [
+      'p-123/thread:01a1c484-1111-aaaaaa',
+      'p-123/thread:01a1c484-2222-bbbbbb',
+    ];
+    const rows = ids.map((id, index) => ({
+      ...apiRowFromFixture(cacheKeepaliveRows[0], index),
+      id,
+    }));
+    const setRows = (visible: CacheKeepaliveRow[]) => {
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        data: {
+          pages: [
+            {
+              rows: visible,
+              summary: summaryBase,
+              next_cursor: null,
+              groups: [
+                {
+                  key: visible[0]?.group_key ?? 'Bash',
+                  label: 'Bash',
+                  kind: 'tool',
+                  sessions: visible.length,
+                  net_pnl: 0,
+                  total_spent: 0,
+                  total_avoided: 0,
+                },
+              ],
+            },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        hasNextPage: false,
+        isFetchingNextPage: false,
+        fetchNextPage: vi.fn(),
+      } as never);
+    };
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const ui = () => (
+      <QueryClientProvider client={client}>
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={mockPrincipal}
+          onOpenChange={() => {}}
+        />
+      </QueryClientProvider>
+    );
+    // Given: a shorter range shows only one of the two sessions.
+    setRows([rows[0]]);
+    const { rerender } = render(ui());
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484'),
+    ).toBeDefined();
+    // When: a wider range loads the second session with the same prefix.
+    setRows(rows);
+    rerender(ui());
+    // Then: neither row keeps the ambiguous bare prefix.
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484…aaaaaa'),
+    ).toBeDefined();
+    expect(
+      within(screen.getByTitle(ids[1])).getByText('01a1c484…bbbbbb'),
+    ).toBeDefined();
+    // And: returning to the shorter range keeps the upgraded label stable.
+    setRows([rows[0]]);
+    rerender(ui());
+    expect(
+      within(screen.getByTitle(ids[0])).getByText('01a1c484…aaaaaa'),
+    ).toBeDefined();
+  });
   it.each([
     ['short', ['session-2', 'session-3']],
     ['exactly prefix plus tail length', ['12345678aaaaaa', '12345678bbbbbb']],

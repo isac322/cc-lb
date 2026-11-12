@@ -149,6 +149,20 @@ function sessionLabels(
   rows: CacheKeepaliveRow[],
   assigned: Map<string, string>,
 ) {
+  // Labels stay stable, except that a bare prefix becomes ambiguous once a
+  // peer sharing it loads; upgrade it so neither row keeps the bare prefix.
+  for (const row of rows) {
+    const prefix = threadId(row.id).slice(0, 8);
+    if (
+      assigned.get(row.id) === prefix &&
+      threadId(row.id) !== prefix &&
+      rows.some(
+        (peer) =>
+          peer.id !== row.id && threadId(peer.id).slice(0, 8) === prefix,
+      )
+    )
+      assigned.delete(row.id);
+  }
   const used = new Set(assigned.values());
   for (const row of rows) {
     if (assigned.has(row.id)) continue;

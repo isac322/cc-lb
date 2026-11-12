@@ -267,7 +267,24 @@ pub fn derive_activity_view(
         state,
         reason: reason_display(&source.item.reason, source.item.error.as_deref()),
         ttl: source.item.ttl,
-        attempts: source.item.refresh_count,
+        // Sessions capped by older releases stored one attempt fewer than the
+        // renewals they sent; never show fewer attempts than the current
+        // cycle's recorded renewals.
+        attempts: source.item.refresh_count.map(|stored| {
+            let recorded = cycle_id.map_or(0, |cycle_id| {
+                source
+                    .turns
+                    .iter()
+                    .filter(|turn| {
+                        turn.cycle_id.or_else(|| {
+                            renewal_evidence_for_turn(turn, source.evidence)
+                                .and_then(|renewal| renewal.cycle_id)
+                        }) == Some(cycle_id)
+                    })
+                    .count()
+            });
+            stored.max(u32::try_from(recorded).unwrap_or(u32::MAX))
+        }),
         max_attempts: source
             .item
             .config_snapshot
