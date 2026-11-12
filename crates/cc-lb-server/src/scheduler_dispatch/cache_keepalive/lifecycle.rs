@@ -64,6 +64,7 @@ pub(super) fn publish_renewal_lifecycle(
             thinking_budget_tokens: None,
             reasoning_effort: None,
             thinking_level: None,
+            keepalive_session_key_hash: None,
         }),
     });
     event_bus.publish_lifecycle(LifecycleEvent::AuthCompleted {

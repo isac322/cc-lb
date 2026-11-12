@@ -81,7 +81,7 @@ Eligible successful Anthropic read-only keep-alive renewals publish observations
 
 ## Anthropic configuration example
 
-The following configuration is an Anthropic example. OpenAI 30-minute sessions require at least 13 refreshes for GPT-5.6, so this example's `max_refreshes_per_session: 12` is not an OpenAI configuration; use the [OpenAI keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for the OpenAI budget and TTL rules.
+The following configuration is an Anthropic example. OpenAI 30-minute sessions require at least 13 refreshes for GPT-5.6, so this example's `max_refreshes_per_session: 4` is not an OpenAI configuration; use the [OpenAI keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for the OpenAI budget and TTL rules.
 
 ```json
 {
@@ -89,7 +89,7 @@ The following configuration is an Anthropic example. OpenAI 30-minute sessions r
     "enabled": true,
     "refresh_lead_time_5m_secs": 30,
     "refresh_lead_time_1h_secs": 300,
-    "max_refreshes_per_session": 12,
+    "max_refreshes_per_session": 4,
     "max_total_duration_secs": 14400,
     "snapshot_max_bytes": 8388608,
     "min_cache_tokens": 10000

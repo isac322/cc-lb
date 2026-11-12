@@ -1608,6 +1608,21 @@ fn truncate_evidence_component(value: &str, max_bytes: usize) -> &str {
     value.get(..max_bytes).unwrap_or(value)
 }
 
+pub(crate) fn follow_up_session_key_hash(
+    principal: &Principal,
+    cache_metadata: &RequestCacheMetadata,
+) -> Option<String> {
+    if cache_metadata.explicit_auxiliary
+        || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
+        || (cache_metadata.thread_id.is_none()
+            && !(cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+                && cache_metadata.openai_replay_identity.is_some()))
+    {
+        return None;
+    }
+    cache_keepalive_session_key(principal, cache_metadata).map(|key| key.to_string())
+}
+
 fn cache_keepalive_session_key(
     principal: &Principal,
     cache_metadata: &RequestCacheMetadata,
@@ -2543,6 +2558,62 @@ mod tests {
 
         assert!(response.sse_observation_disabled);
         assert!(response.pending_sse_bytes.is_empty());
+    }
+
+    #[test]
+    fn follow_up_session_keys_preserve_thread_and_agent_scopes() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let principal_id = cache_keepalive_principal_uuid(&principal.id);
+        for (request_kind, agent_id, suffix) in [
+            ("main", None, ""),
+            ("main", Some("agent-a"), "/agent:agent-a"),
+            ("subagent", Some("main"), ""),
+            ("subagent", None, "/agent:subagent"),
+        ] {
+            let mut metadata = RequestCacheMetadata::default();
+            metadata.thread_id = Some("thread-1".to_owned());
+            metadata.request_kind = Some(request_kind.to_owned());
+            metadata.claude_agent_id = agent_id.map(str::to_owned);
+            let expected = Some(format!("{principal_id}/thread:thread-1{suffix}"));
+            assert_eq!(follow_up_session_key_hash(&principal, &metadata), expected);
+            assert_eq!(
+                follow_up_session_key_hash(&principal, &metadata),
+                cache_keepalive_session_key(&principal, &metadata).map(|key| key.to_string()),
+            );
+        }
+    }
+
+    #[test]
+    fn follow_up_session_keys_exclude_auxiliary_ineligible_and_prefix_only_requests() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.cache_prefix_hash = Some("prefix-1".to_owned());
+        metadata.explicit_auxiliary = true;
+        assert_eq!(follow_up_session_key_hash(&principal, &metadata), None);
+        metadata.explicit_auxiliary = false;
+        metadata.request_kind = Some("compaction".to_owned());
+        assert_eq!(follow_up_session_key_hash(&principal, &metadata), None);
+        metadata.request_kind = Some("main".to_owned());
+        metadata.thread_id = None;
+        assert!(cache_keepalive_session_key(&principal, &metadata).is_some());
+        assert_eq!(follow_up_session_key_hash(&principal, &metadata), None);
+        metadata.openai_replay_identity = Some("prompt-cache-key:stable".to_owned());
+        assert_eq!(follow_up_session_key_hash(&principal, &metadata), None);
+        metadata.cache_keepalive_surface = Some("responses".to_owned());
+        let key = follow_up_session_key_hash(&principal, &metadata)
+            .expect("OpenAI replay identity is stable across turns");
+        assert!(key.contains("openai-replay:prompt-cache-key:stable"));
+        assert_eq!(
+            Some(key),
+            cache_keepalive_session_key(&principal, &metadata).map(|key| key.to_string()),
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Lowered the default cache keep-alive `max_refreshes_per_session` from `12` to `4`. Explicitly configured caps are unchanged.
 - The cache keep-alive sessions sheet now scrolls its list and detail independently, keeps controls and the desktop detail header visible, and uses a compact Net / Saved / Spent summary with clearer status badges. Renewal details open from timeline pulses instead of a duplicate table; sessions without a timeline keep their renewal list.
 - Cache keep-alive session reasons now explain why renewals ended without a cancellation prefix; legacy rows without a cause use “Renewals ended”.
 - Router Basic now exposes “Prefer subscription upstreams” for allowed Anthropic, OpenAI, and Gemini OAuth upstreams in the selected provider scope. The shortcut describes subscription selection, hides for API-key-only scopes, and keeps one principal-wide chain editable in Advanced. ([#1235](https://github.com/isac322/cc-lb/issues/1235))
@@ -42,6 +43,8 @@ All notable changes to this project will be documented in this file.
 - API-key usage cards now preserve bounded provider error codes and classify documented OpenAI and Gemini billing or spend-limit failures with provider-specific remediation, while Anthropic billing-stop behavior and proxy responses remain unchanged. ([#1213](https://github.com/isac322/cc-lb/issues/1213))
 
 ### Fixed
+- Keep-alive classification now treats terminal `SubagentHandback` and `EndConversation` tool calls as `UserTurn`, stopping renewals when a subagent hands back control or a conversation ends.
+- Keep-alive follow-up attribution now uses routed serving cache breakpoints and falls back to the same session when prefix hashes diverge. The fallback requires the same principal, upstream, and model, a positive renewal cache read, and a follow-up within the renewal's TTL that reads at least as many cached input tokens. Each cycle still receives avoided-token credit only once.
 - Cache keep-alive sessions now show a neutral “In use” state while real traffic pauses renewals, instead of prematurely showing a final cancellation. The state remains tracked and visible without counting as renewing; a request marker that outlives its configured deadline shows an incomplete-request explanation without inventing an abort or error.
 - Cache keep-alive cancellation badges, filters, and detail panes now classify retained renewal history within the selected horizon. Follow-up evidence survives housekeeping through its renewal's full TTL window.
 - Keep-alive ownership metadata now expires after session removal and the configured request protection window, instead of retaining every identity forever. Epoch-bound, expiring request tickets prevent late completions from claiming a recreated owner or applying one cache identity's ticket to another during failover.

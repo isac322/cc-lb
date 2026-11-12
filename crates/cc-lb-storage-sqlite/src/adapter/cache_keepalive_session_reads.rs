@@ -183,7 +183,15 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = concat!("
                  AND f.upstream_id = r.upstream_id
                  AND f.model = r.model
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
-                 AND f.prefix_hash = r.prefix_hash
+                 AND (
+                     (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
+                         OR (
+                             r.session_key_hash IS NOT NULL
+                             AND f.session_key_hash = r.session_key_hash
+                             AND COALESCE(r.cache_read_input_tokens, 0) > 0
+                             AND COALESCE(f.cache_read_input_tokens, 0) >= r.cache_read_input_tokens
+                         )
+                 )
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms + ",
     cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
@@ -199,7 +207,7 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = concat!("
                       LIMIT 1
                   )
                   AND r.cycle_id IS NOT NULL
-                  AND r.prefix_hash IS NOT NULL
+                  AND (r.prefix_hash IS NOT NULL OR r.session_key_hash IS NOT NULL)
                   AND r.prefix_policy_version IS NOT NULL
                   AND r.prefix_schema_version IS NOT NULL
             ) THEN 'cancelled'
@@ -691,11 +699,19 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         });
         let prefix_hashes = evidence
             .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
             .filter_map(|entry| entry.prefix_hash.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        if prefix_hashes.is_empty() {
+        let session_key_hashes = evidence
+            .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
+            .filter_map(|entry| entry.session_key_hash.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if prefix_hashes.is_empty() && session_key_hashes.is_empty() {
             return Ok(evidence);
         }
         let follow_up_from_ms = evidence
@@ -714,41 +730,48 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             })
             .max()
             .unwrap_or(follow_up_until_ms);
-        for prefix_hashes in prefix_hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
-            let mut follow_up_query = QueryBuilder::<Sqlite>::new(
-                "SELECT * FROM cache_keepalive_evidence \
-             WHERE principal_id = ",
-            );
-            follow_up_query.push_bind(principal_id);
-            follow_up_query.push(" AND evidence_kind = 'follow_up' AND prefix_hash IN (");
-            let mut separated = follow_up_query.separated(", ");
-            for prefix_hash in prefix_hashes {
-                separated.push_bind(prefix_hash);
+        for (column, hashes) in [
+            ("prefix_hash", &prefix_hashes),
+            ("session_key_hash", &session_key_hashes),
+        ] {
+            for hashes in hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
+                let mut follow_up_query = QueryBuilder::<Sqlite>::new(
+                    "SELECT * FROM cache_keepalive_evidence \
+                 WHERE principal_id = ",
+                );
+                follow_up_query.push_bind(principal_id);
+                follow_up_query.push(" AND evidence_kind = 'follow_up' AND ");
+                follow_up_query.push(column);
+                follow_up_query.push(" IN (");
+                let mut separated = follow_up_query.separated(", ");
+                for hash in hashes {
+                    separated.push_bind(hash);
+                }
+                separated.push_unseparated(") AND request_start_ms > ");
+                follow_up_query.push_bind(u64_to_i64(
+                    follow_up_from_ms,
+                    "cache_keepalive_follow_up_from_ms",
+                    "value exceeds i64::MAX",
+                )?);
+                follow_up_query.push(" AND request_start_ms <= ");
+                follow_up_query.push_bind(u64_to_i64(
+                    follow_up_until_ms,
+                    "cache_keepalive_follow_up_until_ms",
+                    "value exceeds i64::MAX",
+                )?);
+                follow_up_query.push(" ORDER BY request_start_ms ASC, evidence_id ASC");
+                let follow_up_rows = follow_up_query
+                    .build()
+                    .fetch_all(self.pool())
+                    .await
+                    .map_err(map_sqlx_error)?;
+                evidence.extend(
+                    follow_up_rows
+                        .into_iter()
+                        .map(sqlite_evidence_from_row)
+                        .collect::<StorageResult<Vec<_>>>()?,
+                );
             }
-            separated.push_unseparated(") AND request_start_ms > ");
-            follow_up_query.push_bind(u64_to_i64(
-                follow_up_from_ms,
-                "cache_keepalive_follow_up_from_ms",
-                "value exceeds i64::MAX",
-            )?);
-            follow_up_query.push(" AND request_start_ms <= ");
-            follow_up_query.push_bind(u64_to_i64(
-                follow_up_until_ms,
-                "cache_keepalive_follow_up_until_ms",
-                "value exceeds i64::MAX",
-            )?);
-            follow_up_query.push(" ORDER BY request_start_ms ASC, evidence_id ASC");
-            let follow_up_rows = follow_up_query
-                .build()
-                .fetch_all(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-            evidence.extend(
-                follow_up_rows
-                    .into_iter()
-                    .map(sqlite_evidence_from_row)
-                    .collect::<StorageResult<Vec<_>>>()?,
-            );
         }
         seen.clear();
         evidence.retain(|entry| seen.insert(entry.evidence_id.clone()));
@@ -835,7 +858,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND e.upstream_id = a.upstream_id
                  AND e.model = a.model
                  AND e.cycle_id = a.cycle_id
-                 AND e.prefix_hash IS NOT NULL
+                 AND (e.prefix_hash IS NOT NULL OR e.session_key_hash IS NOT NULL)
                  AND e.prefix_policy_version IS NOT NULL
                  AND e.prefix_schema_version IS NOT NULL
                 WHERE a.rn = 1
@@ -858,7 +881,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND r.cycle_id = a.cycle_id
                  AND r.upstream_id = a.upstream_id
                  AND r.model = a.model
-                 AND r.prefix_hash IS NOT NULL
+                 AND (r.prefix_hash IS NOT NULL OR r.session_key_hash IS NOT NULL)
                  AND r.prefix_policy_version IS NOT NULL
                  AND r.prefix_schema_version IS NOT NULL
                 JOIN cache_keepalive_evidence f
@@ -867,7 +890,15 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.upstream_id = r.upstream_id
                  AND f.model = r.model
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
-                 AND f.prefix_hash = r.prefix_hash
+                 AND (
+                     (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
+                         OR (
+                             r.session_key_hash IS NOT NULL
+                             AND f.session_key_hash = r.session_key_hash
+                             AND COALESCE(r.cache_read_input_tokens, 0) > 0
+                             AND COALESCE(f.cache_read_input_tokens, 0) >= r.cache_read_input_tokens
+                         )
+                 )
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
                      + ",
@@ -1018,6 +1049,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 SELECT *
                 FROM cache_keepalive_evidence
                 WHERE principal_id = ? AND evidence_kind = 'renewal' AND cycle_id IS NOT NULL
+                  AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL
                   AND (? IS NULL OR request_start_ms >= ? OR EXISTS (
                       SELECT 1 FROM cache_keepalive_turns t
                       WHERE t.principal_id = cache_keepalive_evidence.principal_id
@@ -1028,6 +1060,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
              qualifying_follow_ups AS (
                 SELECT r.cycle_id, r.principal_id, r.upstream_id, r.model,
                        f.prefix_hash,
+                       f.session_key_hash AS follow_up_session_key_hash,
+                       f.cache_read_input_tokens AS follow_up_cache_read_input_tokens,
                        f.request_start_ms AS follow_up_request_start_ms,
                        ROW_NUMBER() OVER (
                            PARTITION BY r.cycle_id
@@ -1040,7 +1074,15 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.upstream_id = r.upstream_id
                  AND f.model = r.model
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
-                 AND f.prefix_hash = r.prefix_hash
+                 AND (
+                     (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
+                         OR (
+                             r.session_key_hash IS NOT NULL
+                             AND f.session_key_hash = r.session_key_hash
+                             AND COALESCE(r.cache_read_input_tokens, 0) > 0
+                             AND COALESCE(f.cache_read_input_tokens, 0) >= r.cache_read_input_tokens
+                         )
+                 )
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
                      + ",
@@ -1049,6 +1091,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
              ),
              selected_follow_ups AS (
                 SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
+                       follow_up_session_key_hash, follow_up_cache_read_input_tokens,
                        follow_up_request_start_ms
                 FROM qualifying_follow_ups
                 WHERE follow_up_rn = 1
@@ -1065,7 +1108,15 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  AND f.principal_id = r.principal_id
                  AND f.upstream_id = r.upstream_id
                  AND f.model = r.model
-                 AND f.prefix_hash = r.prefix_hash
+                 AND (
+                     (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
+                         OR (
+                             r.session_key_hash IS NOT NULL
+                             AND f.follow_up_session_key_hash = r.session_key_hash
+                             AND COALESCE(r.cache_read_input_tokens, 0) > 0
+                             AND COALESCE(f.follow_up_cache_read_input_tokens, 0) >= r.cache_read_input_tokens
+                         )
+                 )
                  AND f.follow_up_request_start_ms > r.request_start_ms
                  AND f.follow_up_request_start_ms <= r.request_start_ms
                      + ",
@@ -1287,6 +1338,7 @@ fn sqlite_evidence_from_row(
         cost_micros: row.try_get("cost_micros").map_err(map_sqlx_error)?,
         request_ref: row.try_get("request_ref").map_err(map_sqlx_error)?,
         event_ref: row.try_get("event_ref").map_err(map_sqlx_error)?,
+        session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
     })
 }
 

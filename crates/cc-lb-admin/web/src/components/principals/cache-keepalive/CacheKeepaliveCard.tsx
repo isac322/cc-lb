@@ -142,7 +142,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
           ...(base.cache_keepalive ?? {
             refresh_lead_time_5m_secs: 30,
             refresh_lead_time_1h_secs: 300,
-            max_refreshes_per_session: 12,
+            max_refreshes_per_session: 4,
             max_total_duration_secs: 14400,
             snapshot_max_bytes: 8_388_608,
             min_cache_tokens: 10_000,

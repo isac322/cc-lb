@@ -627,7 +627,7 @@ fn renewal_evidence_for_turn<'a>(
 
 fn renewal_evidence_known(evidence: &CacheKeepaliveEvidenceRecord) -> bool {
     evidence.cycle_id.is_some()
-        && evidence.prefix_hash.is_some()
+        && (evidence.prefix_hash.is_some() || evidence.session_key_hash.is_some())
         && evidence.prefix_policy_version.is_some()
         && evidence.prefix_schema_version.is_some()
 }
@@ -636,21 +636,35 @@ fn follow_up_matches(
     renewal: &CacheKeepaliveEvidenceRecord,
     follow_up: &CacheKeepaliveEvidenceRecord,
 ) -> bool {
-    renewal_evidence_known(renewal)
-        && follow_up.evidence_kind == "follow_up"
-        && follow_up.principal_id == renewal.principal_id
-        && follow_up.upstream_id == renewal.upstream_id
-        && follow_up.model == renewal.model
-        && follow_up
+    if !renewal_evidence_known(renewal)
+        || follow_up.evidence_kind != "follow_up"
+        || follow_up.principal_id != renewal.principal_id
+        || follow_up.upstream_id != renewal.upstream_id
+        || follow_up.model != renewal.model
+        || !follow_up
             .cache_read_input_tokens
             .is_some_and(|tokens| tokens > 0)
-        && follow_up.request_start_ms > renewal.request_start_ms
-        && follow_up.request_start_ms
-            <= renewal
+        || follow_up.request_start_ms <= renewal.request_start_ms
+        || follow_up.request_start_ms
+            > renewal
                 .request_start_ms
                 .saturating_add(renewal.ttl.as_secs().saturating_mul(1_000))
-        && follow_up.prefix_hash.is_some()
-        && follow_up.prefix_hash == renewal.prefix_hash
+    {
+        return false;
+    }
+
+    let prefix_matches =
+        renewal.prefix_hash.is_some() && follow_up.prefix_hash == renewal.prefix_hash;
+    let session_matches = renewal.session_key_hash.is_some()
+        && follow_up.session_key_hash == renewal.session_key_hash
+        && renewal
+            .cache_read_input_tokens
+            .is_some_and(|tokens| tokens > 0)
+        && follow_up
+            .cache_read_input_tokens
+            .zip(renewal.cache_read_input_tokens)
+            .is_some_and(|(follow_up_tokens, renewal_tokens)| follow_up_tokens >= renewal_tokens);
+    prefix_matches || session_matches
 }
 
 fn follow_up_proven(

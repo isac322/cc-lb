@@ -201,6 +201,7 @@ async fn append_turn(storage: &cc_lb_storage_sqlite::SqliteStorage, params: Appe
         cost_micros: Some(cost_micros),
         request_ref: Some(format!("request-{source_ref_id}")),
         event_ref: Some(source_ref_id.to_owned()),
+        session_key_hash: None,
     }];
     if with_follow_up {
         evidence.push(CacheKeepaliveEvidenceRow {
@@ -221,6 +222,7 @@ async fn append_turn(storage: &cc_lb_storage_sqlite::SqliteStorage, params: Appe
             cost_micros: None,
             request_ref: Some(format!("follow-up-request-{source_ref_id}")),
             event_ref: None,
+            session_key_hash: None,
         });
     }
     storage
@@ -811,6 +813,7 @@ async fn paused_current_cycle_pending_http_contract_case() {
                 cost_micros: None,
                 request_ref: Some("paused-follow-up-request".to_owned()),
                 event_ref: None,
+                session_key_hash: None,
             }],
         )
         .await
@@ -2891,4 +2894,163 @@ async fn provisional_requests_remain_visible_without_inventing_final_cancellatio
     assert_eq!(detail["state"], "cancelled");
     assert_eq!(detail["cancel_reason"], "user_turn_detected");
     assert_eq!(detail["reason"], "The agent is waiting for the user");
+}
+
+#[test]
+fn session_follow_up_attribution_agrees_across_http_read_models() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::session_follow_up_attribution_agrees_across_http_read_models";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated regression runtime")
+            .block_on(session_follow_up_attribution_agrees_across_http_read_models_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn session_follow_up_attribution_agrees_across_http_read_models_case() {
+    install_regression_catalog();
+    for case in 0..5 {
+        let (_directory, storage, state, principal) = create_principal_id().await;
+        let session_key = format!("session-follow-up-{case}");
+        seed_session(&storage, &principal, &session_key, CYCLE_ONE, false).await;
+        let mut latest_evidence = None;
+        for ordinal in 0..2 {
+            let source_ref_id = format!("session-follow-up-{case}-renewal-{ordinal}");
+            let ts = now_unix_secs() - 2 + ordinal;
+            let renewal = CacheKeepaliveEvidenceRow {
+                evidence_id: format!("{source_ref_id}-evidence"),
+                cycle_id: Some(CYCLE_ONE),
+                evidence_kind: "renewal".to_owned(),
+                request_start_ms: ts * 1_000,
+                prefix_fingerprint: Some("renewal-fingerprint".to_owned()),
+                prefix_hash: Some("renewal-prefix".to_owned()),
+                prefix_policy_version: Some("policy".to_owned()),
+                prefix_schema_version: Some("schema".to_owned()),
+                principal_id: principal.clone(),
+                upstream_id: UPSTREAM_ID,
+                model: MODEL.to_owned(),
+                ttl: CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(20_000),
+                cost_micros: Some(6_000),
+                request_ref: Some(format!("{source_ref_id}-request")),
+                event_ref: Some(source_ref_id.clone()),
+                session_key_hash: Some(session_key.clone()),
+            };
+            let mut decision = cache_keepalive_decision(&principal, &source_ref_id, ts * 1_000);
+            decision.session_key_hash = Some(session_key.clone());
+            decision.upstream_id = UPSTREAM_ID;
+            decision.decision = "reschedule".to_owned();
+            decision.reason = "cache_keepalive_turn".to_owned();
+            storage
+                .append_request_event_with_projections(
+                    &RequestEvent {
+                        ts,
+                        ts_ms: Some(ts * 1_000),
+                        request_id: format!("{source_ref_id}-request"),
+                        event_id: Some(format!("{source_ref_id}-event")),
+                        principal_id: Some(principal.clone()),
+                        upstream_id: Some(UPSTREAM_ID),
+                        model: Some(MODEL.to_owned()),
+                        source_kind: Some("renewal".to_owned()),
+                        source_ref_id: Some(source_ref_id.clone()),
+                        status: 200,
+                        ..RequestEvent::default()
+                    },
+                    &RequestEventProjections {
+                        turn: Some(CacheKeepaliveTurnRow {
+                            source_ref_id,
+                            session_key_hash: session_key.clone(),
+                            principal_id: principal.clone(),
+                            accounting_key_id: None,
+                            upstream_id: UPSTREAM_ID,
+                            cycle_id: Some(CYCLE_ONE),
+                            model: MODEL.to_owned(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cache_creation_input_tokens: 0,
+                            cache_creation_input_tokens_5m: 0,
+                            cache_creation_input_tokens_1h: 0,
+                            cache_read_input_tokens: 20_000,
+                            cost_micros: Some(6_000),
+                            hit_miss: "hit".to_owned(),
+                            ts,
+                        }),
+                        decision,
+                        evidence: vec![renewal.clone()],
+                    },
+                )
+                .await
+                .expect("append session-key renewal");
+            latest_evidence = Some(renewal);
+        }
+        let detail_uri = keepalive_detail_uri(&principal, &session_key);
+        let (status, pending) = get_json(&state, &detail_uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pending["is_last_pending"], true);
+
+        let mut follow_up = latest_evidence.expect("latest renewal");
+        follow_up.evidence_id = format!("session-follow-up-{case}-evidence");
+        follow_up.cycle_id = None;
+        follow_up.evidence_kind = "follow_up".to_owned();
+        follow_up.request_start_ms = now_unix_secs() * 1_000;
+        follow_up.prefix_hash = (case != 0).then(|| "serving-prefix".to_owned());
+        follow_up.request_ref = Some(format!("session-follow-up-{case}-request"));
+        follow_up.event_ref = None;
+        follow_up.cost_micros = None;
+        match case {
+            0 | 1 => {}
+            2 => follow_up.cache_read_input_tokens = Some(19_999),
+            3 => follow_up.upstream_id = Uuid::from_u128(0xbad),
+            4 => follow_up.model = "claude-opus-4-6".to_owned(),
+            _ => unreachable!(),
+        }
+        storage
+            .append_request_event_with_evidence(
+                &RequestEvent {
+                    ts: follow_up.request_start_ms / 1_000,
+                    ts_ms: Some(follow_up.request_start_ms),
+                    request_id: format!("session-follow-up-{case}-request"),
+                    event_id: Some(format!("session-follow-up-{case}-event")),
+                    principal_id: Some(principal.clone()),
+                    status: 200,
+                    ..RequestEvent::default()
+                },
+                &[follow_up],
+            )
+            .await
+            .expect("append session-key follow-up");
+
+        let proven = case < 2;
+        let avoided_micros = if proven { 69_000 } else { 0 };
+        let (status, detail) = get_json(&state, &detail_uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["is_last_pending"], !proven, "case {case}");
+        assert_eq!(detail["turns"][0]["followed_up"], proven, "case {case}");
+        assert_eq!(detail["turns"][0]["pending"], !proven, "case {case}");
+        assert_eq!(detail["turns"][1]["followed_up"], false, "case {case}");
+        assert_json_dollars(&detail["total_avoided"], avoided_micros);
+        assert_eq!(
+            detail["evidence_status"],
+            if proven { "observed" } else { "pending" },
+            "case {case}"
+        );
+        for query in ["?limit=10", "?summary_only=true"] {
+            let (status, list) = get_json(
+                &state,
+                &format!("/admin/v1/principals/{principal}/cache-keepalive{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_json_dollars(&list["summary"]["total_avoided"], avoided_micros);
+            assert_json_dollars(&list["summary"]["cost_saved"], avoided_micros - 12_000);
+            assert_eq!(
+                list["summary"]["evidence_status"], detail["evidence_status"],
+                "case {case}, query {query}"
+            );
+        }
+    }
 }

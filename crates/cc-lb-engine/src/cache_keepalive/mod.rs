@@ -28,6 +28,7 @@ pub use lifecycle_glue::{
 };
 pub(crate) use lifecycle_glue::{
     LifecycleKeepalive, LifecycleKeepaliveContext, RequestStartOrder, StreamingKeepaliveResponse,
+    follow_up_session_key_hash,
 };
 pub(crate) use metrics::record_cancelled;
 pub use metrics::{CancelReason, record_cancel_error, record_dispatch_skipped};

@@ -4451,8 +4451,18 @@ impl Lifecycle {
                         "authenticated principal is unavailable",
                     )
                 })?;
-            let identity = request_identity_metadata(ingress.headers, Some(body.as_ref()));
+            let principal = Principal {
+                id: auth.principal_id().to_owned(),
+                kind: PrincipalKind::InternalKey,
+            };
             if let Some(observer) = observer.as_ref() {
+                let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                    ingress.headers,
+                    Some(body.as_ref()),
+                    None,
+                    Some(ProviderCapability::OpenaiResponses),
+                    None,
+                );
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: observer.event_id().to_owned(),
                     result: Ok(cc_lb_lifecycle::ParseInfo {
@@ -4470,26 +4480,24 @@ impl Lifecycle {
                         thinking_level: None,
                         cache_breakpoints: Vec::new(),
                         cache_prefix_hash: None,
-                        thread_id: identity.thread_id.clone(),
-                        observed_session_id: identity.observed_session_id.clone(),
-                        request_kind: identity.request_kind.clone(),
-                        claude_agent_id: identity.claude_agent_id.clone(),
-                        claude_parent_agent_id: identity.claude_parent_agent_id.clone(),
-                        parent_session_id: identity.parent_session_id.clone(),
-                        client_app: identity.client_app.clone(),
-                        session_id_source: identity.session_id_source.clone(),
+                        thread_id: cache_metadata.thread_id.clone(),
+                        observed_session_id: cache_metadata.observed_session_id.clone(),
+                        request_kind: cache_metadata.request_kind.clone(),
+                        claude_agent_id: cache_metadata.claude_agent_id.clone(),
+                        claude_parent_agent_id: cache_metadata.claude_parent_agent_id.clone(),
+                        parent_session_id: cache_metadata.parent_session_id.clone(),
+                        client_app: cache_metadata.client_app.clone(),
+                        session_id_source: cache_metadata.session_id_source.clone(),
                         message_id: None,
                         message_index: None,
                         message_count: None,
                         cache_control_message_indices: Vec::new(),
-                        native_cache: provider_cache::analyze(
-                            ProviderCapability::OpenaiResponses,
-                            body.as_ref(),
-                            body.get("model")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                            ingress.headers,
-                        ),
+                        native_cache: cache_metadata.native_cache.clone(),
+                        keepalive_session_key_hash:
+                            crate::cache_keepalive::follow_up_session_key_hash(
+                                &principal,
+                                &cache_metadata,
+                            ),
                     }),
                 });
             }
@@ -4590,10 +4598,6 @@ impl Lifecycle {
             let body_view = RequestBodyView {
                 parsed: Ok(body.clone()),
                 json_parse_ms: 0.0,
-            };
-            let principal = Principal {
-                id: auth.principal_id().to_owned(),
-                kind: PrincipalKind::InternalKey,
             };
             let reserve_started = Instant::now();
             let mut active_limit = match self
@@ -5483,6 +5487,10 @@ impl Lifecycle {
                         .cache_control_message_indices
                         .clone(),
                     native_cache: cache_metadata.native_cache.clone(),
+                    keepalive_session_key_hash: crate::cache_keepalive::follow_up_session_key_hash(
+                        &principal,
+                        &cache_metadata,
+                    ),
                 }),
             });
         }
