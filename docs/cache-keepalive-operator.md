@@ -88,7 +88,7 @@ purging and recreating a session cannot overwrite retained spend.
 An authenticated, non-auxiliary, keep-alive-eligible real request retires the
 matching active generation before upstream dispatch. Its queued renewal cannot
 fire while that real request waits for response headers or streams its response.
-The session appears as **In request** (`in_request`), with renewals paused.
+The session appears as **In use** (`in_request`), with renewals paused.
 This state remains tracked and visible even without retained renewal history,
 but does not count toward **Renewing now** or match Scheduled/Renewed filters.
 
@@ -97,7 +97,7 @@ request timeout. Without a recorded terminal upstream response by then, the
 read model shows Expired with the neutral reason “Request did not complete
 before its deadline”.
 This does not claim a known abort or error. Legacy `new_request` cancellations
-without a request-start marker remain Cancelled.
+without a request-start marker retain the `cancelled` state, shown as Returned.
 
 A completed eligible response classified as `AgentInTurn` can establish a new
 generation. A final cancellation records its actual completion reason. If the
@@ -184,7 +184,8 @@ Successful real-request cancellations persist a nullable `cancel_reason`:
 `renewal_not_beneficial`, `session_identity_changed`, `completed_not_renewable`,
 `snapshot_too_large`, `cached_prefix_too_small`, or
 `zero_token_renewal_unsupported`. Older rows
-remain null; their display must say only “Cancelled”, without guessing a cause.
+remain null; show the Returned badge without a separate cancellation box or a
+guessed cause.
 
 Scheduling is anchored to cache creation / response begin:
 
@@ -331,20 +332,41 @@ lifetime total and do not imply that a session is still active.
   session. When keep-alive is disabled, the Admin Web card does not poll the
   summary endpoint.
 
-The base status is one of Renewed, Scheduled, In request, Capped, Expired,
-Cancelled, Failed, or Not tracked. In request uses a neutral badge and explains
-that real traffic has paused renewal. The `in_request` API status filter selects
-that state; `visible` and `tracked` include it. The `renewed` filter selects only
-active renewal sessions, not requests currently in flight. The sessions drawer
-keeps its existing horizon control and server-side visibility filter.
-Cancelled sessions show Cancelled only when the selected horizon contains a
+The internal base states remain `renewed`, `scheduled`, `in_request`, `capped`,
+`expired`, `cancelled`, `failed`, and `not_tracked`. The admin list uses filled
+badges: scheduled and renewed appear as **Warm** in the live/accent tone;
+in_request as **In use** in neutral; cancelled as **Returned** in green;
+capped as **At limit** in neutral; expired as **Expired** in neutral;
+failed as **Failed** in danger; and not_tracked as **Not tracked** in neutral.
+Rows with an error use danger regardless of their base state.
+In use explains that real traffic has paused renewal. The `in_request` API
+status filter selects that state; `visible` and `tracked` include it. The
+`renewed` filter selects only active renewal sessions, not requests currently
+in flight. Internal states, filter names and API values are unchanged.
+Cancelled sessions show Returned only when the selected horizon contains a
 renewal turn. Otherwise they show Not tracked. List filters, group counts, and
 the selected session's detail state use the same horizon.
-The detail renewal table and rail cover all cycles inside that horizon. Each
-table row carries its cycle ID; legacy rows without an owned cycle remain
+
+The sessions drawer keeps its title, summary and toolbar fixed. From `md`,
+the list and detail scroll independently, with a sticky detail header; phones
+show one pane at a time with a Back to sessions button. The summary is a
+label-over-value Net / Saved / Spent strip, with a qualification below only when
+needed. The range control sits to its right, or above it on phones, and uses
+All time for the unbounded range. There is no scope note or repeated Showing
+label. Partial lists show “X of Y sessions shown” and Load more sessions;
+complete lists omit the count footer.
+
+The detail rail covers all cycles inside that horizon without a duplicate
+Renewals table. Hover, focus or tap a pulse for hit/miss, its full timestamp,
+time since the last request and renewal, spent amount, per-renewal net and
+follow-up evidence. Click to pin the details; Escape or an outside click
+closes them. Miss marks use the warning tone. Estimated per-renewal spend on
+legacy synthesized rails carries `≈`. Unmatched records remain visible as
+Additional evidence. Sessions without a rail, including 12h sessions, retain
+a cycle-grouped renewal list; legacy records without an owned cycle remain
 unknown. `total_renewals_current_cycle` and pending status describe only the
 current cycle, so a newly replaced cycle can show zero current renewals while
-retaining earlier cycles in the table and rail.
+retaining earlier cycles in its history.
 
 The detail header uses `follow_up_outcomes` to count observed follow-ups,
 pending gaps, closed gaps with no follow-up, and unknown gaps separately.
@@ -352,7 +374,7 @@ Each rail gap contributes exactly once, including an empty waiting gap as
 pending. These counts preserve mixed historical outcomes; the existing
 `evidence_status` keeps its conservative semantics for list and filter consumers.
 
-Renewal scheduling and pending follow-up evidence are separate. An In request
+Renewal scheduling and pending follow-up evidence are separate. An In use
 cycle remains inactive and has no Next renewal, but a paid renewal can still
 be waiting for follow-up while its TTL window is open. That window ends at
 the last renewal's anchor plus its TTL, not the request marker's deadline or
@@ -363,7 +385,7 @@ An active scheduling row does not extend an expired paid renewal's follow-up
 window either; an overdue scheduled job is not evidence of a live cache.
 
 Errors are orthogonal: a terminal dispatch/decrypt/provider error does not
-become a live Scheduled or Renewed row, and `error` is displayed alongside the
+become a live `scheduled` or `renewed` row, and `error` is displayed alongside the
 terminal base state. An expired request marker projects as Expired without an
 invented error. Its deadline explanation remains visible alongside retained
 renewal history; without renewal history in the selected horizon, normal

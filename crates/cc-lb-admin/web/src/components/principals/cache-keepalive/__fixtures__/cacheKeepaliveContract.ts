@@ -35,22 +35,17 @@ export const cacheKeepaliveDrawerCopy = {
   backDetail: 'Back',
   closeHistoryAriaLabel: 'Close history',
   closeSettingsAriaLabel: 'Close settings',
-  horizons: ['1h', '6h', '24h', '7d', 'All'] as const,
-  filters: [
-    'All statuses',
-    'Renewed',
-    'Scheduled',
-    'In request',
-    'Capped',
+  horizons: ['1h', '6h', '24h', '7d', 'All time'] as const,
+  stateLabels: [
+    'Warm',
+    'In use',
+    'At limit',
     'Expired',
-    'Cancelled',
+    'Returned',
     'Failed',
     'Not tracked',
-    'Error',
   ],
   loading: 'Loading sessions…',
-  allShown: 'All sessions shown',
-  exhausted: '· No more sessions ·',
   overviewFields: [
     'Session ID',
     'Upstream',
@@ -106,9 +101,9 @@ export const cacheKeepaliveAnimationContract = {
 } as const;
 
 export const cacheKeepaliveMoneyExamples = {
-  renewedNet: '+$0.102',
+  renewedNet: '+$0.10',
   cappedNet: '+$0.0936',
-  expiredNet: '+$0.1152',
+  expiredNet: '+$0.12',
   pendingTurn: '−$0.018 pending',
   notTrackedRow: '$0.00',
   notTrackedTurn: '-',

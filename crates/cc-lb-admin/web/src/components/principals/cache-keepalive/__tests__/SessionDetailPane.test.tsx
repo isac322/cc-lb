@@ -17,7 +17,11 @@ import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveRenewedDetailFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import { successQuery } from '../../../../lib/test-utils/hook-results';
 import type { PolledDataResult } from '../../../../lib/usePolledData';
-import { SessionDetailPane } from '../SessionDetailPane';
+import {
+  fmtUsdPlain,
+  fmtUsdSigned,
+  SessionDetailPane,
+} from '../SessionDetailPane';
 
 function renderWithProviders(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -405,7 +409,9 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     ).toBe(true);
     expect(screen.queryByTestId('session-detail-time-rail')).toBeNull();
     expect(screen.queryByText(/Next renewal/)).toBeNull();
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    expect(screen.getByText('Net —')).toBeDefined();
+    expect(screen.getByText('Saved — · Spent $0')).toBeDefined();
+    expect(screen.queryByRole('table')).toBeNull();
   });
 
   it.each([
@@ -464,7 +470,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         expectsNextRenewal,
       );
       if (!expectsNextRenewal) {
-        expect(screen.getByText('0 renewals')).toBeDefined();
+        expect(screen.getByText('No renewals · 5m')).toBeDefined();
       }
       expect(screen.getByText('Net +$0.12')).toBeDefined();
     },
@@ -509,8 +515,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         />,
       );
 
-      const badge = screen.getByText('In request');
-      expect(badge.className).toContain('bg-overlay-5');
+      const badge = screen.getByText('In use');
       expect(badge.className).toContain('text-text-muted');
       expect(
         screen.getByText(
@@ -680,7 +685,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         'Request did not complete before its deadline',
       );
       expect(reason.className).toContain('text-text-muted');
-      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('In use')).toBeNull();
       expect(
         screen.queryByText(/Cancelled|Failed|aborted|Next renewal/),
       ).toBeNull();
@@ -706,8 +711,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       'completed_not_renewable',
       'Cancelled: request completed, renewal not possible',
     ],
-    [null, 'Cancelled'],
-    [undefined, 'Cancelled'],
+    [null, 'Returned'],
+    [undefined, 'Returned'],
   ] as const)(
     'shows cancellation cause %s instead of a stale scheduling reason',
     (cancelReason, expected) => {
@@ -736,8 +741,9 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
 
       expect(screen.getByText(expected)).toBeDefined();
       expect(screen.queryByText(/first renewal in/)).toBeNull();
+      expect(screen.queryByText('Cancelled', { exact: true })).toBeNull();
       expect(screen.getByText(expected).className).toContain('text-text-muted');
-      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('In use')).toBeNull();
       expect(screen.queryByText('Failed')).toBeNull();
     },
   );
@@ -786,14 +792,14 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
 
       expect(screen.getByText(expected)).toBeDefined();
       expect(screen.getByText(expected).className).toContain('text-text-muted');
-      expect(screen.queryByText('In request')).toBeNull();
+      expect(screen.queryByText('In use')).toBeNull();
       expect(screen.queryByText('Failed')).toBeNull();
       expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
       expect(screen.queryByText(/first renewal in/)).toBeNull();
     },
   );
 
-  it('shows every horizon cycle in the renewal table and matches the timeline cycle labels', () => {
+  it('keeps matched renewal facts on cycle rails and unmatched evidence visible', () => {
     const base = 1_700_000_000_000;
     const turn = (
       cycleId: string | null,
@@ -863,22 +869,28 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     expect(
       screen.getByRole('region', { name: 'Cycle 2 timeline' }),
     ).toBeDefined();
-    const tables = screen.getAllByRole('table');
-    expect(tables.map((table) => table.getAttribute('aria-label'))).toEqual([
-      'Cycle 1 renewals',
-      'Cycle 2 renewals',
-      'Unknown cycle renewals',
-    ]);
-    for (const table of tables) {
-      expect(within(table).getAllByRole('row')).toHaveLength(2);
-      expect(within(table).getByText('#1')).toBeDefined();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Renewals' })).toBeNull();
+    for (const [cycle, net, followUp] of [
+      ['Cycle 1', '+$0.10', 'Observed'],
+      ['Cycle 2', '—', 'Unknown'],
+    ]) {
+      const timeline = screen.getByRole('region', {
+        name: `${cycle} timeline`,
+      });
+      fireEvent.click(
+        within(timeline).getByRole('button', { name: /Renewal #1:/ }),
+      );
+      const tip = screen.getByRole('tooltip');
+      expect(within(tip).getByText(net)).toBeDefined();
+      expect(within(tip).getByText(followUp)).toBeDefined();
+      fireEvent.keyDown(document, { key: 'Escape' });
     }
-    expect(within(tables[0]).getByText('Hit')).toBeDefined();
-    expect(within(tables[0]).getByText('+$0.1')).toBeDefined();
-    expect(within(tables[1]).getByText('Miss')).toBeDefined();
-    expect(within(tables[1]).getByText('Unknown')).toBeDefined();
-    expect(within(tables[1]).getByText('—')).toBeDefined();
-    expect(within(tables[2]).getByText('+$0.03')).toBeDefined();
+    const additional = screen.getByRole('region', {
+      name: 'Additional renewal evidence',
+    });
+    expect(within(additional).getByText('Hit')).toBeDefined();
+    expect(within(additional).getByText('Net +$0.03')).toBeDefined();
   });
 
   it('does not invent renewal table rows from a zero-turn scheduled timeline', () => {
@@ -954,10 +966,17 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         />,
       );
       expect(screen.getByText('11-10 23:58:00')).toBeDefined();
-      expect(screen.getByText('11-11 00:02:00')).toBeDefined();
-      const table = screen.getByRole('table', { name: 'Cycle 1 renewals' });
-      expect(within(table).getByText('11-10 23:58:30')).toBeDefined();
-      expect(within(table).getByText('11-11 00:01:30')).toBeDefined();
+      expect(screen.getByText('Next message 11-11 00:02:00')).toBeDefined();
+      const additional = screen.getByRole('region', {
+        name: 'Additional renewal evidence',
+      });
+      const times = Array.from(additional.querySelectorAll('time'));
+      expect(times.map((time) => time.dateTime)).toEqual([
+        new Date(Date.parse(pause) + 30_000).toISOString(),
+        new Date(Date.parse(end) - 30_000).toISOString(),
+      ]);
+      expect(times[0].textContent).toContain('10 Nov 2026');
+      expect(times[1].textContent).toContain('11 Nov 2026');
     },
   );
 
@@ -1003,12 +1022,13 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       />,
     );
     expect(screen.getByText('09:00:00')).toBeDefined();
-    expect(screen.getByText('09:04:00')).toBeDefined();
-    expect(
-      within(screen.getByRole('table', { name: 'Cycle 1 renewals' })).getByText(
-        '09:02:00',
-      ),
-    ).toBeDefined();
+    expect(screen.getByText('Next message 09:04:00')).toBeDefined();
+    const additional = screen.getByRole('region', {
+      name: 'Additional renewal evidence',
+    });
+    expect(additional.querySelector('time')?.textContent).toContain(
+      '11 Nov 2026, 09:02:00',
+    );
     expect(screen.queryByText(/11-11 /)).toBeNull();
   });
 
@@ -1032,9 +1052,436 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.getByLabelText('Follow-up outcomes').textContent).toBe(
-      'Observed 0 · No follow-up 10 · Unknown 1 · Pending 2',
+    const outcomes = screen.getByLabelText('Follow-up outcomes');
+    expect(outcomes.getAttribute('title')).toBe(
+      '0 observed · 10 no follow-up · 1 unknown · 2 pending',
+    );
+    expect(
+      within(outcomes).getByText(
+        'Follow-up: 10 no follow-up · 1 unknown · 2 pending',
+      ),
+    ).toBeDefined();
+    expect(outcomes.querySelector('.sr-only')?.textContent).toBe(
+      '0 observed · 10 no follow-up · 1 unknown · 2 pending',
     );
     expect(screen.queryByText('Follow-up unknown ·')).toBeNull();
   });
+
+  it.each([
+    [84.9, '+$84.90', '$84.90'],
+    [0.09996, '+$0.10', '$0.10'],
+    [0.0326, '+$0.0326', '$0.0326'],
+    [-84.9, '−$84.90', '$84.90'],
+    [0, '$0', '$0'],
+    [null, '—', '—'],
+  ] as const)(
+    'formats money with rounding-aware cents (%s)',
+    (amount, signed, plain) => {
+      expect(fmtUsdSigned(amount)).toBe(signed);
+      expect(fmtUsdPlain(amount)).toBe(plain);
+    },
+  );
+
+  it.each([true, false])(
+    'moves renewal facts into a pinnable pulse popover (hit=%s)',
+    (hit) => {
+      vi.spyOn(locale, 'useTimezone').mockReturnValue({
+        timezone: 'UTC',
+        effective: 'UTC',
+        setTimezone: vi.fn(),
+      });
+      const pulseMs = 1794373221291;
+      const detail: CacheKeepaliveDetail = {
+        ...cacheKeepaliveRenewedDetailFixture,
+        turns: [
+          {
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: 'real-cycle',
+            turn_number: 1,
+            time_ms: 1794373222000,
+            renewals: hit ? 1 : 0,
+            pnl: hit ? 0.0326 : -0.0123,
+            followed_up: hit,
+            pending: false,
+          },
+        ],
+        gaps: [
+          {
+            cycle_id: 'real-cycle',
+            pause_at_ms: pulseMs - 270_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: pulseMs,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.0123,
+                hit,
+              },
+            ],
+            ending_kind: 'followup_hit',
+            ending_at_ms: pulseMs + 30_000,
+            total_duration_sec: 300,
+            since_last_renewal_sec: 30,
+            spent_usd: 0.0123,
+            avoided_usd: 0.0449,
+            net_pnl_usd: 0.0326,
+          },
+        ],
+      };
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery(detail),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="real-shape"
+          onClose={() => {}}
+        />,
+      );
+      expect(screen.queryByRole('table')).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'Renewals' })).toBeNull();
+      expect(
+        screen.queryByRole('region', { name: 'Additional renewal evidence' }),
+      ).toBeNull();
+      const pulse = screen.getByRole('button', { name: /Renewal #1:/ });
+      expect(pulse.querySelector('span')?.className).toContain(
+        hit ? 'bg-accent' : 'bg-warn',
+      );
+      fireEvent.click(pulse);
+      expect(pulse.getAttribute('aria-pressed')).toBe('true');
+      fireEvent.blur(pulse);
+      const tip = screen.getByRole('tooltip');
+      expect(pulse.getAttribute('aria-describedby')).toBe(tip.id);
+      expect(within(tip).getByText(hit ? 'Hit' : 'Miss')).toBeDefined();
+      expect(within(tip).getByText('Spent')).toBeDefined();
+      expect(within(tip).getByText('$0.0123')).toBeDefined();
+      expect(within(tip).getByText('Net')).toBeDefined();
+      expect(
+        within(tip).getByText(hit ? '+$0.0326' : '−$0.0123'),
+      ).toBeDefined();
+      expect(within(tip).getByText('Follow-up')).toBeDefined();
+      expect(within(tip).getByText(hit ? 'Observed' : 'None')).toBeDefined();
+      expect(tip.querySelector('time')?.dateTime).toBe(
+        new Date(pulseMs).toISOString(),
+      );
+      expect(tip.querySelector('time')?.textContent).toContain('11 Nov 2026');
+      expect(within(tip).getByText('+4m 30s')).toBeDefined();
+      expect(within(tip).getByText('— (first renewal)')).toBeDefined();
+      fireEvent.pointerDown(tip);
+      expect(screen.getByRole('tooltip')).toBeDefined();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByRole('tooltip')).toBeNull();
+      fireEvent.click(pulse);
+      fireEvent.click(pulse);
+      expect(screen.queryByRole('tooltip')).toBeNull();
+      fireEvent.click(pulse);
+      fireEvent.pointerDown(document.body);
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    },
+  );
+
+  it('matches cycle ordinals before nearby timestamps and only uses unmatched turns within three seconds', () => {
+    const base = 1794373221291;
+    const turn = (
+      cycle_id: string,
+      turn_number: number,
+      time_ms: number,
+      pnl: number,
+    ) => ({
+      ...cacheKeepaliveRenewedDetailFixture.turns[0],
+      cycle_id,
+      turn_number,
+      time_ms,
+      pnl,
+      followed_up: true,
+      pending: false,
+    });
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        turns: [
+          turn('other-cycle', 1, base, 9),
+          turn('matching-cycle', 2, base + 2000, 0.12),
+          turn('matching-cycle', 9, base - 2500, 0.0326),
+          turn('matching-cycle', 10, base + 24_000, 7),
+        ],
+        gaps: [
+          {
+            cycle_id: 'matching-cycle',
+            pause_at_ms: base - 270_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 99,
+                time_ms: base,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.01,
+                hit: true,
+              },
+              {
+                pulse_number: 2,
+                time_ms: base + 10_000,
+                offset_sec: 280,
+                since_prev_renewal_sec: 10,
+                spent_usd: 0.02,
+                hit: true,
+              },
+              {
+                pulse_number: 3,
+                time_ms: base + 20_000,
+                offset_sec: 290,
+                since_prev_renewal_sec: 10,
+                spent_usd: 0.03,
+                hit: true,
+              },
+            ],
+            ending_kind: 'followup_hit',
+            ending_at_ms: base + 50_000,
+            total_duration_sec: 320,
+            since_last_renewal_sec: 30,
+            spent_usd: 0.06,
+            avoided_usd: 0.2,
+            net_pnl_usd: 0.14,
+          },
+        ],
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="matching"
+        onClose={() => {}}
+      />,
+    );
+    const pulses = screen
+      .getByTestId('session-detail-time-rail')
+      .querySelectorAll('[data-rail-point^="pulse-"]');
+    for (const [index, expected] of ['+$0.0326', '+$0.12', '—'].entries()) {
+      fireEvent.click(pulses[index]);
+      const tip = screen.getByRole('tooltip');
+      expect(within(tip).getByText(expected)).toBeDefined();
+      fireEvent.keyDown(document, { key: 'Escape' });
+    }
+    const additional = screen.getByRole('region', {
+      name: 'Additional renewal evidence',
+    });
+    expect(within(additional).getByText('Net +$9.00')).toBeDefined();
+    expect(within(additional).getByText('Net +$7.00')).toBeDefined();
+  });
+
+  it('marks legacy synthesized per-renewal spending as estimated', () => {
+    const first = cacheKeepaliveRenewedDetailFixture.turns[0];
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        total_spent: 0.0326,
+        turns: [{ ...first, cycle_id: null, turn_number: 4, pending: true }],
+        gaps: [],
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="legacy"
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Renewal #4:/ }));
+    const tip = screen.getByRole('tooltip');
+    expect(within(tip).getByText('≈ $0.0326')).toBeDefined();
+    expect(within(tip).getByTitle('Estimated per-renewal spend')).toBeDefined();
+    expect(within(tip).getByText('Pending')).toBeDefined();
+    expect(screen.queryByRole('table')).toBeNull();
+  });
+
+  it('retains a renewal evidence table when the session has no periodic rail', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+      successQuery<CacheKeepaliveDetail>({
+        ...cacheKeepaliveRenewedDetailFixture,
+        ttl: '12h',
+        gaps: [],
+        turns: [
+          {
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: 'historical',
+            pending: false,
+            followed_up: null,
+            pnl: null,
+          },
+        ],
+      }),
+    );
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="12h-history"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('session-detail-time-rail')).toBeNull();
+    expect(
+      screen.getByRole('table', { name: 'Cycle 1 renewals' }),
+    ).toBeDefined();
+    expect(screen.getByText('Unknown', { exact: true })).toBeDefined();
+    expect(
+      within(screen.getByRole('table', { name: 'Cycle 1 renewals' })).getByText(
+        '—',
+      ),
+    ).toBeDefined();
+  });
+
+  it.each([0, 2000])(
+    'matches distinct null-cycle gaps to their own renewal evidence (turn delay %sms)',
+    (delay) => {
+      const pulseTimes = [1794373221291, 1794373821291];
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          turns: pulseTimes.map((time, index) => ({
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: null,
+            turn_number: index + 1,
+            time_ms: time + delay,
+            pnl: index === 0 ? 0.0326 : -0.0123,
+            followed_up: index === 0,
+            pending: false,
+          })),
+          gaps: pulseTimes.map((time) => ({
+            cycle_id: null,
+            pause_at_ms: time - 270_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: time,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.0123,
+                hit: true,
+              },
+            ],
+            ending_kind: 'ttl_expired_no_followup',
+            ending_at_ms: time + 300_000,
+            total_duration_sec: 570,
+            since_last_renewal_sec: 300,
+            spent_usd: 0.0123,
+            avoided_usd: 0,
+            net_pnl_usd: -0.0123,
+          })),
+        }),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="null-cycles"
+          onClose={() => {}}
+        />,
+      );
+      const timelines = screen.getAllByRole('region', {
+        name: 'Unknown cycle timeline',
+      });
+      for (const [index, timeline] of timelines.entries()) {
+        fireEvent.click(
+          within(timeline).getByRole('button', { name: /Renewal #/ }),
+        );
+        const tip = screen.getByRole('tooltip');
+        expect(
+          within(tip).getByText(index === 0 ? '+$0.0326' : '−$0.0123'),
+        ).toBeDefined();
+        expect(
+          within(tip).getByText(index === 0 ? 'Observed' : 'None'),
+        ).toBeDefined();
+        fireEvent.keyDown(document, { key: 'Escape' });
+      }
+      expect(
+        screen.queryByRole('region', { name: 'Additional renewal evidence' }),
+      ).toBeNull();
+    },
+  );
+
+  it.each(['cycle-b', null])(
+    'keeps interleaved renewal ordinals isolated from cycle %s',
+    (secondCycle) => {
+      const base = 1794373221291;
+      const identities = [
+        {
+          cycle: 'cycle-a',
+          time: base + 10_000,
+          net: 0.0326,
+          followedUp: true,
+        },
+        {
+          cycle: secondCycle,
+          time: base + 2000,
+          net: -0.0123,
+          followedUp: false,
+        },
+      ];
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          turns: identities.map(({ cycle, time, net, followedUp }) => ({
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: cycle,
+            turn_number: 2,
+            time_ms: time,
+            pnl: net,
+            followed_up: followedUp,
+            pending: false,
+          })),
+          gaps: identities.map(({ cycle, time, net }) => ({
+            cycle_id: cycle,
+            pause_at_ms: time - 270_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 2,
+                time_ms: time,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.0123,
+                hit: true,
+              },
+            ],
+            ending_kind: 'ttl_expired_no_followup',
+            ending_at_ms: time + 300_000,
+            total_duration_sec: 570,
+            since_last_renewal_sec: 300,
+            spent_usd: 0.0123,
+            avoided_usd: 0,
+            net_pnl_usd: net,
+          })),
+        }),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="interleaved-cycles"
+          onClose={() => {}}
+        />,
+      );
+      const timelines = within(
+        screen.getByTestId('session-detail-time-rail'),
+      ).getAllByRole('region');
+      for (const [index, timeline] of timelines.entries()) {
+        fireEvent.click(
+          within(timeline).getByRole('button', { name: /Renewal #2:/ }),
+        );
+        const tip = screen.getByRole('tooltip');
+        expect(
+          within(tip).getByText(index === 0 ? '+$0.0326' : '−$0.0123'),
+        ).toBeDefined();
+        expect(
+          within(tip).getByText(index === 0 ? 'Observed' : 'None'),
+        ).toBeDefined();
+        fireEvent.keyDown(document, { key: 'Escape' });
+      }
+      expect(
+        screen.queryByRole('region', { name: 'Additional renewal evidence' }),
+      ).toBeNull();
+    },
+  );
 });
