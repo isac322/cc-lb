@@ -959,3 +959,80 @@ async fn monthly_main_with_ordinary_credits_does_not_report_affected_quota_refre
             .all(|snapshot| snapshot.observed_at_unix_millis.is_none())
     );
 }
+
+#[tokio::test]
+async fn valid_monthly_poll_records_successful_scheduler_attempt_without_claiming_routing_refresh()
+{
+    use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
+    use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let mut monthly = usage(upstream.kind, 100);
+    monthly["rate_limit"]["primary_window"]["limit_window_seconds"] = json!(2_592_000);
+    monthly["credits"] = Value::Null;
+    *provider.state.usage.lock().unwrap() = monthly;
+    // Exercise the real fleet handler's poll_and_record path rather than
+    // manually manufacturing a cursor update from a test observation.
+    let result = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthUsagePoll(
+            cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob::new(1_700_000_000),
+        ))
+        .await;
+    assert!(
+        result.is_ok(),
+        "valid provider usage is a normal scheduler attempt"
+    );
+    let cursor = match &fixture.dispatch.backend {
+        SchedulerBackend::Sqlite(sqlite) => OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
+            .read(upstream.id)
+            .await
+            .unwrap(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
+    };
+    let cursor = cursor.expect("monthly provider success must record the normal poll cursor");
+    assert_eq!(cursor.last_status, Some(200));
+    assert_eq!(cursor.last_observed_at_unix_secs, Some(1_700_000_000));
+    assert_eq!(cursor.attempt_count, 1);
+    assert!(
+        inventory(&fixture, upstream.id)
+            .await
+            .inventory
+            .unwrap()
+            .manual_redemption
+            .unwrap()
+            .eligible
+    );
+    assert!(
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .snapshot_for_upstream(upstream.id, 1_700_000_000_000, 1_800)
+            .iter()
+            .filter(|snapshot| snapshot.window == "5h" || snapshot.window == "7d")
+            .all(|snapshot| snapshot.observed_at_unix_millis.is_none()),
+        "normal monthly polling must not invent supported main routing samples"
+    );
+    let observation = fixture
+        .dispatch
+        .poll_usage(upstream.id, None)
+        .await
+        .expect("valid monthly provider observation is not a handler error");
+    assert!(
+        matches!(
+            observation,
+            cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation::Success {
+                affected_main_quota_published: false,
+                ..
+            }
+        ),
+        "monthly polling succeeds without claiming main routing publication"
+    );
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Failed,
+        "normal provider success does not prove affected routing quota publication"
+    );
+}

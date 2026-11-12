@@ -312,7 +312,9 @@ impl LimitResetUsageRefreshPort for SchedulerDispatch {
             _ = cancel.cancelled() => LimitResetUsageRefresh::Failed,
             result = tokio::time::timeout(std::time::Duration::from_secs(30), dispatch.poll_usage(upstream_id, None)) => {
                 match result {
-                    Ok(Ok(OAuthUsagePollObservation::Success { .. })) => LimitResetUsageRefresh::Refreshed,
+                    Ok(Ok(OAuthUsagePollObservation::Success {
+                        affected_main_quota_published: true, ..
+                    })) => LimitResetUsageRefresh::Refreshed,
                     Ok(Ok(OAuthUsagePollObservation::Skip)) => LimitResetUsageRefresh::NotApplicable,
                     _ => LimitResetUsageRefresh::Failed,
                 }

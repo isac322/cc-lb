@@ -367,11 +367,6 @@ impl SchedulerDispatch {
             self.persist_openai_reset_inventory(&upstream, &fence, &record)
                 .await;
         }
-        if upstream.kind == UpstreamKind::OpenaiOauth && !affected_main_published {
-            return Err(SchedulerError::Job(
-                "OpenAI usage published no affected main routing quota".to_owned(),
-            ));
-        }
         if is_anthropic && upstream.oauth_never_refresh {
             self.enqueue_metadata_refresh_for_long_lived(&upstream, traceparent)
                 .await?;
@@ -380,6 +375,7 @@ impl SchedulerDispatch {
             observed_at_unix_secs,
             window_start_unix_millis: observed_at_unix_millis,
             window_end_unix_millis: observed_at_unix_millis,
+            affected_main_quota_published: affected_main_published,
         })
     }
 

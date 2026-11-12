@@ -165,6 +165,8 @@ Claim settlement advances the epoch after any outcome, including an unknown outc
 
 OpenAI coupon inventory is independent of routing-window support. A valid monthly main allowance can establish manual-redemption eligibility and keep inventory available even though monthly routing quota is not represented. Inventory, ordinary usage credits, or additional model allowances alone do not establish a refreshed affected main quota; the reset result is retained with `usage_refresh: "failed"` when no supported main routing quota was published.
 
+A valid provider observation without a supported main routing quota is still a successful scheduled poll: it records the normal `200` attempt cursor and success classification. The observation separately records whether an affected main quota was published; the post-reset refresh requires that flag before reporting `refreshed`.
+
 **Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-engine/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists.
 
 `GET /admin/scheduler/status`, `GET /admin/scheduler/failures`, and `GET /admin/v1/upstreams/{id}/warmup` read committed job rows directly.
