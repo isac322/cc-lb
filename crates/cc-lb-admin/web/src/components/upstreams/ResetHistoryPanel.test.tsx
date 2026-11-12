@@ -1,0 +1,287 @@
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../../lib/api';
+import {
+  type LimitResetHistoryItem,
+  type LimitResetHistoryResponse,
+  useClaimLimitReset,
+  useLimitResetHistory,
+} from '../../lib/limitResets';
+import { makeOauthUpstream } from '../../lib/test-utils/warmup-fixtures';
+import { useCouponNudge } from './CouponNudge';
+import { LimitResetAction } from './LimitResetAction';
+import { ResetHistoryPanel } from './ResetHistoryPanel';
+
+vi.mock('../../lib/limitResets', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    '../../lib/limitResets',
+  );
+  return {
+    ...actual,
+    useLimitResetHistory: vi.fn(),
+    useClaimLimitReset: vi.fn(),
+    loadPendingLimitResetOp: vi.fn(() => null),
+  };
+});
+vi.mock('./CouponNudge', async () => {
+  const actual =
+    await vi.importActual<Record<string, unknown>>('./CouponNudge');
+  return { ...actual, useCouponNudge: vi.fn() };
+});
+vi.mock('../ui/RelativeTime', () => ({
+  RelativeTime: ({ ts }: { ts: number }) => (
+    <time>{new Date(ts).toISOString()}</time>
+  ),
+}));
+
+function attempt(
+  overrides: Partial<LimitResetHistoryItem> = {},
+): LimitResetHistoryItem {
+  return {
+    id: 'audit-row',
+    recorded_at_unix_millis: Date.parse('2026-11-12T12:00:00Z'),
+    upstream_id: 'upstream-a',
+    provider: 'anthropic',
+    coupon_type: 'weekly',
+    gives_back_weekly: false,
+    result: 'reset',
+    usage_refresh: 'refreshed',
+    actor: null,
+    request_id: null,
+    cleared: ['7d'],
+    windows_reset: null,
+    ...overrides,
+  };
+}
+
+function setHistory(
+  data: LimitResetHistoryResponse | undefined,
+  error: Error | null = null,
+) {
+  vi.mocked(useLimitResetHistory).mockReturnValue({
+    data,
+    error,
+    isPending: !data && !error,
+    isError: error != null,
+    isFetching: false,
+    refetch: vi.fn(),
+  } as never);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  setHistory({ items: [], has_more: false, limit: 100 });
+});
+afterEach(cleanup);
+
+describe('recorded reset activity', () => {
+  it('shows an uncertain legacy attempt without claiming consumption or offering a retry', () => {
+    setHistory({
+      items: [
+        attempt({
+          result: 'unknown',
+          provider: null,
+          coupon_type: null,
+          usage_refresh: null,
+        }),
+      ],
+      has_more: false,
+      limit: 100,
+    });
+    render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    expect(screen.getByText(/Outcome unknown/)).toBeDefined();
+    expect(screen.queryByText('Coupon used')).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: /Use coupon|Retry request/ }),
+    ).toBeNull();
+    expect(screen.getByText('Activity recorded by cc-lb')).toBeDefined();
+    expect(screen.getByText('2026-11-12T12:00:00.000Z')).toBeDefined();
+  });
+
+  it('keeps consumption success distinct from a failed usage refresh', () => {
+    setHistory({
+      items: [attempt({ usage_refresh: 'failed' })],
+      has_more: false,
+      limit: 100,
+    });
+    render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    expect(screen.getByText('Coupon used')).toBeDefined();
+    expect(screen.queryByText(/Outcome unknown/)).toBeNull();
+  });
+
+  it('distinguishes already-applied and not-needed outcomes from a new consumption', () => {
+    setHistory({
+      items: [
+        attempt({ id: 'already', result: 'already_used' }),
+        attempt({ id: 'not-needed', result: 'not_limited' }),
+      ],
+      has_more: false,
+      limit: 100,
+    });
+    render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    const rows = screen.getAllByRole('listitem');
+    expect(
+      within(rows[0]).getByText(/no additional coupon used/),
+    ).toBeDefined();
+    expect(within(rows[1]).getByText(/no coupon used/)).toBeDefined();
+    expect(screen.queryByText('Coupon used')).toBeNull();
+  });
+
+  it('shows the recorded-attempt empty state instead of inventory or granted credits', () => {
+    render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    expect(
+      screen.getByText('No reset attempts recorded in cc-lb.'),
+    ).toBeDefined();
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  it('does not enable the history query while closed', () => {
+    render(<ResetHistoryPanel upstreamId="upstream-a" open={false} />);
+    expect(useLimitResetHistory).toHaveBeenCalledWith('upstream-a', false, 100);
+  });
+
+  it('reports loading and permission failure without presenting an empty ledger', () => {
+    setHistory(undefined);
+    const view = render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    expect(
+      screen.getByRole('status', { name: 'Loading reset activity' }),
+    ).toBeDefined();
+    expect(
+      screen.queryByText('No reset attempts recorded in cc-lb.'),
+    ).toBeNull();
+    setHistory(undefined, new ApiError(403, null, null, 'Forbidden'));
+    view.rerender(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    expect(screen.getByText(/does not have permission/)).toBeDefined();
+    expect(
+      screen.queryByText('No reset attempts recorded in cc-lb.'),
+    ).toBeNull();
+  });
+
+  it('expands the real recent-history bound up to 1000, then states the limit honestly', () => {
+    vi.mocked(useLimitResetHistory).mockImplementation(
+      (_upstreamId, _enabled, limit = 100) =>
+        ({
+          data: { items: [attempt()], has_more: true, limit },
+          error: null,
+          isPending: false,
+          isError: false,
+          isFetching: false,
+          refetch: vi.fn(),
+        }) as never,
+    );
+    render(<ResetHistoryPanel upstreamId="upstream-a" open />);
+    for (let limit = 200; limit <= 1000; limit += 100) {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Load older activity' }),
+      );
+      expect(useLimitResetHistory).toHaveBeenLastCalledWith(
+        'upstream-a',
+        true,
+        limit,
+      );
+    }
+    expect(
+      screen.queryByRole('button', { name: 'Load older activity' }),
+    ).toBeNull();
+    expect(
+      screen.getByText(/most recent 1,000 recorded attempts/),
+    ).toBeDefined();
+  });
+});
+
+describe('reset activity entry availability', () => {
+  it('opens recorded history without credentials and never dispatches a coupon claim', async () => {
+    const mutate = vi.fn();
+    vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
+    vi.mocked(useCouponNudge).mockReturnValue({
+      resetsQ: {
+        data: undefined,
+        isError: false,
+        isPending: true,
+        isFetching: false,
+        refetch: vi.fn(),
+      },
+      nowMs: Date.now(),
+      suppressed: true,
+      nudge: null,
+      derived: null,
+      claimInFlight: false,
+    } as never);
+    render(
+      <LimitResetAction
+        upstream={makeOauthUpstream()}
+        credentialsStored={false}
+      />,
+    );
+    const entry = screen.getByRole('button', { name: 'Reset quota' });
+    expect((entry as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(entry);
+    expect(
+      await screen.findByRole('dialog', { name: 'Reset activity' }),
+    ).toBeDefined();
+    expect(useLimitResetHistory).toHaveBeenLastCalledWith('oauth-1', true, 100);
+    expect(
+      screen.getByText('No reset attempts recorded in cc-lb.'),
+    ).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to coupon' }));
+    expect(
+      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeDefined();
+    const useCoupon = screen.getByRole('button', { name: 'Use coupon' });
+    expect((useCoupon as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(useCoupon);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('keeps recorded history reachable while the provider inventory is loading', async () => {
+    const mutate = vi.fn();
+    vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
+    vi.mocked(useCouponNudge).mockReturnValue({
+      resetsQ: {
+        data: undefined,
+        isError: false,
+        isPending: true,
+        isFetching: true,
+        refetch: vi.fn(),
+      },
+      nowMs: Date.now(),
+      suppressed: true,
+      nudge: null,
+      derived: null,
+      claimInFlight: false,
+    } as never);
+    render(
+      <LimitResetAction
+        upstream={makeOauthUpstream()}
+        credentialsStored
+        renderTrigger={({ onClick, disabled, loading }) => (
+          <button
+            type="button"
+            disabled={disabled || loading}
+            onClick={onClick}
+          >
+            Coupons
+          </button>
+        )}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Coupons' }));
+    expect(
+      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+    expect(
+      await screen.findByRole('dialog', { name: 'Reset activity' }),
+    ).toBeDefined();
+    expect(
+      screen.queryByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeNull();
+    expect(mutate).not.toHaveBeenCalled();
+  });
+});

@@ -3,14 +3,17 @@ import { deriveCouponNudge } from './couponNudge';
 import {
   type CouponQuotaWindow,
   chooseCouponGrant,
+  chooseCouponGroupGrant,
   couponClaimMessage,
   couponEffectDescription,
+  couponGroupKey,
   couponInventory,
   couponOptionLabel,
   couponProductLabel,
   couponScopeLabel,
   couponUsageLabel,
   couponWindowLabel,
+  groupCouponGrants,
   isFableRebateGrant,
   presentCoupon,
 } from './couponPresentation';
@@ -209,7 +212,7 @@ describe('exact coupon scope and usage', () => {
     expect(presentation.targets[0].percentUsed).toBeNull();
   });
 
-  it('distinguishes repeated provider labels by declared scope and remaining count', () => {
+  it('keeps the option label compact while scope remains available separately', () => {
     const full = grant({ clears: ['7d', '7d_overage_included'] });
     const narrow = grant({
       id: 'narrow',
@@ -217,12 +220,8 @@ describe('exact coupon scope and usage', () => {
       resets_total: 3,
       resets_left: 2,
     });
-    expect(couponOptionLabel(full)).toBe(
-      'Reset coupon · Weekly, Weekly (included usage) · 1/2 left',
-    );
-    expect(couponOptionLabel(narrow)).toBe(
-      'Reset coupon · Weekly (included usage) · 2/3 left',
-    );
+    expect(couponOptionLabel(full)).toBe('Reset ×1');
+    expect(couponOptionLabel(narrow)).toBe('Reset ×2');
     expect(couponScopeLabel(full)).not.toContain('All');
     expect(couponScopeLabel(grant({ clears: [] }))).toBe('Scope not reported');
   });
@@ -344,8 +343,8 @@ describe('provider-specific reset semantics', () => {
     expect(observed.targets[0].window).toBe('7d_overage_included');
     expect(observed.fullNonTargets[0].window).toBe('7d');
     const copy = couponEffectDescription(live, 'anthropic');
-    expect(copy).toContain('return');
-    expect(copy).toContain('numeric weekly rebate');
+    expect(copy.toLowerCase()).toContain('return');
+    expect(copy).not.toContain('5-hour');
     expect(copy).not.toContain('untouched');
     expect(copy).not.toContain('unaffected');
     expect(copy).not.toContain('100%');
@@ -416,7 +415,7 @@ describe('provider-specific reset semantics', () => {
     expect(coupon).toBeDefined();
     if (!coupon) throw new Error('Missing coupon fixture');
     const copy = couponEffectDescription(coupon, 'openai');
-    expect(copy).toContain('main Codex allowance');
+    expect(copy).toContain('Codex quota');
     expect(copy).toContain('may change the reset schedule');
     expect(copy).not.toContain('5-hour');
     expect(copy).not.toContain('weekly reset schedule stays');
@@ -474,5 +473,111 @@ describe('reset completion and quota refresh copy', () => {
       couponClaimMessage({ ...response, result: 'not_limited' }),
     ).toContain('No coupon was used');
     expect(data.openai?.available_count).toBe(2);
+  });
+});
+
+describe('coupon type groups', () => {
+  it('sums equivalent active grants without merging differing exact scopes', () => {
+    const first = grant({
+      id: 'first',
+      type: 'weekly',
+      clears: ['7d', '5h'],
+      resets_left: 2,
+    });
+    const second = grant({
+      id: 'second',
+      type: 'weekly',
+      clears: ['5h', '7d'],
+      resets_left: 3,
+      paused: true,
+      usable_now: false,
+    });
+    const narrow = grant({ id: 'narrow', type: 'weekly', clears: ['7d'] });
+    const groups = groupCouponGrants([first, second, narrow], 'anthropic');
+    expect(groups).toHaveLength(2);
+    expect(groups[0].remaining).toBe(5);
+    expect(groups[0].grants.map((item) => item.id)).toEqual([
+      'first',
+      'second',
+    ]);
+    expect(groups[1].remaining).toBe(1);
+  });
+
+  it('keeps provider, raw taxonomy, unknown scope and giveback tri-state distinct', () => {
+    const base = grant({ type: 'full', gives_back_weekly: true });
+    const variants = [
+      base,
+      grant({ type: 'full', gives_back_weekly: false }),
+      grant({ type: 'full', gives_back_weekly: null }),
+      grant({ type: null, gives_back_weekly: true }),
+      grant({ type: 'full', gives_back_weekly: true, clears: [] }),
+      grant({ type: 'full', gives_back_weekly: true, clears: ['future'] }),
+    ];
+    expect(groupCouponGrants(variants, 'anthropic')).toHaveLength(
+      variants.length,
+    );
+    expect(couponGroupKey(base, 'anthropic')).not.toBe(
+      couponGroupKey(base, 'openai'),
+    );
+    expect(groupCouponGrants([base], 'anthropic')[0].fable).toBe(true);
+  });
+
+  it('keeps OpenAI reset taxonomy and plan-support states separate', () => {
+    const credits = [true, false, null].map((support, index) => {
+      const adapted = couponInventory(
+        openAIStatus({ id: `credit-${index}`, is_supported_by_plan: support }),
+      )?.grants[0];
+      if (!adapted) throw new Error('Missing credit fixture');
+      return adapted;
+    });
+    const future = couponInventory(openAIStatus({ reset_type: 'future_reset' }))
+      ?.grants[0];
+    if (!future) throw new Error('Missing future credit');
+    expect(groupCouponGrants([...credits, future], 'openai')).toHaveLength(4);
+    // Native aggregate 2 is not added to the one listed credit's type count.
+    expect(groupCouponGrants([credits[0]], 'openai')[0].remaining).toBe(1);
+  });
+
+  it('chooses the earliest usable exact grant, not an earlier blocked grant', () => {
+    const blocked = grant({
+      id: 'blocked',
+      usable_now: false,
+      paused: true,
+      ends_at: '2026-11-13T00:00:00Z',
+    });
+    const later = grant({ id: 'later', ends_at: '2026-11-20T00:00:00Z' });
+    const earliest = grant({ id: 'earliest', ends_at: '2026-11-15T00:00:00Z' });
+    const group = groupCouponGrants([blocked, later, earliest], 'anthropic')[0];
+    expect(chooseCouponGroupGrant(group, [later, earliest])?.id).toBe(
+      'earliest',
+    );
+    expect(group.remaining).toBe(3);
+    expect(chooseCouponGroupGrant(group, [])?.id).toBe('blocked');
+  });
+
+  it('preserves a selected exact credit rather than falling back within its group', () => {
+    const chosen = grant({ id: 'chosen' });
+    const sibling = grant({ id: 'sibling' });
+    expect(couponGroupKey(chosen, 'anthropic')).toBe(
+      couponGroupKey(sibling, 'anthropic'),
+    );
+    expect(
+      chooseCouponGrant([sibling], [sibling], [], chosen.id, FRESH),
+    ).toBeNull();
+  });
+
+  it('mentions a Fable five-hour reset only when that scope is declared', () => {
+    const fable = grant({
+      type: 'full',
+      gives_back_weekly: true,
+      clears: ['7d_overage_included'],
+    });
+    expect(couponEffectDescription(fable, 'anthropic')).not.toContain('5-hour');
+    expect(
+      couponEffectDescription(
+        { ...fable, clears: [...fable.clears, '5h'] },
+        'anthropic',
+      ),
+    ).toContain('5-hour');
   });
 });

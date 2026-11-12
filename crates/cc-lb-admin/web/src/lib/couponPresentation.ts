@@ -94,19 +94,23 @@ export function couponEffectDescription(
   provider: LimitResetsResponse['provider'],
 ): string {
   if (provider === 'openai') {
-    const scope =
-      grant.openai_credit?.reset_type === 'codex_rate_limits'
-        ? 'the main Codex allowance'
-        : 'the allowance reported by OpenAI';
-    return `This uses one banked reset coupon for ${scope}. It cannot be undone. OpenAI may change the reset schedule; check the reloaded usage afterward.`;
+    return grant.openai_credit?.reset_type === 'codex_rate_limits'
+      ? 'Resets the Codex quota; OpenAI may change the reset schedule.'
+      : 'Resets the provider-reported allowance; OpenAI may change the reset schedule.';
   }
   if (isFableRebateGrant(grant)) {
-    return 'This uses one reset coupon to return Fable usage to your weekly allowance and reset the whole 5-hour window when present. The provider does not report a numeric weekly rebate in advance. It cannot be undone. Your weekly reset schedule stays the same.';
+    return grant.clears.includes('5h')
+      ? 'Returns Fable usage to the weekly allowance and resets 5-hour usage.'
+      : 'Returns Fable usage to the weekly allowance.';
   }
   if (grant.gives_back_weekly === true) {
-    return 'This uses one reset coupon to return the weekly usage covered by this offer. The provider does not report a numeric rebate in advance. It cannot be undone. Your weekly reset schedule stays the same.';
+    return 'Returns the weekly usage covered by this coupon.';
   }
-  return `This uses one reset coupon for ${couponScopeLabel(grant)}. It cannot be undone. Your weekly reset schedule stays the same.`;
+  if (grant.type === 'weekly' && grant.clears.includes('7d'))
+    return 'Resets weekly usage.';
+  return grant.clears.length > 0
+    ? `Resets ${couponScopeLabel(grant).toLowerCase()}.`
+    : 'Uses the reset allowance reported by the provider; scope is not reported.';
 }
 
 export function couponClaimMessage(response: LimitResetClaimResponse): string {
@@ -134,19 +138,84 @@ export function couponScopeLabel(
     : 'Scope not reported';
 }
 
+export function couponTypeLabel(grant: LimitResetGrant): string {
+  if (grant.openai_credit)
+    return grant.openai_credit.reset_type === 'codex_rate_limits'
+      ? 'Codex'
+      : 'Reset';
+  if (isFableRebateGrant(grant)) return 'Fable';
+  return grant.type === 'weekly' ? 'Weekly' : 'Reset';
+}
+
 export function couponOptionLabel(grant: LimitResetGrant): string {
-  const count =
-    grant.resets_total == null
-      ? `${grant.resets_left}`
-      : `${grant.resets_left}/${grant.resets_total}`;
-  if (grant.openai_credit) {
-    const expiry =
-      grant.ends_at == null
-        ? 'No expiry reported'
-        : `Expires ${new Date(grant.ends_at).toLocaleString()}`;
-    return `${couponProductLabel(grant)} · ${expiry}`;
+  return `${couponTypeLabel(grant)} ×${grant.resets_left}`;
+}
+
+export interface CouponGroup {
+  key: string;
+  label: string;
+  fable: boolean;
+  remaining: number;
+  grants: LimitResetGrant[];
+}
+
+/** Identity is provider semantics, never the marketing title or expiry. */
+export function couponGroupKey(
+  grant: LimitResetGrant,
+  provider: LimitResetsResponse['provider'],
+): string {
+  return JSON.stringify([
+    provider,
+    grant.type,
+    [...grant.clears].sort(),
+    grant.gives_back_weekly,
+    grant.openai_credit?.reset_type ?? null,
+    grant.openai_credit?.is_supported_by_plan ?? null,
+  ]);
+}
+
+export function groupCouponGrants(
+  grants: readonly LimitResetGrant[],
+  provider: LimitResetsResponse['provider'],
+): CouponGroup[] {
+  const groups = new Map<string, CouponGroup>();
+  for (const grant of grants) {
+    const key = couponGroupKey(grant, provider);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.remaining += grant.resets_left;
+      existing.grants.push(grant);
+    } else {
+      groups.set(key, {
+        key,
+        label: couponTypeLabel(grant),
+        fable: isFableRebateGrant(grant),
+        remaining: grant.resets_left,
+        grants: [grant],
+      });
+    }
   }
-  return `${couponProductLabel(grant)} · ${couponScopeLabel(grant)} · ${count} left`;
+  return [...groups.values()];
+}
+
+/** Only the initial type choice uses exhausted-target preference. Within a
+ * type, spend the earliest-expiring usable exact grant. */
+export function chooseCouponGroupGrant(
+  group: CouponGroup,
+  usable: readonly LimitResetGrant[],
+): LimitResetGrant | null {
+  const ready = group.grants.filter((grant) => usable.includes(grant));
+  const candidates = ready.length > 0 ? ready : group.grants;
+  let selected: LimitResetGrant | null = null;
+  let earliest = Infinity;
+  for (const grant of candidates) {
+    const expiry = grant.ends_at == null ? Infinity : Date.parse(grant.ends_at);
+    if (!selected || expiry < earliest) {
+      selected = grant;
+      earliest = expiry;
+    }
+  }
+  return selected;
 }
 
 export interface CouponWindowUsage {
