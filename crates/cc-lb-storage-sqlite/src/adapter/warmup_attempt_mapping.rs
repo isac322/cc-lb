@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
     StorageError, StorageResult, WarmupAttemptOutcome, WarmupAttemptStatus, WarmupDispatchKind,
-    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupLane, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
     WarmupTransientFailureReason,
 };
 
@@ -20,6 +20,9 @@ pub(crate) fn outcome_components(outcome: WarmupAttemptOutcome) -> (&'static str
         }
         WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDeleted) => {
             ("skipped", "upstream_deleted")
+        }
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable) => {
+            ("skipped", "quota_group_unavailable")
         }
         WarmupAttemptOutcome::TransientFailure(
             WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
@@ -107,6 +110,9 @@ pub(crate) fn parse_reason(
         (WarmupAttemptStatus::Skipped, "upstream_deleted") => Ok(WarmupAttemptOutcome::Skipped(
             WarmupSkipReason::UpstreamDeleted,
         )),
+        (WarmupAttemptStatus::Skipped, "quota_group_unavailable") => Ok(
+            WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable),
+        ),
         (WarmupAttemptStatus::TransientFailure, "rate_limited_cycle_key_missing") => {
             Ok(WarmupAttemptOutcome::TransientFailure(
                 WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
@@ -186,4 +192,10 @@ pub(crate) fn dispatch_kind_from_str(value: &str) -> StorageResult<WarmupDispatc
             message: format!("invalid warmup attempt dispatch_kind {value}"),
         }),
     }
+}
+
+pub(crate) fn lane_from_str(value: &str) -> StorageResult<WarmupLane> {
+    WarmupLane::parse(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid warmup attempt lane {value}"),
+    })
 }

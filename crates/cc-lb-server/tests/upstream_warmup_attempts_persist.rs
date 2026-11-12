@@ -107,6 +107,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
         let record = execute_warmup_attempt(WarmupAttemptExecution {
             storage: &storage,
             upstream: &upstream,
+            lane: cc_lb_storage_api::WarmupLane::Primary,
             scheduled_for_unix_secs: 1_800_001_000,
             trigger: WarmupAttemptTrigger::Scheduled,
             replica_id: None,
@@ -132,7 +133,9 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
                 WarmupAttemptListFilters {
                     limit: Some(10),
                     before: None,
+                    since_unix_secs: None,
                     status: None,
+                    lane: None,
                 },
             )
             .await
@@ -147,7 +150,9 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             WarmupAttemptListFilters {
                 limit: Some(10),
                 before: None,
+                since_unix_secs: None,
                 status: None,
+                lane: None,
             },
         )
         .await

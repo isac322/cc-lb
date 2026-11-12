@@ -709,6 +709,11 @@ describe('config editor information architecture', () => {
   it.each([
     ['openai_model', 'OpenAI model', 'OpenAI'],
     ['gemini_model', 'Gemini model', 'Gemini'],
+    [
+      'gemini_third_party_model',
+      'Gemini Claude and GPT-OSS model',
+      'Antigravity Gemini',
+    ],
   ])(
     'places warmup.%s in scheduling with provider guidance',
     (key, label, provider) => {

@@ -1,7 +1,7 @@
 use cc_lb_storage_api::{
     StorageError, StorageResult, WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptStatus,
-    WarmupAttemptTrigger, WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
-    WarmupSuccessReason, WarmupTransientFailureReason,
+    WarmupAttemptTrigger, WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason,
+    WarmupSkipReason, WarmupSuccessReason, WarmupTransientFailureReason,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -24,6 +24,7 @@ pub(crate) fn row_to_attempt(row: PgRow) -> StorageResult<WarmupAttemptRecord> {
             &row.try_get::<String, _>("trigger")
                 .map_err(map_sqlx_error)?,
         )?,
+        lane: lane_from_str(&row.try_get::<String, _>("lane").map_err(map_sqlx_error)?)?,
         outcome: parse_reason(
             status_from_str(
                 &row.try_get::<String, _>("outcome")
@@ -71,6 +72,9 @@ pub(crate) fn outcome_components(outcome: WarmupAttemptOutcome) -> (&'static str
         }
         WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDeleted) => {
             ("skipped", "upstream_deleted")
+        }
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable) => {
+            ("skipped", "quota_group_unavailable")
         }
         WarmupAttemptOutcome::TransientFailure(
             WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
@@ -158,6 +162,9 @@ pub(crate) fn parse_reason(
         (WarmupAttemptStatus::Skipped, "upstream_deleted") => Ok(WarmupAttemptOutcome::Skipped(
             WarmupSkipReason::UpstreamDeleted,
         )),
+        (WarmupAttemptStatus::Skipped, "quota_group_unavailable") => Ok(
+            WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable),
+        ),
         (WarmupAttemptStatus::TransientFailure, "rate_limited_cycle_key_missing") => {
             Ok(WarmupAttemptOutcome::TransientFailure(
                 WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
@@ -254,4 +261,10 @@ fn trigger_from_str(value: &str) -> StorageResult<WarmupAttemptTrigger> {
             message: format!("invalid warmup attempt trigger {value}"),
         }),
     }
+}
+
+pub(crate) fn lane_from_str(value: &str) -> StorageResult<WarmupLane> {
+    WarmupLane::parse(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid warmup attempt lane {value}"),
+    })
 }

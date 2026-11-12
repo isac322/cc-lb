@@ -1,9 +1,11 @@
+use cc_lb_aead::AeadService;
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
+use cc_lb_storage_api::{UpstreamRecord, UpstreamStore, WarmupLane};
 use uuid::Uuid;
 
+use crate::scheduler_dispatch::http::decrypt_bundle;
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
 
 use super::SchedulerDispatch;
@@ -11,9 +13,15 @@ use super::SchedulerDispatch;
 const UPSTREAM_PAGE_LIMIT: usize = 1_000;
 
 impl SchedulerDispatch {
-    pub(super) async fn list_warmup_watchdog_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {
-        self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::Warmup)
-            .await
+    pub(super) async fn list_warmup_watchdog_upstream_ids(
+        &self,
+        lane: WarmupLane,
+    ) -> SchedulerResult<Vec<Uuid>> {
+        let filter = match lane {
+            WarmupLane::Primary => WatchdogUpstreamFilter::Warmup,
+            WarmupLane::ThirdParty => WatchdogUpstreamFilter::WarmupThirdParty,
+        };
+        self.list_watchdog_upstream_ids(filter).await
     }
 
     pub(super) async fn list_oauth_refresh_watchdog_upstream_ids(
@@ -43,7 +51,7 @@ impl SchedulerDispatch {
             }
             upstream_ids.extend(
                 page.iter()
-                    .filter(|upstream| filter.matches(upstream))
+                    .filter(|upstream| filter.matches(upstream, self.aead.as_ref()))
                     .map(|upstream| upstream.id),
             );
             after = page.last().map(|upstream| upstream.id);
@@ -58,23 +66,44 @@ impl SchedulerDispatch {
 #[derive(Clone, Copy)]
 enum WatchdogUpstreamFilter {
     Warmup,
+    /// Claude/GPT-OSS warm-up lane: only Gemini OAuth credentials issued by the
+    /// Antigravity client carry that quota group.
+    WarmupThirdParty,
     OAuth,
     OAuthUsagePoll,
 }
 
 impl WatchdogUpstreamFilter {
-    fn matches(self, upstream: &UpstreamRecord) -> bool {
+    fn matches(self, upstream: &UpstreamRecord, aead: &AeadService) -> bool {
         if upstream.deleted_at_unix_secs.is_some() || upstream.oauth_credentials.is_none() {
             return false;
         }
         match self {
             Self::Warmup => {
-                matches!(
-                    upstream.kind,
-                    UpstreamKind::AnthropicOauth
-                        | UpstreamKind::OpenaiOauth
-                        | UpstreamKind::GeminiOauth
-                ) && upstream.warmup_enabled
+                WarmupLane::lanes_for_kind(upstream.kind).contains(&WarmupLane::Primary)
+                    && upstream.warmup_enabled
+            }
+            Self::WarmupThirdParty => {
+                let lane = WarmupLane::ThirdParty;
+                if !upstream.warmup_enabled
+                    || !WarmupLane::lanes_for_kind(upstream.kind).contains(&lane)
+                {
+                    return false;
+                }
+                // A credential that cannot be decrypted only drops this
+                // upstream from the third-party lane; the primary lane and its
+                // dispatch report the decrypt failure on their own.
+                match decrypt_bundle(upstream, aead) {
+                    Ok(bundle) => lane.credential_supports(upstream.kind, &bundle),
+                    Err(error) => {
+                        tracing::warn!(
+                            upstream_id = %upstream.id,
+                            %error,
+                            "third-party warmup watchdog skipped upstream: credential decrypt failed"
+                        );
+                        false
+                    }
+                }
             }
             Self::OAuth => {
                 matches!(
@@ -99,7 +128,8 @@ impl WatchdogUpstreamFilter {
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_aead::EncryptedOAuthTokens;
+    use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_oauth_protocol::GeminiOAuthProfile;
 
     use super::*;
 
@@ -109,7 +139,7 @@ mod tests {
         upstream.enabled = false;
         upstream.warmup_enabled = false;
 
-        assert!(WatchdogUpstreamFilter::OAuth.matches(&upstream));
+        assert!(WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
     }
 
     #[test]
@@ -119,8 +149,8 @@ mod tests {
         let mut missing_credentials = registered_oauth_upstream();
         missing_credentials.oauth_credentials = None;
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted));
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted, &aead()));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials, &aead()));
     }
 
     #[test]
@@ -128,7 +158,7 @@ mod tests {
         let mut upstream = registered_oauth_upstream();
         upstream.kind = UpstreamKind::AnthropicApiKey;
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
     }
 
     #[test]
@@ -137,7 +167,7 @@ mod tests {
             let upstream = oauth_upstream(kind);
 
             assert!(
-                WatchdogUpstreamFilter::OAuth.matches(&upstream),
+                WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()),
                 "{kind:?} OAuth upstream should be refresh-watchdog eligible"
             );
         }
@@ -149,7 +179,7 @@ mod tests {
             let mut upstream = oauth_upstream(kind);
             upstream.oauth_never_refresh = true;
 
-            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
         }
     }
 
@@ -161,8 +191,8 @@ mod tests {
             let mut missing_credentials = oauth_upstream(kind);
             missing_credentials.oauth_credentials = None;
 
-            assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted));
-            assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted, &aead()));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials, &aead()));
         }
     }
 
@@ -171,7 +201,7 @@ mod tests {
         for kind in [UpstreamKind::OpenaiApiKey, UpstreamKind::GeminiApiKey] {
             let upstream = oauth_upstream(kind);
 
-            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
         }
     }
 
@@ -181,7 +211,7 @@ mod tests {
             let mut upstream = oauth_upstream(kind);
             upstream.last_apply_error = Some("status_401".to_owned());
 
-            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
         }
     }
 
@@ -195,10 +225,11 @@ mod tests {
 
         for filter in [
             WatchdogUpstreamFilter::Warmup,
+            WatchdogUpstreamFilter::WarmupThirdParty,
             WatchdogUpstreamFilter::OAuth,
             WatchdogUpstreamFilter::OAuthUsagePoll,
         ] {
-            assert!(!filter.matches(&upstream));
+            assert!(!filter.matches(&upstream, &aead()));
         }
     }
 
@@ -208,8 +239,8 @@ mod tests {
         long_lived.oauth_never_refresh = true;
         let refreshing = registered_oauth_upstream();
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&long_lived));
-        assert!(WatchdogUpstreamFilter::OAuth.matches(&refreshing));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&long_lived, &aead()));
+        assert!(WatchdogUpstreamFilter::OAuth.matches(&refreshing, &aead()));
     }
 
     #[test]
@@ -218,8 +249,8 @@ mod tests {
         long_lived.oauth_never_refresh = true;
         let refreshing = registered_oauth_upstream();
 
-        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&long_lived));
-        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&refreshing));
+        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&long_lived, &aead()));
+        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&refreshing, &aead()));
     }
 
     #[test]
@@ -231,8 +262,93 @@ mod tests {
         enabled_warmup.enabled = false;
         enabled_warmup.warmup_enabled = true;
 
-        assert!(!WatchdogUpstreamFilter::Warmup.matches(&disabled_warmup));
-        assert!(WatchdogUpstreamFilter::Warmup.matches(&enabled_warmup));
+        assert!(!WatchdogUpstreamFilter::Warmup.matches(&disabled_warmup, &aead()));
+        assert!(WatchdogUpstreamFilter::Warmup.matches(&enabled_warmup, &aead()));
+    }
+
+    #[test]
+    fn third_party_warmup_filter_selects_antigravity_gemini_oauth() {
+        let upstream = gemini_upstream_with_profile(GeminiOAuthProfile::Antigravity);
+
+        assert!(WatchdogUpstreamFilter::WarmupThirdParty.matches(&upstream, &aead()));
+        assert!(WatchdogUpstreamFilter::Warmup.matches(&upstream, &aead()));
+    }
+
+    #[test]
+    fn third_party_warmup_filter_excludes_gemini_cli_profile() {
+        let upstream = gemini_upstream_with_profile(GeminiOAuthProfile::GeminiCli);
+
+        assert!(!WatchdogUpstreamFilter::WarmupThirdParty.matches(&upstream, &aead()));
+        assert!(WatchdogUpstreamFilter::Warmup.matches(&upstream, &aead()));
+    }
+
+    #[test]
+    fn third_party_warmup_filter_excludes_non_gemini_kinds() {
+        for kind in [
+            UpstreamKind::AnthropicOauth,
+            UpstreamKind::OpenaiOauth,
+            UpstreamKind::AnthropicApiKey,
+            UpstreamKind::OpenaiApiKey,
+            UpstreamKind::GeminiApiKey,
+        ] {
+            // Even an Antigravity-shaped credential never qualifies another kind.
+            let mut upstream = gemini_upstream_with_profile(GeminiOAuthProfile::Antigravity);
+            upstream.kind = kind;
+
+            assert!(
+                !WatchdogUpstreamFilter::WarmupThirdParty.matches(&upstream, &aead()),
+                "{kind:?} must not be seeded for the third-party lane"
+            );
+        }
+    }
+
+    #[test]
+    fn third_party_warmup_filter_requires_warmup_enabled_and_live_credentials() {
+        let mut disabled = gemini_upstream_with_profile(GeminiOAuthProfile::Antigravity);
+        disabled.warmup_enabled = false;
+        let mut deleted = gemini_upstream_with_profile(GeminiOAuthProfile::Antigravity);
+        deleted.deleted_at_unix_secs = Some(1_800_000_000);
+        let mut missing_credentials = gemini_upstream_with_profile(GeminiOAuthProfile::Antigravity);
+        missing_credentials.oauth_credentials = None;
+
+        for upstream in [disabled, deleted, missing_credentials] {
+            assert!(!WatchdogUpstreamFilter::WarmupThirdParty.matches(&upstream, &aead()));
+        }
+    }
+
+    #[test]
+    fn third_party_decrypt_failure_excludes_only_third_party_lane() {
+        let mut upstream = oauth_upstream(UpstreamKind::GeminiOauth);
+        upstream.warmup_enabled = true;
+        // `oauth_upstream` carries an undecryptable placeholder ciphertext.
+
+        assert!(!WatchdogUpstreamFilter::WarmupThirdParty.matches(&upstream, &aead()));
+        assert!(WatchdogUpstreamFilter::Warmup.matches(&upstream, &aead()));
+    }
+
+    fn aead() -> AeadService {
+        AeadService::from_master_key([42; 32])
+    }
+
+    fn gemini_upstream_with_profile(profile: GeminiOAuthProfile) -> UpstreamRecord {
+        let mut upstream = oauth_upstream(UpstreamKind::GeminiOauth);
+        upstream.warmup_enabled = true;
+        let bundle = OAuthTokenBundle {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: Some("project".to_owned()),
+            oauth_profile: profile,
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        upstream.oauth_credentials = Some(
+            EncryptedOAuthTokens::encrypt(&aead(), &bundle, upstream.id.as_bytes())
+                .expect("encrypt bundle"),
+        );
+        upstream
     }
 
     fn registered_oauth_upstream() -> UpstreamRecord {

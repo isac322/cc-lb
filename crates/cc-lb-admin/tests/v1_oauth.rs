@@ -1045,6 +1045,16 @@ async fn oauth_import_bootstrap_matrix(kind: UpstreamKind) {
             warmup_enabled.then_some(bootstrap_at),
             "omitted warmup must seed its bootstrap task, but explicit false must not"
         );
+        // Imports always carry the Gemini CLI profile (no Claude/GPT-OSS quota)
+        // and OpenAI has no third-party lane, so that lane is never seeded.
+        assert_eq!(
+            scheduler
+                .next_run_for_upstream(upstream_id, "warmup_third_party")
+                .await
+                .expect("next run query succeeds"),
+            None,
+            "only Antigravity Gemini credentials seed the third-party warmup lane"
+        );
         let scheduler_status = scheduler
             .status(&cc_lb_config::SchedulerConfig::default())
             .await

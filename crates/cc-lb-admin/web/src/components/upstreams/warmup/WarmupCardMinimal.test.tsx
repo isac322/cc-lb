@@ -1,8 +1,16 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import * as queries from '../../../lib/queries';
-import { makeOauthUpstream } from '../../../lib/test-utils/warmup-fixtures';
+import {
+  makeFireNowLeaseHeld,
+  makeFireNowSuccess,
+  makeGeminiWarmupSummary,
+  makeOauthUpstream,
+  makeWarmupAttempt,
+  makeWarmupLane,
+  makeWarmupSummary,
+} from '../../../lib/test-utils/warmup-fixtures';
 import { WarmupCardMinimal } from './WarmupCardMinimal';
 
 vi.mock('../../../lib/queries', async () => {
@@ -28,46 +36,20 @@ const upstream = makeOauthUpstream();
 function makeAttempt(
   overrides: Partial<queries.WarmupAttempt> = {},
 ): queries.WarmupAttempt {
-  return {
-    id: 'attempt-1',
-    upstream_id: upstream.id,
-    attempted_at_unix_secs: 1_718_380_800,
-    completed_at_unix_secs: 1_718_380_801,
-    scheduled_for_unix_secs: 1_718_380_800,
-    trigger: 'scheduled',
-    status: 'success',
-    reason: 'cycle_advanced',
-    dispatch_kind: 'http',
-    http_status: 200,
-    cycle_key: 1_718_380_800,
-    expected_cycle_key: 1_718_380_800,
-    idle_secs_since_prev_window: 300,
-    replica_id: 'replica-1',
-    lease_holder: 'replica-1',
-    upstream_spec_revision: 1,
-    dialect_plugin_snapshot: null,
-    error_detail: null,
-    ...overrides,
-  };
+  return makeWarmupAttempt({ upstream_id: upstream.id, ...overrides });
 }
 
 function makeSummary(
   lastAttempt: queries.WarmupAttempt,
   dialectPlugin: queries.WarmupDialectPluginSnapshot | null = null,
 ): queries.WarmupSummary {
-  return {
-    upstream_id: upstream.id,
-    last_attempt: lastAttempt,
-    recent_attempts: [lastAttempt],
-    next_scheduled_at_unix_secs: 1_718_398_800,
-    recent_summary_7d: {
-      success: lastAttempt.status === 'success' ? 1 : 0,
-      skipped: lastAttempt.status === 'skipped' ? 1 : 0,
-      transient_failure: lastAttempt.status === 'transient_failure' ? 1 : 0,
-      permanent_failure: lastAttempt.status === 'permanent_failure' ? 1 : 0,
+  return makeWarmupSummary(
+    [makeWarmupLane({ recent_attempts: [lastAttempt] })],
+    {
+      upstreamId: upstream.id,
+      dialectPlugin,
     },
-    dialect_plugin: dialectPlugin,
-  };
+  );
 }
 
 function setSummaryQuery(
@@ -101,7 +83,7 @@ beforeEach(() => {
   } as never);
   vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
     isPending: false,
-    mutate: vi.fn(),
+    mutateAsync: vi.fn().mockResolvedValue(makeFireNowSuccess()),
   } as never);
   setRegistryPending(false);
   setSummaryQuery(makeSummary(makeAttempt()), false);
@@ -130,7 +112,7 @@ describe('WarmupCardMinimal provider availability', () => {
       expect(
         screen.getByText(
           kind === 'gemini_oauth'
-            ? 'Prepares the next Gemini models quota window during idle gaps.'
+            ? "Prepares each model group's next quota window during idle gaps."
             : 'Prepares the next quota window during idle gaps.',
         ),
       ).toBeTruthy();
@@ -507,11 +489,7 @@ describe('WarmupCardMinimal last-run status colors', () => {
 
   test('an enabled warm-up with no attempts stays neutral — Never, no dot', () => {
     setSummaryQuery(
-      {
-        ...makeSummary(makeAttempt()),
-        last_attempt: null,
-        recent_attempts: [],
-      },
+      makeWarmupSummary([makeWarmupLane()], { upstreamId: upstream.id }),
       false,
     );
     render(
@@ -528,11 +506,7 @@ describe('WarmupCardMinimal last-run status colors', () => {
 
   test('an enabled warm-up awaiting its first attempt shows live Pending', () => {
     setSummaryQuery(
-      {
-        ...makeSummary(makeAttempt()),
-        last_attempt: null,
-        recent_attempts: [],
-      },
+      makeWarmupSummary([makeWarmupLane()], { upstreamId: upstream.id }),
       false,
     );
     render(<WarmupCardMinimal upstream={upstream} />);
@@ -542,5 +516,482 @@ describe('WarmupCardMinimal last-run status colors', () => {
     const dot = statusValue.querySelector('.status-dot');
     expect(dot?.classList.contains('live')).toBe(true);
     expect(dot?.classList.contains('neutral')).toBe(false);
+  });
+});
+
+const gemini = makeOauthUpstream({ kind: 'gemini_oauth' });
+
+function failure(
+  lane: queries.WarmupLane,
+  status: 'transient_failure' | 'permanent_failure',
+): queries.WarmupAttempt {
+  return makeAttempt({
+    id: `${lane}-${status}`,
+    lane,
+    status,
+    reason: status === 'permanent_failure' ? 'auth_failed' : 'upstream_5xx',
+    http_status: status === 'permanent_failure' ? 401 : 503,
+  });
+}
+
+function success(lane: queries.WarmupLane): queries.WarmupAttempt {
+  return makeAttempt({ id: `${lane}-success`, lane });
+}
+
+describe('WarmupCardMinimal lanes', () => {
+  test('a single-lane upstream keeps the plain Next run / Last run grid', () => {
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    expect(screen.queryByTestId('warmup-lanes')).toBeNull();
+    expect(screen.getByTestId('warmup-next-value')).toBeTruthy();
+    expect(screen.getByTestId('warmup-last').textContent).toContain('Success');
+    expect(screen.queryByText('Gemini models')).toBeNull();
+    expect(screen.queryByText('Claude and GPT-OSS models')).toBeNull();
+  });
+
+  test('Gemini renders one row per model group with its own windows and runs', () => {
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        primary: { recent_attempts: [success('primary')] },
+        thirdParty: {
+          recent_attempts: [failure('third_party', 'transient_failure')],
+        },
+      }),
+      false,
+    );
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    const primaryRow = screen.getByTestId('warmup-lane-primary');
+    const thirdRow = screen.getByTestId('warmup-lane-third_party');
+    expect(within(primaryRow).getByText('Gemini models')).toBeTruthy();
+    expect(
+      within(thirdRow).getByText('Claude and GPT-OSS models'),
+    ).toBeTruthy();
+    expect(within(primaryRow).getByText('Gemini 5h')).toBeTruthy();
+    expect(within(primaryRow).getByText('Gemini 7d')).toBeTruthy();
+    expect(within(primaryRow).queryByText('Claude·OSS 5h')).toBeNull();
+    expect(within(thirdRow).getByText('Claude·OSS 5h')).toBeTruthy();
+    expect(within(thirdRow).getByText('Claude·OSS 7d')).toBeTruthy();
+    expect(screen.getByTestId('warmup-last-primary').textContent).toContain(
+      'Success',
+    );
+    expect(screen.getByTestId('warmup-last-third_party').textContent).toContain(
+      'Retrying',
+    );
+    expect(screen.getByTestId('warmup-next-value-primary')).toBeTruthy();
+    expect(screen.getByTestId('warmup-next-value-third_party')).toBeTruthy();
+    // The single-lane grid is replaced, not duplicated.
+    expect(screen.queryByTestId('warmup-last')).toBeNull();
+  });
+
+  test('only the windows the account reports get a swatch', () => {
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        primary: { target_windows: ['gemini_7d'] },
+      }),
+      false,
+    );
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    const primaryRow = screen.getByTestId('warmup-lane-primary');
+    expect(within(primaryRow).getByText('Gemini 7d')).toBeTruthy();
+    expect(within(primaryRow).queryByText('Gemini 5h')).toBeNull();
+    expect(
+      primaryRow.querySelectorAll('[data-slot="window-swatch"]'),
+    ).toHaveLength(1);
+  });
+
+  test('an ineligible lane reads "Not reported by this account" and leaves the badge alone', () => {
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        primary: { recent_attempts: [success('primary')] },
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'profile_unsupported',
+          target_windows: [],
+          next_scheduled_at_unix_secs: null,
+          recent_attempts: [failure('third_party', 'permanent_failure')],
+        },
+      }),
+      false,
+    );
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    const thirdRow = screen.getByTestId('warmup-lane-third_party');
+    expect(thirdRow.textContent).toContain('Not reported by this account');
+    expect(thirdRow.querySelector('[data-slot="window-swatch"]')).toBeNull();
+    expect(within(thirdRow).queryByText('Next run')).toBeNull();
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Healthy',
+    );
+    expect(screen.queryByTestId('warmup-failure-panel')).toBeNull();
+  });
+
+  test.each([
+    [['Healthy', 'Degraded'], 'Degraded'],
+    [['Down', 'Degraded'], 'Down'],
+    [['Pending', 'Healthy'], 'Pending'],
+    [['Healthy', 'Idle'], 'Idle'],
+    [['Healthy', 'Healthy'], 'Healthy'],
+  ] as const)(
+    'lanes %j show the worst lane %s in the header badge',
+    (states, expected) => {
+      const attemptsFor = (
+        lane: queries.WarmupLane,
+        state: (typeof states)[number],
+      ): queries.WarmupAttempt[] => {
+        switch (state) {
+          case 'Healthy':
+            return [success(lane)];
+          case 'Degraded':
+            return [failure(lane, 'transient_failure')];
+          case 'Down':
+            return [failure(lane, 'permanent_failure')];
+          case 'Idle':
+            return [
+              makeAttempt({
+                id: `${lane}-skip`,
+                lane,
+                status: 'skipped',
+                reason: 'quota_group_unavailable',
+              }),
+            ];
+          case 'Pending':
+            return [];
+        }
+      };
+      setSummaryQuery(
+        makeGeminiWarmupSummary({
+          upstreamId: gemini.id,
+          primary: { recent_attempts: attemptsFor('primary', states[0]) },
+          thirdParty: {
+            recent_attempts: attemptsFor('third_party', states[1]),
+          },
+        }),
+        false,
+      );
+      render(<WarmupCardMinimal upstream={gemini} />);
+
+      expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+        expected,
+      );
+    },
+  );
+
+  test('each failing lane gets its own named failure panel', () => {
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        primary: { recent_attempts: [failure('primary', 'permanent_failure')] },
+        thirdParty: {
+          recent_attempts: [failure('third_party', 'transient_failure')],
+        },
+      }),
+      false,
+    );
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    const panels = screen.getAllByTestId('warmup-failure-panel');
+    expect(panels.map((p) => p.dataset.lane)).toEqual([
+      'primary',
+      'third_party',
+    ]);
+    expect(panels[0]?.textContent).toContain(
+      'Gemini models: Last warm-up failure: Auth rejected (401).',
+    );
+    expect(panels[1]?.textContent).toContain(
+      'Claude and GPT-OSS models: Last warm-up retry error: Upstream 5xx.',
+    );
+  });
+
+  test('an empty lanes array renders the plain grid without crashing', () => {
+    setSummaryQuery(makeWarmupSummary([], { upstreamId: upstream.id }), false);
+    render(
+      <WarmupCardMinimal
+        upstream={makeOauthUpstream({ last_warmup_at_unix_secs: null })}
+      />,
+    );
+
+    expect(screen.getByTestId('warmup-next-value').textContent).toBe(
+      'Not scheduled',
+    );
+    expect(screen.getByTestId('warmup-last').textContent).toBe('Never');
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Pending',
+    );
+    expect(screen.getByTestId('warmup-failure-slot').textContent).toBe('');
+  });
+
+  test('a single-lane failure panel carries no lane name', () => {
+    setSummaryQuery(
+      makeSummary(failure('primary', 'permanent_failure')),
+      false,
+    );
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    const panel = screen.getByTestId('warmup-failure-panel');
+    expect(panel.textContent).toContain(
+      'Last warm-up failure: Auth rejected (401).',
+    );
+    expect(panel.textContent).not.toContain('Gemini');
+  });
+});
+
+describe('WarmupCardMinimal fire now lanes', () => {
+  function fireMock() {
+    return vi.mocked(queries.useFireNowUpstreamWarmup).mock.results.at(-1)
+      ?.value.mutateAsync as ReturnType<typeof vi.fn>;
+  }
+
+  test('a single-lane upstream fires once without a lane and shows no model group control', async () => {
+    const user = userEvent.setup();
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(
+      within(dialog).queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Fire now' }));
+
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: upstream.id, lane: undefined }],
+    ]);
+  });
+
+  test('Gemini defaults to Both and fires one request per eligible lane', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    const group = within(dialog).getByRole('radiogroup', {
+      name: 'Model group',
+    });
+    expect(
+      within(group)
+        .getByRole('radio', { name: 'Both' })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(within(group).getByRole('radio', { name: 'Gemini' })).toBeTruthy();
+    expect(
+      within(group).getByRole('radio', { name: 'Claude·OSS' }),
+    ).toBeTruthy();
+    await user.click(within(dialog).getByRole('button', { name: 'Fire now' }));
+
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
+      [{ id: gemini.id, lane: 'third_party' }],
+    ]);
+  });
+
+  test.each(['resolved', 'rejected'] as const)(
+    'both fire buttons stay disabled until the earlier lane request is %s',
+    async (firstOutcome) => {
+      setSummaryQuery(
+        makeGeminiWarmupSummary({ upstreamId: gemini.id }),
+        false,
+      );
+      const {
+        promise: primary,
+        resolve: resolvePrimary,
+        reject: rejectPrimary,
+      } = Promise.withResolvers<queries.FireNowResponse>();
+      const { promise: thirdParty, resolve: resolveThirdParty } =
+        Promise.withResolvers<queries.FireNowResponse>();
+      const mutateAsync = vi.fn(({ lane }: { lane?: queries.WarmupLane }) =>
+        lane === 'primary' ? primary : thirdParty,
+      );
+      vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
+        // The latest mutation can be idle while an earlier one is still pending.
+        isPending: false,
+        mutateAsync,
+      } as never);
+      const user = userEvent.setup();
+      render(<WarmupCardMinimal upstream={gemini} />);
+
+      const headerButton = screen.getByTestId('warmup-fire-now');
+      await user.click(headerButton);
+      const dialog = await screen.findByRole('alertdialog');
+      const confirmButton = within(dialog).getByRole('button', {
+        name: 'Fire now',
+      });
+      await user.click(confirmButton);
+
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+      expect(headerButton.hasAttribute('disabled')).toBe(true);
+      expect(confirmButton.hasAttribute('disabled')).toBe(true);
+
+      await act(async () => {
+        resolveThirdParty(makeFireNowLeaseHeld('third-party-replica'));
+        await thirdParty;
+      });
+      expect(headerButton.hasAttribute('disabled')).toBe(true);
+      expect(confirmButton.hasAttribute('disabled')).toBe(true);
+      await user.click(confirmButton);
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        if (firstOutcome === 'resolved') {
+          resolvePrimary(makeFireNowLeaseHeld('primary-replica'));
+        } else {
+          rejectPrimary(new Error('Primary warmup failed'));
+        }
+        await Promise.allSettled([primary]);
+      });
+      expect(headerButton.hasAttribute('disabled')).toBe(false);
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  test('an explicit lane becoming ineligible blocks confirmation without substituting another lane', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    const { rerender } = render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('radio', { name: 'Claude·OSS' }));
+
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'quota_group_absent',
+        },
+      }),
+      false,
+    );
+    rerender(<WarmupCardMinimal upstream={gemini} />);
+
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Fire now',
+    });
+    expect(confirmButton.hasAttribute('disabled')).toBe(true);
+    expect(within(dialog).getByRole('status').textContent).toContain(
+      'Claude and GPT-OSS models are no longer available for this account.',
+    );
+    await user.click(confirmButton);
+    expect(fireMock()).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(screen.getByTestId('warmup-fire-now'));
+    const reopenedDialog = await screen.findByRole('alertdialog');
+    expect(within(reopenedDialog).queryByRole('status')).toBeNull();
+    await user.click(
+      within(reopenedDialog).getByRole('button', { name: 'Fire now' }),
+    );
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
+    ]);
+  });
+
+  test('Both follows eligible lanes when a summary update hides the selector', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    const { rerender } = render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'quota_group_absent',
+        },
+      }),
+      false,
+    );
+    rerender(<WarmupCardMinimal upstream={gemini} />);
+
+    expect(
+      within(dialog).queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Fire now',
+    });
+    expect(confirmButton.hasAttribute('disabled')).toBe(false);
+    await user.click(confirmButton);
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
+    ]);
+  });
+
+  test('choosing one model group fires only that lane', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('radio', { name: 'Claude·OSS' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Fire now' }));
+
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'third_party' }],
+    ]);
+  });
+
+  test('an ineligible lane is not offered and only the eligible lane fires', async () => {
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'quota_group_absent',
+        },
+      }),
+      false,
+    );
+    const user = userEvent.setup();
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(
+      within(dialog).queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Fire now' }));
+
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
+    ]);
+  });
+
+  test('lane outcomes name their lane', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(async ({ lane }: { lane?: queries.WarmupLane }) =>
+        lane === 'primary'
+          ? makeFireNowLeaseHeld('replica-9')
+          : { fired: false, reason: 'quota_group_unavailable', lane },
+      ),
+    } as never);
+    const user = userEvent.setup();
+    render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Fire now' }));
+
+    const lease = await screen.findByTestId('warmup-lease-panel');
+    expect(lease.dataset.lane).toBe('primary');
+    expect(lease.textContent).toContain(
+      'Gemini models: Another replica (replica-9)',
+    );
+    const error = screen.getByTestId('warmup-error-panel');
+    expect(error.dataset.lane).toBe('third_party');
+    expect(error.dataset.reason).toBe('quota_group_unavailable');
+    expect(error.textContent).toContain(
+      'Claude and GPT-OSS models: Warmup skipped',
+    );
   });
 });

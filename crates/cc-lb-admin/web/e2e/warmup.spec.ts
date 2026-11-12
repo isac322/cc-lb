@@ -40,6 +40,7 @@ type PluginFixture = {
 type WarmupAttemptFixture = {
   id: string;
   upstream_id: string;
+  lane: 'primary' | 'third_party';
   attempted_at_unix_secs: number;
   completed_at_unix_secs: number | null;
   scheduled_for_unix_secs: number;
@@ -61,18 +62,20 @@ type WarmupAttemptFixture = {
   error_detail: string | null;
 };
 
-type WarmupSummaryFixture = {
-  upstream_id: string;
+type WarmupLaneFixture = {
+  lane: 'primary' | 'third_party';
+  eligible: boolean;
+  ineligible_reason: 'profile_unsupported' | 'quota_group_absent' | null;
+  target_windows: string[];
+  next_scheduled_at_unix_secs: number | null;
   last_attempt: WarmupAttemptFixture | null;
   recent_attempts: WarmupAttemptFixture[];
-  next_scheduled_at_unix_secs: number | null;
-  recent_summary_7d: {
-    success: number;
-    skipped: number;
-    transient_failure: number;
-    permanent_failure: number;
-  };
+};
+
+type WarmupSummaryFixture = {
+  upstream_id: string;
   dialect_plugin: WarmupAttemptFixture['dialect_plugin_snapshot'];
+  lanes: WarmupLaneFixture[];
 };
 
 function warmupAttempt(upstream: UpstreamFixture): WarmupAttemptFixture {
@@ -80,6 +83,7 @@ function warmupAttempt(upstream: UpstreamFixture): WarmupAttemptFixture {
   return {
     id: `${upstream.id}-attempt-1`,
     upstream_id: upstream.id,
+    lane: 'primary',
     attempted_at_unix_secs: attemptedAt,
     completed_at_unix_secs: attemptedAt + 1,
     scheduled_for_unix_secs: attemptedAt,
@@ -105,16 +109,18 @@ function warmupSummary(upstream: UpstreamFixture): WarmupSummaryFixture {
   const attempt = warmupAttempt(upstream);
   return {
     upstream_id: upstream.id,
-    last_attempt: attempt,
-    recent_attempts: [attempt],
-    next_scheduled_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
-    recent_summary_7d: {
-      success: 1,
-      skipped: 0,
-      transient_failure: 0,
-      permanent_failure: 0,
-    },
     dialect_plugin: attempt.dialect_plugin_snapshot,
+    lanes: [
+      {
+        lane: 'primary',
+        eligible: true,
+        ineligible_reason: null,
+        target_windows: ['5h', '7d'],
+        next_scheduled_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
+        last_attempt: attempt,
+        recent_attempts: [attempt],
+      },
+    ],
   };
 }
 

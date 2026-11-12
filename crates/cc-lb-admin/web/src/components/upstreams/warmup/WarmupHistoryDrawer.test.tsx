@@ -1,8 +1,10 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   cleanup,
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -29,6 +31,7 @@ function makeAttempt(
   return {
     id: 'attempt-1',
     upstream_id: upstream.id,
+    lane: 'primary',
     attempted_at_unix_secs: attemptedAt,
     completed_at_unix_secs: attemptedAt + 1,
     scheduled_for_unix_secs: attemptedAt,
@@ -89,6 +92,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   document.body.innerHTML = '';
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('WarmupHistoryDrawer outcome colors', () => {
@@ -307,5 +312,221 @@ describe('WarmupHistoryDrawer outcome colors', () => {
     const slot = screen.getByTestId('warmup-history-dominant-failure-slot');
     const reason = within(slot).getByText('Upstream 5xx (1×)');
     expect(reason.classList.contains('text-warn-text')).toBe(true);
+  });
+});
+
+describe('WarmupHistoryDrawer lanes', () => {
+  function renderLaneDrawer(
+    laneFilter: 'all' | queries.WarmupLane,
+    onLaneFilterChange = vi.fn(),
+  ) {
+    render(
+      <WarmupHistoryDrawer
+        open={true}
+        onOpenChange={() => {}}
+        upstream={upstream}
+        lanes={['primary', 'third_party']}
+        laneFilter={laneFilter}
+        onLaneFilterChange={onLaneFilterChange}
+      />,
+    );
+    return onLaneFilterChange;
+  }
+
+  function lastAttemptsFilters() {
+    return vi.mocked(queries.useWarmupAttempts).mock.calls.at(-1)?.[1];
+  }
+
+  test('a single-lane upstream has no model group filter and sends no lane', () => {
+    renderDrawer();
+
+    expect(
+      screen.queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    expect(lastAttemptsFilters()?.lane ?? null).toBeNull();
+    expect(screen.queryByTestId('warmup-attempt-lane')).toBeNull();
+  });
+
+  test('All lists every lane and captions each row with its lane', () => {
+    setAttemptsQuery([
+      makeAttempt({ id: 'p', lane: 'primary' }),
+      makeAttempt({ id: 't', lane: 'third_party' }),
+    ]);
+    renderLaneDrawer('all');
+
+    const group = screen.getByRole('radiogroup', { name: 'Model group' });
+    expect(
+      within(group)
+        .getByRole('radio', { name: 'All' })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(lastAttemptsFilters()?.lane ?? null).toBeNull();
+    expect(
+      screen.getAllByTestId('warmup-attempt-lane').map((el) => el.textContent),
+    ).toEqual(['· Gemini', '· Claude·OSS']);
+  });
+
+  test('a selected lane is sent as the lane filter and drops the row caption', () => {
+    setAttemptsQuery([makeAttempt({ id: 't', lane: 'third_party' })]);
+    renderLaneDrawer('third_party');
+
+    expect(lastAttemptsFilters()).toEqual(
+      expect.objectContaining({ lane: 'third_party' }),
+    );
+    expect(screen.queryByTestId('warmup-attempt-lane')).toBeNull();
+  });
+
+  test('choosing a model group reports the new lane filter', () => {
+    const onChange = renderLaneDrawer('all');
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Claude·OSS' }));
+
+    expect(onChange).toHaveBeenCalledWith('third_party');
+  });
+
+  test('attempt detail names the model group', () => {
+    setAttemptsQuery([makeAttempt({ id: 't', lane: 'third_party' })]);
+    renderLaneDrawer('all');
+
+    fireEvent.click(within(screen.getByRole('list')).getByRole('button'));
+
+    expect(screen.getByTestId('warmup-attempt-detail-lane').textContent).toBe(
+      'Claude and GPT-OSS models',
+    );
+  });
+
+  test('a quota group skip reads as Model group not available', () => {
+    setAttemptsQuery([
+      makeAttempt({
+        id: 's',
+        lane: 'third_party',
+        status: 'skipped',
+        reason: 'quota_group_unavailable',
+      }),
+    ]);
+    renderLaneDrawer('third_party');
+
+    expect(
+      within(screen.getByRole('list')).getByText('Model group not available'),
+    ).toBeTruthy();
+  });
+});
+
+describe('WarmupHistoryDrawer ranges', () => {
+  test('filters rows and requests by range, with a stable cutoff until reopened', async () => {
+    const now = 1_800_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const attempts = [
+      makeAttempt({ id: 'recent', attempted_at_unix_secs: now - 60 }),
+      makeAttempt({
+        id: 'three-days-old',
+        attempted_at_unix_secs: now - 3 * 86400,
+        http_status: 201,
+      }),
+      makeAttempt({
+        id: 'nine-days-old',
+        attempted_at_unix_secs: now - 9 * 86400,
+        http_status: 202,
+      }),
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        input instanceof Request ? input.url : String(input),
+        'http://localhost',
+      );
+      const since = url.searchParams.get('since_unix_secs');
+      return new Response(
+        JSON.stringify({
+          attempts: attempts.filter(
+            (attempt) =>
+              since === null || attempt.attempted_at_unix_secs >= Number(since),
+          ),
+          next_cursor: null,
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const actual = await vi.importActual<typeof queries>(
+      '../../../lib/queries',
+    );
+    vi.mocked(queries.useWarmupAttempts).mockImplementation(
+      actual.useWarmupAttempts,
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const drawer = (open: boolean) => (
+      <QueryClientProvider client={client}>
+        <WarmupHistoryDrawer
+          open={open}
+          onOpenChange={() => {}}
+          upstream={upstream}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(drawer(true));
+    const range = screen.getByRole('radiogroup', { name: 'History range' });
+    const requestedSince = () => {
+      const input = fetchMock.mock.calls.at(-1)?.[0];
+      return new URL(String(input), 'http://localhost').searchParams.get(
+        'since_unix_secs',
+      );
+    };
+    const rows = () => within(screen.getByRole('list'));
+
+    await waitFor(() => expect(rows().getAllByRole('button')).toHaveLength(1));
+    expect(requestedSince()).toBe(String(now - 86400));
+    expect(rows().queryByText('201')).toBeNull();
+    expect(rows().queryByText('202')).toBeNull();
+
+    // Unrelated rerenders must not create a fresh query every second.
+    clock.mockReturnValue((now + 120) * 1000);
+    rerender(drawer(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(queries.useWarmupAttempts).mock.calls.at(-1)?.[1]
+        ?.sinceUnixSecs,
+    ).toBe(now - 86400);
+
+    fireEvent.click(within(range).getByRole('radio', { name: '7d' }));
+    await waitFor(() => expect(rows().getAllByRole('button')).toHaveLength(2));
+    expect(requestedSince()).toBe(String(now + 120 - 604800));
+    expect(rows().getByText('201')).toBeTruthy();
+    expect(rows().queryByText('202')).toBeNull();
+    expect(screen.getByText('2 attempts')).toBeTruthy();
+
+    fireEvent.click(within(range).getByRole('radio', { name: 'All' }));
+    await waitFor(() => expect(rows().getAllByRole('button')).toHaveLength(3));
+    expect(requestedSince()).toBeNull();
+    expect(rows().getByText('202')).toBeTruthy();
+
+    fireEvent.click(rows().getAllByRole('button')[2]);
+    fireEvent.click(within(range).getByRole('radio', { name: '24h' }));
+    await waitFor(() => expect(rows().getAllByRole('button')).toHaveLength(1));
+    expect(requestedSince()).toBe(String(now + 120 - 86400));
+    expect(rows().queryByText('201')).toBeNull();
+    expect(rows().queryByText('202')).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Close attempt detail' }),
+    ).toBeNull();
+
+    rerender(drawer(false));
+    clock.mockReturnValue((now + 240) * 1000);
+    rerender(drawer(true));
+    await waitFor(() =>
+      expect(requestedSince()).toBe(String(now + 240 - 86400)),
+    );
+  });
+
+  test('keeps the existing empty state for a range with no attempts', () => {
+    setAttemptsQuery([]);
+    renderDrawer();
+
+    fireEvent.click(screen.getByRole('radio', { name: '7d' }));
+
+    expect(screen.getByText('No matching attempts')).toBeTruthy();
+    expect(screen.getByText('Try a different filter.')).toBeTruthy();
+    expect(screen.getByText('0 attempts')).toBeTruthy();
   });
 });

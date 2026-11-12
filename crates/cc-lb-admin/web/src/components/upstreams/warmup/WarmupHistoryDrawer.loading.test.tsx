@@ -23,6 +23,7 @@ function makeAttempt(
   return {
     id: 'attempt-1',
     upstream_id: upstream.id,
+    lane: 'primary',
     attempted_at_unix_secs: attemptedAt,
     completed_at_unix_secs: attemptedAt + 1,
     scheduled_for_unix_secs: attemptedAt,

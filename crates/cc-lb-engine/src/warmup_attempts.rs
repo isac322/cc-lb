@@ -3,7 +3,7 @@ use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
     Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaWindow,
     WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger, WarmupDispatchKind,
-    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupLane, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
     WarmupTransientFailureReason,
 };
 use http::StatusCode;
@@ -17,6 +17,7 @@ use classification::attempt_fields;
 pub struct WarmupAttemptExecution<'a> {
     pub storage: &'a dyn Storage,
     pub upstream: &'a UpstreamRecord,
+    pub lane: WarmupLane,
     pub scheduled_for_unix_secs: i64,
     pub trigger: WarmupAttemptTrigger,
     pub replica_id: Option<Uuid>,
@@ -74,6 +75,7 @@ pub async fn execute_warmup_attempt(execution: WarmupAttemptExecution<'_>) -> Wa
     let record = WarmupAttemptRecord {
         id: Uuid::new_v4(),
         upstream_id: execution.upstream.id,
+        lane: execution.lane,
         attempted_at_unix_secs: execution.attempted_at_unix_secs,
         completed_at_unix_secs: execution.completed_at_unix_secs,
         scheduled_for_unix_secs: execution.scheduled_for_unix_secs,

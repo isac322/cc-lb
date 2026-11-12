@@ -6,15 +6,24 @@ Warm-up sends a small provider request to start idle subscription quota windows.
 
 Warm-up supports Anthropic OAuth, OpenAI ChatGPT OAuth, and Gemini OAuth with either the `gemini_cli` or `antigravity` profile. It periodically sends a small provider request to keep reported subscription quota windows active. Warm-up targets the provider-specific windows below and automatically skips targets the account reports as absent. Weekly-only accounts, including Claude accounts without a five-hour limit and OpenAI Pro accounts, never use a five-hour cadence; they warm their weekly window instead.
 
-| Upstream kind | Target windows |
-| --- | --- |
-| `anthropic_oauth` | `5h`, `7d` |
-| `openai_oauth` | `5h`, `7d` |
-| `gemini_oauth` | `gemini_5h`, `gemini_7d` (Gemini models only) |
+### Lanes
 
-An explicitly absent window is excluded. Accounts that report no five-hour limit, such as verified Claude Ultra and OpenAI Pro accounts, warm up on their weekly window. Gemini warm-up does not start the Claude/GPT-OSS windows (`third_party_5h`, `third_party_7d`).
+Each quota group an upstream can warm is a lane. Every supported upstream has a `primary` lane. Gemini OAuth upstreams also have a `third_party` lane for the Claude and GPT-OSS models, because that group resets on its own clock.
 
-`warmup_enabled` defaults to `true` for all three OAuth kinds created through `POST /admin/v1/upstreams` or the OAuth sign-in flow. Disabled upstreams and upstreams without OAuth credentials do not send warm-up requests. API-key upstreams do not support warm-up. Use the admin API for the toggle, status, manual fire, and history.
+| Upstream kind | Lane | Target windows |
+| --- | --- | --- |
+| `anthropic_oauth` | `primary` | `5h`, `7d` |
+| `openai_oauth` | `primary` | `5h`, `7d` |
+| `gemini_oauth` | `primary` | `gemini_5h`, `gemini_7d` (Gemini models) |
+| `gemini_oauth` | `third_party` | `third_party_5h`, `third_party_7d` (Claude and GPT-OSS models) |
+
+Each lane has its own schedule, weekly-exhaustion skip, and attempt history. An exhausted `gemini_7d` window blocks only the Gemini lane, and an exhausted `third_party_7d` window blocks only the Claude/GPT-OSS lane.
+
+Only the `antigravity` profile serves the Claude/GPT-OSS group. For a `gemini_cli` credential, the `third_party` lane is skipped with `quota_group_unavailable`, is not rescheduled, and the watchdog does not seed it.
+
+An explicitly absent window is excluded. Accounts that report no five-hour limit, such as verified Claude Ultra and OpenAI Pro accounts, warm up on their weekly window.
+
+`warmup_enabled` defaults to `true` for all three OAuth kinds created through `POST /admin/v1/upstreams` or the OAuth sign-in flow. The flag covers every lane of the upstream. Disabled upstreams and upstreams without OAuth credentials do not send warm-up requests. API-key upstreams do not support warm-up. Use the admin API for the toggle, status, manual fire, and history.
 
 ### Provider requests and models
 
@@ -22,7 +31,7 @@ Every provider uses the same credential signing and request shaping as proxied t
 
 - Anthropic sends `POST /v1/messages` to `claude-haiku-4-5-20251001` with `max_tokens: 1`.
 - OpenAI sends a ChatGPT Codex `POST /responses` request with `stream: true`, `store: false`, instructions, and one user message `"."`. It reads the SSE stream to completion and parses the Codex quota and credit response headers. The headers do not report `overage_limit_reached`; that restriction comes from the usage poll.
-- Gemini sends `generateContent` with one user message `"."` and `maxOutputTokens: 1`. The issuing OAuth profile determines the envelope, host, user agent, and project.
+- Gemini sends `generateContent` with one user message `"."` and `maxOutputTokens: 1`. The issuing OAuth profile determines the envelope, host, user agent, and project. The `third_party` lane sends the same request through the Antigravity envelope, with the Claude/GPT-OSS model below.
 
 OpenAI and Gemini models are configurable:
 
@@ -30,9 +39,10 @@ OpenAI and Gemini models are configurable:
 [warmup]
 openai_model = "gpt-6.1-sol"
 gemini_model = "gemini-2.5-flash-lite"
+gemini_third_party_model = "gpt-oss-120b-medium"
 ```
 
-These are the defaults. Choose a model available to the connected subscription; Gemini warm-up uses a Gemini model, not a third-party model.
+These are the defaults. Choose a model available to the connected subscription. `gemini_model` must be a Gemini model. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
 ### Shape plugins
 
@@ -42,7 +52,7 @@ These are the defaults. Choose a model available to the connected subscription; 
 | --- | --- | --- |
 | `anthropic_oauth` | `cc_lb_shape_anthropic` or the legacy `cc_lb_shape` | Anthropic `/v1/messages` |
 | `openai_oauth` | `cc_lb_shape_openai` | OpenAI `/v1/responses` body, before Codex OAuth signing |
-| `gemini_oauth` | `cc_lb_shape_gemini` | Native Gemini `generateContent` body, before the Code Assist envelope and OAuth signing |
+| `gemini_oauth` | `cc_lb_shape_gemini` | Native Gemini `generateContent` body, before the Code Assist envelope and OAuth signing. Both lanes use the same plugin; the request path names the lane's model. |
 
 The admin API rejects OpenAI or Gemini plugin assignments with `400 warmup_plugin_unsupported_provider` when the uploaded artifact's registry capabilities lack that provider's shape export. A response-transform hook alone is not sufficient, and legacy unqualified shape exports apply only to Anthropic. An incompatible plugin that is replaced after assignment fails warm-up explicitly rather than silently sending the untransformed request.
 
@@ -108,7 +118,46 @@ WHERE kind IN ('anthropic_oauth', 'openai_oauth', 'gemini_oauth')
 
 ## Manual fire
 
-Use `POST /admin/v1/upstreams/{id}/warmup/fire-now`. Manual fire uses the stored OAuth credential and the same quota checks as scheduled warm-up.
+Use `POST /admin/v1/upstreams/{id}/warmup/fire-now`. Manual fire uses the stored OAuth credential and the same quota checks as scheduled warm-up. Add `?lane=third_party` to warm a Gemini upstream's Claude/GPT-OSS group; the default is `primary`. A lane the upstream kind does not have returns `400 warmup_lane_unsupported`, and an unknown lane name returns `400 invalid_warmup_lane`. If the lane is ineligible, nothing is sent and the attempt is recorded as skipped with `quota_group_unavailable`.
+
+## Status and history
+
+`GET /admin/v1/upstreams/{id}/warmup` returns one entry per lane:
+
+```json
+{
+  "upstream_id": "11111111-2222-3333-4444-555555555555",
+  "dialect_plugin": null,
+  "lanes": [
+    {
+      "lane": "primary",
+      "eligible": true,
+      "ineligible_reason": null,
+      "target_windows": ["gemini_5h", "gemini_7d"],
+      "next_scheduled_at_unix_secs": 1760003600,
+      "last_attempt": null,
+      "recent_attempts": []
+    },
+    {
+      "lane": "third_party",
+      "eligible": false,
+      "ineligible_reason": "profile_unsupported",
+      "target_windows": ["third_party_5h", "third_party_7d"],
+      "next_scheduled_at_unix_secs": null,
+      "last_attempt": null,
+      "recent_attempts": []
+    }
+  ]
+}
+```
+
+`target_windows` lists the lane's windows whose latest stored sample is not `Absent`. `ineligible_reason` is `profile_unsupported` when the credential profile cannot serve the group, or `quota_group_absent` when every target window is reported absent. `recent_attempts` holds the lane's last 10 attempts.
+
+Every attempt record carries a `lane` field. Attempts recorded before lanes existed read back as `primary`. `GET /admin/v1/upstreams/{id}/warmup/attempts?lane=third_party` filters history to one lane; without `lane`, it returns every lane.
+
+History also accepts `status`, `limit`, `before` (an opaque pagination cursor), and `since_unix_secs` (non-negative integer Unix seconds). The time filter includes attempts at or after the supplied second and combines with the other filters before pagination. Keep the same `since_unix_secs` when following `next_cursor`; omit it for all-time history. A negative value returns `400 invalid_warmup_since`.
+
+The upstream's `status.last_warmup_at_unix_secs` is the time any lane last succeeded.
 
 ## What you'll see
 
@@ -133,11 +182,13 @@ After a successful request, each response-present window supersedes its older ca
 
 Presence follows the latest selected sample kind, not its age: an `Absent` sample remains absent after its freshness interval expires, so an older stale five-hour sample cannot restore the five-hour cadence. A newer actual sample or a window reported by the successful response establishes presence again. `Unobserved` targets and `Stale` actual samples remain distinct unknown states, not evidence of structural absence; without an explicit `Absent` sample, their cadence remains conservative. Missing response headers alone never establish absence.
 
-If the local usage cache or a warm-up response shows a fresh weekly window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. This includes Anthropic's shared and model-scoped weekly limits, OpenAI's `7d`, and Gemini's `gemini_7d`. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
+If the local usage cache or a warm-up response shows a fresh weekly window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. This includes Anthropic's shared and model-scoped weekly limits, OpenAI's `7d`, Gemini's `gemini_7d`, and `third_party_7d` for the Claude/GPT-OSS lane. Each lane checks only its own weekly window. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 
-Reset-based jobs run at `reset + 30..59s`, using the idempotency key `adaptive:warmup:{upstream_id}:{reset}`. The guard lets the provider roll the window; stable jitter spreads requests across upstreams. Weekly exhaustion never marks an upstream successfully warmed. Anthropic accounts that report a five-hour window retain their five-hour reset cadence, and also receive a request if the weekly window is idle.
+For Gemini lanes, if every target window of the lane is reported `Absent`, nothing is sent. The attempt is skipped as `quota_group_unavailable` and the lane re-checks after five hours. Anthropic and OpenAI lanes keep the behavior above.
 
-The watchdog treats any pending, queued, running, or retryable failed warm-up task with that cycle-key family as active, even when its `run_at` is in the future. It will not pull a future reset task forward. If the only remaining warm-up task is dead-lettered (`Failed` at max attempts or `Killed`), the watchdog may bootstrap a new immediate warm-up on its next tick.
+Reset-based jobs run at `reset + 30..59s`. The primary lane uses the idempotency key `adaptive:warmup:{upstream_id}:{reset}`, and immediate bootstrap jobs use `adaptive:warmup:{upstream_id}:bootstrap:{seed}`. The `third_party` lane uses `adaptive:warmup_third_party:{upstream_id}:{reset}` and `adaptive:warmup_third_party:{upstream_id}:bootstrap:{seed}`. The guard lets the provider roll the window; stable jitter spreads requests across upstreams. Weekly exhaustion never marks an upstream successfully warmed. Anthropic accounts that report a five-hour window retain their five-hour reset cadence, and also receive a request if the weekly window is idle.
+
+The watchdog checks each lane separately. It treats any pending, queued, running, or retryable failed warm-up task with that lane's cycle-key family as active, even when its `run_at` is in the future, so an active Gemini job never hides a missing Claude/GPT-OSS job. It will not pull a future reset task forward. If the only remaining task for a lane is dead-lettered (`Failed` at max attempts or `Killed`), the watchdog may bootstrap a new immediate warm-up for that lane on its next tick. It seeds the `third_party` lane only for Gemini upstreams that have warm-up enabled and a credential that decrypts to the `antigravity` profile.
 
 ### Shared usage and reset-coupon observations
 
@@ -153,7 +204,7 @@ A durable fence remains pending only while a claim is in flight or settlement fa
 
 ## Multi-replica notes
 
-Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). Cross-replica coordination no longer depends on per-upstream scheduling columns.
+Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`), one job per upstream and lane. Cross-replica coordination no longer depends on per-upstream scheduling columns.
 
 Cross-replica safety is guaranteed by two layers:
 1. **Apalis claim uniqueness**: Only one worker replica can claim and execute a given `UpstreamWarmupJob` at a time.
@@ -161,9 +212,11 @@ Cross-replica safety is guaranteed by two layers:
 
 A crash between dispatch and the database write can cause one extra provider request. This at-least-once cost is accepted.
 
+During rolling deploys, older replicas ignore `lane`: a claimed `third_party` job warms Gemini and schedules a primary successor. The new watchdog re-seeds the third-party job on its next tick, so repeated claims by older replicas can keep warming Gemini without warming Claude/GPT-OSS. Finish the rollout quickly, or set `warmup_enabled=false` on Gemini OAuth upstreams during the rollout and re-enable it afterward.
+
 ## Cost
 
-Each warm-up consumes provider quota. Anthropic and Gemini cap output at one token; OpenAI uses a minimal streamed Codex request. Frequency follows the account's reported window resets, or the full-window fallback described above when no reset is available.
+Each warm-up consumes provider quota. Anthropic and Gemini cap output at one token; OpenAI uses a minimal streamed Codex request. A Gemini upstream on the `antigravity` profile warms both lanes, each on its own schedule. Frequency follows each lane's reported window resets, or the full-window fallback described above when no reset is available.
 
 ## Wave-0 outcomes
 

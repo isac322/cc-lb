@@ -3,26 +3,13 @@ use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupPermanentFailureReason,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupLane, WarmupPermanentFailureReason,
     WarmupSkipReason,
 };
 
 const QUOTA_PREFLIGHT_MAX_AGE_SECS: i64 = 180;
 const FIVE_HOUR_WINDOW_SECS: i64 = 5 * 60 * 60;
 const SEVEN_DAY_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
-
-const ANTHROPIC_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
-    SubscriptionQuotaWindow::FiveHour,
-    SubscriptionQuotaWindow::SevenDay,
-];
-const OPENAI_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
-    SubscriptionQuotaWindow::FiveHour,
-    SubscriptionQuotaWindow::SevenDay,
-];
-const GEMINI_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
-    SubscriptionQuotaWindow::GeminiFiveHour,
-    SubscriptionQuotaWindow::GeminiSevenDay,
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WarmupPreflightReject {
@@ -32,8 +19,15 @@ pub(super) enum WarmupPreflightReject {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WarmupQuotaPreflightDecision {
-    ActiveWindow { cycle_key: i64 },
-    SevenDayQuotaExhausted { cycle_key: i64 },
+    ActiveWindow {
+        cycle_key: i64,
+    },
+    SevenDayQuotaExhausted {
+        cycle_key: i64,
+    },
+    /// Every lane target window is explicitly reported absent: the account has
+    /// no quota in this group, so nothing is sent.
+    TargetsAbsent,
     SendWarmup,
     Unknown,
 }
@@ -63,10 +57,11 @@ pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<Warmu
 
 pub(super) fn quota_preflight_decision_from_snapshots(
     kind: UpstreamKind,
+    lane: WarmupLane,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     now_unix_secs: i64,
 ) -> WarmupQuotaPreflightDecision {
-    if let Some(cycle_key) = weekly_windows_for_kind(kind).iter().find_map(|window| {
+    if let Some(cycle_key) = lane.weekly_windows(kind).iter().find_map(|window| {
         snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
@@ -77,9 +72,23 @@ pub(super) fn quota_preflight_decision_from_snapshots(
         return WarmupQuotaPreflightDecision::SevenDayQuotaExhausted { cycle_key };
     }
 
+    let target_windows = lane.target_windows(kind);
+    // Only Gemini reports whole quota groups as absent; Anthropic and OpenAI
+    // keep sending when every target is absent.
+    if kind == UpstreamKind::GeminiOauth
+        && target_windows.iter().all(|window| {
+            snapshots.iter().any(|snapshot| {
+                quota_snapshot_matches_window(snapshot, *window)
+                    && snapshot.state == SubscriptionQuotaDataState::Absent
+            })
+        })
+    {
+        return WarmupQuotaPreflightDecision::TargetsAbsent;
+    }
+
     let mut earliest_active_reset = None;
 
-    for window in target_windows_for_kind(kind) {
+    for window in target_windows {
         let Some(snapshot) = snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
@@ -116,6 +125,7 @@ pub(super) fn quota_preflight_decision_from_snapshots(
 
 pub(super) fn next_warmup_evaluation_after_success(
     kind: UpstreamKind,
+    lane: WarmupLane,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     observations: &[UnifiedQuotaObservation],
     now_unix_secs: i64,
@@ -124,7 +134,7 @@ pub(super) fn next_warmup_evaluation_after_success(
     let mut shortest_present_duration = None;
     let mut unknown_target = false;
 
-    for window in target_windows_for_kind(kind) {
+    for window in lane.target_windows(kind) {
         let snapshot = snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window));
@@ -171,29 +181,6 @@ pub(super) fn next_warmup_evaluation_after_success(
         Some(reset) if unknown_target => reset.min(fallback),
         Some(reset) => reset,
         None => fallback,
-    }
-}
-
-fn target_windows_for_kind(kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
-    match kind {
-        UpstreamKind::AnthropicOauth => ANTHROPIC_TARGET_WINDOWS,
-        UpstreamKind::OpenaiOauth => OPENAI_TARGET_WINDOWS,
-        UpstreamKind::GeminiOauth => GEMINI_TARGET_WINDOWS,
-        _ => &[],
-    }
-}
-
-fn weekly_windows_for_kind(kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
-    match kind {
-        UpstreamKind::AnthropicOauth => &[
-            SubscriptionQuotaWindow::SevenDay,
-            SubscriptionQuotaWindow::SevenDaySonnet,
-            SubscriptionQuotaWindow::SevenDayOpus,
-            SubscriptionQuotaWindow::SevenDayFable,
-        ],
-        UpstreamKind::OpenaiOauth => &[SubscriptionQuotaWindow::SevenDay],
-        UpstreamKind::GeminiOauth => &[SubscriptionQuotaWindow::GeminiSevenDay],
-        _ => &[],
     }
 }
 

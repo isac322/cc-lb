@@ -1,6 +1,8 @@
 import { ChevronRight, HelpCircle, History, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
+import { windowLabel } from '../../../lib/api';
+import { getWindowColor } from '../../../lib/colors';
 import {
   COPY,
   FIRE_NOW_COOLDOWN_MS,
@@ -22,13 +24,17 @@ import {
   usePluginRegistry,
   useUpdateUpstreamWarmupSettings,
   useWarmupSummary,
+  type WarmupAttempt,
+  type WarmupLane,
+  type WarmupLaneSummary,
 } from '../../../lib/queries';
-import { DetailSection } from '../../ui/DetailPane';
+import { DetailRow, DetailRows, DetailSection } from '../../ui/DetailPane';
 import {
   Button,
   ConfirmDialog,
   cx,
   Hint,
+  SegmentedControl,
   Skeleton,
   StatusBadge,
   ToggleSwitch,
@@ -38,8 +44,9 @@ import { Select } from '../../ui/Select';
 import { OUTCOME_LABEL, REASON_LABEL } from './parts/copy';
 import { WarmupConfigModal } from './parts/WarmupConfigModal';
 import {
-  detectActiveIncident,
+  laneFailureAttempt,
   OUTCOME_SEVERITY,
+  worstLaneStatus,
 } from './parts/warmupViewModel';
 import { WarmupHistoryDrawer } from './WarmupHistoryDrawer';
 
@@ -130,12 +137,7 @@ function HelpIcon({
 }
 
 function WarmupHelpHover() {
-  return (
-    <HelpIcon
-      label="Warm-up help"
-      text="Warm-up sends a tiny background request during idle time so the next quota window is ready when traffic resumes. It uses only windows the account reports; Gemini warm-up covers Gemini models only."
-    />
-  );
+  return <HelpIcon label="Warm-up help" text={COPY.helpText} />;
 }
 
 function ShapePluginHelpHover() {
@@ -156,6 +158,180 @@ const CREDENTIAL_FAILURE_REASONS: Record<string, true> = {
   oauth_refresh_failed: true,
   auth_failed: true,
 };
+
+type FireLaneChoice = 'both' | WarmupLane;
+
+/** `undefined` is the implicit primary lane of a single-lane upstream. */
+type FireTarget = WarmupLane | undefined;
+
+function laneName(lane: FireTarget): string | null {
+  return lane ? COPY.laneLabels[lane] : null;
+}
+
+/** Bold "Lane name:" prefix for panels on multi-lane upstreams. */
+function LanePrefix({ lane }: { lane: FireTarget }) {
+  const name = laneName(lane);
+  if (!name) return null;
+  return (
+    <>
+      <span className="font-medium">{name}:</span>{' '}
+    </>
+  );
+}
+
+function WindowSwatches({ windows }: { windows: readonly string[] }) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {windows.map((window) => (
+        <span
+          key={window}
+          className="inline-flex items-center gap-1.5"
+          title={windowLabel(window, { long: true })}
+        >
+          <span
+            aria-hidden="true"
+            data-slot="window-swatch"
+            className="size-2.5 shrink-0 rounded-xs"
+            style={{ backgroundColor: getWindowColor(window).stroke }}
+          />
+          {windowLabel(window)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function NextRunValue({
+  pending,
+  nextAt,
+  testId,
+}: {
+  pending: boolean;
+  nextAt: number | null | undefined;
+  testId: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-label text-text-faint">Next run</span>
+      <div
+        className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
+        data-testid={testId}
+      >
+        {pending ? (
+          <Skeleton className="h-4 w-24" />
+        ) : nextAt ? (
+          <RelativeTime compact ts={nextAt * 1000} />
+        ) : (
+          <span className="text-text-muted">Not scheduled</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LastRunValue({
+  pending,
+  attempt,
+  fallbackAt,
+  onOpen,
+  openLabel,
+  testId,
+}: {
+  pending: boolean;
+  attempt: WarmupAttempt | null | undefined;
+  /** Shown when no attempt is on record (any-lane success time). */
+  fallbackAt: number | null;
+  onOpen: () => void;
+  openLabel: string;
+  testId: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-label text-text-faint">Last run</span>
+      <div
+        className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
+        data-testid={testId}
+      >
+        {pending ? (
+          <Skeleton className="h-4 w-28" />
+        ) : attempt ? (
+          <button
+            type="button"
+            onClick={onOpen}
+            className="-mx-1 rounded-sm px-1 text-left transition-colors hover:bg-overlay-2 max-md:min-h-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            aria-label={openLabel}
+          >
+            <span className="flex flex-wrap items-center gap-2">
+              <StatusBadge
+                tone={OUTCOME_SEVERITY[attempt.status]}
+                label={OUTCOME_LABEL[attempt.status]}
+              />
+              <RelativeTime
+                compact
+                ts={attempt.attempted_at_unix_secs * 1000}
+              />
+            </span>
+          </button>
+        ) : fallbackAt ? (
+          <RelativeTime compact ts={fallbackAt * 1000} />
+        ) : (
+          <span className="text-text-muted">Never</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FailurePanel({
+  attempt,
+  lane,
+  credentialNoticeShown,
+}: {
+  attempt: WarmupAttempt;
+  lane: FireTarget;
+  credentialNoticeShown: boolean;
+}) {
+  return (
+    <div
+      data-testid="warmup-failure-panel"
+      data-lane={lane}
+      className={cx(
+        'min-h-12',
+        attempt.status === 'permanent_failure'
+          ? DANGER_PANEL_CLASS
+          : WARN_PANEL_CLASS,
+      )}
+    >
+      <p>
+        <LanePrefix lane={lane} />
+        {attempt.status === 'permanent_failure'
+          ? 'Last warm-up failure'
+          : 'Last warm-up retry error'}
+        {attempt.reason ? `: ${REASON_LABEL[attempt.reason]}.` : '.'}
+        {credentialNoticeShown &&
+        attempt.reason &&
+        CREDENTIAL_FAILURE_REASONS[attempt.reason]
+          ? ' Reconnect from the notice above.'
+          : null}
+      </p>
+      {attempt.error_detail ? (
+        <details className="group mt-1">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+            <ChevronRight
+              aria-hidden="true"
+              strokeWidth={1.75}
+              className="size-3 transition-transform group-open:rotate-90"
+            />
+            Details
+          </summary>
+          <code className="mt-1 block break-words font-mono text-data text-text-muted">
+            {attempt.error_detail}
+          </code>
+        </details>
+      ) : null}
+    </div>
+  );
+}
 
 type WarmupCardProps = {
   upstream: Upstream;
@@ -192,35 +368,61 @@ function WarmupCardMinimalInner({
   const registry = usePluginRegistry();
   const summaryQ = useWarmupSummary(upstream.id);
   const summary = summaryQ.data;
-  const incident = detectActiveIncident(summary);
+  const lanes: readonly WarmupLaneSummary[] = summary?.lanes ?? [];
+  const multiLane = lanes.length > 1;
+  // Only multi-lane upstreams name lanes on the wire; a single-lane upstream
+  // keeps the plain fire-now URL.
+  const fireLaneChoices: readonly WarmupLane[] = multiLane
+    ? lanes.filter((l) => l.eligible).map((l) => l.lane)
+    : [];
 
   const [staleRevisionVisible, setStaleRevisionVisible] = useState(false);
   const [revisionOverride, setRevisionOverride] = useState<number | null>(null);
   const [pendingPluginValue, setPendingPluginValue] = useState<string | null>(
     null,
   );
-  const [leasePanel, setLeasePanel] = useState<{ heldBy: string } | null>(null);
-  const [errorPanel, setErrorPanel] = useState<{
-    reason: FireErrorReason;
-  } | null>(null);
+  const [leasePanels, setLeasePanels] = useState<
+    { lane: FireTarget; heldBy: string }[]
+  >([]);
+  const [errorPanels, setErrorPanels] = useState<
+    { lane: FireTarget; reason: FireErrorReason }[]
+  >([]);
   const [fireCooldown, setFireCooldown] = useState(false);
+  const [firing, setFiring] = useState(false);
+  const [fireLaneChoice, setFireLaneChoice] = useState<FireLaneChoice>('both');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [historyLane, setHistoryLane] = useState<WarmupLane | 'all'>('all');
   const [configOpen, setConfigOpen] = useState(false);
 
   const [confirmFireOpen, setConfirmFireOpen] = useState(false);
   const [confirmClearPluginOpen, setConfirmClearPluginOpen] = useState(false);
+  const unavailableFireLane =
+    fireLaneChoice !== 'both' && !fireLaneChoices.includes(fireLaneChoice)
+      ? fireLaneChoice
+      : null;
+  const noEligibleFireLanes = multiLane && fireLaneChoices.length === 0;
+  const onlyFireLane =
+    fireLaneChoices.length === 1 ? fireLaneChoices[0] : undefined;
+
+  useEffect(() => {
+    if (confirmFireOpen && onlyFireLane) {
+      setFireLaneChoice((choice) =>
+        choice === 'both' ? onlyFireLane : choice,
+      );
+    }
+  }, [confirmFireOpen, onlyFireLane]);
 
   const storedPluginId = upstream.warmup_dialect_plugin?.wasm_registry_id ?? '';
   const selectedPluginValue = pendingPluginValue ?? storedPluginId;
 
   useEffect(() => {
-    if (!leasePanel) return;
+    if (leasePanels.length === 0) return;
     const timer = setTimeout(
-      () => setLeasePanel(null),
+      () => setLeasePanels([]),
       LEASE_PANEL_AUTO_DISMISS_MS,
     );
     return () => clearTimeout(timer);
-  }, [leasePanel]);
+  }, [leasePanels]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger, not a read
   useEffect(() => {
@@ -329,28 +531,65 @@ function WarmupCardMinimalInner({
     );
   };
 
-  const handleFireNow = () => {
-    setLeasePanel(null);
-    setErrorPanel(null);
-    fireWarmup.mutate(upstream.id, {
-      onSuccess: (res: FireNowResponse) => {
-        setConfirmFireOpen(false);
-        if (res.fired) {
-          toast.success(COPY.fireSuccess, {
-            duration: TOAST_DURATIONS.success,
-          });
-          setFireCooldown(true);
-          setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
-        } else if (res.reason === 'lease_held') {
-          setLeasePanel({ heldBy: res.held_by });
-        } else {
-          setErrorPanel({ reason: res.reason });
+  const handleFireNow = async () => {
+    if (!summary || firing || unavailableFireLane || noEligibleFireLanes)
+      return;
+    setFiring(true);
+    setLeasePanels([]);
+    setErrorPanels([]);
+    const targets: FireTarget[] = !multiLane
+      ? [undefined]
+      : fireLaneChoice === 'both'
+        ? [...fireLaneChoices]
+        : [fireLaneChoice];
+    try {
+      // One request per lane; each lane reports its own outcome.
+      const results = await Promise.allSettled(
+        targets.map((lane) =>
+          fireWarmup.mutateAsync({ id: upstream.id, lane }),
+        ),
+      );
+      setConfirmFireOpen(false);
+      const leases: { lane: FireTarget; heldBy: string }[] = [];
+      const errors: { lane: FireTarget; reason: FireErrorReason }[] = [];
+      let firedAny = false;
+      results.forEach((result, index) => {
+        const lane = targets[index];
+        const name = laneName(lane);
+        if (result.status === 'rejected') {
+          const message = errorMessage(result.reason, 'Failed to fire warmup');
+          toast.error(name ? `${name}: ${message}` : message);
+          return;
         }
-      },
-      onError: (err: unknown) => {
-        toast.error(errorMessage(err, 'Failed to fire warmup'));
-      },
-    });
+        const res: FireNowResponse = result.value;
+        if (res.fired) {
+          firedAny = true;
+          toast.success(
+            name
+              ? COPY.fireSuccessLaneTemplate.replace('{lane}', name)
+              : COPY.fireSuccess,
+            { duration: TOAST_DURATIONS.success },
+          );
+        } else if (res.reason === 'lease_held') {
+          leases.push({ lane, heldBy: res.held_by });
+        } else {
+          errors.push({ lane, reason: res.reason });
+        }
+      });
+      setLeasePanels(leases);
+      setErrorPanels(errors);
+      if (firedAny) {
+        setFireCooldown(true);
+        setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
+      }
+    } finally {
+      setFiring(false);
+    }
+  };
+
+  const openFireConfirm = () => {
+    setFireLaneChoice('both');
+    setConfirmFireOpen(true);
   };
 
   const handleConfirmFireOpenChange = (open: boolean) => {
@@ -366,7 +605,8 @@ function WarmupCardMinimalInner({
     }
   };
 
-  const openHistory = () => {
+  const openHistory = (lane: WarmupLane | 'all' = 'all') => {
+    setHistoryLane(multiLane ? lane : 'all');
     setDrawerOpen(true);
   };
 
@@ -406,31 +646,11 @@ function WarmupCardMinimalInner({
       statusTone = 'danger';
       statusLabel = 'Unavailable';
     } else {
-      // Skips do not resolve a prior failure. The newest unresolved attempt
-      // determines severity: transient retries are degraded, not down.
-      const currentAttempt = incident?.lastFailure ?? summary?.last_attempt;
-      if (!currentAttempt) {
-        statusTone = 'live';
-        statusLabel = 'Pending';
-      } else {
-        switch (currentAttempt.status) {
-          case 'success':
-            statusTone = 'ok';
-            statusLabel = 'Healthy';
-            break;
-          case 'skipped':
-            statusLabel = 'Idle';
-            break;
-          case 'transient_failure':
-            statusTone = 'warn';
-            statusLabel = 'Degraded';
-            break;
-          case 'permanent_failure':
-            statusTone = 'danger';
-            statusLabel = 'Down';
-            break;
-        }
-      }
+      // Paused and Down-for-reconnect above are card-wide; otherwise the
+      // most severe eligible lane sets the badge.
+      const worst = worstLaneStatus(lanes);
+      statusTone = worst.tone;
+      statusLabel = worst.label;
     }
   }
 
@@ -459,9 +679,15 @@ function WarmupCardMinimalInner({
       <Button
         size="sm"
         data-testid="warmup-fire-now"
-        onClick={() => setConfirmFireOpen(true)}
+        onClick={openFireConfirm}
+        // Lane choices come from the summary; firing before it loads would
+        // silently drop the default "Both" on multi-lane upstreams.
         disabled={
-          fireWarmup.isPending || fireCooldown || !upstream.warmup_enabled
+          !summary ||
+          firing ||
+          fireWarmup.isPending ||
+          fireCooldown ||
+          !upstream.warmup_enabled
         }
         iconLeft={<Zap />}
       >
@@ -488,13 +714,15 @@ function WarmupCardMinimalInner({
     </div>
   );
 
-  const lastAttempt = summary?.last_attempt;
-  const failureAttempt =
-    incident?.lastFailure ??
-    (lastAttempt?.status === 'permanent_failure' ||
-    lastAttempt?.status === 'transient_failure'
-      ? lastAttempt
-      : null);
+  // `lanes` may be empty (non-warm-up kinds, or a degraded response).
+  const primaryLane: WarmupLaneSummary | undefined = lanes[0];
+  const failures: { lane: FireTarget; attempt: WarmupAttempt }[] = [];
+  for (const lane of lanes) {
+    if (!lane.eligible && multiLane) continue;
+    const attempt = laneFailureAttempt(lane);
+    if (attempt)
+      failures.push({ lane: multiLane ? lane.lane : undefined, attempt });
+  }
 
   return (
     <>
@@ -544,63 +772,64 @@ function WarmupCardMinimalInner({
           )}
 
           <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="flex flex-col gap-1">
-                <span className="text-label text-text-faint">Next run</span>
-                <div
-                  className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
-                  data-testid="warmup-next-value"
-                >
-                  {summaryPending ? (
-                    <Skeleton className="h-4 w-24" />
-                  ) : summary?.next_scheduled_at_unix_secs ? (
-                    <RelativeTime
-                      compact
-                      ts={summary.next_scheduled_at_unix_secs * 1000}
-                    />
-                  ) : (
-                    <span className="text-text-muted">Not scheduled</span>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <span className="text-label text-text-faint">Last run</span>
-                <div
-                  className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
-                  data-testid="warmup-last"
-                >
-                  {summaryPending ? (
-                    <Skeleton className="h-4 w-28" />
-                  ) : lastAttempt ? (
-                    <button
-                      type="button"
-                      onClick={openHistory}
-                      className="-mx-1 rounded-sm px-1 text-left transition-colors hover:bg-overlay-2 max-md:min-h-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                      aria-label="Open last warm-up attempt detail"
-                    >
-                      <span className="flex flex-wrap items-center gap-2">
-                        <StatusBadge
-                          tone={OUTCOME_SEVERITY[lastAttempt.status]}
-                          label={OUTCOME_LABEL[lastAttempt.status]}
+            {multiLane ? (
+              <DetailRows data-testid="warmup-lanes">
+                {lanes.map((lane) => (
+                  <DetailRow
+                    key={lane.lane}
+                    data-testid={`warmup-lane-${lane.lane}`}
+                    data-eligible={lane.eligible}
+                    label={COPY.laneLabels[lane.lane]}
+                    description={
+                      lane.eligible && lane.target_windows.length > 0 ? (
+                        <WindowSwatches windows={lane.target_windows} />
+                      ) : undefined
+                    }
+                  >
+                    {lane.eligible ? (
+                      <div className="grid grid-cols-2 gap-4">
+                        <NextRunValue
+                          pending={false}
+                          nextAt={lane.next_scheduled_at_unix_secs}
+                          testId={`warmup-next-value-${lane.lane}`}
                         />
-                        <RelativeTime
-                          compact
-                          ts={lastAttempt.attempted_at_unix_secs * 1000}
+                        <LastRunValue
+                          pending={false}
+                          attempt={lane.last_attempt}
+                          fallbackAt={null}
+                          onOpen={() => openHistory(lane.lane)}
+                          openLabel={`Open last ${COPY.laneLabels[lane.lane]} warm-up attempt detail`}
+                          testId={`warmup-last-${lane.lane}`}
                         />
+                      </div>
+                    ) : (
+                      <span
+                        className="text-body-sm text-text-muted"
+                        data-testid={`warmup-lane-not-reported-${lane.lane}`}
+                      >
+                        {COPY.laneNotReported}
                       </span>
-                    </button>
-                  ) : upstream.status.last_warmup_at_unix_secs ? (
-                    <RelativeTime
-                      compact
-                      ts={upstream.status.last_warmup_at_unix_secs * 1000}
-                    />
-                  ) : (
-                    <span className="text-text-muted">Never</span>
-                  )}
-                </div>
+                    )}
+                  </DetailRow>
+                ))}
+              </DetailRows>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                <NextRunValue
+                  pending={summaryPending}
+                  nextAt={primaryLane?.next_scheduled_at_unix_secs}
+                  testId="warmup-next-value"
+                />
+                <LastRunValue
+                  pending={summaryPending}
+                  attempt={primaryLane?.last_attempt}
+                  fallbackAt={upstream.status.last_warmup_at_unix_secs}
+                  onOpen={() => openHistory()}
+                  openLabel="Open last warm-up attempt detail"
+                  testId="warmup-last"
+                />
               </div>
-            </div>
+            )}
 
             {/* Phones stack the label over a full-width picker; beside it the
                 picker would squeeze to a truncated sliver at 360px. */}
@@ -680,73 +909,49 @@ function WarmupCardMinimalInner({
                   Warm-up status could not be loaded. Refresh this page to try
                   again.
                 </p>
-              ) : failureAttempt ? (
-                <div
-                  className={cx(
-                    'min-h-12',
-                    failureAttempt.status === 'permanent_failure'
-                      ? DANGER_PANEL_CLASS
-                      : WARN_PANEL_CLASS,
-                  )}
-                >
-                  <p>
-                    {failureAttempt.status === 'permanent_failure'
-                      ? 'Last warm-up failure'
-                      : 'Last warm-up retry error'}
-                    {failureAttempt.reason
-                      ? `: ${REASON_LABEL[failureAttempt.reason]}.`
-                      : '.'}
-                    {credentialNoticeShown &&
-                    failureAttempt.reason &&
-                    CREDENTIAL_FAILURE_REASONS[failureAttempt.reason]
-                      ? ' Reconnect from the notice above.'
-                      : null}
-                  </p>
-                  {failureAttempt.error_detail ? (
-                    <details className="group mt-1">
-                      <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
-                        <ChevronRight
-                          aria-hidden="true"
-                          strokeWidth={1.75}
-                          className="size-3 transition-transform group-open:rotate-90"
-                        />
-                        Details
-                      </summary>
-                      <code className="mt-1 block break-words font-mono text-data text-text-muted">
-                        {failureAttempt.error_detail}
-                      </code>
-                    </details>
-                  ) : null}
+              ) : failures.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {failures.map(({ lane, attempt }) => (
+                    <FailurePanel
+                      key={lane ?? 'primary'}
+                      attempt={attempt}
+                      lane={lane}
+                      credentialNoticeShown={credentialNoticeShown}
+                    />
+                  ))}
                 </div>
               ) : null}
             </div>
 
-            {(leasePanel || errorPanel) && (
+            {(leasePanels.length > 0 || errorPanels.length > 0) && (
               <div className="flex flex-col gap-2">
-                {leasePanel && (
+                {leasePanels.map(({ lane, heldBy }) => (
                   <div
+                    key={`lease-${lane ?? 'primary'}`}
                     data-testid="warmup-lease-panel"
+                    data-lane={lane}
                     role="status"
                     aria-live="polite"
                     className={WARN_PANEL_CLASS}
                   >
-                    {COPY.leaseHeldTemplate.replace(
-                      '{heldBy}',
-                      leasePanel.heldBy,
-                    )}
+                    <LanePrefix lane={lane} />
+                    {COPY.leaseHeldTemplate.replace('{heldBy}', heldBy)}
                   </div>
-                )}
-                {errorPanel && (
+                ))}
+                {errorPanels.map(({ lane, reason }) => (
                   <div
+                    key={`error-${lane ?? 'primary'}`}
                     data-testid="warmup-error-panel"
-                    data-reason={errorPanel.reason}
+                    data-reason={reason}
+                    data-lane={lane}
                     role="alert"
                     aria-live="polite"
                     className={DANGER_PANEL_CLASS}
                   >
-                    {COPY.fireErrorReasons[errorPanel.reason]}
+                    <LanePrefix lane={lane} />
+                    {COPY.fireErrorReasons[reason]}
                   </div>
-                )}
+                ))}
               </div>
             )}
           </div>
@@ -762,9 +967,51 @@ function WarmupCardMinimalInner({
           )}
           confirmLabel={COPY.confirmFireConfirmLabel}
           cancelLabel={COPY.confirmFireCancelLabel}
-          onConfirm={handleFireNow}
-          confirmDisabled={fireWarmup.isPending}
-        />
+          onConfirm={() => {
+            void handleFireNow();
+          }}
+          closeOnConfirm={false}
+          pending={firing}
+          confirmDisabled={
+            !summary ||
+            firing ||
+            fireWarmup.isPending ||
+            !!unavailableFireLane ||
+            noEligibleFireLanes
+          }
+        >
+          {fireLaneChoices.length > 1 ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-3"
+              data-testid="warmup-fire-lane-choice"
+            >
+              <span className="text-body-sm text-text-muted">
+                {COPY.laneFilterLabel}
+              </span>
+              <SegmentedControl
+                ariaLabel={COPY.laneFilterLabel}
+                size="sm"
+                value={fireLaneChoice}
+                onChange={setFireLaneChoice}
+                options={[
+                  { value: 'both', label: COPY.laneFireBothOption },
+                  ...fireLaneChoices.map((lane) => ({
+                    value: lane,
+                    label: COPY.laneShortLabels[lane],
+                  })),
+                ]}
+              />
+            </div>
+          ) : null}
+          {unavailableFireLane && (
+            <div role="status" className={WARN_PANEL_CLASS}>
+              {COPY.fireLaneUnavailableTemplate.replace(
+                '{lane}',
+                COPY.laneLabels[unavailableFireLane],
+              )}
+            </div>
+          )}
+        </ConfirmDialog>
 
         <ConfirmDialog
           open={confirmClearPluginOpen}
@@ -790,6 +1037,9 @@ function WarmupCardMinimalInner({
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
         upstream={upstream}
+        lanes={lanes.map((l) => l.lane)}
+        laneFilter={historyLane}
+        onLaneFilterChange={setHistoryLane}
       />
     </>
   );

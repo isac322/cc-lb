@@ -22,6 +22,7 @@ use cc_lb_scheduler::state_stores::{
     AnthropicCompatEtagsStore, OAuthUsagePollCursorsStore, PriceCatalogVersionsStore,
 };
 use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+use cc_lb_storage_api::WarmupLane;
 use uuid::Uuid;
 
 use super::SchedulerDispatch;
@@ -129,21 +130,44 @@ impl SchedulerDispatch {
     }
 
     async fn handle_warmup_watchdog(&self, job: WarmupWatchdogJob) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_warmup_watchdog_upstream_ids().await?;
-        let stats = run_entity_watchdog(
-            &self.backend,
-            WatchdogEntityKind::Warmup,
-            &upstream_ids,
-            job.tick_unix_secs,
-            unix_secs(self.clock.now()),
-        )
-        .await?;
-        tracing::info!(
-            tick_unix_secs = job.tick_unix_secs,
-            seeded = stats.seeded,
-            "warmup watchdog completed"
-        );
-        Ok(JobOutcome::Done)
+        // Each lane is seeded independently: a failure listing or seeding one
+        // lane must not starve the other.
+        let mut first_error = None;
+        for lane in WarmupLane::ALL {
+            let result = async {
+                let upstream_ids = self.list_warmup_watchdog_upstream_ids(lane).await?;
+                run_entity_watchdog(
+                    &self.backend,
+                    WatchdogEntityKind::for_warmup_lane(lane),
+                    &upstream_ids,
+                    job.tick_unix_secs,
+                    unix_secs(self.clock.now()),
+                )
+                .await
+            }
+            .await;
+            match result {
+                Ok(stats) => tracing::info!(
+                    tick_unix_secs = job.tick_unix_secs,
+                    lane = lane.as_str(),
+                    seeded = stats.seeded,
+                    "warmup watchdog completed"
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        tick_unix_secs = job.tick_unix_secs,
+                        lane = lane.as_str(),
+                        %error,
+                        "warmup watchdog failed"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(JobOutcome::Done),
+        }
     }
 
     async fn handle_oauth_refresh_watchdog(

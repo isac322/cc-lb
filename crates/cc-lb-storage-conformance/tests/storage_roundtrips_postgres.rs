@@ -660,7 +660,7 @@ fn upstream_subscription_quota_aggregate_store_postgres() {
 #[test]
 fn warmup_attempts_store_postgres() {
     run_postgres_scenario("warmup_attempts_store", |backend| async move {
-        warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await
+        warmup_attempts_store::run_all(backend).await
     });
 }
 
@@ -1199,10 +1199,6 @@ where
 
 fn prompt_cache_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
-}
-
-fn warmup_attempts_clock() -> ClockHandle {
-    Arc::new(TestClock::new_at_secs(1_800_604_800))
 }
 
 fn system_clock() -> ClockHandle {

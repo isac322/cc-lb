@@ -181,6 +181,7 @@ fn params<'a>(
     ProviderWarmupDispatchParams {
         http,
         upstream,
+        lane: WarmupLane::Primary,
         aead,
         config,
         clock: Arc::new(TestClock::new_at_secs(NOW)),
@@ -347,6 +348,76 @@ async fn gemini_profiles_reuse_proxy_envelope_host_and_headers() {
             assert!(request.body.get("userAgent").is_none());
             assert!(request.body.get("requestType").is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn gemini_third_party_lane_uses_third_party_model_through_antigravity_envelope() {
+    let mut server = MockServer::start(StatusCode::OK, HeaderMap::new(), "{}", None).await;
+    let aead = AeadService::from_master_key([9; 32]);
+    let record = upstream(
+        UpstreamKind::GeminiOauth,
+        GeminiOAuthProfile::Antigravity,
+        "https://cloudcode-pa.googleapis.com/v1internal"
+            .parse()
+            .expect("legacy host"),
+        &aead,
+    );
+    let mut config = Config::default();
+    config.warmup.gemini_model = "custom-gemini-model".to_owned();
+    config.warmup.gemini_third_party_model = "claude-sonnet-5-5-low".to_owned();
+    config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+        code_assist_url: server.base_url.clone(),
+        user_agent: "antigravity/mock".to_owned(),
+        ..Default::default()
+    });
+    let client = http_client();
+    let result = dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
+        lane: WarmupLane::ThirdParty,
+        ..params(&client, &record, &aead, &config)
+    })
+    .await;
+    let WarmupRequestAttempt::Response { status, .. } = result else {
+        panic!("expected response: {result:?}");
+    };
+    assert_eq!(status, StatusCode::OK);
+    let request = server.request().await;
+    assert_eq!(request.uri.path(), "/v1internal:generateContent");
+    assert_eq!(request.body["model"], "claude-sonnet-5-5-low");
+    assert_eq!(request.body["userAgent"], "antigravity");
+    assert_eq!(request.body["requestType"], "agent");
+    assert_eq!(
+        request.body["request"]["contents"],
+        json!([{"role": "user", "parts": [{"text": "."}]}])
+    );
+    assert_eq!(
+        request.body["request"]["generationConfig"]["maxOutputTokens"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn third_party_lane_is_a_request_build_failure_for_non_gemini_kinds() {
+    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::AnthropicOauth] {
+        let server = MockServer::start(StatusCode::OK, HeaderMap::new(), "{}", None).await;
+        let aead = AeadService::from_master_key([9; 32]);
+        let record = upstream(
+            kind,
+            GeminiOAuthProfile::GeminiCli,
+            server.base_url.clone(),
+            &aead,
+        );
+        let config = Config::default();
+        let client = http_client();
+        let result = dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
+            lane: WarmupLane::ThirdParty,
+            ..params(&client, &record, &aead, &config)
+        })
+        .await;
+        let WarmupRequestAttempt::RequestBuildFailed { error } = result else {
+            panic!("expected request build failure for {kind:?}: {result:?}");
+        };
+        assert!(error.contains("third_party"), "{error}");
     }
 }
 

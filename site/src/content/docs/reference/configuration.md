@@ -83,9 +83,12 @@ The optional `[warmup]` section selects the minimal request models used for Open
 [warmup]
 openai_model = "gpt-6.1-sol"
 gemini_model = "gemini-2.5-flash-lite"
+gemini_third_party_model = "gpt-oss-120b-medium"
 ```
 
-`openai_model` defaults to `gpt-6.1-sol`. `gemini_model` defaults to `gemini-2.5-flash-lite`. Gemini warm-up models must belong to the Gemini models quota group.
+`openai_model` defaults to `gpt-6.1-sol`. `gemini_model` defaults to `gemini-2.5-flash-lite` and must belong to the Gemini models quota group.
+
+`gemini_third_party_model` defaults to `gpt-oss-120b-medium`. Gemini upstreams on the Antigravity profile use it to warm the Claude and GPT-OSS quota group (`third_party_5h`, `third_party_7d`). The value must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
 ## Cache keepalive
 

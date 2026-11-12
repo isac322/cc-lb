@@ -1960,6 +1960,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
         runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
         upstream: &cc_lb_storage_api::UpstreamRecord,
+        lane: cc_lb_storage_api::WarmupLane,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError> {
         let http = warmup_dialect_http_client();
         let outcome = crate::warmup::dialect::dispatch_warmup_with_dialect(
@@ -1973,6 +1974,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                 http: &http,
                 clock: self.clock.clone(),
                 config: self.config.as_ref(),
+                lane,
             },
         )
         .await
@@ -1987,6 +1989,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
     async fn dispatch_warmup_native(
         &self,
         upstream: &cc_lb_storage_api::UpstreamRecord,
+        lane: cc_lb_storage_api::WarmupLane,
     ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError> {
         use crate::warmup::request::{
             ProviderWarmupDispatchParams, WarmupRequestAttempt, dispatch_provider_warmup_attempt,
@@ -2046,6 +2049,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                 aead: self.aead.as_ref(),
                 config: self.config.as_ref(),
                 clock: self.clock.clone(),
+                lane,
             })
             .await
             {

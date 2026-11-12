@@ -29,7 +29,7 @@ use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     AuditActorFields, OAuthTokensCreate, OrganizationMetadataRecord, Storage, StorageError,
     StoredOAuthPkceFlow, UpstreamCreate, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, validate_identifier,
+    UpstreamSubscriptionMetadataRecord, WarmupLane, validate_identifier,
 };
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
@@ -2035,18 +2035,12 @@ async fn seed_oauth_reconnect_tasks(
             Err(error) => return Err(error),
         }
     }
-    if matches!(
-        upstream.kind,
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-    ) && upstream.warmup_enabled
+    if !WarmupLane::lanes_for_kind(upstream.kind).is_empty()
+        && upstream.warmup_enabled
         && upstream.oauth_credentials.is_some()
         && upstream.deleted_at_unix_secs.is_none()
     {
-        let task = super::upstreams::warmup_bootstrap_task(upstream.id, seed_secs);
-        match scheduler.push_adaptive_task(task).await {
-            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
-            Err(error) => return Err(error),
-        }
+        super::upstreams::push_warmup_bootstrap_tasks(state, upstream, seed_secs).await?;
     }
     Ok(())
 }
@@ -2113,18 +2107,12 @@ pub(super) async fn seed_oauth_bootstrap_tasks(
             }
         }
     }
-    if matches!(
-        upstream.kind,
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-    ) && upstream.warmup_enabled
+    if !WarmupLane::lanes_for_kind(upstream.kind).is_empty()
+        && upstream.warmup_enabled
         && upstream.oauth_credentials.is_some()
         && upstream.deleted_at_unix_secs.is_none()
     {
-        let task = super::upstreams::warmup_bootstrap_task(upstream.id, seed_secs);
-        match scheduler.push_adaptive_task(task).await {
-            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
-            Err(error) => return Err(error),
-        }
+        super::upstreams::push_warmup_bootstrap_tasks(state, upstream, seed_secs).await?;
     }
     Ok(())
 }

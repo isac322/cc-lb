@@ -25,6 +25,7 @@ impl SchedulerDispatch {
         execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
             upstream,
+            lane: job.lane,
             scheduled_for_unix_secs: cycle_key_i64(job.cycle_key).unwrap_or(expected_cycle_key),
             trigger: WarmupAttemptTrigger::Scheduled,
             replica_id: self.replica_id,
@@ -53,6 +54,7 @@ impl SchedulerDispatch {
         execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
             upstream,
+            lane: job.lane,
             scheduled_for_unix_secs: cycle_key_i64(job.cycle_key).unwrap_or(expected_cycle_key),
             trigger: WarmupAttemptTrigger::Scheduled,
             replica_id: self.replica_id,
@@ -81,6 +83,7 @@ impl SchedulerDispatch {
         execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
             upstream,
+            lane: job.lane,
             scheduled_for_unix_secs: cycle_key_i64(job.cycle_key).unwrap_or(expected_cycle_key),
             trigger: WarmupAttemptTrigger::Scheduled,
             replica_id: self.replica_id,

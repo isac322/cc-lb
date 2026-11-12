@@ -4,8 +4,8 @@ use cc_lb_quota::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::{
-    UpstreamKind, UpstreamRecord, UpstreamStore, WarmupDispatchKind, WarmupPermanentFailureReason,
-    WarmupTransientFailureReason,
+    UpstreamKind, UpstreamRecord, UpstreamStore, WarmupDispatchKind, WarmupLane,
+    WarmupPermanentFailureReason, WarmupTransientFailureReason,
 };
 use http::HeaderMap;
 
@@ -49,13 +49,20 @@ impl SchedulerDispatch {
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(());
         };
-        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
-        if bundle
-            .expires_at_unix_secs
-            .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > unix_secs(self.clock.now())
-        {
+        if !self.bundle_needs_refresh(upstream)? {
             return Ok(());
+        }
+        // Another lane of the same upstream may have refreshed the credential
+        // since this job loaded it; recheck the stored copy before refreshing so
+        // concurrent lanes do not issue a second token-endpoint request.
+        if let Some(current) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+            .await
+            .map_err(storage_scheduler_error)?
+        {
+            *upstream = current;
+            if !self.bundle_needs_refresh(upstream)? {
+                return Ok(());
+            }
         }
         if let Err(error) = lazy_refresher.refresh_one(upstream.id).await {
             tracing::warn!(upstream_id = %upstream.id, %error, "warmup proactive oauth refresh failed");
@@ -68,6 +75,14 @@ impl SchedulerDispatch {
             *upstream = refreshed;
         }
         Ok(())
+    }
+
+    fn bundle_needs_refresh(&self, upstream: &UpstreamRecord) -> SchedulerResult<bool> {
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        Ok(bundle
+            .expires_at_unix_secs
+            .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
+            <= unix_secs(self.clock.now()))
     }
 
     pub(super) async fn force_refresh_oauth_token(
@@ -93,6 +108,7 @@ impl SchedulerDispatch {
     pub(super) async fn dispatch_warmup_request(
         &self,
         upstream: &UpstreamRecord,
+        lane: WarmupLane,
     ) -> WarmupDispatchAttempt {
         if upstream.warmup_dialect_plugin.is_some() {
             let outcome = match crate::warmup::dialect::dispatch_warmup_with_dialect(
@@ -103,6 +119,7 @@ impl SchedulerDispatch {
                     aead: self.aead.clone(),
                     lazy_refresher: self.lazy_refresher.clone(),
                     upstream,
+                    lane,
                     http: &self.http,
                     clock: self.clock.clone(),
                     config: self.config.as_ref(),
@@ -149,6 +166,7 @@ impl SchedulerDispatch {
         match dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
             http: &self.http,
             upstream,
+            lane,
             aead: self.aead.as_ref(),
             config: self.config.as_ref(),
             clock: self.clock.clone(),

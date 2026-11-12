@@ -70,7 +70,7 @@ impl CronJob {
 impl AdaptiveJob {
     pub const fn kind(&self) -> &'static str {
         match self {
-            Self::Warmup(_) => "warmup",
+            Self::Warmup(job) => job.lane.job_kind(),
             Self::OAuthRefresh(_) => "oauth_refresh",
             Self::MetadataRefresh(_) => "metadata_refresh",
             Self::CacheKeepalive(_) => "cache_keepalive",

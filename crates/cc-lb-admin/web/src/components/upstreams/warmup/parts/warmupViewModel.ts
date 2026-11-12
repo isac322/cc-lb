@@ -1,7 +1,7 @@
 import type {
   WarmupAttempt,
   WarmupAttemptStatus,
-  WarmupSummary,
+  WarmupLaneSummary,
 } from '../../../../lib/queries';
 import { REASON_LABEL } from './copy';
 
@@ -101,10 +101,10 @@ export interface ActiveIncident {
  * neither resolve nor extend the incident).
  */
 export function detectActiveIncident(
-  summary: WarmupSummary | undefined,
+  lane: Pick<WarmupLaneSummary, 'recent_attempts'> | undefined,
 ): ActiveIncident | null {
-  if (!summary) return null;
-  const attempts = summary.recent_attempts ?? [];
+  if (!lane) return null;
+  const attempts = lane.recent_attempts ?? [];
   if (attempts.length === 0) return null;
 
   let lastFailure: WarmupAttempt | null = null;
@@ -149,4 +149,93 @@ export function detectActiveIncident(
     recentFailures: total,
     dominantReason: dominant,
   };
+}
+
+export type WarmupStatusLabel =
+  | 'Down'
+  | 'Unavailable'
+  | 'Degraded'
+  | 'Pending'
+  | 'Idle'
+  | 'Healthy';
+
+export interface WarmupStatus {
+  label: WarmupStatusLabel;
+  tone: 'ok' | 'warn' | 'danger' | 'neutral' | 'live';
+}
+
+const STATUS_TONE: Record<WarmupStatusLabel, WarmupStatus['tone']> = {
+  Down: 'danger',
+  Unavailable: 'danger',
+  Degraded: 'warn',
+  Pending: 'live',
+  Idle: 'neutral',
+  Healthy: 'ok',
+};
+
+/** Worst first: the card badge shows the most severe eligible lane. */
+const STATUS_RANK: readonly WarmupStatusLabel[] = [
+  'Down',
+  'Unavailable',
+  'Degraded',
+  'Pending',
+  'Idle',
+  'Healthy',
+];
+
+export function warmupStatus(label: WarmupStatusLabel): WarmupStatus {
+  return { label, tone: STATUS_TONE[label] };
+}
+
+/**
+ * One lane's state. Skips do not resolve a prior failure: the newest
+ * unresolved attempt determines severity, and transient retries are degraded,
+ * not down.
+ */
+export function laneStatus(lane: WarmupLaneSummary): WarmupStatus {
+  const current =
+    detectActiveIncident(lane)?.lastFailure ?? lane.last_attempt ?? null;
+  if (!current) return warmupStatus('Pending');
+  switch (current.status) {
+    case 'success':
+      return warmupStatus('Healthy');
+    case 'skipped':
+      return warmupStatus('Idle');
+    case 'transient_failure':
+      return warmupStatus('Degraded');
+    case 'permanent_failure':
+      return warmupStatus('Down');
+  }
+}
+
+/** Worst state across eligible lanes; ineligible lanes never set the badge. */
+export function worstLaneStatus(
+  lanes: readonly WarmupLaneSummary[],
+): WarmupStatus {
+  let worst: WarmupStatusLabel | null = null;
+  for (const lane of lanes) {
+    if (!lane.eligible) continue;
+    const { label } = laneStatus(lane);
+    if (
+      worst === null ||
+      STATUS_RANK.indexOf(label) < STATUS_RANK.indexOf(worst)
+    ) {
+      worst = label;
+    }
+  }
+  // Nothing loaded yet reads like a lane awaiting its first attempt.
+  return warmupStatus(worst ?? 'Pending');
+}
+
+/** The lane's current failure to explain, or null when it is not failing. */
+export function laneFailureAttempt(
+  lane: WarmupLaneSummary,
+): WarmupAttempt | null {
+  const incident = detectActiveIncident(lane);
+  if (incident) return incident.lastFailure;
+  const last = lane.last_attempt;
+  return last?.status === 'permanent_failure' ||
+    last?.status === 'transient_failure'
+    ? last
+    : null;
 }

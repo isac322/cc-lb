@@ -15,7 +15,7 @@ const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60;
 fn next_warmup_task_schedules_after_reset_guard_and_jitter() {
     let upstream_id = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
     let resets_at_unix_secs = 1_782_414_000;
-    let task = next_warmup_task(upstream_id, resets_at_unix_secs);
+    let task = next_warmup_task(upstream_id, resets_at_unix_secs, WarmupLane::Primary);
     let run_at = task.run_at_unix_secs.expect("test task has run_at");
     assert!(
         (resets_at_unix_secs + POST_RESET_GUARD_SECS..=resets_at_unix_secs + 59).contains(&run_at),
@@ -314,6 +314,7 @@ fn success_without_known_reset_is_bounded_by_shortest_present_duration() {
         assert_eq!(
             next_warmup_evaluation_after_success(
                 kind,
+                WarmupLane::Primary,
                 &[inactive(short), inactive(weekly)],
                 &[],
                 NOW_UNIX_SECS
@@ -323,6 +324,7 @@ fn success_without_known_reset_is_bounded_by_shortest_present_duration() {
         assert_eq!(
             next_warmup_evaluation_after_success(
                 kind,
+                WarmupLane::Primary,
                 &[absent(short), inactive(weekly)],
                 &[],
                 NOW_UNIX_SECS
@@ -330,7 +332,13 @@ fn success_without_known_reset_is_bounded_by_shortest_present_duration() {
             NOW_UNIX_SECS + SEVEN_DAYS,
         );
         assert_eq!(
-            next_warmup_evaluation_after_success(kind, &[], &[], NOW_UNIX_SECS),
+            next_warmup_evaluation_after_success(
+                kind,
+                WarmupLane::Primary,
+                &[],
+                &[],
+                NOW_UNIX_SECS
+            ),
             NOW_UNIX_SECS + FIVE_HOURS,
         );
     }
@@ -354,6 +362,7 @@ fn success_ignores_expired_stale_and_third_party_resets() {
     assert_eq!(
         next_warmup_evaluation_after_success(
             UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
             &[stale],
             &observations,
             NOW_UNIX_SECS
@@ -371,6 +380,7 @@ fn response_can_restore_a_previously_absent_target_after_success() {
     assert_eq!(
         next_warmup_evaluation_after_success(
             UpstreamKind::OpenaiOauth,
+            WarmupLane::Primary,
             &[absent(SubscriptionQuotaWindow::FiveHour)],
             &observations,
             NOW_UNIX_SECS
@@ -447,15 +457,323 @@ fn preflight_deleted_and_warmup_disabled_gates_take_precedence() {
     }
 }
 
+#[test]
+fn next_warmup_task_keeps_the_lane_in_job_and_key() {
+    let upstream_id = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
+    let resets_at_unix_secs = 1_782_414_000;
+    let task = next_warmup_task(upstream_id, resets_at_unix_secs, WarmupLane::ThirdParty);
+    assert_eq!(
+        task.idempotency_key.as_deref(),
+        Some("adaptive:warmup_third_party:12345678-90ab-cdef-1234-567890abcdef:1782414000")
+    );
+    let cc_lb_scheduler::worker::AdaptiveJob::Warmup(job) = task.args else {
+        panic!("expected warmup job");
+    };
+    assert_eq!(job.lane, WarmupLane::ThirdParty);
+    assert_eq!(job.cycle_key, resets_at_unix_secs);
+}
+
+#[test]
+fn third_party_lane_warms_its_idle_group_while_gemini_group_is_active() {
+    let snapshots = [
+        active(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            NOW_UNIX_SECS + 1_000,
+        ),
+        active(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            NOW_UNIX_SECS + 2_000,
+        ),
+        inactive(SubscriptionQuotaWindow::ThirdPartyFiveHour),
+        active(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            NOW_UNIX_SECS + 3_000,
+        ),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &snapshots,
+        WarmupQuotaPreflightDecision::SendWarmup,
+    );
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
+        &snapshots,
+        WarmupQuotaPreflightDecision::ActiveWindow {
+            cycle_key: NOW_UNIX_SECS + 1_000,
+        },
+    );
+}
+
+#[test]
+fn third_party_lane_schedules_its_own_earliest_reset() {
+    let snapshots = [
+        inactive(SubscriptionQuotaWindow::GeminiFiveHour),
+        active(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            NOW_UNIX_SECS + 4_000,
+        ),
+        active(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            NOW_UNIX_SECS + 3_000,
+        ),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &snapshots,
+        WarmupQuotaPreflightDecision::ActiveWindow {
+            cycle_key: NOW_UNIX_SECS + 3_000,
+        },
+    );
+}
+
+#[test]
+fn third_party_lane_treats_rolling_unused_windows_as_idle() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.0),
+            Some(NOW_UNIX_SECS + FIVE_HOURS),
+        ),
+        active(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            NOW_UNIX_SECS + 1_000,
+        ),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &snapshots,
+        WarmupQuotaPreflightDecision::SendWarmup,
+    );
+}
+
+#[test]
+fn weekly_exhaustion_blocks_only_its_own_lane() {
+    let gemini_exhausted = [
+        exhausted(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            NOW_UNIX_SECS + 5_000,
+        ),
+        inactive(SubscriptionQuotaWindow::ThirdPartyFiveHour),
+        inactive(SubscriptionQuotaWindow::ThirdPartySevenDay),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
+        &gemini_exhausted,
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: NOW_UNIX_SECS + 5_000,
+        },
+    );
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &gemini_exhausted,
+        WarmupQuotaPreflightDecision::SendWarmup,
+    );
+
+    let third_party_exhausted = [
+        exhausted(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            NOW_UNIX_SECS + 6_000,
+        ),
+        inactive(SubscriptionQuotaWindow::GeminiFiveHour),
+        inactive(SubscriptionQuotaWindow::GeminiSevenDay),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &third_party_exhausted,
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: NOW_UNIX_SECS + 6_000,
+        },
+    );
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
+        &third_party_exhausted,
+        WarmupQuotaPreflightDecision::SendWarmup,
+    );
+}
+
+#[test]
+fn every_absent_lane_target_is_targets_absent_for_that_lane_only() {
+    let snapshots = [
+        absent(SubscriptionQuotaWindow::ThirdPartyFiveHour),
+        absent(SubscriptionQuotaWindow::ThirdPartySevenDay),
+        inactive(SubscriptionQuotaWindow::GeminiFiveHour),
+    ];
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::ThirdParty,
+        &snapshots,
+        WarmupQuotaPreflightDecision::TargetsAbsent,
+    );
+    assert_lane_decision(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
+        &snapshots,
+        WarmupQuotaPreflightDecision::SendWarmup,
+    );
+    assert_decision(
+        UpstreamKind::GeminiOauth,
+        &[
+            absent(SubscriptionQuotaWindow::GeminiFiveHour),
+            absent(SubscriptionQuotaWindow::GeminiSevenDay),
+        ],
+        WarmupQuotaPreflightDecision::TargetsAbsent,
+    );
+}
+
+#[test]
+fn anthropic_and_openai_with_every_target_absent_still_send() {
+    for (kind, short, weekly) in [
+        (
+            UpstreamKind::AnthropicOauth,
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+        ),
+        (
+            UpstreamKind::OpenaiOauth,
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+        ),
+    ] {
+        assert_decision(
+            kind,
+            &[absent(short), absent(weekly)],
+            WarmupQuotaPreflightDecision::Unknown,
+        );
+    }
+}
+
+#[test]
+fn partially_absent_lane_targets_stay_unknown_and_send() {
+    for other in [
+        Some(quota_snapshot(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            SubscriptionQuotaDataState::Unobserved,
+            None,
+            None,
+        )),
+        Some(quota_snapshot(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            SubscriptionQuotaDataState::Stale,
+            Some(0.2),
+            Some(NOW_UNIX_SECS + 1_000),
+        )),
+        None,
+    ] {
+        let mut snapshots = vec![absent(SubscriptionQuotaWindow::ThirdPartyFiveHour)];
+        snapshots.extend(other);
+        assert_lane_decision(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &snapshots,
+            WarmupQuotaPreflightDecision::Unknown,
+        );
+    }
+}
+
+#[test]
+fn success_evaluation_uses_only_the_lane_target_windows() {
+    let snapshots = [
+        active(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            NOW_UNIX_SECS + 1_000,
+        ),
+        active(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            NOW_UNIX_SECS + 2_000,
+        ),
+        active(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            NOW_UNIX_SECS + 3_000,
+        ),
+        active(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            NOW_UNIX_SECS + 4_000,
+        ),
+    ];
+    assert_eq!(
+        next_warmup_evaluation_after_success(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &snapshots,
+            &[],
+            NOW_UNIX_SECS,
+        ),
+        NOW_UNIX_SECS + 3_000
+    );
+    assert_eq!(
+        next_warmup_evaluation_after_success(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            &[],
+            NOW_UNIX_SECS,
+        ),
+        NOW_UNIX_SECS + 1_000
+    );
+    // A Gemini-group observation in the response does not move the
+    // third-party cadence.
+    assert_eq!(
+        next_warmup_evaluation_after_success(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &snapshots,
+            &[observation(
+                SubscriptionQuotaWindow::GeminiFiveHour,
+                NOW_UNIX_SECS + 500,
+            )],
+            NOW_UNIX_SECS,
+        ),
+        NOW_UNIX_SECS + 3_000
+    );
+}
+
+#[test]
+fn third_party_success_without_known_reset_falls_back_to_five_hours() {
+    assert_eq!(
+        next_warmup_evaluation_after_success(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &[
+                active(
+                    SubscriptionQuotaWindow::GeminiFiveHour,
+                    NOW_UNIX_SECS + 1_000
+                ),
+                absent(SubscriptionQuotaWindow::ThirdPartySevenDay),
+            ],
+            &[],
+            NOW_UNIX_SECS,
+        ),
+        NOW_UNIX_SECS + FIVE_HOURS
+    );
+}
+
 fn assert_decision(
     kind: UpstreamKind,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     expected: WarmupQuotaPreflightDecision,
 ) {
+    assert_lane_decision(kind, WarmupLane::Primary, snapshots, expected);
+}
+
+fn assert_lane_decision(
+    kind: UpstreamKind,
+    lane: WarmupLane,
+    snapshots: &[SubscriptionQuotaCandidateSnapshot],
+    expected: WarmupQuotaPreflightDecision,
+) {
     assert_eq!(
-        quota_preflight_decision_from_snapshots(kind, snapshots, NOW_UNIX_SECS),
+        quota_preflight_decision_from_snapshots(kind, lane, snapshots, NOW_UNIX_SECS),
         expected,
-        "kind={kind:?}"
+        "kind={kind:?} lane={lane:?}"
     );
 }
 
@@ -543,6 +861,7 @@ fn success_uses_earliest_future_reset_from_response_or_snapshot() {
             assert_eq!(
                 next_warmup_evaluation_after_success(
                     kind,
+                    WarmupLane::Primary,
                     &snapshots,
                     &observations,
                     NOW_UNIX_SECS,
@@ -563,6 +882,7 @@ fn success_with_stale_five_hour_snapshot_uses_short_cadence() {
         assert_eq!(
             next_warmup_evaluation_after_success(
                 kind,
+                WarmupLane::Primary,
                 &[stale_short, active(weekly, NOW_UNIX_SECS + SEVEN_DAYS)],
                 &[],
                 NOW_UNIX_SECS,
@@ -585,6 +905,7 @@ fn success_with_expired_or_missing_five_hour_reset_is_bounded_by_five_hours() {
             assert_eq!(
                 next_warmup_evaluation_after_success(
                     kind,
+                    WarmupLane::Primary,
                     &snapshots,
                     &observations,
                     NOW_UNIX_SECS,
@@ -602,6 +923,7 @@ fn success_with_missing_five_hour_target_is_bounded_by_short_cadence() {
         assert_eq!(
             next_warmup_evaluation_after_success(
                 kind,
+                WarmupLane::Primary,
                 &[active(weekly, NOW_UNIX_SECS + SEVEN_DAYS)],
                 &[],
                 NOW_UNIX_SECS,
@@ -627,7 +949,13 @@ fn weekly_only_success_preserves_absence_after_the_sample_becomes_old() {
             },
         );
         assert_eq!(
-            next_warmup_evaluation_after_success(kind, &snapshots, &observations, NOW_UNIX_SECS,),
+            next_warmup_evaluation_after_success(
+                kind,
+                WarmupLane::Primary,
+                &snapshots,
+                &observations,
+                NOW_UNIX_SECS,
+            ),
             NOW_UNIX_SECS + SEVEN_DAYS,
             "kind={kind:?}",
         );
@@ -651,6 +979,7 @@ fn success_response_reset_overrides_the_older_snapshot_reset() {
             assert_eq!(
                 next_warmup_evaluation_after_success(
                     kind,
+                    WarmupLane::Primary,
                     &snapshots,
                     &observations,
                     NOW_UNIX_SECS,
@@ -764,6 +1093,7 @@ fn latest_absent_five_hour_sample_overrides_older_stale_sample_for_weekly_cadenc
     assert_eq!(
         next_warmup_evaluation_after_success(
             UpstreamKind::AnthropicOauth,
+            WarmupLane::Primary,
             &snapshots,
             &observations,
             NOW_UNIX_SECS,

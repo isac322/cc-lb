@@ -6,7 +6,7 @@ use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_quota::{UnifiedQuotaObservation, parse_openai_codex_quota_headers};
-use cc_lb_storage_api::{UpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{UpstreamKind, UpstreamRecord, WarmupLane};
 use cc_lb_upstream::{DialectShapeContext, Signer, UpstreamDialect, shape_request, sign_request};
 use http::{HeaderMap, HeaderValue, Method, Request};
 use http_body_util::Full;
@@ -23,6 +23,7 @@ use super::{
 pub struct ProviderWarmupDispatchParams<'a> {
     pub http: &'a WarmupHttpClient,
     pub upstream: &'a UpstreamRecord,
+    pub lane: WarmupLane,
     pub aead: &'a AeadService,
     pub config: &'a Config,
     pub clock: ClockHandle,
@@ -42,6 +43,9 @@ async fn build_and_dispatch(
     params: ProviderWarmupDispatchParams<'_>,
 ) -> Result<WarmupRequestAttempt, String> {
     let upstream = params.upstream;
+    if !WarmupLane::lanes_for_kind(upstream.kind).contains(&params.lane) {
+        return Err(unsupported_lane_error(upstream.kind, params.lane));
+    }
     let bundle = match upstream.oauth_credentials.as_ref() {
         Some(credentials) => match credentials.decrypt(params.aead, upstream.id.as_bytes()) {
             Ok(bundle) => bundle,
@@ -88,8 +92,8 @@ pub(crate) async fn build_provider_warmup_request(
     dialect: &dyn UpstreamDialect,
 ) -> Result<(Request<Full<Bytes>>, Arc<dyn Signer>), String> {
     let upstream = params.upstream;
-    let (api, path, body) = match upstream.kind {
-        UpstreamKind::OpenaiOauth => (
+    let (api, path, body) = match (upstream.kind, params.lane) {
+        (UpstreamKind::OpenaiOauth, WarmupLane::Primary) => (
             Upstream::OpenaiDirect {
                 base_url: upstream.base_url.clone(),
             },
@@ -102,19 +106,25 @@ pub(crate) async fn build_provider_warmup_request(
                 "input": [{"role": "user", "content": "."}],
             }),
         ),
-        UpstreamKind::GeminiOauth => (
+        (UpstreamKind::GeminiOauth, lane) => (
             Upstream::GeminiDirect {
                 base_url: upstream.base_url.clone(),
             },
             format!(
                 "/v1beta/models/{}:generateContent",
-                params.config.warmup.gemini_model
+                match lane {
+                    WarmupLane::Primary => &params.config.warmup.gemini_model,
+                    WarmupLane::ThirdParty => &params.config.warmup.gemini_third_party_model,
+                }
             ),
             json!({
                 "contents": [{"role": "user", "parts": [{"text": "."}]}],
                 "generationConfig": {"maxOutputTokens": 1},
             }),
         ),
+        (UpstreamKind::OpenaiOauth, lane) => {
+            return Err(unsupported_lane_error(upstream.kind, lane));
+        }
         _ => return Err("provider warmup requires OpenAI or Gemini OAuth".to_owned()),
     };
     let mut headers = HeaderMap::new();
@@ -156,6 +166,14 @@ pub(crate) async fn build_provider_warmup_request(
         .body(Full::new(signed.body().clone()))
         .map_err(|error| error.to_string())?;
     Ok((request, signer))
+}
+
+fn unsupported_lane_error(kind: UpstreamKind, lane: WarmupLane) -> String {
+    format!(
+        "warmup lane {} is not available for {} upstreams",
+        lane.as_str(),
+        kind.as_str()
+    )
 }
 
 #[cfg(test)]

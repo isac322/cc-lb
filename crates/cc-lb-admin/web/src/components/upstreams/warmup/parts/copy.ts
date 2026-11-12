@@ -25,6 +25,7 @@ export const REASON_LABEL: Record<
   seven_day_quota_exhausted: '7-day quota exhausted',
   upstream_disabled: 'Upstream is disabled',
   upstream_deleted: 'Upstream was deleted',
+  quota_group_unavailable: 'Model group not available',
   rate_limited_cycle_key_missing: '429 without quota reset headers',
   upstream_5xx: 'Upstream 5xx',
   network_error: 'Network error',

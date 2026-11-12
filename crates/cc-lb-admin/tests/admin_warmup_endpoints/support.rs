@@ -9,10 +9,14 @@ use cc_lb_config::Config;
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
     WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger,
-    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
-    WarmupTransientFailureReason,
+    WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason, WarmupSkipReason,
+    WarmupSuccessReason, WarmupTransientFailureReason,
 };
-use cc_lb_storage_api::{UpstreamStore, UpstreamWarmupAttemptStore};
+use cc_lb_storage_api::{
+    OAuthTokensCreate, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaWindow, UpstreamStore,
+    UpstreamSubscriptionQuotaStore, UpstreamWarmupAttemptStore,
+};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -21,12 +25,13 @@ use uuid::Uuid;
 
 const TEST_TOKEN: &str = "test-token";
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
-pub use super::scheduler_support::NEXT_SCHEDULED_AT;
-pub const RECENT_7D_COUNTS: (u64, u64, u64, u64) = (6, 2, 3, 3);
+const TEST_MASTER_KEY: [u8; 32] = [0; 32];
+pub use super::scheduler_support::{NEXT_SCHEDULED_AT, NEXT_THIRD_PARTY_SCHEDULED_AT};
 
 pub struct Fixture {
     pub _dir: tempfile::TempDir,
     pub app: axum::Router,
+    pub storage: Arc<SqliteStorage>,
     pub upstream_id: Uuid,
     pub attempts: Vec<WarmupAttemptRecord>,
     pub dialect_plugin: UpstreamWarmupDialectPlugin,
@@ -70,17 +75,161 @@ pub async fn new_fixture() -> Fixture {
         upstream.revision,
         &dialect_plugin,
         clock.as_ref(),
+        |_| WarmupLane::Primary,
     )
     .await;
     let scheduler =
         super::scheduler_support::scheduler_with_next_warmup(upstream.id, clock.clone()).await;
     Fixture {
         _dir: dir,
-        app: router(test_state(storage, scheduler, clock)),
+        app: router(test_state(storage.clone(), scheduler, clock)),
+        storage,
         upstream_id: upstream.id,
         attempts,
         dialect_plugin,
     }
+}
+
+pub struct GeminiFixture {
+    pub _dir: tempfile::TempDir,
+    pub app: axum::Router,
+    pub storage: Arc<SqliteStorage>,
+    pub upstream_id: Uuid,
+    /// Newest first; every third attempt (index % 3 == 0) is third-party.
+    pub attempts: Vec<WarmupAttemptRecord>,
+}
+
+impl GeminiFixture {
+    pub fn attempts_for(&self, lane: WarmupLane) -> Vec<WarmupAttemptRecord> {
+        self.attempts
+            .iter()
+            .filter(|attempt| attempt.lane == lane)
+            .cloned()
+            .collect()
+    }
+}
+
+/// A `gemini_oauth` upstream whose encrypted credential carries `profile`,
+/// with attempts on both lanes and a pending job per lane.
+pub async fn new_gemini_fixture(
+    profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
+) -> GeminiFixture {
+    let dir = tempfile::tempdir().expect("temp admin warmup dir");
+    let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+    let clock: ClockHandle = test_clock.clone();
+    let storage = crate::admin_test_common::sqlite_storage_with_clock(
+        dir.path(),
+        "admin_warmup_gemini.sqlite",
+        clock.clone(),
+    )
+    .await;
+    let id = Uuid::new_v4();
+    let bundle = cc_lb_aead::OAuthTokenBundle {
+        oauth_profile: profile,
+        access_token: "test-access-token".to_owned(),
+        refresh_token: "test-refresh-token".to_owned(),
+        expires_at_unix_secs: TEST_NOW_UNIX_SECS + 3_600,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: None,
+        project_id: Some("test-project".to_owned()),
+        scopes: Vec::new(),
+        never_refresh: false,
+    };
+    let tokens = cc_lb_aead::AeadEncryptedField::<cc_lb_aead::OAuthTokenBundle>::encrypt(
+        &cc_lb_aead::AeadService::from_master_key(TEST_MASTER_KEY),
+        &bundle,
+        id.as_bytes(),
+    )
+    .expect("token encryption succeeds");
+    let upstream = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id,
+            name: "warmup-gemini".to_owned(),
+            kind: UpstreamKind::GeminiOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens,
+                never_refresh: false,
+            }),
+            warmup_enabled: true,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("upstream seed succeeds");
+    let attempts = seed_attempts(
+        storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        &UpstreamWarmupDialectPlugin {
+            wasm_registry_id: Uuid::nil(),
+            config: Value::Null,
+            wire_version: None,
+        },
+        clock.as_ref(),
+        |index| {
+            if index.is_multiple_of(3) {
+                WarmupLane::ThirdParty
+            } else {
+                WarmupLane::Primary
+            }
+        },
+    )
+    .await;
+    let scheduler =
+        super::scheduler_support::scheduler_with_next_lane_warmups(upstream.id, clock.clone())
+            .await;
+    GeminiFixture {
+        _dir: dir,
+        app: router(test_state(storage.clone(), scheduler, clock)),
+        storage,
+        upstream_id: upstream.id,
+        attempts,
+    }
+}
+
+/// Stores a fresh `Absent` quota sample for each window.
+pub async fn record_absent_windows(
+    storage: &SqliteStorage,
+    upstream_id: Uuid,
+    windows: &[SubscriptionQuotaWindow],
+) {
+    let observed_at_unix_millis = TEST_NOW_UNIX_SECS * 1_000;
+    let samples = windows
+        .iter()
+        .map(|window| SubscriptionQuotaSample {
+            upstream_id,
+            window: *window,
+            source: SubscriptionQuotaSource::Api,
+            sample_kind: SubscriptionQuotaSampleKind::Absent,
+            observed_at_unix_millis,
+            sample_id: Uuid::new_v4(),
+            utilization: None,
+            status: None,
+            resets_at_unix_secs: None,
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
+        })
+        .collect::<Vec<_>>();
+    storage
+        .record_subscription_quota_samples(&samples)
+        .await
+        .expect("absent quota samples record");
 }
 
 fn test_state(
@@ -95,7 +244,7 @@ fn test_state(
         startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(crate::admin_test_common::key_store(storage)),
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key(TEST_MASTER_KEY)),
         limit_engine: crate::admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
@@ -123,6 +272,7 @@ async fn seed_attempts(
     upstream_spec_revision: u64,
     dialect_plugin: &UpstreamWarmupDialectPlugin,
     clock: &dyn cc_lb_clock::Clock,
+    lane_for_index: fn(usize) -> WarmupLane,
 ) -> Vec<WarmupAttemptRecord> {
     let now = i64::try_from(cc_lb_clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");
@@ -134,6 +284,7 @@ async fn seed_attempts(
                 &plugin_snapshot,
                 now,
                 index,
+                lane_for_index(index),
             )
         })
         .collect::<Vec<_>>();
@@ -152,6 +303,7 @@ fn seeded_attempt(
     plugin_snapshot: &Value,
     now: i64,
     index: usize,
+    lane: WarmupLane,
 ) -> WarmupAttemptRecord {
     let outcome = outcome_for_index(index);
     let attempted_at_unix_secs = attempted_at_for_index(now, index);
@@ -162,6 +314,7 @@ fn seeded_attempt(
         completed_at_unix_secs: Some(attempted_at_unix_secs + 2),
         scheduled_for_unix_secs: attempted_at_unix_secs - 60,
         trigger: trigger_for_index(index),
+        lane,
         outcome,
         dispatch_kind: Some(dispatch_kind_for_outcome(outcome)),
         http_status: http_status_for_outcome(outcome),

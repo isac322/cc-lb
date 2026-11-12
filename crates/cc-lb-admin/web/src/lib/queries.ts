@@ -1196,9 +1196,9 @@ export type FireNowErrorReason =
   | WarmupPermanentFailureReason;
 
 export type FireNowResponse =
-  | { fired: true; cycle_key: number }
-  | { fired: false; reason: 'lease_held'; held_by: string }
-  | { fired: false; reason: FireNowErrorReason };
+  | { fired: true; cycle_key: number; lane?: WarmupLane }
+  | { fired: false; reason: 'lease_held'; held_by: string; lane?: WarmupLane }
+  | { fired: false; reason: FireNowErrorReason; lane?: WarmupLane };
 
 /** `inlineError`: the caller renders failures next to the input, no toast. */
 export function useUpdateUpstream({
@@ -1323,14 +1323,24 @@ export function useUpstreamKeyUsage(
     POLLING_INTERVALS.USAGE_MS,
   );
 }
+export interface FireNowUpstreamWarmupVariables {
+  id: string;
+  /** Omit for the primary lane; the request then carries no `lane` query. */
+  lane?: WarmupLane;
+}
+
 export function useFireNowUpstreamWarmup() {
   const qc = useQueryClient();
   return useMutation({
     mutationKey: ['upstreams', 'fire-now'],
-    mutationFn: async (id: string): Promise<FireNowResponse> => {
+    mutationFn: async ({
+      id,
+      lane,
+    }: FireNowUpstreamWarmupVariables): Promise<FireNowResponse> => {
+      const qs = lane ? `?${new URLSearchParams({ lane })}` : '';
       try {
         const res = await fetchWithAuth(
-          `/admin/v1/upstreams/${id}/warmup/fire-now`,
+          `/admin/v1/upstreams/${id}/warmup/fire-now${qs}`,
           { method: 'POST' },
         );
         return (await res.json()) as FireNowResponse;
@@ -1349,9 +1359,15 @@ export function useFireNowUpstreamWarmup() {
         throw error;
       }
     },
-    onSuccess: async (_response, id) => {
+    onSuccess: async (_response, { id }) => {
       await qc.invalidateQueries({ queryKey: qk.upstream(id) });
       await qc.invalidateQueries({ queryKey: qk.upstreams });
+    },
+    // Any fire-now outcome records an attempt: refresh per-lane Last run and
+    // an open history drawer, including after a thrown error.
+    onSettled: async (_response, _error, { id }) => {
+      await qc.invalidateQueries({ queryKey: warmupKeys.summary(id) });
+      await qc.invalidateQueries({ queryKey: warmupKeys.attemptsAll(id) });
     },
   });
 }
@@ -1982,7 +1998,8 @@ export type WarmupSuccessReason = 'cycle_advanced' | 'window_already_active';
 export type WarmupSkipReason =
   | 'seven_day_quota_exhausted'
   | 'upstream_disabled'
-  | 'upstream_deleted';
+  | 'upstream_deleted'
+  | 'quota_group_unavailable';
 export type WarmupTransientFailureReason =
   | 'rate_limited_cycle_key_missing'
   | 'upstream_5xx'
@@ -2004,6 +2021,16 @@ export type WarmupDispatchKind = 'not_dispatched' | 'http' | 'dialect_plugin';
 
 export type WarmupTrigger = 'scheduled' | 'manual';
 
+/**
+ * Independent warm-up lane. Every warm-up kind has `primary`; Gemini OAuth
+ * also warms its Claude and GPT-OSS quota group as `third_party`.
+ */
+export type WarmupLane = 'primary' | 'third_party';
+
+export type WarmupLaneIneligibleReason =
+  | 'profile_unsupported'
+  | 'quota_group_absent';
+
 export interface WarmupDialectPluginSnapshot {
   wasm_registry_id: string;
   wire_version?: number;
@@ -2013,6 +2040,7 @@ export interface WarmupDialectPluginSnapshot {
 export interface WarmupAttempt {
   id: string;
   upstream_id: string;
+  lane: WarmupLane;
   attempted_at_unix_secs: number;
   completed_at_unix_secs: number | null;
   scheduled_for_unix_secs: number;
@@ -2035,20 +2063,23 @@ export interface WarmupAttempt {
   error_detail: string | null;
 }
 
-export interface WarmupRecentSummary {
-  success: number;
-  skipped: number;
-  transient_failure: number;
-  permanent_failure: number;
+export interface WarmupLaneSummary {
+  lane: WarmupLane;
+  eligible: boolean;
+  ineligible_reason: WarmupLaneIneligibleReason | null;
+  /** Lane target windows the account reports (absent windows are omitted). */
+  target_windows: string[];
+  next_scheduled_at_unix_secs: number | null;
+  last_attempt: WarmupAttempt | null;
+  /** Newest first, this lane only. */
+  recent_attempts: WarmupAttempt[];
 }
 
 export interface WarmupSummary {
   upstream_id: string;
-  last_attempt: WarmupAttempt | null;
-  recent_attempts: WarmupAttempt[];
-  next_scheduled_at_unix_secs: number | null;
-  recent_summary_7d: WarmupRecentSummary;
   dialect_plugin: WarmupDialectPluginSnapshot | null;
+  /** Always starts with the primary lane. */
+  lanes: WarmupLaneSummary[];
 }
 
 export interface WarmupHistoryPage {
@@ -2056,12 +2087,22 @@ export interface WarmupHistoryPage {
   next_cursor: string | null;
 }
 
+export interface WarmupAttemptFilters {
+  status?: WarmupAttemptStatus | null;
+  /** Omitted or null lists every lane. */
+  lane?: WarmupLane | null;
+  limit?: number;
+  /** Inclusive lower bound for the attempt timestamp. */
+  sinceUnixSecs?: number;
+}
+
 export const warmupKeys = {
   summary: (upstreamId: string) => ['warmup', 'summary', upstreamId] as const,
-  attempts: (
-    upstreamId: string,
-    filters: { status?: WarmupAttemptStatus | null; limit?: number },
-  ) => ['warmup', 'attempts', upstreamId, filters] as const,
+  attempts: (upstreamId: string, filters: WarmupAttemptFilters) =>
+    ['warmup', 'attempts', upstreamId, filters] as const,
+  /** Prefix matching every attempts page/filter of one upstream. */
+  attemptsAll: (upstreamId: string) =>
+    ['warmup', 'attempts', upstreamId] as const,
 };
 
 export function useWarmupSummary(upstreamId: string) {
@@ -2079,7 +2120,7 @@ export function useWarmupSummary(upstreamId: string) {
 
 export function useWarmupAttempts(
   upstreamId: string,
-  filters: { status?: WarmupAttemptStatus | null; limit?: number } = {},
+  filters: WarmupAttemptFilters = {},
   enabled = true,
 ) {
   return useInfiniteQuery({
@@ -2089,7 +2130,11 @@ export function useWarmupAttempts(
     queryFn: async ({ pageParam }) => {
       const params = new URLSearchParams();
       if (filters.status) params.set('status', filters.status);
+      if (filters.lane) params.set('lane', filters.lane);
       if (filters.limit) params.set('limit', String(filters.limit));
+      if (filters.sinceUnixSecs !== undefined) {
+        params.set('since_unix_secs', String(filters.sinceUnixSecs));
+      }
       if (pageParam) params.set('before', pageParam);
       const qs = params.toString();
       return getJson<WarmupHistoryPage>(

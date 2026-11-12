@@ -498,11 +498,14 @@ export function ConfirmDialog({
   confirmDisabled = false,
   pending = false,
   closeOnConfirm = true,
+  children,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: ReactNode;
   description?: ReactNode;
+  /** Block content (form controls) below the description paragraph. */
+  children?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;
@@ -545,6 +548,7 @@ export function ConfirmDialog({
                 {description}
               </BaseAlertDialog.Description>
             ) : null}
+            {children ? <div className="mt-3">{children}</div> : null}
           </div>
           <div className="px-4 py-3 border-t border-subtle flex flex-wrap items-center justify-end gap-2">
             {/* A destructive confirm must not be one stray Enter away: focus

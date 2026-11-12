@@ -444,7 +444,7 @@ upstream_subscription_quota_sqlite_test!(
 #[test]
 fn warmup_attempts_store_sqlite() {
     run_sqlite_scenario("warmup_attempts_store", |backend| async move {
-        warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await
+        warmup_attempts_store::run_all(backend).await
     });
 }
 
@@ -758,10 +758,6 @@ where
 
 fn prompt_cache_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
-}
-
-fn warmup_attempts_clock() -> ClockHandle {
-    Arc::new(TestClock::new_at_secs(1_800_604_800))
 }
 
 fn system_clock() -> ClockHandle {

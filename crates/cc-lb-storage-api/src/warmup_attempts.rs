@@ -3,9 +3,120 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::StorageResult;
+use crate::upstream::UpstreamKind;
+use crate::upstream_subscription_quota::SubscriptionQuotaWindow;
 
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Independent warm-up schedule for one quota group of an upstream.
+///
+/// Every warm-up kind has a `Primary` lane. `gemini_oauth` upstreams also have a
+/// `ThirdParty` lane for the Claude and GPT-OSS quota group, whose windows reset
+/// independently of the Gemini group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupLane {
+    #[default]
+    Primary,
+    ThirdParty,
+}
+
+impl WarmupLane {
+    pub const ALL: [Self; 2] = [Self::Primary, Self::ThirdParty];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::ThirdParty => "third_party",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "primary" => Some(Self::Primary),
+            "third_party" => Some(Self::ThirdParty),
+            _ => None,
+        }
+    }
+
+    /// Scheduler job-kind segment used in idempotency keys
+    /// (`adaptive:{job_kind}:{upstream_id}:...`).
+    pub const fn job_kind(self) -> &'static str {
+        match self {
+            Self::Primary => "warmup",
+            Self::ThirdParty => "warmup_third_party",
+        }
+    }
+
+    /// Lanes that exist for an upstream kind, before credential/quota eligibility.
+    pub fn lanes_for_kind(kind: UpstreamKind) -> &'static [Self] {
+        match kind {
+            UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth => &[Self::Primary],
+            UpstreamKind::GeminiOauth => &[Self::Primary, Self::ThirdParty],
+            _ => &[],
+        }
+    }
+
+    /// Quota windows this lane warms for an upstream kind.
+    pub fn target_windows(self, kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
+        match (kind, self) {
+            (UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth, Self::Primary) => &[
+                SubscriptionQuotaWindow::FiveHour,
+                SubscriptionQuotaWindow::SevenDay,
+            ],
+            (UpstreamKind::GeminiOauth, Self::Primary) => &[
+                SubscriptionQuotaWindow::GeminiFiveHour,
+                SubscriptionQuotaWindow::GeminiSevenDay,
+            ],
+            (UpstreamKind::GeminiOauth, Self::ThirdParty) => &[
+                SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                SubscriptionQuotaWindow::ThirdPartySevenDay,
+            ],
+            _ => &[],
+        }
+    }
+
+    /// Weekly windows whose exhaustion blocks this lane (and only this lane).
+    pub fn weekly_windows(self, kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
+        match (kind, self) {
+            (UpstreamKind::AnthropicOauth, Self::Primary) => &[
+                SubscriptionQuotaWindow::SevenDay,
+                SubscriptionQuotaWindow::SevenDaySonnet,
+                SubscriptionQuotaWindow::SevenDayOpus,
+                SubscriptionQuotaWindow::SevenDayFable,
+            ],
+            (UpstreamKind::OpenaiOauth, Self::Primary) => &[SubscriptionQuotaWindow::SevenDay],
+            (UpstreamKind::GeminiOauth, Self::Primary) => {
+                &[SubscriptionQuotaWindow::GeminiSevenDay]
+            }
+            (UpstreamKind::GeminiOauth, Self::ThirdParty) => {
+                &[SubscriptionQuotaWindow::ThirdPartySevenDay]
+            }
+            _ => &[],
+        }
+    }
+    /// Whether the decrypted OAuth credential can serve this lane's quota group.
+    ///
+    /// The Claude/GPT-OSS group is served only through the Antigravity profile;
+    /// Gemini CLI grants have no third-party quota.
+    pub fn credential_supports(
+        self,
+        kind: UpstreamKind,
+        bundle: &cc_lb_aead::OAuthTokenBundle,
+    ) -> bool {
+        match self {
+            Self::Primary => Self::lanes_for_kind(kind).contains(&Self::Primary),
+            Self::ThirdParty => {
+                kind == UpstreamKind::GeminiOauth
+                    && matches!(
+                        bundle.oauth_profile,
+                        cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity
+                    )
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +140,10 @@ pub enum WarmupSkipReason {
     SevenDayQuotaExhausted,
     UpstreamDisabled,
     UpstreamDeleted,
+    /// Every target window of the lane's quota group is reported absent, or the
+    /// credential profile does not serve the group (e.g. Gemini CLI has no
+    /// Claude/GPT-OSS quota). Nothing is sent.
+    QuotaGroupUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,6 +214,10 @@ pub struct WarmupAttemptRecord {
     pub completed_at_unix_secs: Option<i64>,
     pub scheduled_for_unix_secs: i64,
     pub trigger: WarmupAttemptTrigger,
+    /// Quota group this attempt warmed. Rows written before lanes existed read
+    /// back as `Primary`.
+    #[serde(default)]
+    pub lane: WarmupLane,
     #[serde(flatten)]
     pub outcome: WarmupAttemptOutcome,
     pub dispatch_kind: Option<WarmupDispatchKind>,
@@ -147,15 +266,11 @@ impl WarmupAttemptCursor {
 pub struct WarmupAttemptListFilters {
     pub limit: Option<u32>,
     pub before: Option<WarmupAttemptCursor>,
+    /// Inclusive lower bound on `attempted_at_unix_secs`; `None` includes all times.
+    pub since_unix_secs: Option<i64>,
     pub status: Option<WarmupAttemptStatus>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WarmupAttemptSummary {
-    pub success: u64,
-    pub skipped: u64,
-    pub transient_failure: u64,
-    pub permanent_failure: u64,
+    /// `None` returns attempts from every lane.
+    pub lane: Option<WarmupLane>,
 }
 
 #[async_trait]
@@ -172,19 +287,6 @@ pub trait UpstreamWarmupAttemptStore: Send + Sync {
         upstream_id: Uuid,
         filters: WarmupAttemptListFilters,
     ) -> StorageResult<Vec<WarmupAttemptRecord>>;
-
-    /// Counts outcomes for attempts with `attempted_at_unix_secs >= cutoff_unix_secs`. The caller
-    /// owns the cutoff so backends stay clock-free and behave identically across SQL dialects.
-    async fn summarize_recent_warmup_attempts(
-        &self,
-        upstream_id: Uuid,
-        cutoff_unix_secs: i64,
-    ) -> StorageResult<WarmupAttemptSummary>;
-
-    async fn latest_warmup_attempt_for_upstream(
-        &self,
-        upstream_id: Uuid,
-    ) -> StorageResult<Option<WarmupAttemptRecord>>;
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -338,5 +440,44 @@ mod tests {
             success_json,
             r#"{"status":"success","reason":"window_already_active"}"#
         );
+    }
+
+    #[test]
+    fn warmup_attempt_record_lane_serializes_and_defaults_to_primary() {
+        let record = WarmupAttemptRecord {
+            id: Uuid::from_u128(1),
+            upstream_id: Uuid::from_u128(2),
+            attempted_at_unix_secs: 10,
+            completed_at_unix_secs: Some(11),
+            scheduled_for_unix_secs: 10,
+            trigger: WarmupAttemptTrigger::Scheduled,
+            lane: WarmupLane::ThirdParty,
+            outcome: WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable),
+            dispatch_kind: Some(WarmupDispatchKind::NotDispatched),
+            http_status: None,
+            cycle_key: None,
+            expected_cycle_key: None,
+            idle_secs_since_prev_window: None,
+            replica_id: None,
+            lease_holder: None,
+            upstream_spec_revision: 1,
+            dialect_plugin_snapshot: None,
+            error_detail: None,
+        };
+
+        let mut json = serde_json::to_value(&record).expect("serialize record");
+        assert_eq!(json["lane"], "third_party");
+        assert_eq!(json["status"], "skipped");
+        assert_eq!(json["reason"], "quota_group_unavailable");
+        let decoded: WarmupAttemptRecord =
+            serde_json::from_value(json.clone()).expect("deserialize record");
+        assert_eq!(decoded, record);
+
+        json.as_object_mut()
+            .expect("record serializes as an object")
+            .remove("lane");
+        let legacy: WarmupAttemptRecord =
+            serde_json::from_value(json).expect("deserialize record without lane");
+        assert_eq!(legacy.lane, WarmupLane::Primary);
     }
 }

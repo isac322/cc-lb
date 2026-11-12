@@ -6,7 +6,7 @@ use bytes::Bytes;
 use cc_lb_domain::RoutingTrace;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord, WarmupAttemptOutcome, WarmupDispatchKind,
+    Storage, UpstreamRecord, WarmupAttemptOutcome, WarmupDispatchKind, WarmupLane,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
 use serde::Serialize;
@@ -53,6 +53,7 @@ pub trait RoutePreviewPort: Send + Sync {
 pub struct WarmupAttemptInput<'a> {
     pub storage: &'a dyn Storage,
     pub upstream: &'a UpstreamRecord,
+    pub lane: WarmupLane,
     pub scheduled_for_unix_secs: i64,
     pub lease_holder: Option<&'a str>,
     pub expected_cycle_key: Option<i64>,

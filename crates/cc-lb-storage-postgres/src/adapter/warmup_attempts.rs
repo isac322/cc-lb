@@ -1,17 +1,15 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptRecord,
-    WarmupAttemptStatus, WarmupAttemptSummary,
 };
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::{
     adapter::{
-        PostgresStorage, i64_to_u64,
+        PostgresStorage,
         warmup_attempt_mapping::{
-            dispatch_kind_to_str, outcome_components, row_to_attempt, status_from_str,
-            status_to_str, trigger_to_str,
+            dispatch_kind_to_str, outcome_components, row_to_attempt, status_to_str, trigger_to_str,
         },
     },
     error_map::map_sqlx_error,
@@ -26,10 +24,10 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
         sqlx::query(
             "INSERT INTO warmup_attempts_v1 \
               (id, upstream_id, attempted_at_unix_secs, completed_at_unix_secs, scheduled_for_unix_secs, \
-               trigger, outcome, reason, dispatch_kind, http_status, cycle_key, expected_cycle_key, \
-               idle_secs_since_prev_window, replica_id, lease_holder, upstream_spec_revision, \
-               dialect_plugin_snapshot, error_detail) \
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)",
+               trigger, lane, outcome, reason, dispatch_kind, http_status, cycle_key, \
+               expected_cycle_key, idle_secs_since_prev_window, replica_id, lease_holder, \
+               upstream_spec_revision, dialect_plugin_snapshot, error_detail) \
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19)",
         )
         .bind(attempt.id)
         .bind(attempt.upstream_id)
@@ -37,6 +35,7 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
         .bind(attempt.completed_at_unix_secs)
         .bind(attempt.scheduled_for_unix_secs)
         .bind(trigger_to_str(attempt.trigger))
+        .bind(attempt.lane.as_str())
         .bind(outcome)
         .bind(reason)
         .bind(attempt.dispatch_kind.map(dispatch_kind_to_str))
@@ -64,125 +63,44 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
             .limit
             .map(i64::from)
             .unwrap_or(DEFAULT_WARMUP_ATTEMPT_LIMIT);
-        let rows = match (filters.status, filters.before) {
-            (Some(status), Some(before)) => {
-                sqlx::query(
-                    "SELECT * FROM warmup_attempts_v1 \
-                 WHERE upstream_id = $1 \
-                 AND outcome = $2::text \
-                 AND (attempted_at_unix_secs < $3 \
-                      OR (attempted_at_unix_secs = $3 AND id < $4)) \
-                 ORDER BY attempted_at_unix_secs DESC, id DESC \
-                 LIMIT $5",
-                )
-                .bind(upstream_id)
-                .bind(status_to_str(status))
-                .bind(before.attempted_at_unix_secs)
-                .bind(before.id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-            }
-            (Some(status), None) => {
-                sqlx::query(
-                    "SELECT * FROM warmup_attempts_v1 \
-                 WHERE upstream_id = $1 \
-                 AND outcome = $2::text \
-                 ORDER BY attempted_at_unix_secs DESC, id DESC \
-                 LIMIT $3",
-                )
-                .bind(upstream_id)
-                .bind(status_to_str(status))
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-            }
-            (None, Some(before)) => {
-                sqlx::query(
-                    "SELECT * FROM warmup_attempts_v1 \
-                 WHERE upstream_id = $1 \
-                 AND (attempted_at_unix_secs < $2 \
-                      OR (attempted_at_unix_secs = $2 AND id < $3)) \
-                 ORDER BY attempted_at_unix_secs DESC, id DESC \
-                 LIMIT $4",
-                )
-                .bind(upstream_id)
-                .bind(before.attempted_at_unix_secs)
-                .bind(before.id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-            }
-            (None, None) => {
-                sqlx::query(
-                    "SELECT * FROM warmup_attempts_v1 \
-                 WHERE upstream_id = $1 \
-                 ORDER BY attempted_at_unix_secs DESC, id DESC \
-                 LIMIT $2",
-                )
-                .bind(upstream_id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-            }
+        let mut query =
+            QueryBuilder::<Postgres>::new("SELECT * FROM warmup_attempts_v1 WHERE upstream_id = ");
+        query.push_bind(upstream_id);
+        if let Some(status) = filters.status {
+            query
+                .push(" AND outcome = ")
+                .push_bind(status_to_str(status))
+                .push("::text");
         }
-        .map_err(map_sqlx_error)?;
+        if let Some(lane) = filters.lane {
+            query
+                .push(" AND lane = ")
+                .push_bind(lane.as_str())
+                .push("::text");
+        }
+        if let Some(since_unix_secs) = filters.since_unix_secs {
+            query
+                .push(" AND attempted_at_unix_secs >= ")
+                .push_bind(since_unix_secs);
+        }
+        if let Some(before) = filters.before {
+            query
+                .push(" AND (attempted_at_unix_secs < ")
+                .push_bind(before.attempted_at_unix_secs)
+                .push(" OR (attempted_at_unix_secs = ")
+                .push_bind(before.attempted_at_unix_secs)
+                .push(" AND id < ")
+                .push_bind(before.id)
+                .push("))");
+        }
+        query
+            .push(" ORDER BY attempted_at_unix_secs DESC, id DESC LIMIT ")
+            .push_bind(limit);
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
         rows.into_iter().map(row_to_attempt).collect()
-    }
-
-    async fn summarize_recent_warmup_attempts(
-        &self,
-        upstream_id: Uuid,
-        cutoff_unix_secs: i64,
-    ) -> StorageResult<WarmupAttemptSummary> {
-        let rows = sqlx::query(
-            "SELECT outcome, COUNT(*) AS attempt_count \
-             FROM warmup_attempts_v1 \
-             WHERE upstream_id = $1 \
-             AND attempted_at_unix_secs >= $2 \
-             GROUP BY outcome",
-        )
-        .bind(upstream_id)
-        .bind(cutoff_unix_secs)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        let mut summary = WarmupAttemptSummary::default();
-        for row in rows {
-            let status = status_from_str(
-                &row.try_get::<String, _>("outcome")
-                    .map_err(map_sqlx_error)?,
-            )?;
-            let count = i64_to_u64(
-                row.try_get("attempt_count").map_err(map_sqlx_error)?,
-                "warmup attempt summary count",
-            )?;
-            match status {
-                WarmupAttemptStatus::Success => summary.success = count,
-                WarmupAttemptStatus::Skipped => summary.skipped = count,
-                WarmupAttemptStatus::TransientFailure => summary.transient_failure = count,
-                WarmupAttemptStatus::PermanentFailure => summary.permanent_failure = count,
-            }
-        }
-        Ok(summary)
-    }
-
-    async fn latest_warmup_attempt_for_upstream(
-        &self,
-        upstream_id: Uuid,
-    ) -> StorageResult<Option<WarmupAttemptRecord>> {
-        sqlx::query(
-            "SELECT * FROM warmup_attempts_v1 \
-             WHERE upstream_id = $1 \
-             ORDER BY attempted_at_unix_secs DESC, id DESC \
-             LIMIT 1",
-        )
-        .bind(upstream_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .map(row_to_attempt)
-        .transpose()
     }
 }

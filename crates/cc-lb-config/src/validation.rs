@@ -33,6 +33,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
+    validate_warmup(config)?;
     validate_scheduler_keepalive_dispatch_timeout(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
@@ -46,6 +47,7 @@ pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigE
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
+    validate_warmup(config)?;
     validate_scheduler_keepalive_dispatch_timeout(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
@@ -168,6 +170,24 @@ fn validate_api_key_usage_poll(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "scheduler.recurring_jobs.api_key_usage_poll.jitter_secs",
             "API-key usage poll jitter must be less than its interval",
+        ));
+    }
+    Ok(())
+}
+
+/// Model-name prefixes billed to the Antigravity Claude/GPT-OSS quota group
+/// (the same rule routing uses to pick the third-party quota family).
+const GEMINI_THIRD_PARTY_MODEL_PREFIXES: [&str; 2] = ["claude-", "gpt-oss-"];
+
+fn validate_warmup(config: &Config) -> Result<(), ValidationError> {
+    let model = config.warmup.gemini_third_party_model.as_str();
+    if !GEMINI_THIRD_PARTY_MODEL_PREFIXES
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
+    {
+        return Err(ValidationError::new(
+            "warmup.gemini_third_party_model",
+            "Gemini third-party warm-up model must start with `claude-` or `gpt-oss-`",
         ));
     }
     Ok(())
