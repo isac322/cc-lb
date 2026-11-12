@@ -74,6 +74,9 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         if filters.lane.is_some() {
             sql.push_str(" AND lane = ?");
         }
+        if filters.since_unix_secs.is_some() {
+            sql.push_str(" AND attempted_at_unix_secs >= ?");
+        }
         if filters.before.is_some() {
             sql.push_str(
                 " AND (attempted_at_unix_secs < ? \
@@ -88,6 +91,9 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         }
         if let Some(lane) = filters.lane {
             query = query.bind(lane.as_str());
+        }
+        if let Some(since_unix_secs) = filters.since_unix_secs {
+            query = query.bind(since_unix_secs);
         }
         if let Some(cursor) = filters.before {
             query = query

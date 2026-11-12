@@ -31,6 +31,7 @@ const ATTEMPT_MAX_LIMIT: u32 = 200;
 pub(crate) struct WarmupAttemptsQuery {
     limit: Option<u32>,
     before: Option<String>,
+    since_unix_secs: Option<i64>,
     status: Option<WarmupAttemptStatus>,
     lane: Option<String>,
 }
@@ -156,6 +157,7 @@ pub(crate) async fn get_upstream_warmup(
                 WarmupAttemptListFilters {
                     limit: Some(RECENT_ATTEMPT_LIMIT),
                     before: None,
+                    since_unix_secs: None,
                     status: None,
                     lane: Some(lane),
                 },
@@ -200,12 +202,19 @@ pub(crate) async fn list_upstream_warmup_attempts(
         })?;
     let limit = normalized_limit(query.limit);
     let before = decode_before(query.before.as_deref())?;
+    if query.since_unix_secs.is_some_and(|since| since < 0) {
+        return Err(WarmupReadError::BadRequest {
+            error: "invalid_warmup_since",
+            detail: "since_unix_secs must be non-negative".to_owned(),
+        });
+    }
     let attempts = storage
         .list_warmup_attempts_for_upstream(
             upstream_id,
             WarmupAttemptListFilters {
                 limit: Some(limit),
                 before,
+                since_unix_secs: query.since_unix_secs,
                 status: query.status,
                 lane,
             },

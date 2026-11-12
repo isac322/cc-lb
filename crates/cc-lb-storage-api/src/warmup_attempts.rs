@@ -266,6 +266,8 @@ impl WarmupAttemptCursor {
 pub struct WarmupAttemptListFilters {
     pub limit: Option<u32>,
     pub before: Option<WarmupAttemptCursor>,
+    /// Inclusive lower bound on `attempted_at_unix_secs`; `None` includes all times.
+    pub since_unix_secs: Option<i64>,
     pub status: Option<WarmupAttemptStatus>,
     /// `None` returns attempts from every lane.
     pub lane: Option<WarmupLane>,

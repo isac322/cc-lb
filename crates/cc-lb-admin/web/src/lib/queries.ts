@@ -2092,6 +2092,8 @@ export interface WarmupAttemptFilters {
   /** Omitted or null lists every lane. */
   lane?: WarmupLane | null;
   limit?: number;
+  /** Inclusive lower bound for the attempt timestamp. */
+  sinceUnixSecs?: number;
 }
 
 export const warmupKeys = {
@@ -2130,6 +2132,9 @@ export function useWarmupAttempts(
       if (filters.status) params.set('status', filters.status);
       if (filters.lane) params.set('lane', filters.lane);
       if (filters.limit) params.set('limit', String(filters.limit));
+      if (filters.sinceUnixSecs !== undefined) {
+        params.set('since_unix_secs', String(filters.sinceUnixSecs));
+      }
       if (pageParam) params.set('before', pageParam);
       const qs = params.toString();
       return getJson<WarmupHistoryPage>(

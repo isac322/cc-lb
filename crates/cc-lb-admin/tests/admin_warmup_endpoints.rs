@@ -357,6 +357,70 @@ async fn test_attempts_status_filter() {
 }
 
 #[tokio::test]
+async fn test_attempts_since_filter_is_inclusive_and_paginates() {
+    let fixture = support::new_fixture().await;
+    let since = fixture.attempts[6].attempted_at_unix_secs;
+    let mut before: Option<String> = None;
+    let mut listed = Vec::new();
+    loop {
+        let mut uri = format!(
+            "/admin/v1/upstreams/{}/warmup/attempts?limit=5&since_unix_secs={since}",
+            fixture.upstream_id
+        );
+        if let Some(cursor) = &before {
+            uri.push_str("&before=");
+            uri.push_str(cursor);
+        }
+        let (status, body) = support::get_json(fixture.app.clone(), &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        listed.extend(support::attempt_ids(&body, "attempts"));
+        before = body["next_cursor"].as_str().map(str::to_owned);
+        if before.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(listed, support::expected_ids(&fixture.attempts[..=6]));
+}
+
+#[tokio::test]
+async fn test_attempts_since_zero_includes_all_rows() {
+    let fixture = support::new_fixture().await;
+    let (status, body) = support::get_json(
+        fixture.app,
+        &format!(
+            "/admin/v1/upstreams/{}/warmup/attempts?limit=50&since_unix_secs=0",
+            fixture.upstream_id
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        support::attempt_ids(&body, "attempts"),
+        support::expected_ids(&fixture.attempts)
+    );
+    assert_eq!(body["next_cursor"], Value::Null);
+}
+
+#[tokio::test]
+async fn test_attempts_negative_since_400() {
+    let fixture = support::new_fixture().await;
+    let (status, body) = support::get_json(
+        fixture.app,
+        &format!(
+            "/admin/v1/upstreams/{}/warmup/attempts?since_unix_secs=-1",
+            fixture.upstream_id
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_warmup_since");
+    assert_eq!(body["detail"], "since_unix_secs must be non-negative");
+}
+
+#[tokio::test]
 async fn test_attempts_before_cursor_excludes_rows_at_or_before() {
     let fixture = support::new_fixture().await;
     let before = support::cursor_for(&fixture.attempts[6]).encode();

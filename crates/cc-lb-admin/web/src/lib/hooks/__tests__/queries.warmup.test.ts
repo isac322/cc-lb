@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
@@ -135,6 +135,112 @@ describe('useWarmupAttempts', () => {
         }),
       ),
     ).toBeUndefined();
+  });
+
+  test.each([0, 1_799_913_600, 1_799_395_200])(
+    'sends the inclusive time bound %s and keys the cache by it',
+    async (sinceUnixSecs) => {
+      const fetchMock = stubFetchOnce({ attempts: [], next_cursor: null });
+      const client = makeClient();
+      const { result } = renderHook(
+        () =>
+          useWarmupAttempts(UPSTREAM_ID, {
+            status: 'success',
+            lane: 'primary',
+            limit: 50,
+            sinceUnixSecs,
+          }),
+        { wrapper: makeWrapper(client) },
+      );
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      const url = new URL(requestFrom(fetchMock).url, 'http://localhost');
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        status: 'success',
+        lane: 'primary',
+        limit: '50',
+        since_unix_secs: String(sinceUnixSecs),
+      });
+      expect(
+        client.getQueryData(
+          warmupKeys.attempts(UPSTREAM_ID, {
+            status: 'success',
+            lane: 'primary',
+            limit: 50,
+            sinceUnixSecs,
+          }),
+        ),
+      ).toBeDefined();
+      expect(
+        client.getQueryData(
+          warmupKeys.attempts(UPSTREAM_ID, {
+            status: 'success',
+            lane: 'primary',
+            limit: 50,
+            sinceUnixSecs: sinceUnixSecs + 1,
+          }),
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  test('keeps the time bound on older pages and resets pagination for a new range', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ attempts: [], next_cursor: 'older-page' }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ attempts: [], next_cursor: null }))
+      .mockResolvedValueOnce(jsonResponse({ attempts: [], next_cursor: null }))
+      .mockResolvedValueOnce(jsonResponse({ attempts: [], next_cursor: null }));
+    vi.stubGlobal('fetch', fetchMock);
+    const since24h = 1_799_913_600;
+    const since7d = 1_799_395_200;
+    const initialProps: { sinceUnixSecs: number | undefined } = {
+      sinceUnixSecs: since24h,
+    };
+    const { result, rerender } = renderHook(
+      ({ sinceUnixSecs }) =>
+        useWarmupAttempts(UPSTREAM_ID, { limit: 50, sinceUnixSecs }),
+      {
+        initialProps,
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true));
+
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
+    const olderUrl = new URL(
+      String(fetchMock.mock.calls[1][0]),
+      'http://localhost',
+    );
+    expect(olderUrl.searchParams.get('since_unix_secs')).toBe(String(since24h));
+    expect(olderUrl.searchParams.get('before')).toBe('older-page');
+
+    rerender({ sinceUnixSecs: since7d });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.pages).toHaveLength(1);
+    expect(result.current.data?.pageParams).toEqual([undefined]);
+    const weekUrl = new URL(
+      String(fetchMock.mock.calls[2][0]),
+      'http://localhost',
+    );
+    expect(weekUrl.searchParams.get('since_unix_secs')).toBe(String(since7d));
+    expect(weekUrl.searchParams.has('before')).toBe(false);
+
+    rerender({ sinceUnixSecs: undefined });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.pages).toHaveLength(1);
+    expect(result.current.data?.pageParams).toEqual([undefined]);
+    const allUrl = new URL(
+      String(fetchMock.mock.calls[3][0]),
+      'http://localhost',
+    );
+    expect(allUrl.searchParams.has('since_unix_secs')).toBe(false);
+    expect(allUrl.searchParams.has('before')).toBe(false);
   });
 });
 describe('useFireNowUpstreamWarmup', () => {

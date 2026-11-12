@@ -133,6 +133,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
                 WarmupAttemptListFilters {
                     limit: Some(10),
                     before: None,
+                    since_unix_secs: None,
                     status: None,
                     lane: None,
                 },
@@ -149,6 +150,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             WarmupAttemptListFilters {
                 limit: Some(10),
                 before: None,
+                since_unix_secs: None,
                 status: None,
                 lane: None,
             },

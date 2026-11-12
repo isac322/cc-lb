@@ -78,6 +78,11 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
                 .push_bind(lane.as_str())
                 .push("::text");
         }
+        if let Some(since_unix_secs) = filters.since_unix_secs {
+            query
+                .push(" AND attempted_at_unix_secs >= ")
+                .push_bind(since_unix_secs);
+        }
         if let Some(before) = filters.before {
             query
                 .push(" AND (attempted_at_unix_secs < ")

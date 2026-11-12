@@ -155,6 +155,8 @@ Use `POST /admin/v1/upstreams/{id}/warmup/fire-now`. Manual fire uses the stored
 
 Every attempt record carries a `lane` field. Attempts recorded before lanes existed read back as `primary`. `GET /admin/v1/upstreams/{id}/warmup/attempts?lane=third_party` filters history to one lane; without `lane`, it returns every lane.
 
+History also accepts `status`, `limit`, `before` (an opaque pagination cursor), and `since_unix_secs` (non-negative integer Unix seconds). The time filter includes attempts at or after the supplied second and combines with the other filters before pagination. Keep the same `since_unix_secs` when following `next_cursor`; omit it for all-time history. A negative value returns `400 invalid_warmup_since`.
+
 The upstream's `status.last_warmup_at_unix_secs` is the time any lane last succeeded.
 
 ## What you'll see

@@ -22,6 +22,7 @@ where
     insert_and_read_back(Arc::clone(&backend)).await?;
     cursor_pagination(Arc::clone(&backend)).await?;
     outcome_filter(Arc::clone(&backend)).await?;
+    since_filter(Arc::clone(&backend)).await?;
     fk_cascade_on_upstream_delete(Arc::clone(&backend)).await?;
     lane_round_trip_and_filter(Arc::clone(&backend)).await?;
     row_without_lane_reads_as_primary(backend).await?;
@@ -131,6 +132,94 @@ scenario!(outcome_filter, |storage| async move {
     ensure!(
         ids(&listed) == [records[4].id, records[2].id, records[0].id],
         "filtered rows should be ordered newest first"
+    );
+    Ok(())
+});
+
+scenario!(since_filter, |storage| async move {
+    let upstream = create_upstream(storage.as_ref(), "warmup-since-filter").await?;
+    let since = 1_800_000_010;
+    let success = WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced);
+    let skipped = WarmupAttemptOutcome::Skipped(WarmupSkipReason::QuotaGroupUnavailable);
+    let records = [
+        (since - 1, WarmupLane::ThirdParty, success),
+        (since, WarmupLane::ThirdParty, success),
+        (since, WarmupLane::ThirdParty, success),
+        (since + 1, WarmupLane::Primary, success),
+        (since + 2, WarmupLane::ThirdParty, skipped),
+        (since + 3, WarmupLane::ThirdParty, success),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (timestamp, lane, outcome))| {
+        lane_attempt(upstream.id, index as u128 + 1, timestamp, lane, outcome)
+    })
+    .collect::<Vec<_>>();
+    insert_all(storage.as_ref(), &records).await?;
+
+    let listed = storage
+        .list_warmup_attempts_for_upstream(
+            upstream.id,
+            WarmupAttemptListFilters {
+                since_unix_secs: Some(since),
+                ..Default::default()
+            },
+        )
+        .await?;
+    ensure!(
+        ids(&listed)
+            == [
+                records[5].id,
+                records[4].id,
+                records[3].id,
+                records[2].id,
+                records[1].id,
+            ],
+        "since should exclude older rows and include every row at the boundary"
+    );
+
+    let mut before = None;
+    for expected in [
+        Some(&records[5]),
+        Some(&records[2]),
+        Some(&records[1]),
+        None,
+    ] {
+        let page = storage
+            .list_warmup_attempts_for_upstream(
+                upstream.id,
+                WarmupAttemptListFilters {
+                    limit: Some(1),
+                    before,
+                    since_unix_secs: Some(since),
+                    status: Some(WarmupAttemptStatus::Success),
+                    lane: Some(WarmupLane::ThirdParty),
+                },
+            )
+            .await?;
+        let expected_ids = expected
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        ensure!(
+            ids(&page) == expected_ids,
+            "since should combine with lane, status, limit, and cursor without crossing its boundary"
+        );
+        before = page.last().map(cursor);
+    }
+
+    ensure!(
+        storage
+            .list_warmup_attempts_for_upstream(
+                upstream.id,
+                WarmupAttemptListFilters {
+                    since_unix_secs: Some(since + 4),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .is_empty(),
+        "since newer than every row should return no attempts"
     );
     Ok(())
 });

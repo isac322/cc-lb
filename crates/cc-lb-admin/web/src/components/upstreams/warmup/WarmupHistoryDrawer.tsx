@@ -69,17 +69,14 @@ function OverviewStrip({
   horizon: Horizon;
   isPending: boolean;
 }) {
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = horizon === 'all' ? 0 : now - HORIZON_SECS[horizon];
-  const inWindow = attempts.filter((a) => a.attempted_at_unix_secs >= cutoff);
   const counts = {
     success: 0,
     transient_failure: 0,
     permanent_failure: 0,
     skipped: 0,
   };
-  for (const a of inWindow) counts[a.status]++;
-  const total = inWindow.length;
+  for (const a of attempts) counts[a.status]++;
+  const total = attempts.length;
   const failed = counts.transient_failure + counts.permanent_failure;
   // The merged "failed" count shows the worst unresolved severity: any
   // permanent failure is danger, transient-only retries stay warn.
@@ -87,7 +84,7 @@ function OverviewStrip({
 
   // Dominant failure reason.
   const reasonCounts = new Map<string, number>();
-  for (const a of inWindow) {
+  for (const a of attempts) {
     if (a.status === 'permanent_failure' || a.status === 'transient_failure') {
       const r = a.reason ?? 'unknown';
       reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + 1);
@@ -201,6 +198,13 @@ export function WarmupHistoryDrawer({
   const [selected, setSelected] = useState<WarmupAttempt | null>(null);
   const multiLane = lanes.length > 1;
   const lane = multiLane && laneFilter !== 'all' ? laneFilter : null;
+  const sinceUnixSecs = useMemo(
+    () =>
+      open && horizon !== 'all'
+        ? Math.floor(Date.now() / 1000) - HORIZON_SECS[horizon]
+        : undefined,
+    [open, horizon],
+  );
 
   const query = useWarmupAttempts(
     upstream.id,
@@ -208,6 +212,7 @@ export function WarmupHistoryDrawer({
       status: filter === 'all' ? null : filter,
       lane,
       limit: 50,
+      sinceUnixSecs,
     },
     open,
   );
@@ -238,7 +243,10 @@ export function WarmupHistoryDrawer({
               ariaLabel="History range"
               size="sm"
               value={horizon}
-              onChange={setHorizon}
+              onChange={(next) => {
+                setSelected(null);
+                setHorizon(next);
+              }}
               options={HORIZON_OPTIONS}
             />
           </span>
