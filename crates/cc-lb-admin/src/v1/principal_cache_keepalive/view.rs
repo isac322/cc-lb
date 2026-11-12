@@ -357,7 +357,7 @@ pub(crate) fn row_from_activity(
         last_message_at_ms: item.last_message_at_ms,
         state: activity.state,
         ttl: Some(ttl_name(item.ttl)),
-        attempts: item.refresh_count,
+        attempts: activity.attempts,
         max_attempts: item
             .config_snapshot
             .as_ref()
