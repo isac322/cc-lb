@@ -215,9 +215,8 @@ test('OpenAI keepalive controls remain reachable across responsive principal det
     await page.keyboard.press('Escape');
 
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await expect(page.getByTestId('cache-keepalive-scope')).toContainText(
-      'Principal-wide history',
-    );
+    await expect(page.getByRole('dialog', { name: 'Cache keepalive sessions' })).toBeVisible();
+    await expect(page.getByText(/Principal-wide|All providers/)).toHaveCount(0);
     await page.keyboard.press('Escape');
   }
 });
@@ -267,12 +266,12 @@ for (const key of ['Enter', 'Space', 'hover']) {
 }
 
 const sessionStates = [
-  ['renewed', 'Renewed'],
-  ['scheduled', 'Scheduled'],
-  ['in_request', 'In request'],
-  ['capped', 'Capped'],
+  ['renewed', 'Warm'],
+  ['scheduled', 'Warm'],
+  ['in_request', 'In use'],
+  ['capped', 'At limit'],
   ['expired', 'Expired'],
-  ['cancelled', 'Cancelled'],
+  ['cancelled', 'Returned'],
   ['failed', 'Failed'],
   ['not_tracked', 'Not tracked'],
 ] as const;
@@ -290,7 +289,7 @@ async function installCycleFixtures(page: Page) {
     attempts: 1,
     retained_renewals: 3,
     max_attempts: 12,
-    reason: state === 'cancelled' ? 'Cancelled: new request' : state,
+    reason: state === 'cancelled' ? 'A new request arrived' : state,
     cancel_reason: state === 'cancelled' ? 'new_request' : null,
     generation: 3,
     upstream: 'Fixture upstream',
@@ -358,8 +357,9 @@ for (const width of [390, 1440]) {
     await installCycleFixtures(page);
     await page.goto(`/principals?selectedId=${PRINCIPAL_ID}`);
     await page.getByRole('button', { name: 'Sessions', exact: true }).click();
-    for (const [, label] of sessionStates) {
-      await expect(page.getByRole('status', { name: `Session state: ${label}`, exact: true })).toBeVisible();
+    for (let index = 0; index < sessionStates.length; index += 1) {
+      const label = sessionStates[index][1];
+      await expect(page.locator('[data-session-id]').nth(index).getByRole('status', { name: `Session state: ${label}`, exact: true })).toBeVisible();
     }
     await expect(page.locator('[data-session-id]').nth(0)).toContainText('01a1c484…aaaaaa');
     await expect(page.locator('[data-session-id]').nth(1)).toContainText('01a1c484…bbbbbb');
@@ -372,15 +372,22 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('region', { name: 'Cycle 1 timeline' })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Cycle 2 timeline' })).toBeVisible();
     await expect(page.getByText('11-10 23:58:00', { exact: true })).toBeVisible();
-    await expect(page.getByText('11-11 00:02:50', { exact: true })).toBeVisible();
-    await expect(page.getByRole('table', { name: 'Cycle 1 renewals' }).getByText('11-11 00:02:30', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('Follow-up outcomes')).toHaveText('Observed 1 · No follow-up 0 · Unknown 1 · Pending 0');
-    for (const label of ['Cycle 1', 'Cycle 2', 'Unknown cycle']) {
-      const table = page.getByRole('table', { name: `${label} renewals`, exact: true });
-      await expect(table).toBeVisible();
-      await expect(table.getByRole('row')).toHaveCount(2);
-    }
-    await expect(page.getByRole('table', { name: 'Cycle 2 renewals' }).getByText('Miss', { exact: true })).toBeVisible();
+    await expect(page.getByText('Next message 11-11 00:02:50', { exact: true })).toBeVisible();
+    await expect(page.getByRole('table')).toHaveCount(0);
+    await expect(page.getByLabel('Follow-up outcomes')).toHaveAttribute('title', '1 observed · 0 no follow-up · 1 unknown · 0 pending');
+    const firstCycle = page.getByRole('region', { name: 'Cycle 1 timeline' });
+    await firstCycle.getByRole('button', { name: /Renewal #1:/ }).click();
+    await expect(page.getByRole('tooltip')).toContainText('Hit');
+    await expect(page.getByRole('tooltip')).toContainText('11 Nov 2026, 00:02:30');
+    await expect(page.getByRole('tooltip')).toContainText('Observed');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Cache keepalive sessions' })).toBeVisible();
+    const secondCycle = page.getByRole('region', { name: 'Cycle 2 timeline' });
+    await secondCycle.getByRole('button', { name: /Renewal #1:/ }).click();
+    await expect(page.getByRole('tooltip')).toContainText('Unknown');
+    await expect(page.getByRole('tooltip')).toContainText('Net');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('region', { name: 'Additional renewal evidence' })).toContainText('Net +$0.03');
     await expect(page.locator('html')).toHaveJSProperty('scrollWidth', width);
     await page.screenshot({ path: testInfo.outputPath(`cycles-${width}.png`), animations: 'disabled' });
   });
@@ -404,13 +411,13 @@ for (const width of [390, 1440]) {
     fixture.rows[0].state = 'cancelled';
     fixture.rows[0].is_active = false;
     fixture.rows[0].cancel_reason = 'new_request';
-    fixture.rows[0].reason = 'Cancelled: new request';
+    fixture.rows[0].reason = 'A new request arrived';
     await page.clock.fastForward(5_000);
     await expect(page.getByTestId('session-detail-loading')).toBeVisible();
     await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`lifecycle-loading-${width}.png`), animations: 'disabled' });
     resume.resolve();
-    await expect(page.getByText('Cancelled: new request', { exact: true })).toBeVisible();
+    await expect(page.getByText('A new request arrived', { exact: true })).toBeVisible();
     await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`lifecycle-cancelled-${width}.png`), animations: 'disabled' });
   });

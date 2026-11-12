@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import {
+  ArrowLeft,
   ChevronDown,
   ChevronRight,
   CornerDownRight,
@@ -32,6 +33,7 @@ import {
   fmtUsdSigned,
   SessionDetailPane,
 } from './SessionDetailPane';
+import { type StateTone, sessionStateDisplay } from './sessionStateDisplay';
 
 interface Props {
   open: boolean;
@@ -44,7 +46,7 @@ const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
   { value: '6h', label: '6h' },
   { value: '24h', label: '24h' },
   { value: '7d', label: '7d' },
-  { value: 'all', label: 'All' },
+  { value: 'all', label: 'All time' },
 ];
 
 export interface SplitUsdParts {
@@ -54,7 +56,7 @@ export interface SplitUsdParts {
 }
 
 /**
- * Formats a USD amount without trailing zero padding, splitting at the decimal point `.`
+ * Formats a USD amount, retaining cents from $0.10, and splits at the decimal point `.`
  * so all rows in the same alignment scope align their `.` at the exact same X coordinate.
  */
 export function splitUsdNoTrailingZeros(
@@ -67,10 +69,9 @@ export function splitUsdNoTrailingZeros(
   if (Math.abs(val) < 0.00005) {
     return { intPart: '$0', fracDigits: '', hasDot: false };
   }
+  const formatted = signed || val < 0 ? fmtUsdSigned(val) : fmtUsdPlain(val);
+  const fixed = formatted.slice(formatted.indexOf('$') + 1);
   const sign = val > 0 ? (signed ? '+' : '') : '−';
-  const abs = Math.abs(val);
-  const precision = abs >= 0.1 ? 2 : 4;
-  const fixed = abs.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '');
   const dotIdx = fixed.indexOf('.');
   if (dotIdx === -1) {
     return { intPart: `${sign}$${fixed}`, fracDigits: '', hasDot: false };
@@ -106,37 +107,27 @@ export function DecimalAlignedUsd({
     value,
     signed,
   );
-  const fullText = hasDot ? `${intPart}.${fracDigits}` : intPart;
-  const padRightCh =
-    maxFracDigits <= 0
-      ? 0
-      : hasDot
-        ? Math.max(0, maxFracDigits - fracDigits.length)
-        : maxFracDigits + 1;
+  const padRightCh = Math.max(0, maxFracDigits - fracDigits.length);
 
   return (
     <span
       data-decimal-scope={scope}
       style={padRightCh > 0 ? { paddingRight: `${padRightCh}ch` } : undefined}
       className={cx(
-        'inline-flex shrink-0 whitespace-nowrap items-baseline justify-end font-mono text-data tabular-nums',
+        'inline-flex shrink-0 whitespace-nowrap items-baseline justify-end text-caption tabular-nums',
         pnlTone(value),
         className,
       )}
     >
-      {fullText}
+      {intPart}
       {hasDot ? (
-        <span data-decimal-dot={scope} aria-hidden="true" className="hidden" />
+        <span data-decimal-dot={scope}>.</span>
+      ) : maxFracDigits > 0 ? (
+        <span aria-hidden="true" className="invisible after:content-['.']" />
       ) : null}
+      {fracDigits}
     </span>
   );
-}
-
-function sessionDotTone(row: CacheKeepaliveRow): string {
-  if (row.error != null || row.state === 'failed') return 'danger';
-  if (row.state === 'scheduled') return 'live';
-  if (row.state === 'renewed') return 'ok';
-  return 'neutral';
 }
 
 function threadId(id: string): string {
@@ -149,6 +140,20 @@ function sessionLabels(
   rows: CacheKeepaliveRow[],
   assigned: Map<string, string>,
 ) {
+  // Labels stay stable, except that a bare prefix becomes ambiguous once a
+  // peer sharing it loads; upgrade it so neither row keeps the bare prefix.
+  for (const row of rows) {
+    const prefix = threadId(row.id).slice(0, 8);
+    if (
+      assigned.get(row.id) === prefix &&
+      threadId(row.id) !== prefix &&
+      rows.some(
+        (peer) =>
+          peer.id !== row.id && threadId(peer.id).slice(0, 8) === prefix,
+      )
+    )
+      assigned.delete(row.id);
+  }
   const used = new Set(assigned.values());
   for (const row of rows) {
     if (assigned.has(row.id)) continue;
@@ -182,17 +187,6 @@ function sessionLabels(
   return assigned;
 }
 
-const SESSION_STATE_LABELS: Record<CacheKeepaliveRow['state'], string> = {
-  renewed: 'Renewed',
-  scheduled: 'Scheduled',
-  in_request: 'In request',
-  capped: 'Capped',
-  expired: 'Expired',
-  cancelled: 'Cancelled',
-  failed: 'Failed',
-  not_tracked: 'Not tracked',
-};
-
 function SessionMasterRow({
   row,
   label,
@@ -207,12 +201,10 @@ function SessionMasterRow({
   onSelect: () => void;
 }) {
   const renewals = row.retained_renewals ?? row.attempts ?? 0;
-  const renewalLabel =
-    renewals === 0
-      ? row.state === 'scheduled'
-        ? 'scheduled'
-        : '0×'
-      : `${renewals}×`;
+  const renewalLabel = `${renewals.toLocaleString('en-US')} ${renewals === 1 ? 'renewal' : 'renewals'}`;
+  const display = sessionStateDisplay(row.state);
+  const tone: StateTone = row.error != null ? 'danger' : display.tone;
+  const badgeTone = tone === 'live' ? 'accent' : tone;
 
   return (
     <button
@@ -230,31 +222,20 @@ function SessionMasterRow({
       onClick={onSelect}
     >
       <span className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1">
-        <span
-          aria-hidden="true"
-          className={cx('status-dot shrink-0', sessionDotTone(row))}
-        />
-        <span className="break-all font-mono text-data text-text">{label}</span>
+        <span aria-hidden="true" className={cx('status-dot shrink-0', tone)} />
+        <span className="min-w-0 truncate font-mono text-data text-text">
+          {label}
+        </span>
         <span className="col-start-2 flex flex-wrap items-center gap-2">
           <span className="shrink-0 text-caption text-text-faint tabular-nums">
             {renewalLabel}
           </span>
           <span
             role="status"
-            aria-label={`Session state: ${SESSION_STATE_LABELS[row.state]}`}
+            aria-label={`Session state: ${display.label}`}
             className="shrink-0"
           >
-            <Badge
-              tone={
-                row.state === 'failed'
-                  ? 'danger'
-                  : row.state === 'renewed'
-                    ? 'ok'
-                    : 'neutral'
-              }
-            >
-              {SESSION_STATE_LABELS[row.state]}
-            </Badge>
+            <Badge tone={badgeTone}>{display.label}</Badge>
           </span>
         </span>
       </span>
@@ -322,66 +303,76 @@ function SheetSummaryHeader({
 }) {
   const effectiveCostSaved = summary?.cost_saved ?? null;
   const effectiveTotalAvoided = summary?.total_avoided ?? null;
+  const qualification = summary
+    ? effectiveCostSaved === null
+      ? 'Price unknown'
+      : summary.evidence_status !== 'observed'
+        ? `Follow-up ${summary.evidence_status}`
+        : null
+    : null;
 
   return (
     <header
-      className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-subtle px-4 py-2.5"
+      className="shrink-0 border-b border-subtle px-4 py-3"
       data-testid="cache-keepalive-pnl-equation"
     >
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-body-sm tabular-nums">
-        {isLoading ? (
-          <Skeleton className="h-5 w-52" />
-        ) : summary ? (
-          <>
-            <span
-              className={cx(
-                'font-medium whitespace-nowrap',
-                pnlTone(effectiveCostSaved),
-              )}
-            >
-              Net {fmtUsdSigned(effectiveCostSaved)}
-            </span>
+      <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-between">
+        <div className="order-2 min-w-0 md:order-1 md:flex-1">
+          {isLoading ? (
+            <Skeleton className="h-5 w-52" />
+          ) : summary ? (
+            <>
+              <dl className="grid grid-cols-3 gap-x-5 tabular-nums md:flex md:gap-x-6">
+                <div>
+                  <dt className="text-caption text-text-faint">Net</dt>
+                  <dd
+                    className={cx(
+                      'text-body font-medium',
+                      pnlTone(effectiveCostSaved),
+                    )}
+                  >
+                    {fmtUsdSigned(effectiveCostSaved)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-caption text-text-faint">Saved</dt>
+                  <dd className="text-body text-text">
+                    {fmtUsdPlain(effectiveTotalAvoided)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-caption text-text-faint">Spent</dt>
+                  <dd className="text-body text-text">
+                    {fmtUsdPlain(summary.total_spent)}
+                  </dd>
+                </div>
+              </dl>
+              {qualification ? (
+                <p className="mt-1 text-caption text-text-faint">
+                  {qualification}
+                </p>
+              ) : null}
+            </>
+          ) : (
             <span className="text-caption text-text-faint">
-              Saved{' '}
-              <span className="whitespace-nowrap">
-                {fmtUsdPlain(effectiveTotalAvoided)}
-              </span>{' '}
-              · Spent{' '}
-              <span className="whitespace-nowrap">
-                {fmtUsdPlain(summary.total_spent)}
-              </span>
+              No summary available
             </span>
-            {effectiveCostSaved === null ? (
-              <span className="text-caption text-text-faint">
-                · Price unknown
-              </span>
-            ) : summary.evidence_status !== 'observed' ? (
-              <span className="text-caption text-text-faint">
-                · Follow-up {summary.evidence_status}
-              </span>
-            ) : null}
-          </>
-        ) : (
-          <span className="text-caption text-text-faint">
-            No summary available
-          </span>
-        )}
-      </div>
-
-      {showHorizon ? (
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="shrink-0 text-caption text-text-muted">
-            Showing {horizon === 'all' ? 'All time' : `Last ${horizon}`}
-          </span>
-          <SegmentedControl
-            ariaLabel="Time range"
-            size="sm"
-            value={horizon}
-            onChange={onHorizonChange}
-            options={HORIZON_OPTIONS}
-          />
+          )}
         </div>
-      ) : null}
+
+        {showHorizon ? (
+          <div className="order-1 flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 md:order-2 md:justify-end">
+            <SegmentedControl
+              ariaLabel="Time range"
+              size="sm"
+              value={horizon}
+              onChange={onHorizonChange}
+              options={HORIZON_OPTIONS}
+              className="max-md:w-full max-md:[&>button]:flex-1"
+            />
+          </div>
+        ) : null}
+      </div>
     </header>
   );
 }
@@ -537,6 +528,10 @@ export function CacheKeepaliveSessionsDrawer({
     : null;
   const showMobileDetail = hasSelection;
   const summary = query.data?.pages[0]?.summary ?? undefined;
+  const hasSplitContent =
+    !query.isLoading &&
+    !(query.isError && !query.data) &&
+    (groups.length > 0 || (summary?.unlisted_sessions ?? 0) > 0);
   const totalSessions = groups.reduce(
     (total, group) => total + group.sessions,
     0,
@@ -554,18 +549,12 @@ export function CacheKeepaliveSessionsDrawer({
       title="Cache keepalive sessions"
       description={principal.name}
       width="xl"
+      bodyScroll={false}
     >
       <div
         className="flex h-full min-h-0 flex-col"
         data-testid="cache-keepalive-sessions-body"
       >
-        <p
-          className="shrink-0 border-b border-subtle px-4 py-2 text-caption text-text-muted"
-          data-testid="cache-keepalive-scope"
-        >
-          Principal-wide history. The current provider lens does not filter
-          these sessions.
-        </p>
         <SheetSummaryHeader
           horizon={horizon}
           summary={summary}
@@ -599,7 +588,10 @@ export function CacheKeepaliveSessionsDrawer({
         ) : null}
 
         <div
-          className="min-h-0 flex-1 overflow-y-auto"
+          className={cx(
+            'min-h-0 flex-1 overflow-y-auto',
+            hasSplitContent && 'md:overflow-hidden',
+          )}
           data-testid="cache-keepalive-session-list-region"
           aria-busy={query.isLoading}
         >
@@ -631,12 +623,12 @@ export function CacheKeepaliveSessionsDrawer({
               description="No sessions recorded in this horizon."
             />
           ) : (
-            <div className="min-h-full md:grid md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
+            <div className="min-h-full md:grid md:h-full md:min-h-0 md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
               {/* Left Pane: Collapsible Trigger groups + Decimal-aligned USD columns */}
               <div
                 className={cx(
                   showMobileDetail ? 'hidden md:block' : 'block',
-                  'divide-y divide-row px-2 py-2',
+                  'min-h-0 divide-y divide-row px-2 py-2 md:h-full md:overflow-y-auto',
                 )}
               >
                 {groups.map((group) => {
@@ -764,13 +756,6 @@ export function CacheKeepaliveSessionsDrawer({
                       Load more sessions
                     </Button>
                   </div>
-                ) : pagesComplete ? (
-                  <p
-                    className="px-2 py-2 text-caption text-text-muted"
-                    data-testid="cache-keepalive-all-sessions"
-                  >
-                    All {totalSessions} sessions shown
-                  </p>
                 ) : null}
               </div>
 
@@ -778,7 +763,7 @@ export function CacheKeepaliveSessionsDrawer({
               <div
                 className={cx(
                   showMobileDetail ? 'block' : 'hidden',
-                  'min-w-0 md:block',
+                  'min-h-0 min-w-0 md:block md:h-full md:overflow-y-auto',
                 )}
               >
                 {selectedSessionHidden ? (
@@ -792,6 +777,10 @@ export function CacheKeepaliveSessionsDrawer({
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="min-h-11"
+                      iconLeft={
+                        <ArrowLeft aria-hidden="true" strokeWidth={1.75} />
+                      }
                       onClick={() => setSelectedSessionId(null)}
                     >
                       Back to sessions

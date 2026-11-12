@@ -381,23 +381,31 @@ where
         ensure!(cancelled.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
         ensure!(!cancelled.request_incomplete && cancelled.cancel_reason.as_deref() == Some("user_turn_detected"));
         for (index, (cancel_reason, expected_reason)) in [
-            ("ambiguous_turn", "Cancelled: the agent turn could not be determined"),
-            ("retention_recorded", "Retention recorded without renewal"),
-            ("renewal_not_beneficial", "Refresh expected value is unknown or non-positive"),
-            ("session_identity_changed", "Cancelled: the request completed under a different cache identity"),
-            ("completed_not_renewable", "Cancelled: request completed, renewal not possible"),
+            (Some("new_request"), "A new request arrived"),
+            (Some("user_turn_detected"), "The agent is waiting for the user"),
+            (Some("snapshot_too_large"), "The request snapshot is too large"),
+            (Some("cached_prefix_too_small"), "The cached prefix is too small"),
+            (Some("zero_token_renewal_unsupported"), "Zero-token renewals are unsupported"),
+            (Some("ambiguous_turn"), "The agent turn could not be determined"),
+            (Some("retention_recorded"), "Retention recorded without renewal"),
+            (Some("renewal_not_beneficial"), "Refresh expected value is unknown or non-positive"),
+            (Some("session_identity_changed"), "The request completed under a different cache identity"),
+            (Some("completed_not_renewable"), "Request completed, renewal not possible"),
+            (None, "Renewals ended"),
         ].into_iter().enumerate() {
             let now = 1_100 + index as u64;
             storage.replace_from_real_request(&request("final-reason", now)).await?;
-            ensure!(
-                storage.begin_cache_keepalive_request_fenced(
-                    "final-reason", None, now, 4_000_000_000,
-                ).await?
-            );
+            if cancel_reason != Some("new_request") {
+                ensure!(
+                    storage.begin_cache_keepalive_request_fenced(
+                        "final-reason", None, now, 4_000_000_000,
+                    ).await?
+                );
+            }
             ensure!(
                 storage.cancel_cache_keepalive_fenced(
                     "final-reason", None, now, CacheKeepaliveTerminalReason::Cancelled,
-                    Some(cancel_reason), now + 1,
+                    cancel_reason, now + 1,
                 ).await?
             );
             let final_row = storage.get_cache_keepalive_list_item(
@@ -406,7 +414,7 @@ where
             ensure!(final_row.status == Some(CacheKeepaliveSessionStatus::Terminal));
             ensure!(final_row.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
             ensure!(!final_row.request_incomplete && final_row.error.is_none());
-            ensure!(final_row.cancel_reason.as_deref() == Some(cancel_reason));
+            ensure!(final_row.cancel_reason.as_deref() == cancel_reason);
             ensure!(final_row.reason == expected_reason);
         }
         // A newly scheduled session with no renewal history stays visible while

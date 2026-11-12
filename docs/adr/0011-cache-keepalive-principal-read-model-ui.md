@@ -35,13 +35,18 @@ The Principal-detail surfaces stay live through the existing admin-web React Que
 
 - The session sheet polls only the first page. Later loaded pages refresh once when row/session state-bearing summary fields or groups change, when the first-page boundary changes (the last row's id or message timestamp, or whether another page exists), or when the sheet reopens. The clock-driven `sessions_last_5m` field does not trigger a tail refresh. Cursor tokens are opaque: a rolling horizon changes their embedded horizon start without necessarily moving the page boundary. A state change on a later page can remain stale until one of those refresh conditions occurs; this is the accepted trade-off for one-request polling. Polling and "Load more sessions" share a serialization queue, and queued page loads are dropped if the selected query key changes.
 - While the sheet is open the card pauses its own summary poll; when the sheet shows the 24h horizon it writes its overview summary into the card's query.
-- The open session detail polls while the session is active, In request, or its follow-up evidence is pending, and refetches when the selected row's generation, state, or economics changes in the list.
+- The open session detail polls while the session is active, in the `in_request` state, or its follow-up evidence is pending, and refetches when the selected row's generation, state, or economics changes in the list.
 
 A pure client-side merge dedupes rows by id, and a FLIP transition animates a row that rises. This reuses an established pattern and adds no new transport abstraction.
 
 ### Explicit state model with an orthogonal error flag
 
-Sessions are displayed as exactly one base state — Renewed, Scheduled, In request, Capped, Expired, Cancelled, Failed, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Capped means only the renewal or duration cap; Failed covers dispatch, decrypt, unsupported-provider, and stale renewal terminals. An expired real-request marker instead projects as Expired with the neutral reason “Request did not complete before its deadline”. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not an extra base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip. When keep-alive is disabled for the principal, the sheet lists with the `all` status so retained decisions stay visible.
+Each session has exactly one API/read-model base state — `renewed`, `scheduled`, `in_request`, `capped`, `expired`, `cancelled`, `failed`, or `not_tracked` — derived server-side from the stored status/terminal-reason/refresh-count. The `capped` state means only the renewal or duration cap; `failed` covers dispatch, decrypt, unsupported-provider, and stale renewal terminals. An expired real-request marker projects as `expired` with the neutral reason “Request did not complete before its deadline”.
+
+The rendered lifecycle labels are separate: `scheduled` and `renewed` → **Warm** (live/accent), `in_request` → **In use** (neutral), `cancelled` → **Returned** (ok/green), `capped` → **At limit** (neutral), `expired` → **Expired** (neutral), `failed` → **Failed** (danger), and `not_tracked` → **Not tracked** (neutral). The list uses filled badges, and the detail header uses the same wording. API/read-model states and status-filter values remain unchanged.
+
+Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not an extra base state, so an errored session keeps its rendered lifecycle label with a danger treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip. When keep-alive is disabled for the principal, the sheet lists with the `all` status so retained decisions stay visible.
+
 ### Durable cycle/evidence projection
 
 Renewal attribution is backed by a retention-managed evidence projection
@@ -98,15 +103,17 @@ the requested session. Current-cycle detail renewal counts use cycle-linked evid
 retained history remains available independently. The Admin Web card disables
 summary polling while keep-alive is disabled.
 
-Cancelled sessions are tracked and visible only when they have a retained
+Sessions in the `cancelled` state are tracked and visible only when they have a retained
 renewal turn inside the selected horizon. Lifetime refresh counts and turns
 outside that horizon do not keep them in the groups or recent-session count.
-The All horizon includes their retained historical renewals and spend.
+The All time horizon includes their retained historical renewals and spend.
 
 Cancellation stores its nullable `cancel_reason` independently of the
 schedule-time trigger in `display_reason`. List and detail responses expose
-that cause and render a human-readable cancellation reason. Legacy rows with
-no cause say `Cancelled`; they never infer why the session stopped. Terminal
+that cause and render its reason without a cancellation prefix, such as
+“A new request arrived”. Legacy rows with no cause use “Renewals ended” in the
+API and show the Returned lifecycle label without a separate cancellation box;
+they never infer why the session stopped. Terminal
 rows do not advertise a scheduled first or next renewal. Trigger grouping
 continues to use the original schedule-time descriptor.
 
@@ -114,12 +121,13 @@ Before a real request dispatches, its fenced provisional record retains the
 durable `terminal/cancelled/new_request` representation and adds a request-start
 timestamp plus a deadline derived from the server's configured request timeout.
 Before that deadline, the read model projects `in_request` with a neutral
-“In request” badge and a paused-renewal explanation. It is tracked and visible
+“In use” badge and a paused-renewal explanation. It is tracked and visible
 without retained renewal turns, but is neither scheduled nor renewed and does
 not contribute to `renewing_now`. Completion replaces or resolves the marker.
-An expired marker is terminal/stale and projects as Expired, without claiming
-a known abort or error. Legacy `new_request` rows without a request-start marker
-remain Cancelled. The `in_request` API filter selects only fresh request markers.
+An expired marker is terminal/stale and projects as `expired` (shown as Expired),
+without claiming a known abort or error. Legacy `new_request` rows without a
+request-start marker remain `cancelled` (shown as Returned). The `in_request`
+API filter selects only fresh request markers.
 
 
 ### Stable ordering and cursor pagination

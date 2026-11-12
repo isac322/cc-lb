@@ -1891,3 +1891,49 @@ fn idle_gaps_order_same_second_pulses_by_millisecond_evidence_timestamp() {
     assert_eq!(pulses[1].pulse_number, 2);
     assert_eq!(pulses[1].time_ms, 1_000_800);
 }
+
+#[test]
+fn attempts_never_fall_below_recorded_renewals_in_the_current_cycle() {
+    // Given: a session capped by an older release that stored 11 attempts
+    // although its cycle recorded 12 renewals, plus one renewal from an
+    // earlier cycle that must not count.
+    let cycle_id = Uuid::from_u128(12);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    item.terminal_reason = Some(CacheKeepaliveTerminalReason::MaxRefreshes);
+    item.cycle_id = Some(cycle_id);
+    item.refresh_count = Some(11);
+    let mut turns = (0..12_u64)
+        .map(|index| {
+            let mut turn = turn(&format!("cycle-{index}"), 1_000 + index * 270);
+            turn.cycle_id = Some(cycle_id);
+            turn
+        })
+        .collect::<Vec<_>>();
+    let mut earlier = turn("earlier-cycle", 500);
+    earlier.cycle_id = Some(Uuid::from_u128(11));
+    turns.push(earlier);
+    let derive = |item: &CacheKeepaliveSessionListItem, turns: &[CacheKeepaliveTurnRecord]| {
+        derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item,
+                session: None,
+                turns,
+                evidence: &[],
+                now_ms: 10_000_000,
+                horizon_start_ms: None,
+            },
+            priced_catalog().as_ref(),
+        )
+        .attempts
+    };
+
+    // Then: the displayed attempts match the renewals actually recorded.
+    assert_eq!(derive(&item, &turns), Some(12));
+
+    // And: a correct stored count is kept, and decision rows stay countless.
+    item.refresh_count = Some(12);
+    assert_eq!(derive(&item, &turns), Some(12));
+    item.refresh_count = None;
+    assert_eq!(derive(&item, &turns), None);
+}

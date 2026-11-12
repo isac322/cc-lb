@@ -1,5 +1,5 @@
-import { AlertTriangle } from 'lucide-react';
-import { useState } from 'react';
+import { AlertTriangle, ArrowLeft } from 'lucide-react';
+import { type CSSProperties, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '../../../lib/api';
 import type {
   CacheKeepaliveDetail,
@@ -19,6 +19,7 @@ import {
   TableHeadCell,
   TableRow,
 } from '../../ui/Table';
+import { sessionStateDisplay } from './sessionStateDisplay';
 
 interface Props {
   principalId: string;
@@ -34,8 +35,11 @@ export function fmtUsdSigned(val: number | null): string {
   if (Math.abs(val) < 0.00005) return '$0';
   const sign = val > 0 ? '+' : '−';
   const abs = Math.abs(val);
-  const precision = abs >= 0.1 ? 2 : 4;
-  const fixed = abs.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '');
+  const rounded = abs.toFixed(4);
+  const fixed =
+    Number(rounded) >= 0.1
+      ? abs.toFixed(2)
+      : rounded.replace(/0+$/, '').replace(/\.$/, '');
   return `${sign}$${fixed}`;
 }
 
@@ -43,8 +47,11 @@ export function fmtUsdPlain(val: number | null): string {
   if (val === null) return '—';
   const abs = Math.abs(val);
   if (abs < 0.00005) return '$0';
-  const precision = abs >= 0.1 ? 2 : 4;
-  const fixed = abs.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '');
+  const rounded = abs.toFixed(4);
+  const fixed =
+    Number(rounded) >= 0.1
+      ? abs.toFixed(2)
+      : rounded.replace(/0+$/, '').replace(/\.$/, '');
   return `$${fixed}`;
 }
 
@@ -112,6 +119,77 @@ function shortThreadDisplay(id: string): string {
   return `${raw.slice(0, 15)}…${raw.slice(-12)}`;
 }
 
+function fullTimestamp(ms: number, timeZone: string): string {
+  return new Date(ms).toLocaleString('en-GB', {
+    timeZone,
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'short',
+  });
+}
+
+function followUpLabel(turn?: CacheKeepaliveTurn): string {
+  if (!turn) return 'Unknown';
+  if (turn.pending) return 'Pending';
+  if (turn.followed_up === true) return 'Observed';
+  if (turn.followed_up === false) return 'None';
+  return 'Unknown';
+}
+
+function matchGapTurns(
+  gaps: CacheKeepaliveGap[],
+  turns: CacheKeepaliveTurn[],
+  synthesized: boolean,
+): Array<Array<CacheKeepaliveTurn | undefined>> {
+  const available = [...turns].sort((a, b) => a.time_ms - b.time_ms);
+
+  // Claim each turn at most once across the session. Reserve cycle ordinals
+  // and exact timestamps before nearby pulses can consume their evidence.
+  // Null-cycle turn ordinals span multiple gaps; only their timestamps identify
+  // gap-local pulses, whose numbering restarts in each gap.
+  const matched = gaps.map((gap) =>
+    gap.pulses.map((pulse) => {
+      const matchIndex = available.findIndex((turn) => {
+        if (synthesized) return turn.time_ms === pulse.time_ms;
+        if (turn.cycle_id !== gap.cycle_id) return false;
+        return gap.cycle_id === null
+          ? turn.time_ms === pulse.time_ms
+          : turn.turn_number === pulse.pulse_number;
+      });
+      if (matchIndex >= 0) return available.splice(matchIndex, 1)[0];
+      // The legacy rail is synthesized from this ordered turn list.
+      return synthesized ? available.shift() : undefined;
+    }),
+  );
+
+  return matched.map((gapTurns, gapIndex) =>
+    gapTurns.map((turn, pulseIndex) => {
+      if (turn) return turn;
+      const gap = gaps[gapIndex];
+      let nearestIndex = -1;
+      let nearestDelta = 3001;
+      available.forEach((candidate, candidateIndex) => {
+        if (candidate.cycle_id !== gap.cycle_id) return;
+        const delta = Math.abs(
+          candidate.time_ms - gap.pulses[pulseIndex].time_ms,
+        );
+        if (delta <= 3000 && delta < nearestDelta) {
+          nearestIndex = candidateIndex;
+          nearestDelta = delta;
+        }
+      });
+      return nearestIndex >= 0
+        ? available.splice(nearestIndex, 1)[0]
+        : undefined;
+    }),
+  );
+}
+
 interface RailPoint {
   id: string;
   pct: number;
@@ -128,12 +206,20 @@ interface RailPoint {
   absTime: string;
   sinceUserReq: string;
   sinceLastRenewal: string;
+  timeMs: number;
+  hit?: boolean;
+  spent?: number | null;
+  spendEstimated?: boolean;
+  net?: number | null;
+  followUp?: string;
 }
 
 function buildRailPoints(
   gap: CacheKeepaliveGap,
   maxAttempts: number,
   timeZone: string,
+  turns: Array<CacheKeepaliveTurn | undefined>,
+  synthesized: boolean,
 ): RailPoint[] {
   const maxSec = Math.max(gap.total_duration_sec, 300);
   const points: RailPoint[] = [
@@ -145,6 +231,7 @@ function buildRailPoints(
       badgeText: `${compactTokens(gap.cached_tokens)} cached`,
       badgeTone: 'neutral',
       absTime: railTime(gap.pause_at_ms, timeZone),
+      timeMs: gap.pause_at_ms,
       sinceUserReq: '0s (paused)',
       sinceLastRenewal: '— (before renewal)',
     },
@@ -152,6 +239,7 @@ function buildRailPoints(
 
   gap.pulses.forEach((pulse, idx) => {
     const prevPulse = idx > 0 ? gap.pulses[idx - 1] : null;
+    const turn = turns[idx];
     const ratio = Math.min(1, Math.max(0, pulse.offset_sec / maxSec));
     const pct = 7 + ratio * 86;
     const sincePrevSec =
@@ -161,11 +249,16 @@ function buildRailPoints(
       id: `pulse-${pulse.pulse_number}`,
       pct,
       kind: 'pulse',
-      title: `Renewal #${pulse.pulse_number}`,
-      badgeText:
-        pulse.spent_usd === null ? '—' : `−${fmtUsdPlain(pulse.spent_usd)}`,
-      badgeTone: 'accent',
-      absTime: railTime(pulse.time_ms, timeZone, gap.pause_at_ms),
+      title: `Renewal #${turn?.turn_number ?? pulse.pulse_number}`,
+      badgeText: pulse.hit ? 'Hit' : 'Miss',
+      badgeTone: pulse.hit ? 'ok' : 'warn',
+      absTime: fullTimestamp(pulse.time_ms, timeZone),
+      timeMs: pulse.time_ms,
+      hit: pulse.hit,
+      spent: pulse.spent_usd,
+      spendEstimated: synthesized,
+      net: turn?.pnl ?? null,
+      followUp: followUpLabel(turn),
       sinceUserReq: plusDeltaLabel(pulse.offset_sec),
       sinceLastRenewal:
         prevPulse && sincePrevSec !== null
@@ -203,6 +296,7 @@ function buildRailPoints(
             ? 'warn'
             : 'neutral',
       absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
+      timeMs: gap.ending_at_ms,
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -221,6 +315,7 @@ function buildRailPoints(
       badgeText: deltaLabel(gap.total_duration_sec),
       badgeTone: gap.ending_kind === 'followup_pending' ? 'neutral' : 'accent',
       absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
+      timeMs: gap.ending_at_ms,
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -233,6 +328,7 @@ function buildRailPoints(
       badgeText: fmtUsdSigned(gap.net_pnl_usd),
       badgeTone: 'neutral',
       absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
+      timeMs: gap.ending_at_ms,
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -256,6 +352,7 @@ function buildRailPoints(
             ? 'ok'
             : 'neutral',
       absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
+      timeMs: gap.ending_at_ms,
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -267,17 +364,12 @@ function buildRailPoints(
 function PointHoverPopover({
   point,
   placeBelow,
+  id,
 }: {
   point: RailPoint;
   placeBelow: boolean;
+  id: string;
 }) {
-  const alignClass =
-    point.pct <= 20
-      ? 'left-0'
-      : point.pct >= 80
-        ? 'right-0'
-        : 'left-1/2 -translate-x-1/2';
-
   const toneClass =
     point.badgeTone === 'ok'
       ? 'text-traffic-success-text'
@@ -289,39 +381,73 @@ function PointHoverPopover({
 
   return (
     <div
+      id={id}
       role="tooltip"
-      style={
-        point.pct > 20 && point.pct < 80 ? { left: `${point.pct}%` } : undefined
-      }
+      style={{
+        left: `clamp(0px, calc(${point.pct}% - 9rem), max(0px, 100% - 18rem))`,
+      }}
       className={cx(
-        'pointer-events-none absolute z-30 w-72 rounded-sm border border-subtle-strong bg-panel p-2.5 shadow-overlay tabular-nums',
-        placeBelow ? 'top-full mt-2' : 'bottom-full mb-2',
-        alignClass,
+        'absolute z-30 w-72 max-w-full rounded-md border border-subtle-strong bg-bg-sub p-3 shadow-overlay tabular-nums',
+        placeBelow ? 'top-full' : 'bottom-full',
       )}
     >
-      <div className="flex items-baseline justify-between gap-2 border-b border-row pb-1.5 text-caption">
+      <div className="flex items-baseline justify-between gap-2 border-b border-row pb-2 text-caption">
         <span className="font-medium text-text">{point.title}</span>
-        <span className={cx('font-mono text-data font-medium', toneClass)}>
+        <span
+          className={cx(
+            'font-medium',
+            point.kind === 'pulse' && 'rounded-sm bg-overlay-5 px-1.5 py-0.5',
+            toneClass,
+          )}
+        >
           {point.badgeText}
         </span>
       </div>
-      <dl className="mt-1.5 space-y-1 text-caption">
-        <div className="flex items-baseline justify-between gap-2">
+      <dl className="mt-2 space-y-1 text-caption">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
           <dt className="text-text-faint">Timestamp</dt>
-          <dd className="font-mono text-data text-text">{point.absTime}</dd>
+          <dd className="text-text">
+            <time dateTime={new Date(point.timeMs).toISOString()}>
+              {point.absTime}
+            </time>
+          </dd>
         </div>
         <div className="flex items-baseline justify-between gap-2">
           <dt className="text-text-faint">Since last request</dt>
-          <dd className="font-mono text-data text-text">
-            {point.sinceUserReq}
-          </dd>
+          <dd className="text-text">{point.sinceUserReq}</dd>
         </div>
         <div className="flex items-baseline justify-between gap-2">
           <dt className="text-text-faint">Since last renewal</dt>
-          <dd className="font-mono text-data text-text">
-            {point.sinceLastRenewal}
-          </dd>
+          <dd className="text-right text-text">{point.sinceLastRenewal}</dd>
         </div>
+        {point.kind === 'pulse' ? (
+          <>
+            <div className="flex items-baseline justify-between gap-2">
+              <dt className="text-text-faint">Spent</dt>
+              <dd
+                className="text-text"
+                title={
+                  point.spendEstimated
+                    ? 'Estimated per-renewal spend'
+                    : undefined
+                }
+              >
+                {point.spendEstimated && point.spent != null ? '≈ ' : ''}
+                {fmtUsdPlain(point.spent ?? null)}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <dt className="text-text-faint">Net</dt>
+              <dd className={pnlTone(point.net ?? null)}>
+                {fmtUsdSigned(point.net ?? null)}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <dt className="text-text-faint">Follow-up</dt>
+              <dd className="text-text">{point.followUp}</dd>
+            </div>
+          </>
+        ) : null}
       </dl>
     </div>
   );
@@ -333,197 +459,192 @@ function TimeRailGap({
   renewalScheduled,
   placeTooltipBelow,
   timeZone,
+  turns,
+  synthesized,
 }: {
   gap: CacheKeepaliveGap;
   maxAttempts: number;
   renewalScheduled: boolean;
   placeTooltipBelow: boolean;
   timeZone: string;
+  turns: Array<CacheKeepaliveTurn | undefined>;
+  synthesized: boolean;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [pinnedId, setPinnedId] = useState<string | null>(null);
+  const railRef = useRef<HTMLDivElement>(null);
+  const tooltipId = useId();
   const count = gap.pulses.length;
-  const points = buildRailPoints(gap, maxAttempts, timeZone);
-  const activePoint = points.find((pt) => pt.id === hoveredId) ?? null;
-  const netText = fmtUsdSigned(gap.net_pnl_usd);
-  const netTone = pnlTone(gap.net_pnl_usd);
-  const afterRenewalLabel =
-    gap.since_last_renewal_sec != null
-      ? `${plusDeltaLabel(gap.since_last_renewal_sec)} later`
-      : plusDeltaLabel(gap.total_duration_sec);
+  const points = buildRailPoints(
+    gap,
+    maxAttempts,
+    timeZone,
+    turns,
+    synthesized,
+  );
+  const activeId = pinnedId ?? hoveredId ?? focusedId;
+  const activePoint = points.find((point) => point.id === activeId) ?? null;
+
+  useEffect(() => {
+    if (!activeId) return;
+    const dismiss = () => {
+      setPinnedId(null);
+      setHoveredId(null);
+      setFocusedId(null);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !railRef.current?.contains(target) ||
+        !target.closest('[data-rail-point], [role="tooltip"]')
+      ) {
+        dismiss();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [activeId]);
+
+  const outcome =
+    gap.ending_kind === 'followup_hit'
+      ? `Next message ${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}`
+      : gap.ending_kind === 'followup_pending'
+        ? 'Follow-up pending'
+        : gap.ending_kind === 'scheduled_waiting'
+          ? 'Waiting'
+          : gap.ending_kind === 'followup_unknown'
+            ? `Follow-up unknown (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`
+            : `No follow-up (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`;
 
   return (
-    <div className="space-y-2 rounded-sm bg-overlay-2 px-3.5 py-3 tabular-nums">
-      {/* Top Endpoint Labels: Start Message (Left) vs Next Message + Net (Right) */}
-      <div className="flex flex-wrap items-baseline justify-between gap-2 text-body-sm">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono text-data text-text-muted">
+    <div className="space-y-2 rounded-sm bg-overlay-2 px-3 py-3 tabular-nums">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-body-sm">
+        <div className="flex flex-wrap items-baseline gap-x-1.5">
+          <span className="text-caption text-text-muted">
             {railTime(gap.pause_at_ms, timeZone)}
           </span>
           <span className="font-medium text-text">Paused</span>
           {gap.cached_tokens > 0 ? (
             <span className="text-caption text-text-faint">
-              ({compactTokens(gap.cached_tokens)})
+              {compactTokens(gap.cached_tokens)} cached
             </span>
           ) : null}
         </div>
-
-        <div className="flex items-center gap-2">
-          {gap.ending_kind === 'followup_hit' ? (
-            <>
-              <span className="text-caption text-text-muted">
-                Next msg{' '}
-                <span className="font-mono">
-                  {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}
-                </span>{' '}
-                ({afterRenewalLabel})
-              </span>
-              <span
-                className={cx(
-                  'whitespace-nowrap font-mono text-data font-medium',
-                  netTone,
-                )}
-              >
-                {netText}
-              </span>
-            </>
-          ) : gap.ending_kind === 'scheduled_waiting' ||
-            gap.ending_kind === 'followup_pending' ? (
-            <span className="text-caption text-text-muted">
-              {gap.ending_kind === 'followup_pending'
-                ? 'Follow-up pending'
-                : 'Waiting'}{' '}
-              · {deltaLabel(gap.total_duration_sec)}
-            </span>
-          ) : gap.ending_kind === 'followup_unknown' ? (
-            <>
-              <span className="text-caption text-text-faint">
-                Follow-up unknown (
-                {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})
-              </span>
-              <span
-                className={cx(
-                  'whitespace-nowrap font-mono text-data font-medium',
-                  netTone,
-                )}
-              >
-                {netText}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="text-caption text-text-faint">
-                No follow-up (
-                {railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})
-              </span>
-              <span
-                className={cx(
-                  'whitespace-nowrap font-mono text-data font-medium',
-                  netTone,
-                )}
-              >
-                {netText}
-              </span>
-            </>
-          )}
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-caption text-text-muted">{outcome}</span>
+          <span
+            className={cx(
+              'whitespace-nowrap font-medium',
+              pnlTone(gap.net_pnl_usd),
+            )}
+          >
+            {fmtUsdSigned(gap.net_pnl_usd)}
+          </span>
         </div>
       </div>
 
-      {/* Proportional Time Rail with interactive hover points */}
-      <div className="relative flex h-6 items-center">
-        {activePoint ? (
-          <PointHoverPopover
-            point={activePoint}
-            placeBelow={placeTooltipBelow}
-          />
-        ) : null}
-
-        {/* Track line */}
-        <div className="h-1.5 w-full rounded-full bg-overlay-4" />
-
-        {/* Interactive Points (Start, Renewal Ticks, End) */}
-        {points.map((pt) => {
-          const isHovered = hoveredId === pt.id;
+      <div
+        ref={railRef}
+        className="relative flex h-6 items-center max-md:h-8"
+        onMouseLeave={() => setHoveredId(null)}
+      >
+        <div className="h-1.5 w-full rounded-xs bg-overlay-4" />
+        {points.map((point, index) => {
+          const active = activeId === point.id;
+          const nearestDistance = Math.min(
+            index > 0 ? point.pct - points[index - 1].pct : 100,
+            index < points.length - 1 ? points[index + 1].pct - point.pct : 100,
+          );
           return (
             <button
-              key={pt.id}
+              key={point.id}
               type="button"
-              data-rail-point={pt.id}
-              aria-label={`${pt.title}: Timestamp ${pt.absTime}, Since last request ${pt.sinceUserReq}, Since last renewal ${pt.sinceLastRenewal}`}
-              style={{ left: `${pt.pct}%` }}
-              onMouseEnter={() => setHoveredId(pt.id)}
-              onMouseLeave={() =>
-                setHoveredId((prev) => (prev === pt.id ? null : prev))
+              data-rail-point={point.id}
+              aria-label={`${point.title}: ${point.badgeText}, Timestamp ${point.absTime}, Since last request ${point.sinceUserReq}, Since last renewal ${point.sinceLastRenewal}${point.kind === 'pulse' ? `, Spent ${point.spendEstimated ? 'approximately ' : ''}${fmtUsdPlain(point.spent ?? null)}, Net ${fmtUsdSigned(point.net ?? null)}, Follow-up ${point.followUp}` : ''}`}
+              aria-pressed={pinnedId === point.id}
+              aria-describedby={active ? tooltipId : undefined}
+              style={
+                {
+                  left: `${point.pct}%`,
+                  '--rail-hit-width': `${nearestDistance}%`,
+                } as CSSProperties
               }
-              onFocus={() => setHoveredId(pt.id)}
+              onPointerEnter={(event) => {
+                if (event.pointerType === 'mouse') setHoveredId(point.id);
+              }}
+              onFocus={() => setFocusedId(point.id)}
               onBlur={() =>
-                setHoveredId((prev) => (prev === pt.id ? null : prev))
+                setFocusedId((prev) => (prev === point.id ? null : prev))
               }
-              className="group absolute flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full focus-visible:outline-2 focus-visible:outline-accent"
+              onClick={() => {
+                setPinnedId((prev) => (prev === point.id ? null : point.id));
+                setHoveredId(null);
+                setFocusedId(null);
+              }}
+              className="absolute flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-sm focus-visible:outline-2 focus-visible:outline-accent max-md:h-8 max-md:w-[clamp(1.5rem,var(--rail-hit-width),2rem)]"
             >
-              {pt.kind === 'pulse' ? (
+              {point.kind === 'pulse' ? (
                 <span
                   className={cx(
-                    'h-3.5 w-1.5 rounded-xs bg-accent transition-transform',
-                    isHovered ? 'scale-125 ring-2 ring-accent/40' : undefined,
+                    'h-3.5 w-1.5 rounded-xs transition-transform',
+                    point.hit === false ? 'bg-warn' : 'bg-accent',
+                    active && 'scale-125',
+                    pinnedId === point.id &&
+                      'ring-2 ring-subtle-strong ring-offset-2 ring-offset-bg-sub',
                   )}
                 />
               ) : (
                 <span
                   className={cx(
                     'h-3 w-3 rounded-full border-2 transition-transform',
-                    pt.kind === 'start'
+                    point.kind === 'start'
                       ? 'border-subtle-strong bg-panel'
-                      : pt.kind === 'end_hit'
+                      : point.kind === 'end_hit'
                         ? 'border-traffic-success-text bg-traffic-success-text'
-                        : pt.kind === 'end_waiting'
-                          ? pt.badgeTone === 'neutral'
+                        : point.kind === 'end_waiting'
+                          ? point.badgeTone === 'neutral'
                             ? 'border-subtle-strong bg-panel'
                             : 'border-accent bg-accent'
-                          : pt.kind === 'end_unknown'
+                          : point.kind === 'end_unknown'
                             ? 'border-subtle-strong bg-panel'
                             : 'border-subtle-strong bg-bg',
-                    isHovered
-                      ? 'scale-125 ring-2 ring-subtle-strong'
-                      : undefined,
+                    active && 'scale-125',
+                    pinnedId === point.id &&
+                      'ring-2 ring-subtle-strong ring-offset-2 ring-offset-bg-sub',
                   )}
                 />
               )}
             </button>
           );
         })}
+        {activePoint ? (
+          <PointHoverPopover
+            point={activePoint}
+            placeBelow={placeTooltipBelow}
+            id={tooltipId}
+          />
+        ) : null}
       </div>
 
-      {/* Bottom 1-line micro legend for the rail */}
-      <div className="flex items-center justify-between gap-2 text-caption text-text-faint">
-        <span className="shrink-0 whitespace-nowrap">0s (pause)</span>
-        <span className="min-w-0 text-center">
-          {count === 0 ? (
-            renewalScheduled ? (
-              `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
-            ) : (
-              '0 renewals'
-            )
-          ) : count === 1 ? (
-            <>
-              ↻ 1 renewal at {plusDeltaLabel(gap.pulses[0].offset_sec)}{' '}
-              <span className="whitespace-nowrap">
-                (−{fmtUsdPlain(gap.spent_usd)})
-              </span>
-            </>
-          ) : (
-            <>
-              ↻ {count} renewals ({plusDeltaLabel(gap.pulses[0].offset_sec)} →{' '}
-              {plusDeltaLabel(gap.pulses[count - 1].offset_sec)}){' '}
-              <span className="whitespace-nowrap">
-                · −{fmtUsdPlain(gap.spent_usd)}
-              </span>
-            </>
-          )}
-        </span>
-        <span className="shrink-0 whitespace-nowrap">
-          {deltaLabel(gap.total_duration_sec)}
-        </span>
-      </div>
+      <p className="text-caption text-text-faint">
+        {count > 0
+          ? `${count} ${count === 1 ? 'renewal' : 'renewals'} · Spent ${fmtUsdPlain(gap.spent_usd)} · ${deltaLabel(gap.total_duration_sec)}`
+          : renewalScheduled
+            ? `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
+            : `No renewals · ${deltaLabel(gap.total_duration_sec)}`}
+      </p>
     </div>
   );
 }
@@ -644,7 +765,7 @@ function RenewalTable({
 }) {
   const ordered = [...turns].sort((a, b) => a.time_ms - b.time_ms);
   return (
-    <div className="min-w-0 overflow-x-auto">
+    <div className="min-w-0 overflow-x-auto tabular-nums">
       <Table aria-label={`${label} renewals`}>
         <caption className="pb-2 text-left text-label text-text-muted">
           {label}
@@ -676,9 +797,7 @@ function RenewalTable({
               <TableCell>
                 <time
                   dateTime={new Date(turn.time_ms).toISOString()}
-                  title={new Date(turn.time_ms).toLocaleString('en-US', {
-                    timeZone,
-                  })}
+                  title={fullTimestamp(turn.time_ms, timeZone)}
                 >
                   {railTime(
                     turn.time_ms,
@@ -687,15 +806,7 @@ function RenewalTable({
                   )}
                 </time>
               </TableCell>
-              <TableCell>
-                {turn.pending
-                  ? 'Pending'
-                  : turn.followed_up === true
-                    ? 'Observed'
-                    : turn.followed_up === false
-                      ? 'None'
-                      : 'Unknown'}
-              </TableCell>
+              <TableCell>{followUpLabel(turn)}</TableCell>
               <TableCell numeric className={pnlTone(turn.pnl)}>
                 {fmtUsdSigned(turn.pnl)}
               </TableCell>
@@ -736,15 +847,16 @@ export function SessionDetailPane({
         <span className="sr-only" role="status">
           Loading session detail
         </span>
-        <button
-          type="button"
-          aria-label="Back to sessions"
-          className="m-3 mb-0 min-h-9 rounded-sm px-2 text-body-sm text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent md:hidden"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="m-3 mb-0 max-md:min-h-11 md:hidden"
+          iconLeft={<ArrowLeft strokeWidth={1.75} />}
           onClick={onClose}
         >
-          ← Back to sessions
-        </button>
-        <div className="flex items-center justify-between border-b border-row px-4 py-2.5">
+          Back to sessions
+        </Button>
+        <div className="z-10 flex items-center justify-between border-b border-row bg-bg-sub px-4 py-3 md:sticky md:top-0">
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-4 w-36" />
         </div>
@@ -800,7 +912,13 @@ export function SessionDetailPane({
             >
               {isNotFound ? 'Retry session detail' : 'Retry'}
             </Button>
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="max-md:min-h-11"
+              iconLeft={<ArrowLeft strokeWidth={1.75} />}
+              onClick={onClose}
+            >
               Back to sessions
             </Button>
           </div>
@@ -811,12 +929,18 @@ export function SessionDetailPane({
 
   const session = query.data;
   const isError = session.error != null;
+  const synthesized = !session.gaps?.length;
   const railGaps =
     session.ttl === '12h'
       ? []
       : session.gaps && session.gaps.length > 0
         ? session.gaps
         : synthesizeGapsFromTurns(session);
+  const railTurns = matchGapTurns(railGaps, session.turns, synthesized);
+  const mappedTurns = new Set(
+    railTurns.flat().filter((turn) => turn !== undefined),
+  );
+  const unmappedTurns = session.turns.filter((turn) => !mappedTurns.has(turn));
   const cycleLabels = new Map<string, string>();
   for (const gap of railGaps) {
     if (gap.cycle_id !== null && !cycleLabels.has(gap.cycle_id)) {
@@ -836,6 +960,17 @@ export function SessionDetailPane({
   const tableCycles = [...cycleLabels.keys(), null].filter((id) =>
     cycleTurns.has(id),
   );
+  const lifecycleLabel = sessionStateDisplay(session.state).label;
+  const outcomes = session.follow_up_outcomes;
+  const followUpSummary = [
+    outcomes.observed > 0 ? `${outcomes.observed} observed` : null,
+    outcomes.no_follow_up > 0 ? `${outcomes.no_follow_up} no follow-up` : null,
+    outcomes.unknown > 0 ? `${outcomes.unknown} unknown` : null,
+    outcomes.pending > 0 ? `${outcomes.pending} pending` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const followUpAllCounts = `${outcomes.observed} observed · ${outcomes.no_follow_up} no follow-up · ${outcomes.unknown} unknown · ${outcomes.pending} pending`;
 
   return (
     <div
@@ -845,58 +980,56 @@ export function SessionDetailPane({
       aria-label="Session detail"
       aria-busy="false"
     >
-      <button
-        type="button"
-        aria-label="Back to sessions"
-        className="m-3 mb-0 min-h-9 rounded-sm px-2 text-body-sm text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent md:hidden"
+      <Button
+        variant="ghost"
+        size="sm"
+        className="m-3 mb-0 max-md:min-h-11 md:hidden"
+        iconLeft={<ArrowLeft strokeWidth={1.75} />}
         onClick={onClose}
       >
-        ← Back to sessions
-      </button>
+        Back to sessions
+      </Button>
 
-      {/* Single-line session summary bar (zero duplicate trigger/upstream/headings) */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-row px-4 py-2.5 text-caption tabular-nums">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-text-muted">
-          <span className="font-mono text-data text-text" title={session.id}>
+      <div className="z-10 space-y-2 border-b border-row bg-bg-sub px-4 py-3 text-caption tabular-nums md:sticky md:top-0">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span
+            className="break-all font-mono text-data text-text"
+            title={session.id}
+          >
             {shortThreadDisplay(session.id)}
           </span>
-          {session.state === 'in_request' ? (
-            <span className="rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
-              In request
-            </span>
-          ) : null}
-          <span className="text-text-faint">·</span>
+          <span className="text-text-muted">{lifecycleLabel}</span>
           <span className="text-text-faint">
+            Last request{' '}
             <RelativeTime ts={session.last_message_at_ms} compact />
           </span>
         </div>
-
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          <span className="text-text-faint">
-            Saved{' '}
-            <span className="whitespace-nowrap">
-              {fmtUsdPlain(session.total_avoided)}
-            </span>{' '}
-            · Spent{' '}
-            <span className="whitespace-nowrap">
-              {fmtUsdPlain(session.total_spent)}
-            </span>
-          </span>
-          <span className="text-text-faint" aria-label="Follow-up outcomes">
-            Observed {session.follow_up_outcomes.observed} · No follow-up{' '}
-            {session.follow_up_outcomes.no_follow_up} · Unknown{' '}
-            {session.follow_up_outcomes.unknown} · Pending{' '}
-            {session.follow_up_outcomes.pending}
-          </span>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <span
             className={cx(
-              'whitespace-nowrap font-mono text-data font-medium',
+              'text-title-section font-medium',
               pnlTone(session.net_pnl),
             )}
           >
             Net {fmtUsdSigned(session.net_pnl)}
           </span>
+          <span className="text-text-muted">
+            Saved {fmtUsdPlain(session.total_avoided)} · Spent{' '}
+            {fmtUsdPlain(session.total_spent)}
+          </span>
         </div>
+        <p
+          className="text-text-faint"
+          aria-label="Follow-up outcomes"
+          title={followUpAllCounts}
+        >
+          <span aria-hidden="true">
+            {followUpSummary
+              ? `Follow-up: ${followUpSummary}`
+              : 'No follow-up evidence yet'}
+          </span>
+          <span className="sr-only">{followUpAllCounts}</span>
+        </p>
       </div>
 
       <div className="space-y-3 p-4">
@@ -906,9 +1039,9 @@ export function SessionDetailPane({
             it completes.
           </p>
         ) : null}
-        {session.state === 'cancelled' ? (
+        {session.state === 'cancelled' && session.cancel_reason ? (
           <p className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted">
-            {session.cancel_reason ? session.reason : 'Cancelled'}
+            {session.reason}
           </p>
         ) : null}
         {session.state === 'expired' ? (
@@ -939,13 +1072,20 @@ export function SessionDetailPane({
 
         {isError ? (
           <div className="flex items-start gap-2 rounded-sm bg-danger/8 px-3 py-2 text-body-sm text-danger-text">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <AlertTriangle
+              className="mt-0.5 h-4 w-4 shrink-0"
+              strokeWidth={1.75}
+            />
             <span>{session.error}</span>
           </div>
         ) : null}
 
         {railGaps.length > 0 ? (
-          <div className="space-y-2.5" data-testid="session-detail-time-rail">
+          <div
+            key={sessionId}
+            className="space-y-2.5"
+            data-testid="session-detail-time-rail"
+          >
             {railGaps.map((gap, index) => (
               <section
                 key={gap.cycle_id ?? `${gap.pause_at_ms}-${index}`}
@@ -958,6 +1098,8 @@ export function SessionDetailPane({
                 </h3>
                 <TimeRailGap
                   gap={gap}
+                  turns={railTurns[index]}
+                  synthesized={synthesized}
                   maxAttempts={session.max_attempts}
                   renewalScheduled={
                     session.is_active &&
@@ -978,9 +1120,11 @@ export function SessionDetailPane({
             {session.reason}
           </div>
         ) : null}
-        {tableCycles.length > 0 ? (
+        {railGaps.length === 0 && tableCycles.length > 0 ? (
           <section aria-label="Renewals by cycle" className="space-y-4">
-            <h3 className="text-title-card text-text">Renewals</h3>
+            {tableCycles.length > 1 ? (
+              <h3 className="text-title-card text-text">Renewals</h3>
+            ) : null}
             {tableCycles.map((cycleId) => (
               <RenewalTable
                 key={cycleId ?? 'unknown-cycle'}
@@ -999,6 +1143,48 @@ export function SessionDetailPane({
                 }
               />
             ))}
+          </section>
+        ) : null}
+        {railGaps.length > 0 && unmappedTurns.length > 0 ? (
+          <section
+            aria-label="Additional renewal evidence"
+            className="space-y-2 tabular-nums"
+          >
+            <h3 className="text-label text-text-muted">Additional evidence</h3>
+            <p className="text-caption text-text-faint">
+              These records could not be matched to a timeline renewal.
+            </p>
+            <ul className="divide-y divide-row text-caption">
+              {unmappedTurns.map((turn) => (
+                <li
+                  key={`${turn.cycle_id}-${turn.turn_number}-${turn.time_ms}`}
+                  className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2"
+                >
+                  <span className="text-text">Renewal #{turn.turn_number}</span>
+                  <span
+                    className={
+                      turn.renewals > 0
+                        ? 'text-traffic-success-text'
+                        : 'text-warn-text'
+                    }
+                  >
+                    {turn.renewals > 0 ? 'Hit' : 'Miss'}
+                  </span>
+                  <time
+                    dateTime={new Date(turn.time_ms).toISOString()}
+                    className="text-text-muted"
+                  >
+                    {fullTimestamp(turn.time_ms, timeZone)}
+                  </time>
+                  <span className="text-text-muted">
+                    Follow-up: {followUpLabel(turn)}
+                  </span>
+                  <span className={pnlTone(turn.pnl)}>
+                    Net {fmtUsdSigned(turn.pnl)}
+                  </span>
+                </li>
+              ))}
+            </ul>
           </section>
         ) : null}
       </div>

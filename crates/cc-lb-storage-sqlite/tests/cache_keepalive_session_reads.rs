@@ -2569,28 +2569,28 @@ async fn cancelled_sessions_require_a_renewal_inside_the_selected_horizon() {
 async fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
     let (_directory, storage) = storage().await;
     for (cause, expected) in [
-        (Some("new_request"), "Cancelled: a new request arrived"),
+        (Some("new_request"), "A new request arrived"),
         (
             Some("user_turn_detected"),
-            "Cancelled: the agent is waiting for the user",
+            "The agent is waiting for the user",
         ),
         (
             Some("snapshot_too_large"),
-            "Cancelled: the request snapshot is too large",
+            "The request snapshot is too large",
         ),
         (
             Some("cached_prefix_too_small"),
-            "Cancelled: the cached prefix is too small",
+            "The cached prefix is too small",
         ),
         (
             Some("zero_token_renewal_unsupported"),
-            "Cancelled: zero-token renewals are unsupported",
+            "Zero-token renewals are unsupported",
         ),
         (
             Some("completed_not_renewable"),
-            "Cancelled: request completed, renewal not possible",
+            "Request completed, renewal not possible",
         ),
-        (None, "Cancelled"),
+        (None, "Renewals ended"),
     ] {
         let id = cause.unwrap_or("legacy");
         storage

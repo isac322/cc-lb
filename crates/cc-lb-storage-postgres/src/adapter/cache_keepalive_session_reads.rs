@@ -59,17 +59,17 @@ SELECT \
                    ELSE 'Request did not complete before its deadline' END \
          ELSE CASE terminal_reason \
         WHEN 'cancelled' THEN CASE cancel_reason \
-            WHEN 'new_request' THEN 'Cancelled: a new request arrived' \
-            WHEN 'user_turn_detected' THEN 'Cancelled: the agent is waiting for the user' \
-            WHEN 'snapshot_too_large' THEN 'Cancelled: the request snapshot is too large' \
-            WHEN 'cached_prefix_too_small' THEN 'Cancelled: the cached prefix is too small' \
-            WHEN 'zero_token_renewal_unsupported' THEN 'Cancelled: zero-token renewals are unsupported' \
-            WHEN 'ambiguous_turn' THEN 'Cancelled: the agent turn could not be determined' \
+            WHEN 'new_request' THEN 'A new request arrived' \
+            WHEN 'user_turn_detected' THEN 'The agent is waiting for the user' \
+            WHEN 'snapshot_too_large' THEN 'The request snapshot is too large' \
+            WHEN 'cached_prefix_too_small' THEN 'The cached prefix is too small' \
+            WHEN 'zero_token_renewal_unsupported' THEN 'Zero-token renewals are unsupported' \
+            WHEN 'ambiguous_turn' THEN 'The agent turn could not be determined' \
             WHEN 'retention_recorded' THEN 'Retention recorded without renewal' \
             WHEN 'renewal_not_beneficial' THEN 'Refresh expected value is unknown or non-positive' \
-            WHEN 'session_identity_changed' THEN 'Cancelled: the request completed under a different cache identity' \
-            WHEN 'completed_not_renewable' THEN 'Cancelled: request completed, renewal not possible' \
-            ELSE 'Cancelled' \
+            WHEN 'session_identity_changed' THEN 'The request completed under a different cache identity' \
+            WHEN 'completed_not_renewable' THEN 'Request completed, renewal not possible' \
+            ELSE 'Renewals ended' \
         END \
         WHEN 'max_refreshes' THEN 'max renewals reached' \
         WHEN 'max_duration' THEN 'max duration reached' \

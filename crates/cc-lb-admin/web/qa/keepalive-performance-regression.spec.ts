@@ -2415,7 +2415,7 @@ test('FLOW-01 terminal reactivation appears on the next actual poll', async ({
 }) => {
   await openDrawer(page, 'low');
   await clickRow(page, manifest.low_ids.terminal);
-  await expect(page.getByText('Capped', { exact: true }).last()).toBeVisible();
+  await expect(page.getByText('At limit', { exact: true }).last()).toBeVisible();
   const before = await directRequest(
     'FLOW-01',
     'GET',
@@ -2431,7 +2431,7 @@ test('FLOW-01 terminal reactivation appears on the next actual poll', async ({
     );
   });
   await expect(
-    page.getByText('Scheduled', { exact: true }).last(),
+    page.getByText('Warm', { exact: true }).last(),
   ).toBeVisible();
   const after = await directRequest(
     'FLOW-01',

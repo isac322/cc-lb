@@ -1156,6 +1156,7 @@ export function Drawer({
   width,
   children,
   footer,
+  bodyScroll = true,
 }: {
   open: boolean;
   onOpenChange: (
@@ -1167,6 +1168,8 @@ export function Drawer({
   width: 'md' | 'lg' | 'xl';
   children: ReactNode;
   footer?: ReactNode;
+  /** Set false when the drawer content owns its scroll containers. */
+  bodyScroll?: boolean;
 }) {
   return (
     <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
@@ -1203,7 +1206,14 @@ export function Drawer({
               <X className="w-4 h-4" aria-hidden="true" />
             </BaseDialog.Close>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
+          <div
+            className={cx(
+              'flex-1 min-h-0',
+              bodyScroll ? 'overflow-y-auto' : 'overflow-hidden',
+            )}
+          >
+            {children}
+          </div>
           {footer ? (
             <div className="px-4 py-3 border-t border-subtle flex flex-wrap items-center justify-end gap-2">
               {footer}
