@@ -2519,7 +2519,7 @@ async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
         &keepalive_detail_uri(&principal_id, "legacy-cancelled"),
     )
     .await;
-    assert_eq!(detail["reason"], json!("Cancelled"));
+    assert_eq!(detail["reason"], json!("Renewals ended"));
     assert!(
         !detail["reason"]
             .as_str()
@@ -2532,22 +2532,13 @@ async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
 async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     for (cause, reason) in [
-        ("new_request", "Cancelled: a new request arrived"),
-        (
-            "user_turn_detected",
-            "Cancelled: the agent is waiting for the user",
-        ),
-        (
-            "snapshot_too_large",
-            "Cancelled: the request snapshot is too large",
-        ),
-        (
-            "cached_prefix_too_small",
-            "Cancelled: the cached prefix is too small",
-        ),
+        ("new_request", "A new request arrived"),
+        ("user_turn_detected", "The agent is waiting for the user"),
+        ("snapshot_too_large", "The request snapshot is too large"),
+        ("cached_prefix_too_small", "The cached prefix is too small"),
         (
             "zero_token_renewal_unsupported",
-            "Cancelled: zero-token renewals are unsupported",
+            "Zero-token renewals are unsupported",
         ),
     ] {
         let mut request = cache_keepalive_replace_request(
@@ -2595,7 +2586,7 @@ async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
     assert_eq!(list["rows"].as_array().unwrap().len(), 5);
     for row in list["rows"].as_array().unwrap() {
         assert_eq!(row["cancel_reason"], row["id"]);
-        assert!(row["reason"].as_str().unwrap().starts_with("Cancelled: "));
+        assert!(!row["reason"].as_str().unwrap().starts_with("Cancelled: "));
     }
 }
 
@@ -2899,8 +2890,5 @@ async fn provisional_requests_remain_visible_without_inventing_final_cancellatio
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["state"], "cancelled");
     assert_eq!(detail["cancel_reason"], "user_turn_detected");
-    assert_eq!(
-        detail["reason"],
-        "Cancelled: the agent is waiting for the user"
-    );
+    assert_eq!(detail["reason"], "The agent is waiting for the user");
 }

@@ -28,6 +28,20 @@ import {
 const CANCEL_REASON_PARAGRAPH =
   /Successful real-request cancellations persist a nullable `cancel_reason`:\s*([\s\S]*?)(?:\n\n|$)/;
 
+const CANCEL_REASON_TEXT: Record<string, string> = {
+  new_request: 'A new request arrived',
+  user_turn_detected: 'The agent is waiting for the user',
+  snapshot_too_large: 'The request snapshot is too large',
+  cached_prefix_too_small: 'The cached prefix is too small',
+  zero_token_renewal_unsupported: 'Zero-token renewals are unsupported',
+  ambiguous_turn: 'The agent turn could not be determined',
+  retention_recorded: 'Retention recorded without renewal',
+  renewal_not_beneficial: 'Refresh expected value is unknown or non-positive',
+  session_identity_changed:
+    'The request completed under a different cache identity',
+  completed_not_renewable: 'Request completed, renewal not possible',
+};
+
 describe('Cache keepalive canonical wire vocabulary', () => {
   it('accepts exactly the canonical Rust cancellation reasons', () => {
     expect(CacheKeepaliveCancelReasonSchema.options).toEqual(
@@ -41,7 +55,7 @@ describe('Cache keepalive canonical wire vocabulary', () => {
       state: 'cancelled',
       is_active: false,
       cancel_reason: 'completed_not_renewable',
-      reason: 'Cancelled: request completed, renewal not possible',
+      reason: 'Request completed, renewal not possible',
       error: null,
     };
     const list = CacheKeepaliveListResponseSchema.parse({
@@ -63,9 +77,7 @@ describe('Cache keepalive canonical wire vocabulary', () => {
       expect(decoded.state).toBe('cancelled');
       expect(decoded.is_active).toBe(false);
       expect(decoded.cancel_reason).toBe('completed_not_renewable');
-      expect(decoded.reason).toBe(
-        'Cancelled: request completed, renewal not possible',
-      );
+      expect(decoded.reason).toBe('Request completed, renewal not possible');
       expect(decoded.error).toBeNull();
     }
   });
@@ -102,7 +114,7 @@ describe('Cache keepalive canonical wire vocabulary', () => {
         state: 'cancelled',
         is_active: false,
         cancel_reason: cancelReason,
-        reason: `Cancelled: ${cancelReason.replaceAll('_', ' ')}`,
+        reason: CANCEL_REASON_TEXT[cancelReason],
       };
       const listWire = JSON.parse(
         JSON.stringify({

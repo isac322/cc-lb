@@ -696,21 +696,18 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   );
 
   it.each([
-    ['new_request', 'Cancelled: new request'],
-    ['user_turn_detected', 'Cancelled: user turn detected'],
-    ['ambiguous_turn', 'Cancelled: ambiguous turn'],
-    ['retention_recorded', 'Cancelled: retention recorded'],
-    ['renewal_not_beneficial', 'Cancelled: renewal not beneficial'],
-    ['snapshot_too_large', 'Cancelled: snapshot too large'],
-    ['cached_prefix_too_small', 'Cancelled: cached prefix too small'],
+    ['new_request', 'A new request arrived'],
+    ['user_turn_detected', 'The agent is waiting for the user'],
+    ['ambiguous_turn', 'The agent turn could not be determined'],
+    ['retention_recorded', 'Retention recorded without renewal'],
     [
-      'zero_token_renewal_unsupported',
-      'Cancelled: zero-token renewal unsupported',
+      'renewal_not_beneficial',
+      'Refresh expected value is unknown or non-positive',
     ],
-    [
-      'completed_not_renewable',
-      'Cancelled: request completed, renewal not possible',
-    ],
+    ['snapshot_too_large', 'The request snapshot is too large'],
+    ['cached_prefix_too_small', 'The cached prefix is too small'],
+    ['zero_token_renewal_unsupported', 'Zero-token renewals are unsupported'],
+    ['completed_not_renewable', 'Request completed, renewal not possible'],
     [null, 'Returned'],
     [undefined, 'Returned'],
   ] as const)(
@@ -749,11 +746,8 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
   );
 
   it.each([
-    ['new_request', 'Cancelled: new request'],
-    [
-      'completed_not_renewable',
-      'Cancelled: request completed, renewal not possible',
-    ],
+    ['new_request', 'A new request arrived'],
+    ['completed_not_renewable', 'Request completed, renewal not possible'],
   ] as const)(
     'keeps %s visible alongside retained renewal history',
     (cancelReason, expected) => {

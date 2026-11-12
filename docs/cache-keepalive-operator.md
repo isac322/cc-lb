@@ -152,8 +152,8 @@ start, independently of whether a newer request superseded its primary owner.
 Neither retirement re-observes or replaces a newer owner.
 
 Completed requests that cannot produce a safe renewal snapshot finalize their
-captured primary and sibling owners with `completed_not_renewable`: “Cancelled:
-request completed, renewal not possible”. This includes configuration changes,
+captured primary and sibling owners with `completed_not_renewable`: “Request
+completed, renewal not possible”. This includes configuration changes,
 missing or invalid snapshot metadata, raw-passthrough shaping fallbacks,
 undecodable completed responses, and responses rejected by affinity binding.
 Captured ownership survives even when no safe snapshot was captured. Fully
@@ -343,9 +343,13 @@ In use explains that real traffic has paused renewal. The `in_request` API
 status filter selects that state; `visible` and `tracked` include it. The
 `renewed` filter selects only active renewal sessions, not requests currently
 in flight. Internal states, filter names and API values are unchanged.
-Cancelled sessions show Returned only when the selected horizon contains a
-renewal turn. Otherwise they show Not tracked. List filters, group counts, and
-the selected session's detail state use the same horizon.
+Sessions in the `cancelled` state show Returned only when the selected horizon
+contains a renewal turn. Otherwise they show Not tracked. List filters, group
+counts, and the selected session's detail state use the same horizon.
+Reason text explains why renewals ended without a cancellation prefix, such as
+“A new request arrived” or “The agent is waiting for the user”. Legacy rows with
+no recorded cause use “Renewals ended” in the API; the detail pane omits the
+separate reason box.
 
 The sessions drawer keeps its title, summary and toolbar fixed. From `md`,
 the list and detail scroll independently, with a sticky detail header; phones
