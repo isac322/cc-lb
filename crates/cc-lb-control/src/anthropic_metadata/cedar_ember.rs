@@ -193,6 +193,10 @@ pub struct CedarEmberGrant {
     pub id: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(rename = "type")]
+    pub grant_type: Option<String>,
+    pub gives_back_weekly: Option<bool>,
+    pub unavailable_reason: Option<String>,
     #[serde(default)]
     pub resets_total: Option<u32>,
     /// Consumption is provider-owned; a missing value fails the parse rather

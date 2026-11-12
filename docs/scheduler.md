@@ -79,14 +79,23 @@ uses `https://downloads.claude.ai/claude-code-releases/<channel>` and falls back
 to the matching npm dist-tag if that request fails. A failed channel does not
 prevent the other channel from refreshing or replace its own last successful value.
 
-Usage polling and its associated account-identity lookup use `latest`; before
-the first successful latest refresh, they use `2.1.282`, not the stored stable
-version. Other metadata requests and coupon claims continue using `stable`.
+Anthropic usage polling and its associated account-identity lookup use `latest`;
+before the first successful latest refresh, they use `2.1.282`, not the stored
+stable version. Other Anthropic metadata requests and Anthropic coupon claims
+continue using `stable`. These Claude Code identities do not apply to OpenAI
+banked reset inventory or consumption, or to Gemini requests.
 This adds a KV entry, not a database migration or a configuration key.
 
 Existing keyed job payloads remain readable. New daily jobs encode `key: null`
 to refresh all registered channels; older binaries cannot decode that payload,
 which must be considered before rolling back a worker.
+
+### Reset inventory and immediate usage refresh
+
+OAuth usage polling maintains credential-bound reset snapshots: Anthropic grants share the usage response, while OpenAI banked reset credits use a separate inventory request. Admin fleet and per-upstream limit-reset GETs read those snapshots without provider calls. Unknown, stale, and pending-claim state cannot establish availability.
+
+A claim submits one provider POST for the selected grant or credit and is never replayed automatically. After successful terminal `reset` or `already_used` results, the admin handler awaits a direct usage read for that upstream and publication to the serving replica's routing quota cache, rather than enqueueing a post-claim cron job. Its `usage_refresh` result is separate from the reset outcome: `not_applicable` means the upstream is no longer eligible for usage polling, while an unavailable refresh integration reports `failed`. A failed refresh leaves the reset outcome intact and lets normal usage polling recover freshness without another redemption or optimistic zero usage. Peer replicas remain asynchronous; see the [consistency contract](./consistency-contract.md#scheduler-jobs).
+
 
 ### Upstream-affinity retention
 

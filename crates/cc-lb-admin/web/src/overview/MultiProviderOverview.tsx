@@ -11,13 +11,23 @@ import {
   RequestEventsFeed,
 } from '../components/ui/RequestEventsFeed';
 import type { DashboardUsageResponse } from '../lib/api';
+import {
+  aggregateCouponInventory,
+  useCouponInventory,
+} from '../lib/couponInventory';
+import { useCouponNow } from '../lib/couponNudge';
 import { GENERATION_REQUEST_EVENT_KINDS } from '../lib/logRows';
 import {
   type ProviderFamily,
   providerOf,
   useInstallation,
 } from '../lib/providers';
-import { usePrincipalNameMap, useUpstreams, useUsage } from '../lib/queries';
+import {
+  usePrincipalNameMap,
+  usePrincipals,
+  useUpstreams,
+  useUsage,
+} from '../lib/queries';
 import {
   TIME_PRESET_OPTIONS,
   TIME_PRESET_SECONDS,
@@ -104,6 +114,9 @@ function PrincipalUsageSection({
   principalNames: Map<string, string>;
 }) {
   const step = stepFor(range);
+  const principalConfig = usePrincipals();
+  const couponFleet = useCouponInventory();
+  const couponNow = useCouponNow();
   const anthropicUsage = useUsage(
     range,
     step,
@@ -140,6 +153,35 @@ function PrincipalUsageSection({
     (provider) => usageQueries[provider].isPending,
   );
   const anyError = providers.some((provider) => usageQueries[provider].isError);
+  const inventoryByPrincipal = useMemo(() => {
+    const configs = new Map(
+      principalConfig.data?.principals.map((principal) => [
+        principal.id,
+        principal.allowed_upstreams,
+      ]),
+    );
+    return new Map(
+      rows.map((principal) => [
+        principal.id,
+        aggregateCouponInventory({
+          fleet: couponFleet.isPlaceholderData ? undefined : couponFleet.data,
+          allowedUpstreams: configs.get(principal.id),
+          providers,
+          nowMs: couponNow,
+          incomplete: couponFleet.isError || principalConfig.isError,
+        }),
+      ]),
+    );
+  }, [
+    couponFleet.data,
+    couponFleet.isError,
+    couponFleet.isPlaceholderData,
+    couponNow,
+    principalConfig.data,
+    principalConfig.isError,
+    providers,
+    rows,
+  ]);
 
   return (
     <Section
@@ -148,6 +190,9 @@ function PrincipalUsageSection({
     >
       <PrincipalProviderTable
         error={anyError}
+        inventoryByPrincipal={inventoryByPrincipal}
+        inventoryLoading={couponFleet.isPending || principalConfig.isPending}
+        inventoryError={couponFleet.isError || principalConfig.isError}
         loading={anyLoading}
         providers={providers}
         rows={rows}

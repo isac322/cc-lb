@@ -10,6 +10,8 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
+import { CouponInventoryBadge } from '../components/upstreams/CouponInventoryBadge';
+import type { CouponInventory } from '../lib/couponInventory';
 import type { ProviderFamily } from '../lib/providers';
 import { PrincipalUsageRow } from './PrincipalUsageRow';
 import type {
@@ -81,11 +83,17 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
   rows,
   loading,
   error,
+  inventoryByPrincipal,
+  inventoryLoading = false,
+  inventoryError = false,
 }: {
   providers: readonly ProviderFamily[];
   rows: readonly MergedPrincipalUsage[];
   loading: boolean;
   error: boolean;
+  inventoryByPrincipal?: ReadonlyMap<string, CouponInventory>;
+  inventoryLoading?: boolean;
+  inventoryError?: boolean;
 }) {
   const [descending, setDescending] = useState(true);
   const [filter, setFilter] = useState('');
@@ -173,7 +181,7 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
         <Table className="w-full table-auto">
           <TableHead className="bg-bg">
             <tr>
-              <TableHeadCell className="sticky left-0 z-20 min-w-24 bg-bg">
+              <TableHeadCell className="sticky left-0 z-20 w-40 min-w-32 bg-bg max-md:w-32">
                 Principal
               </TableHeadCell>
               {header('Total cost')}
@@ -191,68 +199,83 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                 No principals in this range
               </TableEmptyRow>
             ) : (
-              sortedRows.map((row) => (
-                <PrincipalUsageRow
-                  // Opaque fill instead of the shared translucent `interactive`
-                  // hover: the inheriting cells would stack the translucency
-                  // and the sticky cell would show scrolled content through it.
-                  className="group cursor-pointer bg-bg hover:bg-row-hover-solid"
-                  data-testid="multi-provider-principal-row"
-                  key={row.id}
-                  principalId={row.id}
-                >
-                  <TableCell
-                    className={`sticky left-0 z-10 min-w-24 max-w-0 ${PRINCIPAL_BODY_CELL_CLASS}`}
+              sortedRows.map((row) => {
+                const inventory = inventoryByPrincipal?.get(row.id);
+                return (
+                  <PrincipalUsageRow
+                    // Opaque fill instead of the shared translucent `interactive`
+                    // hover: the inheriting cells would stack the translucency
+                    // and the sticky cell would show scrolled content through it.
+                    className="group cursor-pointer bg-bg hover:bg-row-hover-solid"
+                    data-testid="multi-provider-principal-row"
+                    key={row.id}
+                    principalId={row.id}
                   >
-                    <Link
-                      className="relative -my-2 flex min-h-10 min-w-0 items-center truncate text-text underline decoration-transparent underline-offset-4 after:absolute after:-inset-2 after:content-[''] hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent"
-                      data-principal-link
-                      search={{ selectedId: row.id }}
-                      title={row.name}
-                      to="/principals"
-                    >
-                      {row.name}
-                    </Link>
-                  </TableCell>
-                  <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
-                    {fmtCost(row.totalCostMicros)}
-                  </TableCell>
-                  <TableCell className={PRINCIPAL_BODY_CELL_CLASS}>
-                    <div className="flex min-w-24 items-center gap-2">
-                      <span className="h-1.5 min-w-0 flex-1 bg-progress-track">
-                        <span
-                          className="block h-full bg-text-muted"
-                          style={{
-                            width: `${Math.min(100, Math.max(0, row.sharePct))}%`,
-                          }}
-                        />
-                      </span>
-                      <span className="text-caption tabular-nums text-text-muted">
-                        {row.sharePct.toFixed(0)}%
-                      </span>
-                    </div>
-                  </TableCell>
-                  {activeProviders.map((provider) => (
                     <TableCell
-                      className={`${PRINCIPAL_BODY_CELL_CLASS} whitespace-nowrap`}
-                      key={provider}
+                      className={`sticky left-0 z-10 w-40 min-w-32 max-w-40 max-md:w-32 ${PRINCIPAL_BODY_CELL_CLASS}`}
                     >
-                      <span className="tabular-nums">
-                        {metricValue(row.providers[provider], 'cost')}
-                      </span>
-                      <span className="ml-1 text-caption text-text-muted">
-                        / {metricValue(row.providers[provider], 'cache')}
-                      </span>
+                      <Link
+                        className="block min-w-0 truncate rounded-sm text-text underline decoration-transparent underline-offset-4 hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                        data-principal-link
+                        search={{ selectedId: row.id }}
+                        title={row.name}
+                        to="/principals"
+                      >
+                        {row.name}
+                      </Link>
+                      {inventory ? (
+                        <div
+                          className="flex min-w-0"
+                          data-slot="principal-coupons"
+                        >
+                          <CouponInventoryBadge
+                            inventory={inventory}
+                            loading={inventoryLoading}
+                            error={inventoryError}
+                          />
+                        </div>
+                      ) : null}
                     </TableCell>
-                  ))}
-                </PrincipalUsageRow>
-              ))
+                    <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
+                      {fmtCost(row.totalCostMicros)}
+                    </TableCell>
+                    <TableCell className={PRINCIPAL_BODY_CELL_CLASS}>
+                      <div className="flex min-w-24 items-center gap-2">
+                        <span className="h-1.5 min-w-0 flex-1 bg-progress-track">
+                          <span
+                            className="block h-full bg-text-muted"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, row.sharePct))}%`,
+                            }}
+                          />
+                        </span>
+                        <span className="text-caption tabular-nums text-text-muted">
+                          {row.sharePct.toFixed(0)}%
+                        </span>
+                      </div>
+                    </TableCell>
+                    {activeProviders.map((provider) => (
+                      <TableCell
+                        className={`${PRINCIPAL_BODY_CELL_CLASS} whitespace-nowrap`}
+                        key={provider}
+                      >
+                        <span className="tabular-nums">
+                          {metricValue(row.providers[provider], 'cost')}
+                        </span>
+                        <span className="ml-1 text-caption text-text-muted">
+                          / {metricValue(row.providers[provider], 'cache')}
+                        </span>
+                      </TableCell>
+                    ))}
+                  </PrincipalUsageRow>
+                );
+              })
             )}
           </tbody>
           <tfoot>
             <TableRow className="border-t border-subtle bg-bg">
               <TableCell
-                className={`${PRINCIPAL_BODY_CELL_CLASS} sticky left-0 z-10 min-w-24 text-label text-text`}
+                className={`${PRINCIPAL_BODY_CELL_CLASS} sticky left-0 z-10 w-40 min-w-32 text-label text-text max-md:w-32`}
               >
                 Total
               </TableCell>

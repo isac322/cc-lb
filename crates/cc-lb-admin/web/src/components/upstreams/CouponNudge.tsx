@@ -15,6 +15,7 @@ import {
   type NudgeQuotaWindow,
   useCouponNow,
 } from '../../lib/couponNudge';
+import { couponInventory } from '../../lib/couponPresentation';
 import {
   LIMIT_RESET_CLAIM_MUTATION_KEY,
   type LimitResetsResponse,
@@ -88,7 +89,7 @@ export function useCouponNudge(
     }) > 0;
 
   const data = resetsQ.data;
-  const ember = data?.cedar_ember;
+  const ember = couponInventory(data);
   // A persisted marker only suppresses while it still matches the account it
   // was written for — the same rule LimitResetAction applies. localStorage
   // is re-read on every render; the shared clock tick and query updates keep

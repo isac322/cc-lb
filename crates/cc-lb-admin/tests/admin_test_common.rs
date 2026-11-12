@@ -181,6 +181,7 @@ pub async fn spawn_admin_server_with_clock_and_auth(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: dynamic_view.clone(),
         config: Arc::new(config),
         dynamic_view_rebinder: None,

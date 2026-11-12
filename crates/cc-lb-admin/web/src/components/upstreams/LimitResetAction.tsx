@@ -9,6 +9,19 @@ import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
 import { formatWait, type NudgeQuotaWindow } from '../../lib/couponNudge';
 import {
+  type CouponPresentation,
+  chooseCouponGrant,
+  couponClaimMessage,
+  couponEffectDescription,
+  couponInventory,
+  couponOptionLabel,
+  couponProductLabel,
+  couponScopeLabel,
+  couponUsageLabel,
+  openAIResetLabel,
+  presentCoupon,
+} from '../../lib/couponPresentation';
+import {
   claimErrorReason,
   clearPendingLimitResetOp,
   isUnknownClaimError,
@@ -24,31 +37,6 @@ import { Button, Modal, Notice } from '../ui/primitives';
 import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
 import { Select } from '../ui/Select';
 import { CouponActionButton, useCouponNudge } from './CouponNudge';
-
-const SURFACE_URL = 'https://claude.ai/settings/usage';
-
-// Coupon copy uses spelled-out window names; the compressed '5h'/'7d' labels
-// belong to the existing quota UI, which stays the sole source of usage data.
-const COUPON_WINDOW_LABELS: Record<string, string> = {
-  '5h': '5-hour',
-  '7d': 'Weekly',
-  '7d_sonnet': 'Weekly (Sonnet)',
-  '7d_opus': 'Weekly (Opus)',
-  '7d_fable': 'Weekly (Fable)',
-  '7d_overage_included': 'Weekly (overage included)',
-  '7d_cowork': 'Weekly (Cowork)',
-  '7d_omelette': 'Weekly (Omelette)',
-  '7d_oauth_apps': 'Weekly (OAuth apps)',
-  overage: 'Extra Usage',
-};
-
-function windowLabel(name: string): string {
-  return COUPON_WINDOW_LABELS[name] ?? name.replaceAll('_', ' ');
-}
-
-function windowList(names: string[]): string {
-  return names.map(windowLabel).join(', ');
-}
 
 interface GrantBlock {
   /** Plain-text explanation, reused as the disabled-button popover. */
@@ -96,16 +84,31 @@ function grantBlock(grant: LimitResetGrant, nowMs: number): GrantBlock | null {
             'This coupon becomes usable once the account reaches its limit',
           surface: false,
         };
+      case 'unsupported_plan':
+        return {
+          label: 'This coupon is not supported by the current plan',
+          surface: false,
+        };
+      case 'plan_support_unreported':
+        return {
+          label: 'Plan support not reported',
+          surface: false,
+        };
       default:
         return {
-          label: 'This coupon is not usable right now',
+          label:
+            grant.unavailable_reason ?? 'This coupon is not usable right now',
           surface: false,
         };
     }
   }
   return grant.usable_now
     ? null
-    : { label: 'This coupon is not usable right now', surface: false };
+    : {
+        label:
+          grant.unavailable_reason ?? 'This coupon is not usable right now',
+        surface: false,
+      };
 }
 
 function blockingReason(
@@ -144,7 +147,12 @@ export function LimitResetAction({
    *  numbers, never a second source. */
   quotaWindows?: readonly NudgeQuotaWindow[];
 }) {
-  const isOauth = upstream.kind === 'anthropic_oauth';
+  const isOpenAI = upstream.kind === 'openai_oauth';
+  const isOauth = upstream.kind === 'anthropic_oauth' || isOpenAI;
+  const surfaceUrl = isOpenAI
+    ? 'https://chatgpt.com/codex/settings/usage'
+    : 'https://claude.ai/settings/usage';
+  const providerSurface = isOpenAI ? 'ChatGPT usage' : 'claude.ai';
   const notConnected = isOauth && credentialsStored === false;
   const { resetsQ, nowMs, suppressed, nudge, derived, claimInFlight } =
     useCouponNudge(
@@ -165,7 +173,12 @@ export function LimitResetAction({
   // in flight instead of swapping to the pending-op surface mid-request.
   const [inFlightView, setInFlightView] = useState<{
     grant: LimitResetGrant;
-    atLimit: boolean;
+    presentation: CouponPresentation;
+    grants: LimitResetGrant[];
+    activeCount: number;
+    usableCount: number;
+    hiddenGrantCount: number;
+    cooldownUntil: string | null;
   } | null>(null);
   // Two-step dismissal for an unresolved marker: the first click arms it and
   // shows the warning, the second clears the record.
@@ -175,7 +188,7 @@ export function LimitResetAction({
   const dispatchLatch = useRef(false);
 
   const data = resetsQ.data;
-  const ember = data?.cedar_ember ?? null;
+  const ember = couponInventory(data);
 
   // A persisted marker belongs to the account that started it. Counts can
   // never prove this operation's outcome, so the marker clears itself only
@@ -183,7 +196,7 @@ export function LimitResetAction({
   // previous account must never follow the new one. Everything else waits
   // for the user to refresh the status or dismiss the record.
   useEffect(() => {
-    if (!pendingOp || !data?.account_id || !data.organization_id) return;
+    if (!pendingOp || !data?.account_id) return;
     if (
       pendingOp.account_id !== data.account_id ||
       pendingOp.organization_id !== data.organization_id
@@ -197,12 +210,8 @@ export function LimitResetAction({
     if (!pendingOp) setDismissArmed(false);
   }, [pendingOp]);
 
-  // The action stays visible in every state so the user can always inspect
-  // why a reset is or isn't available — errors and ineligibility are
-  // explained in the dialog, never hidden and never shown as "0". A
-  // confirmed empty/unusable state disables the button instead (the
-  // disabledReason popover explains why), while a read error or an
-  // unresolved pending op keeps it clickable for inspection.
+  // Keep the action available for inspecting inventory, provider gates and
+  // unknown outcomes. Missing or failed observations are never shown as zero.
   const queryError = resetsQ.isError;
   const loading = !notConnected && resetsQ.isPending && !data;
   const eligible = ember?.eligible === true;
@@ -212,7 +221,6 @@ export function LimitResetAction({
   // a selectable option — activeGrants is the single filtered list.
   const selectableGrants = derived?.activeGrants ?? [];
   const hiddenGrantCount = grants.length - selectableGrants.length;
-  const recommended = grants.find((g) => g.id === ember?.next_grant_id);
   // Account-level cooldown blocks every grant, matching the nudge's usable
   // definition (an unparseable cooldown fails closed).
   const cooldownMs =
@@ -228,46 +236,31 @@ export function LimitResetAction({
     !cooldownActive &&
     selectableGrants.includes(g);
   const readyGrants = selectableGrants.filter(grantReady);
-  const earliestEnding = (list: readonly LimitResetGrant[]) => {
-    let earliest: LimitResetGrant | undefined;
-    let earliestMs = Infinity;
-    for (const grant of list) {
-      const endsMs =
-        grant.ends_at == null ? Infinity : Date.parse(grant.ends_at);
-      if (earliest == null || endsMs < earliestMs) {
-        earliest = grant;
-        earliestMs = endsMs;
-      }
-    }
-    return earliest;
-  };
-  // Prefer the soonest-expiring usable coupon; undated coupons come last.
-  // If none are usable, retain an active grant to explain its blocking reason.
-  const defaultGrant =
-    earliestEnding(readyGrants) ??
-    (recommended != null && selectableGrants.includes(recommended)
-      ? recommended
-      : (selectableGrants.at(0) ?? null));
-  const selected =
-    selectableGrants.find((g) => g.id === selectedGrantId) ?? defaultGrant;
+  const observationOptions = { providerFresh: !queryError };
+  const selected = chooseCouponGrant(
+    selectableGrants,
+    readyGrants,
+    quotaWindows,
+    selectedGrantId,
+    observationOptions,
+  );
+  const selectedPresentation = selected
+    ? presentCoupon(selected, quotaWindows, observationOptions)
+    : null;
   const selectedBlocking = selected
     ? blockingReason(selected, ember?.cooldown_until ?? null, nowMs)
     : null;
   const selectedUsable =
-    eligible && selected != null && grantReady(selected) && !selectedBlocking;
+    eligible &&
+    Boolean(data?.account_id && (isOpenAI || data.organization_id)) &&
+    selected != null &&
+    grantReady(selected) &&
+    !selectedBlocking;
 
-  // Usable coupons exist only on authoritative successful data: the account
-  // is eligible and at least one active grant is consumable right now.
-  const usableCoupons = eligible && readyGrants.length > 0;
-  // Disabled while a claim is in flight, during the initial load (unless a
-  // pending op still needs its resolution surface), or once data proves
-  // there is no usable coupon. Read errors and pending ops stay enabled —
-  // the dialog is where the user inspects the state.
+  // Keep inventory inspectable even when no coupon can currently be used.
+  // Only connection, loading and an in-flight claim block opening the dialog.
   const actionDisabled =
-    claimInFlight ||
-    notConnected ||
-    (pendingOp == null &&
-      (loading || (!queryError && data != null && !usableCoupons)));
+    claimInFlight || notConnected || (pendingOp == null && loading);
 
   const openDialog = () => {
     if (actionDisabled) return;
@@ -283,12 +276,12 @@ export function LimitResetAction({
     body: { grant_id: string; request_id: string },
     // Fresh claims freeze the confirmation the user just approved so the
     // dialog body cannot shift while the request is in flight.
-    freeze: { grant: LimitResetGrant; atLimit: boolean },
+    freeze: NonNullable<typeof inFlightView>,
   ) => {
     // The account/org pair submitted with the claim must come from the same
     // payload the user reviewed; the server revalidates it against the live
     // profile and rejects a stale identity with 409.
-    if (!data?.account_id || !data.organization_id) return;
+    if (!data?.account_id || (!isOpenAI && !data.organization_id)) return;
     // Latch: a claim already in flight must never dispatch a second request.
     // The shared flag covers remounts; the ref covers same-tick repeats.
     if (claimInFlight || dispatchLatch.current) return;
@@ -320,22 +313,19 @@ export function LimitResetAction({
         onSuccess: (res) => {
           switch (res.result) {
             case 'reset':
-              clearPendingLimitResetOp(upstream.id);
-              setPendingOp(null);
-              setDialogOpen(false);
-              toast.success(
-                res.cleared.length
-                  ? `Usage reset for ${windowList(res.cleared)}`
-                  : 'Quota reset applied',
-              );
-              break;
             case 'already_used':
               clearPendingLimitResetOp(upstream.id);
               setPendingOp(null);
               setDialogOpen(false);
-              toast(
-                'This reset was already applied. No additional coupon was used.',
-              );
+              if (res.usage_refresh === 'failed')
+                toast.warning(couponClaimMessage(res));
+              else toast.success(couponClaimMessage(res));
+              break;
+            case 'not_limited':
+              clearPendingLimitResetOp(upstream.id);
+              setPendingOp(null);
+              setDialogOpen(false);
+              toast(couponClaimMessage(res));
               break;
             case 'unknown':
               toast.error(
@@ -401,42 +391,36 @@ export function LimitResetAction({
   // user confirmed; otherwise the live selection.
   const displayGrant = inFlightView?.grant ?? selected;
   const displayBlocking = inFlightView ? null : selectedBlocking;
+  const displayPresentation =
+    inFlightView?.presentation ?? selectedPresentation;
+  const displayGrants = inFlightView?.grants ?? selectableGrants;
+  const displayActiveCount = inFlightView?.activeCount ?? derived?.activeCount;
+  const displayUsableCount = inFlightView?.usableCount ?? derived?.usableCount;
+  const displayHiddenCount = inFlightView?.hiddenGrantCount ?? hiddenGrantCount;
+  const displayCooldown = inFlightView
+    ? inFlightView.cooldownUntil
+    : ember?.cooldown_until;
 
-  // Popover copy for the disabled button: the direct reason the action is
-  // unavailable. Only set when the OAuth status or the reset data actually
-  // proves the state is unusable.
   const disabledReason = notConnected
     ? 'Connect the account first: resets are claimed with its stored credentials.'
-    : !claimInFlight &&
-        pendingOp == null &&
-        !loading &&
-        !queryError &&
-        data != null &&
-        !usableCoupons
-      ? ember == null
-        ? 'No current reset coupon data. Status updates with quota polling.'
-        : (() => {
-            const candidate = defaultGrant ?? grants.at(0);
-            const block = candidate ? grantBlock(candidate, nowMs) : null;
-            return block
-              ? `${block.label}.`
-              : 'No reset coupons available right now.';
-          })()
-      : undefined;
+    : undefined;
 
   const showNudge = !suppressed && nudge != null && nudge.kind !== 'quiet';
   const buttonKind = showNudge ? nudge.kind : 'quiet';
   const buttonTitle = showNudge
     ? (nudge.detail ?? nudge.label ?? undefined)
     : undefined;
+  const ownedCount =
+    inFlightView?.activeCount ??
+    (isOpenAI ? data?.openai?.available_count : derived?.activeCount);
   const buttonCount =
     (!pendingOp || inFlightView != null) &&
     !loading &&
     !queryError &&
     eligible &&
-    derived != null &&
-    derived.activeCount > 0
-      ? derived.activeCount
+    ownedCount != null &&
+    ownedCount > 0
+      ? ownedCount
       : null;
   // Constant label while a claim is in flight — the button's own loading
   // spinner signals progress, so the ticket outline never resizes. The
@@ -450,29 +434,20 @@ export function LimitResetAction({
       ? `Expires ${formatWait(nudge.expiresSoonAt - nowMs)}`
       : undefined;
 
-  // The action drops out of the header only when authoritative data proves
-  // the account ineligible — a permanently inert control. Every other
-  // failure mode keeps a visible button: the status check shows a spinner,
-  // read errors stay clickable so the dialog can explain and retry.
-  const unavailable =
-    !loading && !queryError && data != null && ember?.eligible === false;
-
   return (
     <>
-      {unavailable ? null : (
-        <CouponActionButton
-          kind={buttonKind}
-          count={buttonCount}
-          disabled={actionDisabled}
-          disabledReason={disabledReason}
-          loading={claimInFlight || loading}
-          expiryLabel={expiryLabel}
-          title={buttonTitle}
-          onClick={openDialog}
-        >
-          {buttonLabel}
-        </CouponActionButton>
-      )}
+      <CouponActionButton
+        kind={buttonKind}
+        count={buttonCount}
+        disabled={actionDisabled}
+        disabledReason={disabledReason}
+        loading={claimInFlight || loading}
+        expiryLabel={expiryLabel}
+        title={buttonTitle}
+        onClick={openDialog}
+      >
+        {buttonLabel}
+      </CouponActionButton>
 
       <Modal
         open={dialogOpen}
@@ -526,7 +501,19 @@ export function LimitResetAction({
                       grant_id: selected.id,
                       request_id: requestId,
                     },
-                    { grant: selected, atLimit: ember?.at_limit === true },
+                    {
+                      grant: structuredClone(selected),
+                      presentation: presentCoupon(
+                        selected,
+                        quotaWindows,
+                        observationOptions,
+                      ),
+                      grants: structuredClone(selectableGrants),
+                      activeCount: ownedCount ?? 0,
+                      usableCount: derived?.usableCount ?? 0,
+                      hiddenGrantCount,
+                      cooldownUntil: ember?.cooldown_until ?? null,
+                    },
                   );
                 }}
               >
@@ -537,6 +524,56 @@ export function LimitResetAction({
         }
       >
         <div className="flex flex-col gap-3 text-body-sm text-text-muted">
+          {isOpenAI && data?.openai && !inFlightView ? (
+            <>
+              <p className="text-text">
+                {data.openai.available_count} banked reset coupons available.{' '}
+                {data.openai.applicable_available_count == null
+                  ? 'The number applicable to this account is not reported.'
+                  : `${data.openai.applicable_available_count} applicable to this account.`}
+              </p>
+              <details>
+                <summary className="cursor-pointer text-text-muted">
+                  Coupon inventory and history ({data.openai.credits.length})
+                </summary>
+                <ul className="mt-2 flex flex-col gap-3">
+                  {data.openai.credits.map((credit) => (
+                    <li key={credit.id} className="min-w-0">
+                      <p className="text-text">
+                        {openAIResetLabel(credit.reset_type)}
+                      </p>
+                      {credit.title ? (
+                        <p className="text-text-faint">{credit.title}</p>
+                      ) : null}
+                      <p>
+                        {credit.status} ·{' '}
+                        {credit.is_supported_by_plan === false
+                          ? 'Not supported by this plan'
+                          : credit.is_supported_by_plan === true
+                            ? 'Plan supported'
+                            : 'Plan support not reported'}
+                      </p>
+                      {credit.granted_at ? (
+                        <p>
+                          Granted{' '}
+                          <RelativeTime ts={new Date(credit.granted_at)} />
+                        </p>
+                      ) : null}
+                      {credit.expires_at ? (
+                        <p>
+                          Expires{' '}
+                          <RelativeTime ts={new Date(credit.expires_at)} />
+                        </p>
+                      ) : null}
+                      <code className="break-all font-mono text-data text-text-faint">
+                        {credit.id}
+                      </code>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </>
+          ) : null}
           {pendingView && pendingOp ? (
             <>
               <Notice tone="warning" title="Reset result not confirmed">
@@ -566,7 +603,7 @@ export function LimitResetAction({
               ) : null}
             </>
           ) : null}
-          {queryError ? (
+          {queryError && !inFlightView ? (
             <Notice
               tone="danger"
               title="Could not load reset status"
@@ -589,39 +626,51 @@ export function LimitResetAction({
             </Notice>
           ) : null}
 
-          {data && !eligible && ember != null ? (
+          {!inFlightView && data && !eligible && ember != null ? (
             <p className="text-body-sm text-text-muted">
               {ember.ineligible_reason === 'api_key_upstream'
                 ? 'Limit resets are only available for OAuth subscription upstreams.'
                 : 'This account is not eligible for limit resets.'}{' '}
               <a
-                href={SURFACE_URL}
+                href={surfaceUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-0.5 underline decoration-text-faint underline-offset-2 hover:text-text"
               >
-                Manage on claude.ai
+                Manage on {providerSurface}
                 <ExternalLink className="h-3 w-3" />
               </a>
             </p>
           ) : null}
 
-          {data && ember == null ? (
+          {!inFlightView && data && ember == null ? (
             <p className="text-body-sm text-text-muted">
               No current reset coupon data. Status updates with quota polling.
             </p>
           ) : null}
 
-          {loading ? (
+          {loading && !inFlightView ? (
             <p className="text-body-sm text-text-muted">
               Checking reset availability…
             </p>
           ) : null}
+          {!pendingView &&
+          !inFlightView &&
+          !selected &&
+          selectedGrantId != null ? (
+            <Notice
+              tone="warning"
+              title="Selected coupon is no longer available"
+            >
+              Choose another coupon to continue. No reset has been submitted.
+            </Notice>
+          ) : null}
 
-          {pendingView || !ember ? null : ember.grants.length === 0 ? (
+          {pendingView || (!ember && !inFlightView) ? null : !inFlightView &&
+            ember?.grants.length === 0 ? (
             <p className="text-body-sm text-text-muted">
               No reset coupons available.
-              {ember.weekly_resets_at ? (
+              {ember?.weekly_resets_at ? (
                 <>
                   {' '}
                   Weekly usage resets{' '}
@@ -629,10 +678,10 @@ export function LimitResetAction({
                 </>
               ) : null}
             </p>
-          ) : selectableGrants.length === 0 ? (
+          ) : displayGrants.length === 0 ? (
             <p className="text-body-sm text-text-muted">
               No active reset coupons.
-              {ember.weekly_resets_at ? (
+              {ember?.weekly_resets_at ? (
                 <>
                   {' '}
                   Weekly usage resets{' '}
@@ -642,40 +691,95 @@ export function LimitResetAction({
             </p>
           ) : (
             <>
-              {selectableGrants.length > 1 ? (
+              {displayGrants.length > 1 || selectedGrantId != null ? (
                 <Select
                   aria-label="Reset coupon"
                   className="w-full"
                   value={displayGrant?.id ?? ''}
                   disabled={claimInFlight || pendingView}
                   onChange={setSelectedGrantId}
-                  options={selectableGrants.map((grant) => ({
+                  placeholder="Choose a coupon"
+                  options={displayGrants.map((grant, index) => ({
                     value: grant.id,
-                    label: `${grant.label}: ${grant.resets_left}${
-                      grant.resets_total != null ? `/${grant.resets_total}` : ''
-                    } left`,
+                    label: `${couponOptionLabel(grant)} · Coupon ${index + 1}`,
                   }))}
                 />
               ) : null}
-              {hiddenGrantCount > 0 ? (
+              {displayHiddenCount > 0 ? (
                 <p className="text-caption text-text-faint">
                   Only active coupons are shown.
                 </p>
               ) : null}
               {displayGrant ? (
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-body-sm">
-                  <dt className="text-label text-text-faint">Coupon</dt>
+                  <dt className="text-label text-text-faint">Reset</dt>
                   <dd className="min-w-0 break-words text-text">
-                    {displayGrant.label} · {displayGrant.resets_left}
-                    {displayGrant.resets_total != null
-                      ? `/${displayGrant.resets_total}`
-                      : ''}{' '}
-                    left
+                    {couponProductLabel(displayGrant)}
                   </dd>
-                  <dt className="text-label text-text-faint">Clears</dt>
+                  <dt className="text-label text-text-faint">Provider title</dt>
                   <dd className="min-w-0 break-words text-text">
-                    {windowList(displayGrant.clears)}
+                    {displayGrant.label}
                   </dd>
+                  <dt className="text-label text-text-faint">Scope</dt>
+                  <dd className="min-w-0 break-words text-text">
+                    {displayGrant.openai_credit?.reset_type ===
+                    'codex_rate_limits'
+                      ? 'Main Codex allowance'
+                      : couponScopeLabel(displayGrant)}
+                  </dd>
+                  <dt className="text-label text-text-faint">
+                    Provider details
+                  </dt>
+                  <dd className="min-w-0">
+                    <details>
+                      <summary className="cursor-pointer">
+                        Exact scope and coupon ID
+                      </summary>
+                      <p className="break-all font-mono text-data">
+                        {displayGrant.openai_credit?.reset_type ??
+                          (displayGrant.clears.join(', ') || 'Not reported')}
+                      </p>
+                      <p className="break-all font-mono text-data">
+                        {displayGrant.id}
+                      </p>
+                    </details>
+                  </dd>
+                  {displayPresentation?.targets.map((reading) => (
+                    <div key={reading.window} className="contents">
+                      <dt className="text-label text-text-faint">
+                        {reading.label} usage
+                      </dt>
+                      <dd className="min-w-0 break-words text-text">
+                        {couponUsageLabel(reading)}
+                      </dd>
+                    </div>
+                  ))}
+                  {displayGrant.openai_credit ? (
+                    <>
+                      <dt className="text-label text-text-faint">
+                        Plan support
+                      </dt>
+                      <dd className="text-text">
+                        {displayGrant.openai_credit.is_supported_by_plan ===
+                        true
+                          ? 'Supported'
+                          : displayGrant.openai_credit.is_supported_by_plan ===
+                              false
+                            ? 'Not supported by this plan'
+                            : 'Not reported by OpenAI'}
+                      </dd>
+                      {displayGrant.openai_credit.description ? (
+                        <>
+                          <dt className="text-label text-text-faint">
+                            Provider note
+                          </dt>
+                          <dd className="min-w-0 break-words text-text">
+                            {displayGrant.openai_credit.description}
+                          </dd>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
                   {displayGrant.ends_at ? (
                     <>
                       <dt className="text-label text-text-faint">Expires</dt>
@@ -686,19 +790,21 @@ export function LimitResetAction({
                   ) : null}
                   {displayBlocking ? (
                     <>
-                      <dt className="text-label text-text-faint">Status</dt>
+                      <dt className="text-label text-text-faint">
+                        Provider status
+                      </dt>
                       <dd className="min-w-0 break-words text-warn-text">
                         {displayBlocking.text}
                         {displayBlocking.surface ? (
                           <>
                             {' '}
                             <a
-                              href={SURFACE_URL}
+                              href={surfaceUrl}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-0.5 underline decoration-text-faint underline-offset-2 hover:text-text"
                             >
-                              Open claude.ai
+                              Open {providerSurface}
                               <ExternalLink className="h-3 w-3" />
                             </a>
                           </>
@@ -706,48 +812,68 @@ export function LimitResetAction({
                       </dd>
                     </>
                   ) : null}
+                  {!displayBlocking ? (
+                    <>
+                      <dt className="text-label text-text-faint">
+                        Provider status
+                      </dt>
+                      <dd className="min-w-0 break-words text-text">
+                        {inFlightView || selectedUsable
+                          ? 'Usable now'
+                          : 'Not usable now'}
+                      </dd>
+                    </>
+                  ) : null}
                 </dl>
               ) : null}
-              {derived != null && derived.usableCount < derived.activeCount ? (
+              {displayPresentation &&
+              displayPresentation.fullNonTargets.length > 0 ? (
+                <Notice tone="warning" title="Additional full usage">
+                  {displayPresentation.fullNonTargets
+                    .map(
+                      (reading) =>
+                        `${reading.label}: ${couponUsageLabel(reading)}`,
+                    )
+                    .join('; ')}
+                  . These are additional usage readings, not a prediction of the
+                  coupon's effects.
+                </Notice>
+              ) : null}
+              {displayActiveCount != null &&
+              displayUsableCount != null &&
+              displayUsableCount < displayActiveCount ? (
                 <p className="text-caption text-text-faint">
-                  {derived.usableCount === 0
+                  {displayUsableCount === 0
                     ? 'These coupons cannot be used right now. See the status above.'
-                    : `${derived.usableCount} of ${derived.activeCount} coupons can be used right now.`}
+                    : `${displayUsableCount} of ${displayActiveCount} coupons can be used right now.`}
                 </p>
               ) : null}
             </>
           )}
 
-          {ember?.cooldown_until ? (
+          {displayCooldown ? (
             <p className="text-body-sm text-text-muted">
               Resets on cooldown until{' '}
-              <ResetCountdown ts={new Date(ember.cooldown_until)} />.
+              <ResetCountdown ts={new Date(displayCooldown)} />.
             </p>
           ) : null}
 
           {displayGrant &&
           (inFlightView != null || (!pendingView && selectedUsable)) ? (
-            <>
-              <p className="text-body-sm text-text-muted">
-                This uses one reset coupon to reset usage for your{' '}
-                {windowList(displayGrant.clears)}{' '}
-                {displayGrant.clears.length > 1 ? 'limits' : 'limit'}. It cannot
-                be undone, and your weekly reset schedule stays the same.
-              </p>
-              {!(inFlightView?.atLimit ?? ember?.at_limit) ? (
-                <Notice tone="warning" title="Not at the limit yet">
-                  You can still use this coupon now, or save it for later.
-                </Notice>
-              ) : null}
-            </>
+            <p className="text-body-sm text-text-muted">
+              {couponEffectDescription(
+                displayGrant,
+                isOpenAI ? 'openai' : 'anthropic',
+              )}
+            </p>
           ) : null}
           <a
-            href={SURFACE_URL}
+            href={surfaceUrl}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1 text-caption text-text-faint hover:text-text"
           >
-            Manage on claude.ai
+            Manage on {providerSurface}
             <ExternalLink className="h-3 w-3" />
           </a>
         </div>

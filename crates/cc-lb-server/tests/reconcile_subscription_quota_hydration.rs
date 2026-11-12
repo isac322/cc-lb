@@ -353,6 +353,7 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: peer.holder.clone(),
         config: Arc::new(config),
         dynamic_view_rebinder: None,

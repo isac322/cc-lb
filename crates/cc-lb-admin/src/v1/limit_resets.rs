@@ -1,9 +1,9 @@
-//! Per-upstream subscription limit-reset ("cedar_ember" coupon) endpoints.
+//! Cached Anthropic and OpenAI subscription limit-reset endpoints.
 //!
-//! `GET /admin/v1/upstreams/{id}/limit-resets` serves the snapshot collected
-//! by the scheduler's usage poll (`GET /api/oauth/usage?cedar_ember=1`), so
-//! it never calls the provider itself; `POST .../limit-resets/claim`
-//! dispatches a single reset claim, serialized per upstream by a durable
+//! Fleet and per-upstream GETs serve usage-poll snapshots without calling
+//! either provider. `POST .../limit-resets/claim` revalidates the provider
+//! identity and dispatches a single selected grant/credit claim,
+//! serialized per upstream by a durable
 //! compare-and-put epoch fence. Coupon eligibility is provider-owned: the
 //! backend only caches the polled snapshot, invents no eligibility, and
 //! never retries the claim POST. A timeout or mid-flight transport failure
@@ -26,10 +26,16 @@ use cc_lb_control::anthropic_metadata::{
     claim_cedar_ember_reset, fetch_oauth_profile_at, is_valid_grant_id, make_metadata_http_client,
     settled_cedar_ember_epoch,
 };
-use cc_lb_scheduler::error::SchedulerError;
-use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
-use cc_lb_scheduler::worker::{CronJob, SchedulerPushTask};
-use cc_lb_storage_api::{Storage, UpstreamKind, UpstreamRecord, UpstreamStore};
+use cc_lb_control::openai_limit_resets::{
+    OpenAiLimitResetAuth, OpenAiLimitResetConsumeOutcome, OpenAiLimitResetConsumeRequest,
+    OpenAiLimitResetConsumeResult, OpenAiLimitResetError, OpenAiLimitResetInventory,
+    OpenAiLimitResetPollRecord, consume_openai_limit_reset_credit, list_openai_limit_reset_credits,
+    openai_limit_reset_epoch_fence, openai_limit_reset_epoch_meta_key, openai_limit_reset_meta_key,
+    settled_openai_limit_reset_epoch,
+};
+use cc_lb_storage_api::{
+    Storage, SubscriptionQuotaSample, UpstreamKind, UpstreamRecord, UpstreamStore,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -41,28 +47,42 @@ use super::upstreams::{
     storage_arc, upstream_base_url,
 };
 use crate::{
-    AdminState,
+    AdminState, LimitResetUsageRefresh,
     audit::{AdminAuditEvent, record_admin_audit},
     auth::AdminIdentity,
 };
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LimitResetsResponse {
+    provider: &'static str,
     /// Null until the metadata hook has observed the OAuth identity; the
     /// claim endpoint re-verifies the live identity regardless.
     account_id: Option<String>,
     organization_id: Option<String>,
     cedar_ember: Option<CedarEmberStatusResponse>,
+    openai: Option<OpenAiLimitResetInventory>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FleetLimitResetsResponse {
+    upstreams: Vec<UpstreamLimitResetsResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpstreamLimitResetsResponse {
+    upstream_id: Uuid,
+    #[serde(flatten)]
+    snapshot: LimitResetsResponse,
 }
 
 #[derive(Debug, Serialize)]
 struct CedarEmberStatusResponse {
     eligible: bool,
     ineligible_reason: Option<String>,
-    at_limit: bool,
+    at_limit: Option<bool>,
     /// Provider window names mapped to the cc-lb quota vocabulary
     /// (`five_hour` -> `5h`, `seven_day*` -> `7d*`).
-    exhausted: Vec<String>,
+    exhausted: Option<Vec<String>>,
     grants: Vec<LimitResetGrantResponse>,
     next_grant_id: Option<String>,
     weekly_resets_at: Option<String>,
@@ -73,6 +93,10 @@ struct CedarEmberStatusResponse {
 struct LimitResetGrantResponse {
     id: String,
     label: String,
+    #[serde(rename = "type")]
+    grant_type: Option<String>,
+    gives_back_weekly: Option<bool>,
+    unavailable_reason: Option<String>,
     resets_total: Option<u32>,
     resets_left: u32,
     starts_at: Option<String>,
@@ -81,14 +105,14 @@ struct LimitResetGrantResponse {
     paused: bool,
     usable_now: bool,
     use_requires_limit: bool,
-    percent_used: BTreeMap<String, u64>,
+    percent_used: BTreeMap<String, serde_json::Number>,
     blocking: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct LimitResetClaimBody {
     account_id: String,
-    organization_id: String,
+    organization_id: Option<String>,
     grant_id: String,
     request_id: String,
 }
@@ -102,6 +126,53 @@ struct LimitResetClaimResponse {
     resets_left: Option<u32>,
     weekly_resets_at: Option<String>,
     cooldown_until: Option<String>,
+    windows_reset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_refresh: Option<LimitResetUsageRefresh>,
+}
+
+pub(crate) async fn list_upstream_limit_resets(
+    State(state): State<AdminState>,
+) -> Result<Json<FleetLimitResetsResponse>, UpstreamError> {
+    let storage = storage_arc(&state)?;
+    let upstreams: Vec<_> = super::upstreams::list_all_upstreams(&state)
+        .await?
+        .into_iter()
+        .filter(|upstream| {
+            upstream.enabled
+                && upstream.deleted_at_unix_secs.is_none()
+                && matches!(
+                    upstream.kind,
+                    UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth
+                )
+                && upstream.oauth_credentials.is_some()
+        })
+        .collect();
+    let upstream_ids: Vec<_> = upstreams.iter().map(|upstream| upstream.id).collect();
+    let mut latest_by_upstream = BTreeMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
+    if !upstream_ids.is_empty() {
+        for sample in storage
+            .list_latest_subscription_quota_for_upstreams(&upstream_ids)
+            .await?
+        {
+            latest_by_upstream
+                .entry(sample.upstream_id)
+                .or_default()
+                .push(sample);
+        }
+    }
+    let mut snapshots = Vec::with_capacity(upstreams.len());
+    for upstream in upstreams {
+        let latest = latest_by_upstream.remove(&upstream.id).unwrap_or_default();
+        snapshots.push(UpstreamLimitResetsResponse {
+            upstream_id: upstream.id,
+            snapshot: load_cached_limit_resets(&state, storage.as_ref(), &upstream, &latest)
+                .await?,
+        });
+    }
+    Ok(Json(FleetLimitResetsResponse {
+        upstreams: snapshots,
+    }))
 }
 
 pub(crate) async fn get_upstream_limit_resets(
@@ -112,9 +183,33 @@ pub(crate) async fn get_upstream_limit_resets(
     let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
         .await?
         .ok_or(UpstreamError::NotFound)?;
-    if upstream.kind != UpstreamKind::AnthropicOauth || upstream.oauth_credentials.is_none() {
+    if !matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth
+    ) || upstream.oauth_credentials.is_none()
+    {
         return Err(UpstreamError::NotOauthUpstream);
     }
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await?;
+    Ok(Json(
+        load_cached_limit_resets(&state, storage.as_ref(), &upstream, &latest).await?,
+    ))
+}
+
+/// Loads only cached metadata. Callers batch quota samples before invoking
+/// this loader; missing, stale, rotated or fenced observations remain null.
+pub(crate) async fn load_cached_limit_resets(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream: &UpstreamRecord,
+    latest: &[SubscriptionQuotaSample],
+) -> Result<LimitResetsResponse, UpstreamError> {
+    if upstream.kind == UpstreamKind::OpenaiOauth {
+        return load_cached_openai_limit_resets(state, storage, upstream).await;
+    }
+    let upstream_id = upstream.id;
     let fingerprint = upstream.oauth_credential_fingerprint();
     let coupon_key = cedar_ember_meta_key(upstream_id);
     let identity_key = cedar_ember_identity_meta_key(upstream_id);
@@ -174,9 +269,6 @@ pub(crate) async fn get_upstream_limit_resets(
         _ => None,
     };
     if let Some(status) = &mut cedar_ember {
-        let latest = storage
-            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
-            .await?;
         let snapshots = state
             .dynamic_view
             .load()
@@ -192,11 +284,55 @@ pub(crate) async fn get_upstream_limit_resets(
         }
     }
 
-    Ok(Json(LimitResetsResponse {
+    Ok(LimitResetsResponse {
+        provider: "anthropic",
         account_id,
         organization_id,
         cedar_ember,
-    }))
+        openai: None,
+    })
+}
+
+async fn load_cached_openai_limit_resets(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream: &UpstreamRecord,
+) -> Result<LimitResetsResponse, UpstreamError> {
+    let bundle = decrypt_oauth_bundle(state, upstream)?;
+    let account_id = bundle
+        .account_id
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| cc_lb_oauth_protocol::account_id_from_access_token(&bundle.access_token));
+    let inventory_key = openai_limit_reset_meta_key(upstream.id);
+    let epoch_key = openai_limit_reset_epoch_meta_key(upstream.id);
+    let (raw, epoch) = tokio::join!(
+        storage.get_meta_value(&inventory_key),
+        storage.get_meta_value(&epoch_key),
+    );
+    let current_epoch = settled_openai_limit_reset_epoch(epoch?.as_deref());
+    let record = raw?.and_then(|raw| serde_json::from_str::<OpenAiLimitResetPollRecord>(&raw).ok());
+    let now = cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
+    let max_age = state
+        .dynamic_view
+        .load()
+        .subscription_quota_routing_max_staleness_secs
+        .saturating_mul(1_000);
+    let openai = record
+        .filter(|record| {
+            Some(record.credential_fingerprint) == upstream.oauth_credential_fingerprint()
+                && record.oauth_token_generation == upstream.oauth_token_generation
+                && Some(record.account_id.as_str()) == account_id.as_deref()
+                && current_epoch == Some(record.epoch)
+                && now.saturating_sub(record.observed_at_unix_millis) <= max_age
+        })
+        .and_then(|record| record.inventory);
+    Ok(LimitResetsResponse {
+        provider: "openai",
+        account_id,
+        organization_id: None,
+        cedar_ember: None,
+        openai,
+    })
 }
 
 pub(crate) async fn claim_upstream_limit_reset(
@@ -210,12 +346,11 @@ pub(crate) async fn claim_upstream_limit_reset(
         .await?
         .ok_or(UpstreamError::NotFound)?;
     let target_upstream = upstream.name.clone();
-    // The provider claim runs on the request future, so a request cancelled
-    // before dispatch never sends it. Once the claim result (or a refusal
-    // before dispatch) exists, settling the fence, the usage-poll trigger and
-    // the audit run to completion even if the client disconnects.
-    let dispatched = dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body).await;
+    // Dispatch, fence settlement, usage refresh and audit belong to one
+    // continuation, so dropping the HTTP request cannot abandon a dispatched claim.
     complete_after_commit(async move {
+        let dispatched =
+            dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body).await;
         let result = match dispatched {
             Ok((fence, claim)) => {
                 settle_limit_reset_claim(&state, storage.as_ref(), upstream.id, fence, claim).await
@@ -282,7 +417,10 @@ async fn dispatch_limit_reset_claim(
     storage: Arc<dyn Storage>,
     upstream: &UpstreamRecord,
     body: &LimitResetClaimBody,
-) -> Result<(ClaimFence, Result<CedarEmberClaimResult, CedarEmberError>), UpstreamError> {
+) -> Result<(ClaimFence, Result<LimitResetClaimResponse, UpstreamError>), UpstreamError> {
+    if upstream.kind == UpstreamKind::OpenaiOauth {
+        return dispatch_openai_limit_reset_claim(state, storage, upstream, body).await;
+    }
     if !is_valid_grant_id(&body.grant_id) {
         return Err(UpstreamError::BadRequest {
             error: "invalid_grant_id",
@@ -298,6 +436,16 @@ async fn dispatch_limit_reset_claim(
     if upstream.kind != UpstreamKind::AnthropicOauth {
         return Err(UpstreamError::NotOauthUpstream);
     }
+    if body
+        .organization_id
+        .as_deref()
+        .is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_organization_id",
+            detail: "organization_id is required for Anthropic limit resets".to_owned(),
+        });
+    }
     let bundle = decrypt_oauth_bundle(state, upstream)?;
     let access_token = fresh_enough_access_token(state, storage.clone(), upstream, bundle).await?;
     let user_agent = metadata_user_agent(storage.as_ref()).await?;
@@ -311,7 +459,9 @@ async fn dispatch_limit_reset_claim(
         .await
         .map_err(provider_read_error)?;
     let (account_id, organization_id) = live_identity(&profile)?;
-    if body.account_id != account_id || body.organization_id != organization_id {
+    if body.account_id != account_id
+        || body.organization_id.as_deref() != Some(organization_id.as_str())
+    {
         return Err(UpstreamError::StaleIdentity);
     }
     // Durable per-attempt fence before the POST, compare-and-put over the
@@ -358,7 +508,169 @@ async fn dispatch_limit_reset_claim(
         &cancel,
     )
     .await;
+    Ok((
+        ClaimFence { epoch_key, fence },
+        result
+            .map(anthropic_claim_response)
+            .map_err(provider_claim_error),
+    ))
+}
+
+async fn dispatch_openai_limit_reset_claim(
+    state: &AdminState,
+    storage: Arc<dyn Storage>,
+    upstream: &UpstreamRecord,
+    body: &LimitResetClaimBody,
+) -> Result<(ClaimFence, Result<LimitResetClaimResponse, UpstreamError>), UpstreamError> {
+    if Uuid::parse_str(&body.request_id).is_err() {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_request_id",
+            detail: "request_id must be a UUID".to_owned(),
+        });
+    }
+    if body.grant_id.is_empty()
+        || body.grant_id.len() > 1_024
+        || body.grant_id.chars().any(char::is_control)
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_grant_id",
+            detail: "grant_id must be a nonempty provider credit ID".to_owned(),
+        });
+    }
+    let bundle = decrypt_oauth_bundle(state, upstream)?;
+    let access_token = fresh_enough_access_token(state, storage.clone(), upstream, bundle).await?;
+    // Refresh can rotate the bundle/account; bind to the credential actually
+    // stored now rather than a cached inventory or the pre-refresh bundle.
+    let current = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+    let bundle = decrypt_oauth_bundle(state, &current)?;
+    let account_id = bundle
+        .account_id
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| cc_lb_oauth_protocol::account_id_from_access_token(&bundle.access_token))
+        .ok_or(UpstreamError::StaleIdentity)?;
+    if body.account_id != account_id || bundle.access_token != access_token {
+        return Err(UpstreamError::StaleIdentity);
+    }
+    let client = make_metadata_http_client();
+    let base_url = current.base_url.clone().unwrap_or_else(|| {
+        url::Url::parse("https://chatgpt.com/backend-api/codex")
+            .expect("static Codex OAuth base URL")
+    });
+    let cancel = CancellationToken::new();
+    let auth = OpenAiLimitResetAuth {
+        access_token: &access_token,
+        account_id: &account_id,
+        user_agent: "codex-cli",
+    };
+    let epoch_key = openai_limit_reset_epoch_meta_key(upstream.id);
+    let epoch = storage.get_meta_value(&epoch_key).await?;
+    if settled_openai_limit_reset_epoch(epoch.as_deref()).is_none() {
+        return Err(claim_in_progress());
+    }
+    let inventory = list_openai_limit_reset_credits(&client, &base_url, auth, &cancel)
+        .await
+        .map_err(openai_read_error)?;
+    if !inventory.credits.iter().any(|credit| {
+        credit.id == body.grant_id
+            && credit.status == "available"
+            && credit.is_supported_by_plan == Some(true)
+    }) {
+        return Err(UpstreamError::Conflict {
+            detail: "selected credit is unavailable or its plan support is unknown; refetch limit-resets".to_owned(),
+        });
+    }
+    if UpstreamStore::read_oauth_token_generation(storage.as_ref(), upstream.id).await?
+        != Some(current.oauth_token_generation)
+    {
+        return Err(UpstreamError::StaleIdentity);
+    }
+    let now = cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
+    let fence = openai_limit_reset_epoch_fence(Uuid::new_v4(), now);
+    if !storage
+        .compare_and_put_meta_value(&epoch_key, epoch.as_deref(), &fence)
+        .await?
+    {
+        return Err(claim_in_progress());
+    }
+    let result = consume_openai_limit_reset_credit(
+        &client,
+        &base_url,
+        auth,
+        OpenAiLimitResetConsumeRequest {
+            redeem_request_id: &body.request_id,
+            credit_id: &body.grant_id,
+        },
+        &cancel,
+    )
+    .await
+    .map(openai_claim_response)
+    .map_err(openai_claim_error);
     Ok((ClaimFence { epoch_key, fence }, result))
+}
+
+fn anthropic_claim_response(result: CedarEmberClaimResult) -> LimitResetClaimResponse {
+    LimitResetClaimResponse {
+        result: claim_outcome_str(result.result),
+        reason: result.reason,
+        cleared: result
+            .cleared
+            .unwrap_or_default()
+            .iter()
+            .map(|name| quota_window_name(name))
+            .collect(),
+        resets_left: result.resets_left,
+        weekly_resets_at: result.weekly_resets_at,
+        cooldown_until: result.cooldown_until,
+        windows_reset: None,
+        usage_refresh: None,
+    }
+}
+
+fn openai_claim_response(result: OpenAiLimitResetConsumeResult) -> LimitResetClaimResponse {
+    LimitResetClaimResponse {
+        result: match result.code {
+            OpenAiLimitResetConsumeOutcome::Reset => "reset",
+            OpenAiLimitResetConsumeOutcome::AlreadyRedeemed => "already_used",
+            OpenAiLimitResetConsumeOutcome::NothingToReset => "not_limited",
+            OpenAiLimitResetConsumeOutcome::NoCredit => "unavailable",
+        },
+        reason: None,
+        cleared: Vec::new(),
+        resets_left: None,
+        weekly_resets_at: None,
+        cooldown_until: None,
+        windows_reset: result.windows_reset,
+        usage_refresh: None,
+    }
+}
+
+fn openai_read_error(error: OpenAiLimitResetError) -> UpstreamError {
+    match error {
+        OpenAiLimitResetError::Timeout | OpenAiLimitResetError::Cancelled => {
+            UpstreamError::ProviderTimeout
+        }
+        OpenAiLimitResetError::ProviderStatus(status) => UpstreamError::ProviderError { status },
+        OpenAiLimitResetError::Parse(_) => UpstreamError::ProviderMalformed {
+            detail: "provider response failed schema validation".to_owned(),
+        },
+        OpenAiLimitResetError::Connect(detail)
+        | OpenAiLimitResetError::Transport(detail)
+        | OpenAiLimitResetError::Request(detail) => UpstreamError::ProviderUnreachable { detail },
+    }
+}
+
+fn openai_claim_error(error: OpenAiLimitResetError) -> UpstreamError {
+    if error.consume_outcome_is_uncertain() {
+        return UpstreamError::ClaimOutcomeUnknown;
+    }
+    match error {
+        OpenAiLimitResetError::Connect(detail) => UpstreamError::ProviderUnreachable { detail },
+        OpenAiLimitResetError::ProviderStatus(status) => UpstreamError::ProviderRejected { status },
+        OpenAiLimitResetError::Request(detail) => UpstreamError::Internal { detail },
+        _ => UpstreamError::ClaimOutcomeUnknown,
+    }
 }
 
 /// Settles the claim's own fence and maps the provider outcome.
@@ -367,7 +679,7 @@ async fn settle_limit_reset_claim(
     storage: &dyn Storage,
     upstream_id: Uuid,
     ClaimFence { epoch_key, fence }: ClaimFence,
-    result: Result<CedarEmberClaimResult, CedarEmberError>,
+    result: Result<LimitResetClaimResponse, UpstreamError>,
 ) -> Result<Response, UpstreamError> {
     // Settle our own fence with a fresh epoch after any outcome. Snapshots
     // from polls issued before the claim carry the old epoch and polls during
@@ -385,50 +697,26 @@ async fn settle_limit_reset_claim(
     if !settled {
         tracing::warn!(upstream_id = %upstream_id, "cedar_ember claim fence was already recovered");
     }
-    let result = result.map_err(provider_claim_error)?;
-
-    if result.result == CedarEmberClaimOutcome::Reset {
-        trigger_usage_poll(state);
+    let mut result = result?;
+    if result.result == "reset" || result.result == "already_used" {
+        let cancel = CancellationToken::new();
+        result.usage_refresh = Some(match &state.limit_reset_usage_refresh {
+            Some(refresh) => match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                refresh.refresh_upstream_usage(upstream_id, &cancel),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    cancel.cancel();
+                    LimitResetUsageRefresh::Failed
+                }
+            },
+            None => LimitResetUsageRefresh::Failed,
+        });
     }
-
-    Ok(Json(LimitResetClaimResponse {
-        result: claim_outcome_str(result.result),
-        reason: result.reason,
-        cleared: result
-            .cleared
-            .unwrap_or_default()
-            .iter()
-            .map(|name| quota_window_name(name))
-            .collect(),
-        resets_left: result.resets_left,
-        weekly_resets_at: result.weekly_resets_at,
-        cooldown_until: result.cooldown_until,
-    })
-    .into_response())
-}
-
-/// Enqueues the existing oauth_usage_poll cron tick so the quota pipeline
-/// re-observes the upstream after a successful reset. Best-effort: the claim
-/// already succeeded, and the regular tick still runs on its own interval.
-fn trigger_usage_poll(state: &AdminState) {
-    let Some(scheduler) = state.scheduler.clone() else {
-        return;
-    };
-    let tick_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
-    tokio::spawn(async move {
-        let task = SchedulerPushTask {
-            args: CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(tick_unix_secs)),
-            idempotency_key: Some(format!("oauth_usage_poll:claim:{tick_unix_secs}")),
-            run_at_unix_secs: None,
-            max_attempts: None,
-        };
-        match scheduler.push_cron_task(task).await {
-            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
-            Err(error) => {
-                tracing::warn!(%error, "post-claim oauth usage poll enqueue failed");
-            }
-        }
-    });
+    Ok(Json(result).into_response())
 }
 
 fn live_identity(
@@ -452,8 +740,9 @@ fn live_identity(
 }
 
 fn remove_absent_five_hour(status: &mut CedarEmberStatusResponse) {
-    status.exhausted.retain(|window| window != "5h");
-    status.at_limit = !status.exhausted.is_empty();
+    if let Some(exhausted) = &mut status.exhausted {
+        exhausted.retain(|window| window != "5h");
+    }
     status.grants.retain(|grant| {
         !grant.clears.iter().any(|window| window == "5h")
             || grant.clears.iter().any(|window| window != "5h")
@@ -478,19 +767,20 @@ fn cedar_ember_response(status: &CedarEmberStatus) -> CedarEmberStatusResponse {
     CedarEmberStatusResponse {
         eligible: status.eligible,
         ineligible_reason: status.ineligible_reason.clone(),
-        at_limit: status.at_limit.unwrap_or(false),
+        at_limit: status.at_limit,
         exhausted: status
             .exhausted
-            .iter()
-            .flatten()
-            .map(|name| quota_window_name(name))
-            .collect(),
+            .as_ref()
+            .map(|windows| windows.iter().map(|name| quota_window_name(name)).collect()),
         grants: status
             .grants
             .iter()
             .map(|grant| LimitResetGrantResponse {
                 id: grant.id.clone(),
                 label: grant.label.clone().unwrap_or_default(),
+                grant_type: grant.grant_type.clone(),
+                gives_back_weekly: grant.gives_back_weekly,
+                unavailable_reason: grant.unavailable_reason.clone(),
                 // Optional per the provider schema; forwarded as null rather
                 // than fabricated as 0 when absent.
                 resets_total: grant.resets_total,
@@ -513,10 +803,12 @@ fn cedar_ember_response(status: &CedarEmberStatus) -> CedarEmberStatusResponse {
                     .iter()
                     .flatten()
                     .filter_map(|(name, value)| {
-                        value
-                            .as_u64()
-                            .filter(|percent| *percent <= 100)
-                            .map(|percent| (quota_window_name(name), percent))
+                        value.as_number().and_then(|number| {
+                            number
+                                .as_f64()
+                                .filter(|percent| (0.0..=100.0).contains(percent))
+                                .map(|_| (quota_window_name(name), number.clone()))
+                        })
                     })
                     .collect(),
                 blocking: grant.blocking.clone().unwrap_or_default(),
@@ -621,18 +913,47 @@ mod absent_five_hour_tests {
         .expect("provider status fixture");
         let mut response = cedar_ember_response(&provider);
         remove_absent_five_hour(&mut response);
-        assert!(response.at_limit);
-        assert_eq!(response.exhausted, ["7d"]);
+        assert_eq!(response.at_limit, Some(true));
+        assert_eq!(response.exhausted, Some(vec!["7d".to_owned()]));
         assert_eq!(response.grants.len(), 1);
         let weekly = response.grants.first().expect("weekly grant is retained");
         assert_eq!(weekly.id, "weekly");
         assert_eq!(weekly.clears, ["7d"]);
-        assert_eq!(weekly.percent_used.get("7d"), Some(&100));
+        assert_eq!(
+            weekly.percent_used.get("7d"),
+            Some(&serde_json::Number::from(100))
+        );
         assert!(!weekly.percent_used.contains_key("5h"));
         assert!(response.next_grant_id.is_none());
 
-        response.exhausted = vec!["5h".to_owned()];
+        response.exhausted = Some(vec!["5h".to_owned()]);
         remove_absent_five_hour(&mut response);
-        assert!(!response.at_limit);
+        assert_eq!(response.at_limit, Some(true));
+    }
+
+    #[test]
+    fn absent_five_hour_preserves_all_provider_gate_states() {
+        for at_limit in [Some(true), Some(false), None] {
+            let provider: CedarEmberStatus = serde_json::from_value(json!({
+                "eligible": true,
+                "at_limit": at_limit,
+                "exhausted": null,
+                "grants": [{
+                    "id": "weekly", "resets_left": 1,
+                    "clears": ["five_hour", "seven_day"],
+                    "percent_used": {"five_hour": 100, "seven_day": 42.5}
+                }]
+            }))
+            .expect("provider status fixture");
+            let mut response = cedar_ember_response(&provider);
+            remove_absent_five_hour(&mut response);
+            assert_eq!(response.at_limit, at_limit);
+            assert!(response.exhausted.is_none());
+            assert_eq!(response.grants[0].clears, ["7d"]);
+            assert_eq!(
+                response.grants[0].percent_used["7d"],
+                serde_json::Number::from_f64(42.5).unwrap()
+            );
+        }
     }
 }

@@ -39,6 +39,7 @@ pub fn app_with_scheduler_and_build(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
         dynamic_view_rebinder: None,
         config: Arc::new(config),

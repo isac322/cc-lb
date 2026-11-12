@@ -129,6 +129,7 @@ pub fn test_state_with_clock(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         start_time: std::time::Instant::now(),
         event_bus,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),

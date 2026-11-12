@@ -327,6 +327,11 @@ pub(super) fn observe_provider_usage_body(
         },
         _ => Vec::new(),
     };
+    if kind == UpstreamKind::OpenaiOauth && records.is_empty() {
+        return Err(SchedulerError::Job(
+            "OpenAI usage response contains no recognized quota observation".to_owned(),
+        ));
+    }
     for record in records {
         cache.upsert_observation(upstream_id, &record);
         sink.enqueue(record)

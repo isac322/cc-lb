@@ -626,6 +626,7 @@ async fn build_admin_state(
         runtime: None,
         data_dir: Some(server._dir.path().to_path_buf()),
         warmup_dialect_dispatcher: None,
+        limit_reset_usage_refresh: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&cc_lb_config::Config::default()),
         dynamic_view_rebinder: None,
         config: Arc::new(cc_lb_config::Config::default()),

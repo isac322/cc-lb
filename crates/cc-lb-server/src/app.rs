@@ -1716,7 +1716,7 @@ async fn build_app_with_storage_inner(
     let anthropic_org_api =
         AnthropicOrgApi::production().map_err(BuildError::AnthropicOrgOrigin)?;
     let scheduler_cancel = CancellationToken::new();
-    let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
+    let (scheduler_ctx, limit_reset_usage_refresh) = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {
             backend: opened_scheduler.backend.clone(),
             cache_keepalive_pusher: Arc::new(opened_scheduler.backend.clone()),
@@ -1815,6 +1815,7 @@ async fn build_app_with_storage_inner(
                 config: admin_config.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
         }),
+        limit_reset_usage_refresh: Some(limit_reset_usage_refresh),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
         dynamic_view_rebinder: Some(admin_rebinder),

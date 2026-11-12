@@ -9,6 +9,9 @@ function grant(overrides: Partial<LimitResetGrant>): LimitResetGrant {
   return {
     id: 'g1',
     label: 'Coupon',
+    type: null,
+    gives_back_weekly: null,
+    unavailable_reason: null,
     resets_total: 1,
     resets_left: 1,
     starts_at: '2026-09-01T00:00:00Z',

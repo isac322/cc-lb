@@ -225,6 +225,10 @@ pub fn router() -> Router<AdminState> {
             post(super::api_key::preflight::preflight_candidate),
         )
         .route(
+            "/admin/v1/upstreams/limit-resets",
+            get(super::limit_resets::list_upstream_limit_resets),
+        )
+        .route(
             "/admin/v1/upstreams/{id}",
             get(get_upstream)
                 .put(update_upstream)
@@ -2918,7 +2922,9 @@ async fn find_upstream(
         .find(|record| record.id.to_string() == id))
 }
 
-async fn list_all_upstreams(state: &AdminState) -> Result<Vec<UpstreamRecord>, UpstreamError> {
+pub(super) async fn list_all_upstreams(
+    state: &AdminState,
+) -> Result<Vec<UpstreamRecord>, UpstreamError> {
     let storage = storage(state)?;
     let mut after = None;
     let mut all = Vec::new();
@@ -3338,6 +3344,7 @@ mod tests {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
+            limit_reset_usage_refresh: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
             dynamic_view_rebinder: None,

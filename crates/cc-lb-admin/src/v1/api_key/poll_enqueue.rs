@@ -142,6 +142,7 @@ mod tests {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
+            limit_reset_usage_refresh: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(view)),
             config: Arc::new(Config::default()),
             dynamic_view_rebinder: None,

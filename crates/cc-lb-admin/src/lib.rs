@@ -44,6 +44,23 @@ use cc_lb_storage_api::{
 
 use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitResetUsageRefresh {
+    Refreshed,
+    Failed,
+    NotApplicable,
+}
+
+#[async_trait]
+pub trait LimitResetUsageRefreshPort: Send + Sync {
+    async fn refresh_upstream_usage(
+        &self,
+        upstream_id: uuid::Uuid,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> LimitResetUsageRefresh;
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WarmupDialectDispatchErrorKind {
     Transient,
@@ -151,6 +168,7 @@ pub struct AdminState {
     pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
+    pub limit_reset_usage_refresh: Option<Arc<dyn LimitResetUsageRefreshPort>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<Config>,
     pub dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,

@@ -353,6 +353,24 @@ If an operator keeps a local proxy client key file such as a local file, treat i
 | GET | `/admin/v1/upstreams/{id}/workspaces` | Bearer | None | `{"workspaces":[{"id","name"}]}` | `not_api_key_upstream`, `non_anthropic_base_url`, `workspace_list_denied`, `probe_unreachable`, `api_key_credential_decrypt_failed` |
 | GET | `/admin/v1/upstreams/{id}/usage?range=&step=` | Bearer | None | UpstreamKeyUsageResponse | `not_api_key_upstream`, `upstream_not_found`, invalid `range`/`step` |
 
+#### Subscription limit resets
+
+`GET /admin/v1/upstreams/limit-resets` returns fleet-wide cached reset snapshots, grouped by upstream and provider. `GET /admin/v1/upstreams/{id}/limit-resets` reads one snapshot. Neither route contacts the provider. Missing, stale, credential-mismatched, or pending-claim observations do not establish availability.
+
+Anthropic grants retain the provider's label, raw `type`, `gives_back_weekly`, `unavailable_reason`, remaining count, expiry, eligibility, and exact `clears` scope. Window names normalize `five_hour` to `5h`, `seven_day` to `7d`, and `seven_day_*` to `7d_*`; other names remain unchanged. The observed `type: "full"` with `gives_back_weekly: true` is presented as a “Fable usage reset,” not “All weekly.” `7d_overage_included` has no confirmed mapping to `7d_fable` or extra usage. A zero reading for that target does not prove no weekly benefit, and the UI does not project a numeric rebate.
+
+The selector and confirmation dialog show the selected grant's scope and factual usage for each target separately from provider eligibility. A provider may permit a reset before a limit is reached. An eligible grant is not proof that every target is exhausted, and an unmapped or missing target is unknown rather than zero. The browser's local pending marker suppresses resubmission after a pending or uncertain claim; this is separate from the server's in-flight claim fence.
+
+OpenAI subscriptions expose banked reset-credit inventory and explicit credit consumption. These one-time resets are separate from usage-credit balances, automatic promotional resets, and paid instant-reset purchases. Preserve the provider's `available_count`, `applicable_available_count`, and each credit's `is_supported_by_plan` as distinct inventory and eligibility facts; the returned list may be capped. Unknown `reset_type` and status values remain provider values; titles and descriptions do not establish scope or eligibility. cc-lb does not offer a Gemini coupon claim without a verified provider contract.
+
+The OpenAI confirmation dialog preserves `reset_type` and reports plan support as supported, not supported, or not reported. For `codex_rate_limits`, it describes the main Codex allowance; it does not map a credit title or support flag to specific plan windows. [OpenAI's reset guidance](https://help.openai.com/en/articles/20001498-how-resets-work-in-codex) explains full banked resets by plan: monthly for Go, five-hour and weekly for Plus and Business Standard, and weekly for Pro 100, Pro 200, and Pro 500. That guidance does not establish an individual credit's availability. A reset can change the affected allowance's next refresh time without changing the billing date; use refreshed usage instead of preserving the old countdown.
+
+[Claude's reset guidance](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset) and [Fable launch offer](https://support.claude.com/en/articles/17506494-claude-fable-5-2-launch-offers) explain that a Fable reset returns only the Fable portion of shared weekly consumption; usage spent on other models remains. It also refills the whole five-hour window when the account has one. Weekly limits keep their usual reset day and time. These documented effects do not establish an alias for an undocumented wire scope or reveal the account's numeric Fable rebate.
+
+`POST /admin/v1/upstreams/{id}/limit-resets/claim` verifies the current provider account and submits the explicitly selected grant or credit with one provider POST. Authentication and authorization precede provider calls. A durable claim fence prevents overlapping redemption while the claim is in flight. Settlement advances the epoch after every outcome, including an unknown outcome, so older snapshots cannot become usable again. The fence remains pending only while work is in flight or settlement fails. A timeout, lost reply, or uncertain outcome is never replayed automatically.
+
+The response keeps the successful terminal `reset` or `already_used` result separate from `usage_refresh` and nullable `windows_reset`. An unknown reset-window count remains `null`, not zero. After either result, the handler awaits an immediate usage read for that upstream and publishes observed quota to the serving replica's routing cache before returning `usage_refresh: "refreshed"`. `"failed"` preserves the reset result but reports that quota freshness was not established, including when the refresh integration is unavailable; it never triggers another redemption or replaces usage with optimistic zeroes. `"not_applicable"` means the upstream is no longer eligible for usage polling. Peer replicas still converge asynchronously. Post-commit work retains the cancellation guarantee described in the [consistency contract](https://github.com/isac322/cc-lb/blob/master/docs/consistency-contract.md#admin-mutations-and-audit-records).
+
 #### UpstreamCreateBody
 
 ```json
@@ -543,6 +561,8 @@ that were not stored.
 The `cache_keepalive` field mirrors whatever was persisted on the
 principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 `"cache_keepalive": null` clears the config.
+
+Principal coupon counts sum active remaining resets on allowed, enabled upstreams with stored credentials in the selected provider scope. They describe access to shared upstream inventory, not coupon ownership. Unknown or stale inventory is unavailable, not an observed zero. A count does not guarantee that a request for a particular model will route to one of those upstreams; model eligibility, routing plugins, affinity, quota, and other admission checks still apply.
 
 Each principal receives a built-in `subscription-preference` Router chain
 entry at creation, with order `0`. Use the plugin-chain endpoints below to
