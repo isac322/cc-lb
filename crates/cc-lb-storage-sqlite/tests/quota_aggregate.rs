@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::{
-    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
-    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    MetaStore, OAuthTokensCreate, StorageError, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaPollFence, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
     UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageTokenInterval,
-    UsageTokenIntervalStore, UsageTokenIntervalSum,
+    UsageTokenIntervalStore, UsageTokenIntervalSum, upstream::UpstreamKind,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use sqlx::Row;
@@ -68,6 +70,289 @@ fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimC
         status: checkpoint.status,
         resets_at_unix_secs: checkpoint.resets_at_unix_secs,
     }
+}
+
+async fn quota_poll_fence(storage: &SqliteStorage) -> SubscriptionQuotaPollFence {
+    let upstream_id = Uuid::new_v4();
+    let upstream = storage
+        .create(UpstreamCreate {
+            id: upstream_id,
+            name: format!("quota-poll-{upstream_id}"),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: EncryptedOAuthTokens::from_ciphertext(vec![1; 8]),
+                never_refresh: false,
+            }),
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        })
+        .await
+        .expect("create poll upstream");
+    SubscriptionQuotaPollFence {
+        upstream_id,
+        oauth_token_generation: upstream.oauth_token_generation,
+        epoch_key: format!("quota-poll-epoch:{upstream_id}"),
+        epoch_value: None,
+    }
+}
+
+fn quota_poll_sample(
+    upstream_id: Uuid,
+    at: u64,
+    id: u128,
+    utilization: f64,
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
+        upstream_id,
+        window: SubscriptionQuotaWindow::FiveHour,
+        source: SubscriptionQuotaSource::Api,
+        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis: at,
+        sample_id: Uuid::from_u128(id),
+        utilization: Some(utilization),
+        status: Some(SubscriptionQuotaStatus::Allowed),
+        resets_at_unix_secs: Some(18_000),
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        credits: None,
+        ingested_at_unix_millis: at,
+    }
+}
+
+async fn assert_quota_poll_records(
+    storage: &SqliteStorage,
+    upstream_id: Uuid,
+    latest: &[SubscriptionQuotaSample],
+    checkpoints: &[SubscriptionQuotaSample],
+) {
+    assert_eq!(
+        storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+            .await
+            .expect("read poll latest"),
+        latest
+    );
+    assert_eq!(
+        storage
+            .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
+                upstream_ids: vec![upstream_id],
+                windows: vec![SubscriptionQuotaWindow::FiveHour],
+                sources: vec![
+                    SubscriptionQuotaSource::Api,
+                    SubscriptionQuotaSource::Header
+                ],
+                since_unix_millis: 0,
+                until_unix_millis: 10_000,
+            })
+            .await
+            .expect("read poll checkpoints"),
+        checkpoints
+            .iter()
+            .map(|record| slim(SubscriptionQuotaCheckpointRecord::from(record)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn quota_poll_rejects_stale_epoch_across_storage_handles_without_any_writes() {
+    let (temp_dir, storage) = quota_storage("poll-epoch.sqlite").await;
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir.path().join("poll-epoch.sqlite").display()
+    );
+    let replica =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open second poll storage handle");
+    let initial_fence = quota_poll_fence(&storage).await;
+    let initial = quota_poll_sample(initial_fence.upstream_id, 100, 1, 0.1);
+    let unexpected_epoch = SubscriptionQuotaPollFence {
+        epoch_value: Some("0".to_owned()),
+        ..initial_fence.clone()
+    };
+    assert!(
+        !storage
+            .record_subscription_quota_poll(std::slice::from_ref(&initial), &unexpected_epoch)
+            .await
+            .expect("present epoch must not match absent epoch")
+    );
+    assert_quota_poll_records(&storage, initial_fence.upstream_id, &[], &[]).await;
+    assert!(
+        storage
+            .record_subscription_quota_poll(std::slice::from_ref(&initial), &initial_fence)
+            .await
+            .expect("publish initial absent epoch")
+    );
+    assert!(
+        replica
+            .compare_and_put_meta_value(&initial_fence.epoch_key, None, "0")
+            .await
+            .expect("create epoch")
+    );
+    let old_fence = unexpected_epoch;
+    assert!(
+        replica
+            .compare_and_put_meta_value(&old_fence.epoch_key, Some("0"), "1")
+            .await
+            .expect("advance epoch")
+    );
+    let current_fence = SubscriptionQuotaPollFence {
+        epoch_value: Some("1".to_owned()),
+        ..old_fence.clone()
+    };
+    let fresh = quota_poll_sample(initial_fence.upstream_id, 200, 2, 0.2);
+    assert!(
+        replica
+            .record_subscription_quota_poll(std::slice::from_ref(&fresh), &current_fence)
+            .await
+            .expect("publish current epoch")
+    );
+    let stale = quota_poll_sample(initial_fence.upstream_id, 900, 3, 0.9);
+    for fence in [&old_fence, &initial_fence] {
+        assert!(
+            !storage
+                .record_subscription_quota_poll(std::slice::from_ref(&stale), fence)
+                .await
+                .expect("reject stale epoch despite its higher timestamp")
+        );
+    }
+    assert_quota_poll_records(
+        &replica,
+        initial_fence.upstream_id,
+        std::slice::from_ref(&fresh),
+        &[initial, fresh.clone()],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn quota_poll_rejects_changed_credentials_deleted_and_missing_upstreams() {
+    let (_dir, storage) = quota_storage("poll-generation.sqlite").await;
+    let old_fence = quota_poll_fence(&storage).await;
+    let initial = quota_poll_sample(old_fence.upstream_id, 100, 1, 0.1);
+    assert!(
+        storage
+            .record_subscription_quota_poll(std::slice::from_ref(&initial), &old_fence)
+            .await
+            .expect("publish old generation before rotation")
+    );
+    let rotated = storage
+        .update_oauth_token(
+            old_fence.upstream_id,
+            EncryptedOAuthTokens::from_ciphertext(vec![2; 8]),
+        )
+        .await
+        .expect("rotate poll credential");
+    let stale = quota_poll_sample(old_fence.upstream_id, 900, 3, 0.9);
+    assert!(
+        !storage
+            .record_subscription_quota_poll(std::slice::from_ref(&stale), &old_fence)
+            .await
+            .expect("reject old credential generation")
+    );
+    let current_fence = SubscriptionQuotaPollFence {
+        oauth_token_generation: rotated.oauth_token_generation,
+        ..old_fence.clone()
+    };
+    let fresh = quota_poll_sample(old_fence.upstream_id, 200, 2, 0.2);
+    assert!(
+        storage
+            .record_subscription_quota_poll(std::slice::from_ref(&fresh), &current_fence)
+            .await
+            .expect("publish rotated credential generation")
+    );
+    sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = unixepoch() WHERE id = ?")
+        .bind(old_fence.upstream_id.to_string())
+        .execute(storage.pool())
+        .await
+        .expect("soft-delete poll upstream");
+    assert!(
+        !storage
+            .record_subscription_quota_poll(std::slice::from_ref(&stale), &current_fence)
+            .await
+            .expect("reject deleted upstream")
+    );
+    assert_quota_poll_records(
+        &storage,
+        old_fence.upstream_id,
+        std::slice::from_ref(&fresh),
+        &[initial, fresh.clone()],
+    )
+    .await;
+    let missing_fence = SubscriptionQuotaPollFence {
+        upstream_id: Uuid::new_v4(),
+        oauth_token_generation: 0,
+        ..old_fence
+    };
+    let missing = quota_poll_sample(missing_fence.upstream_id, 100, 4, 0.4);
+    assert!(
+        !storage
+            .record_subscription_quota_poll(std::slice::from_ref(&missing), &missing_fence)
+            .await
+            .expect("missing upstream must not match generation zero")
+    );
+    assert_quota_poll_records(&storage, missing_fence.upstream_id, &[], &[]).await;
+}
+
+#[tokio::test]
+async fn quota_poll_rejects_mixed_upstreams_and_non_api_sources_before_writing() {
+    let (_dir, storage) = quota_storage("poll-invalid.sqlite").await;
+    let fence = quota_poll_fence(&storage).await;
+    let valid = quota_poll_sample(fence.upstream_id, 100, 1, 0.1);
+    let other_upstream = quota_poll_sample(Uuid::new_v4(), 200, 2, 0.2);
+    let mut header = quota_poll_sample(fence.upstream_id, 300, 3, 0.3);
+    header.source = SubscriptionQuotaSource::Header;
+    for invalid in [other_upstream.clone(), header] {
+        assert!(matches!(
+            storage
+                .record_subscription_quota_poll(&[valid.clone(), invalid], &fence)
+                .await,
+            Err(StorageError::InvalidInput { .. })
+        ));
+    }
+    assert_quota_poll_records(&storage, fence.upstream_id, &[], &[]).await;
+    assert_quota_poll_records(&storage, other_upstream.upstream_id, &[], &[]).await;
+}
+
+#[tokio::test]
+async fn quota_poll_rolls_back_latest_and_checkpoints_when_a_later_sample_is_invalid() {
+    let (_dir, storage) = quota_storage("poll-rollback.sqlite").await;
+    let fence = quota_poll_fence(&storage).await;
+    let valid = quota_poll_sample(fence.upstream_id, 100, 1, 0.1);
+    let invalid = quota_poll_sample(fence.upstream_id, u64::MAX, 2, 0.2);
+    assert!(matches!(
+        storage
+            .record_subscription_quota_poll(&[valid.clone(), invalid], &fence)
+            .await,
+        Err(StorageError::InvalidInput { .. })
+    ));
+    assert_quota_poll_records(&storage, fence.upstream_id, &[], &[]).await;
+    assert!(
+        storage
+            .record_subscription_quota_poll(std::slice::from_ref(&valid), &fence)
+            .await
+            .expect("publish after failed transaction")
+    );
+    assert_quota_poll_records(
+        &storage,
+        fence.upstream_id,
+        std::slice::from_ref(&valid),
+        std::slice::from_ref(&valid),
+    )
+    .await;
 }
 
 #[tokio::test]

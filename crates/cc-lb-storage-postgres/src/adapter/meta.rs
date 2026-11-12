@@ -71,6 +71,17 @@ fn sqlx_migration_lock_id(database_name: &str) -> i64 {
     0x3d32_ad9e_i64 * i64::from(!crc)
 }
 
+// A row lock cannot protect an absent meta key. All meta writers and guarded
+// readers use this per-key transaction lock, including first-insert CAS.
+pub(super) async fn lock_meta_value(conn: &mut sqlx::PgConnection, key: &str) -> StorageResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(1667460194, hashtext($1))")
+        .bind(key)
+        .execute(conn)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
@@ -153,14 +164,17 @@ impl MetaStore for PostgresStorage {
     }
 
     async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        lock_meta_value(&mut tx, key).await?;
         sqlx::query(
             "INSERT INTO meta (key, value) VALUES ($1, $2)              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         )
         .bind(key)
         .bind(value)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 
@@ -170,6 +184,8 @@ impl MetaStore for PostgresStorage {
         expected: Option<&str>,
         value: &str,
     ) -> StorageResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        lock_meta_value(&mut tx, key).await?;
         let result =
             match expected {
                 Some(expected) => {
@@ -177,7 +193,7 @@ impl MetaStore for PostgresStorage {
                         .bind(value)
                         .bind(key)
                         .bind(expected)
-                        .execute(&self.pool)
+                        .execute(&mut *tx)
                         .await
                 }
                 None => sqlx::query(
@@ -185,10 +201,11 @@ impl MetaStore for PostgresStorage {
                 )
                 .bind(key)
                 .bind(value)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await,
             }
             .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(result.rows_affected() == 1)
     }
 

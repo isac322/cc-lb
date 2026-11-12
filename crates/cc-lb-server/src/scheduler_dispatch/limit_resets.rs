@@ -125,6 +125,51 @@ impl SchedulerDispatch {
         Ok(())
     }
 
+    pub(super) async fn publish_usage_poll(
+        &self,
+        upstream: &UpstreamRecord,
+        fence: &UsagePollFence,
+        sequence: u64,
+        records: &[cc_lb_storage_api::SubscriptionQuotaSample],
+    ) -> SchedulerResult<()> {
+        if let Some(epoch_key) = &fence.epoch_key {
+            let publication = cc_lb_storage_api::SubscriptionQuotaPollFence {
+                upstream_id: upstream.id,
+                oauth_token_generation: upstream.oauth_token_generation,
+                epoch_key: epoch_key.clone(),
+                epoch_value: fence.epoch.map(|epoch| epoch.to_string()),
+            };
+            if !self
+                .storage
+                .record_subscription_quota_poll(records, &publication)
+                .await
+                .map_err(super::storage::storage_scheduler_error)?
+            {
+                return Err(SchedulerError::Job(
+                    "usage poll identity or reset epoch changed before durable publication"
+                        .to_owned(),
+                ));
+            }
+            if !self
+                .subscription_quota_cache
+                .publish_poll(upstream.id, sequence, records)
+            {
+                return Err(SchedulerError::Job(
+                    "a newer usage poll already published routing quota".to_owned(),
+                ));
+            }
+        } else {
+            for record in records {
+                self.subscription_quota_cache
+                    .upsert_observation(upstream.id, record);
+                self.subscription_quota_sink
+                    .enqueue(record.clone())
+                    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn fetch_openai_reset_inventory(
         &self,
         upstream: &UpstreamRecord,

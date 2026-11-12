@@ -8,6 +8,7 @@ use cc_lb_control::openai_limit_resets::{
 use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_routing::{FilterPlugin, RoutingContext};
+use cc_lb_storage_api::UpstreamSubscriptionQuotaStore;
 use serde_json::{Value, json};
 use std::sync::{
     Mutex,
@@ -782,5 +783,179 @@ async fn admin_claim_refuses_when_cached_reset_eligibility_no_longer_matches_liv
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Stops the poll on its third clock read after inventory was fetched:
+/// classifier freshness, inventory observation, then quota publication time.
+/// The last read is immediately after the final durable epoch validation.
+struct AfterEpochReadClock {
+    provider: Arc<ProviderState>,
+    reads_after_inventory: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: (Mutex<bool>, std::sync::Condvar),
+    paused_once: AtomicBool,
+    seconds: std::sync::atomic::AtomicU64,
+}
+
+impl cc_lb_clock::Clock for AfterEpochReadClock {
+    fn now(&self) -> std::time::SystemTime {
+        if self.provider.inventory_calls.load(Ordering::SeqCst) > 0
+            && !self.paused_once.load(Ordering::SeqCst)
+            && self.reads_after_inventory.fetch_add(1, Ordering::SeqCst) == 2
+            && !self.paused_once.swap(true, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            let released = self.release.0.lock().unwrap();
+            let (released, _) = self
+                .release
+                .1
+                .wait_timeout_while(released, std::time::Duration::from_secs(10), |released| {
+                    !*released
+                })
+                .unwrap();
+            assert!(
+                *released,
+                "test must release the poll paused after its epoch read"
+            );
+        }
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(self.seconds.load(Ordering::SeqCst))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_paused_after_final_epoch_read_cannot_restore_pre_reset_exhaustion() {
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 100).await;
+    let mut fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let clock = Arc::new(AfterEpochReadClock {
+        provider: provider.state.clone(),
+        reads_after_inventory: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: (Mutex::new(false), std::sync::Condvar::new()),
+        paused_once: AtomicBool::new(false),
+        seconds: std::sync::atomic::AtomicU64::new(1_700_000_000),
+    });
+    fixture.dispatch.clock = clock.clone();
+    let dispatch = fixture.dispatch.clone();
+    let old_poll = tokio::spawn(async move { dispatch.poll_usage(upstream.id, None).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), clock.entered.notified())
+        .await
+        .expect("poll pauses after final epoch read and before quota publication");
+    fixture
+        .storage
+        .put_meta_value(
+            &openai_limit_reset_epoch_meta_key(upstream.id),
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+    *provider.state.usage.lock().unwrap() = usage(upstream.kind, 12);
+    let refreshed = refresh(&fixture, &upstream).await;
+    let selected_after_refresh = selected(&fixture, &upstream);
+    // A timestamp acquired after resumption must not make the stale body newer.
+    clock.seconds.store(1_700_000_001, Ordering::SeqCst);
+    *clock.release.0.lock().unwrap() = true;
+    clock.release.1.notify_one();
+    let _old_outcome = old_poll.await.unwrap();
+    assert_eq!(refreshed, LimitResetUsageRefresh::Refreshed);
+    assert_eq!(selected_after_refresh, upstream.id);
+    assert_eq!(
+        selected(&fixture, &upstream),
+        upstream.id,
+        "a pre-reset body validated before settlement must not overwrite refreshed routing quota"
+    );
+    let durable = fixture
+        .storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream.id])
+        .await
+        .unwrap();
+    assert_eq!(
+        durable
+            .iter()
+            .find(|sample| sample.window == cc_lb_storage_api::SubscriptionQuotaWindow::SevenDay)
+            .unwrap()
+            .utilization,
+        Some(0.12),
+        "durable latest must retain the post-reset observation"
+    );
+}
+
+#[tokio::test]
+async fn monthly_main_without_ordinary_credits_keeps_coupon_inventory_without_claiming_quota_refresh()
+ {
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let mut monthly = usage(upstream.kind, 100);
+    monthly["plan_type"] = json!("go");
+    monthly["rate_limit"]["primary_window"]["limit_window_seconds"] = json!(2_592_000);
+    monthly["credits"] = Value::Null;
+    *provider.state.usage.lock().unwrap() = monthly;
+    let result = refresh(&fixture, &upstream).await;
+    let raw = fixture
+        .storage
+        .get_meta_value(&openai_limit_reset_meta_key(upstream.id))
+        .await
+        .unwrap();
+    assert!(
+        raw.is_some(),
+        "valid monthly usage must not discard the already-fetched banked reset inventory"
+    );
+    let record: OpenAiLimitResetPollRecord = serde_json::from_str(&raw.unwrap()).unwrap();
+    let manual = record.inventory.unwrap().manual_redemption.unwrap();
+    assert!(manual.eligible);
+    assert_eq!(manual.windows[0].window, "monthly");
+    assert_eq!(manual.windows[0].duration_seconds, Some(2_592_000));
+    assert_ne!(
+        result,
+        LimitResetUsageRefresh::Refreshed,
+        "inventory publication alone is not affected-quota routing publication"
+    );
+    assert!(
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .snapshot_for_upstream(upstream.id, 1_700_000_000_000, 1_800)
+            .iter()
+            .all(|snapshot| snapshot.observed_at_unix_millis.is_none())
+    );
+    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.state.inventory_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn monthly_main_with_ordinary_credits_does_not_report_affected_quota_refreshed() {
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let mut monthly = usage(upstream.kind, 100);
+    monthly["rate_limit"]["primary_window"]["limit_window_seconds"] = json!(2_592_000);
+    monthly["credits"] = json!({"has_credits":true,"balance":"1.00"});
+    *provider.state.usage.lock().unwrap() = monthly;
+    let result = refresh(&fixture, &upstream).await;
+    assert_ne!(
+        result,
+        LimitResetUsageRefresh::Refreshed,
+        "publishing ordinary credits does not refresh the reset's affected main quota"
+    );
+    let record = inventory(&fixture, upstream.id).await;
+    assert!(
+        record
+            .inventory
+            .unwrap()
+            .manual_redemption
+            .unwrap()
+            .eligible
+    );
+    let snapshots = fixture
+        .dispatch
+        .subscription_quota_cache
+        .snapshot_for_upstream(upstream.id, 1_700_000_000_000, 1_800);
+    assert!(
+        snapshots
+            .iter()
+            .filter(|snapshot| snapshot.window == "5h" || snapshot.window == "7d")
+            .all(|snapshot| snapshot.observed_at_unix_millis.is_none())
     );
 }

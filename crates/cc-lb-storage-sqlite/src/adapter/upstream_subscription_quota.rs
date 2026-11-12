@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaPollFence, SubscriptionQuotaProviderLot,
     SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
@@ -61,18 +61,55 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()> {
         let mut tx = self.begin_immediate().await?;
-        for record in records {
-            upsert_latest(&mut tx, record).await?;
-            if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
-                insert_checkpoint_if_changed(
-                    &mut tx,
-                    &SubscriptionQuotaCheckpointRecord::from(record),
-                )
-                .await?;
-            }
-        }
+        record_samples_in_tx(&mut tx, records).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
+    }
+
+    async fn record_subscription_quota_poll(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool> {
+        if records.iter().any(|record| {
+            record.upstream_id != fence.upstream_id || record.source != SubscriptionQuotaSource::Api
+        }) {
+            return Err(StorageError::InvalidInput {
+                field: "subscription quota poll records".to_owned(),
+                reason: "records must belong to the fenced upstream and use the API source"
+                    .to_owned(),
+            });
+        }
+        let Ok(expected_generation) = i64::try_from(fence.oauth_token_generation) else {
+            return Ok(false);
+        };
+        // The write lock serializes both absent/present epoch CAS and credential
+        // changes with the fence checks and all latest/checkpoint writes.
+        let mut tx = self.begin_immediate().await?;
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT token.oauth_token_generation FROM upstream_spec_v1 spec \
+             JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id \
+             WHERE spec.id = ? AND spec.deleted_at IS NULL \
+               AND token.oauth_credentials_ciphertext IS NOT NULL",
+        )
+        .bind(fence.upstream_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if generation != Some(expected_generation) {
+            return Ok(false);
+        }
+        let epoch: Option<String> = sqlx::query_scalar("SELECT value FROM meta_v1 WHERE key = ?")
+            .bind(&fence.epoch_key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        if epoch != fence.epoch_value {
+            return Ok(false);
+        }
+        record_samples_in_tx(&mut tx, records).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(true)
     }
 
     async fn list_latest_subscription_quota_for_upstreams(
@@ -130,6 +167,20 @@ impl UpstreamSubscriptionQuotaAggregateStore for SqliteStorage {
         .await?;
         Ok(provider_lots_from_slim_checkpoints(checkpoints, &query))
     }
+}
+
+async fn record_samples_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    records: &[SubscriptionQuotaSample],
+) -> StorageResult<()> {
+    for record in records {
+        upsert_latest(tx, record).await?;
+        if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
+            insert_checkpoint_if_changed(tx, &SubscriptionQuotaCheckpointRecord::from(record))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn list_latest_records_for_upstreams(

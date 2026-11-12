@@ -38,7 +38,7 @@ use crate::scheduler_dispatch::http::{
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 use crate::scheduler_dispatch::time::now_unix_millis;
-use crate::scheduler_dispatch::usage::observe_usage_body;
+use crate::scheduler_dispatch::usage::parse_usage_body;
 
 use super::SchedulerDispatch;
 
@@ -262,6 +262,7 @@ impl SchedulerDispatch {
             String::new()
         };
         let fence = self.capture_usage_poll_fence(&upstream).await?;
+        let poll_sequence = self.subscription_quota_cache.begin_poll();
         let observed_at_unix_secs = unix_secs(self.clock.now());
         let first_response = match self
             .fetch_usage_with_current_token(&upstream, &user_agent)
@@ -312,17 +313,13 @@ impl SchedulerDispatch {
             .await?;
         self.validate_usage_poll_fence(&upstream, &fence).await?;
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
-        let cedar_ember = if is_anthropic {
-            observe_usage_body(
-                upstream.id,
-                &response.body,
-                observed_at_unix_millis,
-                &self.subscription_quota_sink,
-                self.subscription_quota_cache.as_ref(),
-            )?
+        let (records, cedar_ember, affected_main_published) = if is_anthropic {
+            let (records, cedar_ember) =
+                parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;
+            (records, cedar_ember, true)
         } else {
             let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
-            super::usage::observe_provider_usage_body(
+            let (records, affected_main_published) = super::usage::parse_provider_usage_body(
                 super::usage::ProviderUsageContext {
                     upstream_id: upstream.id,
                     kind: upstream.kind,
@@ -331,9 +328,13 @@ impl SchedulerDispatch {
                 },
                 &response.body,
                 observed_at_unix_millis,
-                &self.subscription_quota_sink,
-                self.subscription_quota_cache.as_ref(),
             )?;
+            (records, None, affected_main_published)
+        };
+        self.publish_usage_poll(&upstream, &fence, poll_sequence, &records)
+            .await?;
+        if !is_anthropic {
+            let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
             self.enrich_provider_account_metadata(
                 &upstream,
                 &bundle,
@@ -341,8 +342,7 @@ impl SchedulerDispatch {
                 observed_at_unix_millis,
             )
             .await;
-            None
-        };
+        }
         if is_anthropic
             && self
                 .validate_usage_poll_fence(&upstream, &fence)
@@ -366,6 +366,11 @@ impl SchedulerDispatch {
         if let Some(record) = openai_inventory {
             self.persist_openai_reset_inventory(&upstream, &fence, &record)
                 .await;
+        }
+        if upstream.kind == UpstreamKind::OpenaiOauth && !affected_main_published {
+            return Err(SchedulerError::Job(
+                "OpenAI usage published no affected main routing quota".to_owned(),
+            ));
         }
         if is_anthropic && upstream.oauth_never_refresh {
             self.enqueue_metadata_refresh_for_long_lived(&upstream, traceparent)

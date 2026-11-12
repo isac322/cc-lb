@@ -1,14 +1,17 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStore, MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PriceCatalogCache, Provider, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
-    UpstreamSubscriptionQuotaStore, UsageRollupStore, UsageTokenInterval, UsageTokenIntervalStore,
+    CacheKeepaliveSessionStore, MetaStore, OAuthTokensCreate, PoolQuotaHistoryStore,
+    PoolQuotaSnapshotRecord, PriceCatalogCache, Provider, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaPollFence,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
+    SubscriptionQuotaWindow, UpstreamCreate, UpstreamKind, UpstreamStore,
+    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageRollupStore,
+    UsageTokenInterval, UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -289,6 +292,346 @@ async fn price_snapshots_retain_three_newest_distinct_payloads() -> Result<()> {
     let teardown = fixture.drop_schema().await;
     result?;
     teardown
+}
+
+#[tokio::test]
+async fn quota_poll_rejects_stale_epoch_even_with_a_newer_timestamp() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let fence = poll_fence(&storage).await?;
+        storage.put_meta_value(&fence.epoch_key, "first").await?;
+        let fence = SubscriptionQuotaPollFence {
+            epoch_value: Some("first".to_owned()),
+            ..fence
+        };
+        let original = api_sample(fence.upstream_id, 10, 1, 0.2);
+        assert!(
+            storage
+                .record_subscription_quota_poll(std::slice::from_ref(&original), &fence)
+                .await?
+        );
+        assert!(
+            storage
+                .compare_and_put_meta_value(&fence.epoch_key, Some("first"), "second")
+                .await?
+        );
+        let replacement = api_sample(fence.upstream_id, 100, 2, 0.9);
+        assert!(
+            !storage
+                .record_subscription_quota_poll(std::slice::from_ref(&replacement), &fence)
+                .await?
+        );
+        assert_poll_rows(&storage, &original).await?;
+
+        // Ordinary CAS still rejects an existing key and an incorrect value.
+        assert!(
+            !storage
+                .compare_and_put_meta_value(&fence.epoch_key, None, "wrong")
+                .await?
+        );
+        assert!(
+            !storage
+                .compare_and_put_meta_value(&fence.epoch_key, Some("first"), "wrong")
+                .await?
+        );
+        let current = SubscriptionQuotaPollFence {
+            epoch_value: Some("second".to_owned()),
+            ..fence
+        };
+        for invalid in [
+            sample(current.upstream_id, 200, 3, 0.8, 1000),
+            api_sample(Uuid::new_v4(), 200, 4, 0.8),
+        ] {
+            assert!(
+                storage
+                    .record_subscription_quota_poll(&[replacement.clone(), invalid], &current)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_poll_rows(&storage, &original).await?;
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn quota_poll_rejects_rotated_generation_and_deleted_upstream() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let fence = poll_fence(&storage).await?;
+        let original = api_sample(fence.upstream_id, 10, 1, 0.2);
+        assert!(
+            storage
+                .record_subscription_quota_poll(std::slice::from_ref(&original), &fence)
+                .await?
+        );
+        let rotated = UpstreamStore::update_oauth_token(
+            &storage,
+            fence.upstream_id,
+            EncryptedOAuthTokens::from_ciphertext(b"rotated".to_vec()),
+        )
+        .await?;
+        let replacement = api_sample(fence.upstream_id, 100, 2, 0.9);
+        assert!(
+            !storage
+                .record_subscription_quota_poll(std::slice::from_ref(&replacement), &fence)
+                .await?
+        );
+        assert_poll_rows(&storage, &original).await?;
+        let current = SubscriptionQuotaPollFence {
+            oauth_token_generation: rotated.oauth_token_generation,
+            ..fence
+        };
+        assert!(
+            storage
+                .record_subscription_quota_poll(std::slice::from_ref(&replacement), &current)
+                .await?
+        );
+        sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = NOW() WHERE id = $1")
+            .bind(current.upstream_id)
+            .execute(storage.pool())
+            .await?;
+        assert!(
+            !storage
+                .record_subscription_quota_poll(
+                    &[api_sample(current.upstream_id, 200, 3, 0.8)],
+                    &current,
+                )
+                .await?
+        );
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT sample_id FROM upstream_subscription_quota_checkpoints_v1 ORDER BY sample_id",
+        )
+        .fetch_all(storage.pool())
+        .await?;
+        assert_eq!(ids, vec![original.sample_id, replacement.sample_id]);
+        assert_eq!(
+            storage
+                .list_latest_subscription_quota_for_upstreams(&[current.upstream_id])
+                .await?,
+            vec![replacement],
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn quota_poll_absent_epoch_serializes_with_cas_and_direct_meta_writes() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        for direct_write in [false, true] {
+            let fence = poll_fence(&storage).await?;
+            let original = api_sample(fence.upstream_id, 10, 1, 0.2);
+            let records = [original.clone()];
+            // Pause publication after it owns the absent key's advisory lock.
+            let mut blocker = storage.pool().begin().await?;
+            sqlx::query("SELECT id FROM upstream_spec_v1 WHERE id = $1 FOR UPDATE")
+                .bind(fence.upstream_id)
+                .execute(&mut *blocker)
+                .await?;
+            let publish = storage.record_subscription_quota_poll(&records, &fence);
+            let reset = async {
+                wait_for_meta_lock(storage.pool(), &fence.epoch_key, true).await?;
+                let write = async {
+                    if direct_write {
+                        storage.put_meta_value(&fence.epoch_key, "reset").await?;
+                    } else {
+                        assert!(
+                            storage
+                                .compare_and_put_meta_value(&fence.epoch_key, None, "reset")
+                                .await?
+                        );
+                    }
+                    Ok::<_, anyhow::Error>(())
+                };
+                let unblock = async {
+                    // Observe actual database lock contention, not a sleep-based
+                    // assumption that the reset started before publication.
+                    let observed =
+                        wait_for_meta_lock(storage.pool(), &fence.epoch_key, false).await;
+                    blocker.rollback().await?;
+                    observed
+                };
+                let (write, unblock) = tokio::join!(write, unblock);
+                write?;
+                unblock
+            };
+            let (published, reset) = tokio::join!(publish, reset);
+            assert!(published?);
+            reset?;
+            assert_poll_rows(&storage, &original).await?;
+            assert_eq!(
+                storage.get_meta_value(&fence.epoch_key).await?,
+                Some("reset".to_owned()),
+            );
+            assert!(
+                !storage
+                    .record_subscription_quota_poll(
+                        &[api_sample(fence.upstream_id, 100, 2, 0.9)],
+                        &fence,
+                    )
+                    .await?
+            );
+            assert_poll_rows(&storage, &original).await?;
+        }
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn quota_poll_checkpoint_failure_rolls_back_latest() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let fence = poll_fence(&storage).await?;
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_poll_checkpoint() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture checkpoint failure'; END $$;
+             CREATE TRIGGER reject_poll_checkpoint BEFORE INSERT
+             ON upstream_subscription_quota_checkpoints_v1 FOR EACH ROW
+             EXECUTE FUNCTION reject_poll_checkpoint();",
+        )
+        .execute(storage.pool())
+        .await?;
+        assert!(
+            storage
+                .record_subscription_quota_poll(
+                    &[api_sample(fence.upstream_id, 10, 1, 0.2)],
+                    &fence,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .list_latest_subscription_quota_for_upstreams(&[fence.upstream_id])
+                .await?
+                .is_empty()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1")
+                .fetch_one(storage.pool())
+                .await?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+async fn poll_fence(storage: &PostgresStorage) -> Result<SubscriptionQuotaPollFence> {
+    let id = Uuid::new_v4();
+    let upstream = UpstreamStore::create(
+        storage,
+        UpstreamCreate {
+            id,
+            name: format!("quota-poll-{id}"),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: EncryptedOAuthTokens::from_ciphertext(b"initial".to_vec()),
+                never_refresh: false,
+            }),
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?;
+    Ok(SubscriptionQuotaPollFence {
+        upstream_id: id,
+        oauth_token_generation: upstream.oauth_token_generation,
+        epoch_key: format!("quota-poll-epoch:{id}"),
+        epoch_value: None,
+    })
+}
+
+fn api_sample(upstream: Uuid, at: u64, id: u128, utilization: f64) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
+        source: SubscriptionQuotaSource::Api,
+        ..sample(upstream, at, id, utilization, 1000)
+    }
+}
+
+async fn assert_poll_rows(
+    storage: &PostgresStorage,
+    expected: &SubscriptionQuotaSample,
+) -> Result<()> {
+    assert_eq!(
+        storage
+            .list_latest_subscription_quota_for_upstreams(&[expected.upstream_id])
+            .await?,
+        vec![expected.clone()],
+    );
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT sample_id FROM upstream_subscription_quota_checkpoints_v1 \
+         WHERE upstream_id = $1 ORDER BY sample_id",
+    )
+    .bind(expected.upstream_id)
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(ids, vec![expected.sample_id]);
+    Ok(())
+}
+
+async fn wait_for_meta_lock(pool: &PgPool, key: &str, granted: bool) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let found: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_locks
+                     WHERE locktype = 'advisory' AND classid = 1667460194::oid
+                       AND objid = hashtext($1)::oid AND objsubid = 2 AND granted = $2
+                       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                 )",
+            )
+            .bind(key)
+            .bind(granted)
+            .fetch_one(pool)
+            .await?;
+            if found {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("quota poll/meta writer did not reach the expected advisory lock state")?
 }
 
 fn sample(

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use cc_lb_control::SubscriptionQuotaCacheLike;
 use cc_lb_domain::{
@@ -111,11 +112,39 @@ enum EqualObservedAt<'a> {
 #[derive(Debug, Default)]
 pub struct SubscriptionQuotaCache {
     inner: Arc<RwLock<HashMap<Uuid, HashMap<SubscriptionQuotaWindow, WindowSlots>>>>,
+    poll_sequence: AtomicU64,
+    published_polls: parking_lot::Mutex<HashMap<Uuid, u64>>,
 }
 
 impl SubscriptionQuotaCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Request order is independent of observation timestamps. A delayed older
+    /// request cannot publish after a newer poll has published its batch.
+    pub(crate) fn begin_poll(&self) -> u64 {
+        self.poll_sequence.fetch_add(1, AtomicOrdering::Relaxed) + 1
+    }
+
+    pub(crate) fn publish_poll(
+        &self,
+        upstream_id: Uuid,
+        sequence: u64,
+        records: &[SubscriptionQuotaSample],
+    ) -> bool {
+        let mut published = self.published_polls.lock();
+        if published
+            .get(&upstream_id)
+            .is_some_and(|current| *current > sequence)
+        {
+            return false;
+        }
+        for record in records {
+            self.upsert_observation(upstream_id, record);
+        }
+        published.insert(upstream_id, sequence);
+        true
     }
 
     pub async fn hydrate_from_store(
@@ -485,6 +514,46 @@ mod tests {
             extra_usage_used_credits: None,
             ingested_at_unix_millis: observed_at_unix_millis,
         }
+    }
+
+    #[test]
+    fn poll_publication_rejects_older_request_even_with_later_observation_time() {
+        let cache = SubscriptionQuotaCache::new();
+        let old = cache.begin_poll();
+        let fresh = cache.begin_poll();
+        let refreshed = record(SubscriptionQuotaSampleKind::Sample, 1_000, Some(0.12));
+        assert!(cache.publish_poll(Uuid::nil(), fresh, &[refreshed]));
+        let delayed = record(SubscriptionQuotaSampleKind::Sample, 2_000, Some(1.0));
+        assert!(!cache.publish_poll(Uuid::nil(), old, &[delayed]));
+        assert_eq!(
+            cache
+                .snapshot_for_upstream(Uuid::nil(), 2_000, 60)
+                .into_iter()
+                .find(|snapshot| snapshot.window == "7d")
+                .unwrap()
+                .utilization,
+            Some(0.12)
+        );
+    }
+
+    #[test]
+    fn poll_publication_accepts_later_request_when_older_request_publishes_first() {
+        let cache = SubscriptionQuotaCache::new();
+        let old = cache.begin_poll();
+        let fresh = cache.begin_poll();
+        let exhausted = record(SubscriptionQuotaSampleKind::Sample, 1_000, Some(1.0));
+        assert!(cache.publish_poll(Uuid::nil(), old, &[exhausted]));
+        let refreshed = record(SubscriptionQuotaSampleKind::Sample, 2_000, Some(0.12));
+        assert!(cache.publish_poll(Uuid::nil(), fresh, &[refreshed]));
+        assert_eq!(
+            cache
+                .snapshot_for_upstream(Uuid::nil(), 2_000, 60)
+                .into_iter()
+                .find(|snapshot| snapshot.window == "7d")
+                .unwrap()
+                .utilization,
+            Some(0.12)
+        );
     }
 
     #[test]

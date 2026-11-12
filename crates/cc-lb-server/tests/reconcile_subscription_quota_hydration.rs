@@ -103,6 +103,16 @@ impl UpstreamSubscriptionQuotaStore for SwitchableQuotaStore {
         self.inner.record_subscription_quota_samples(records).await
     }
 
+    async fn record_subscription_quota_poll(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &cc_lb_storage_api::SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool> {
+        self.inner
+            .record_subscription_quota_poll(records, fence)
+            .await
+    }
+
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         upstream_ids: &[Uuid],
