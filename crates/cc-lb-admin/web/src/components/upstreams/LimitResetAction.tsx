@@ -14,6 +14,7 @@ import {
 import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
 import { type CouponAdvice, deriveCouponAdvice } from '../../lib/couponAdvice';
+import { couponInventoryForUpstream } from '../../lib/couponInventory';
 import { formatWait, type NudgeQuotaWindow } from '../../lib/couponNudge';
 import {
   type CouponEffects as CouponEffectsView,
@@ -234,6 +235,16 @@ export function LimitResetAction({
       quotaWindows,
     );
   const claim = useClaimLimitReset();
+  // Use the same complete-list aging and capped-list fallback as Overview.
+  const ownedInventoryCount = isOpenAI
+    ? couponInventoryForUpstream({
+        upstream,
+        fleet: resetsQ.data
+          ? { upstreams: [{ ...resetsQ.data, upstream_id: upstream.id }] }
+          : undefined,
+        nowMs,
+      }).total
+    : derived?.activeCount;
 
   const [dialogOpen, updateDialogOpen] = useState(defaultOpen);
   const workflowOpenRef = useRef(defaultOpen);
@@ -261,13 +272,10 @@ export function LimitResetAction({
       return initialOwnedCount != null && initialOwnedCount > 0
         ? 'coupon'
         : 'history';
-    const owned = isOpenAI
-      ? resetsQ.data?.openai?.available_count
-      : derived?.activeCount;
     return credentialsStored === true &&
       !resetsQ.isError &&
-      owned != null &&
-      owned > 0
+      ownedInventoryCount != null &&
+      ownedInventoryCount > 0
       ? 'coupon'
       : 'history';
   });
@@ -325,9 +333,6 @@ export function LimitResetAction({
   // Expired/depleted/not-yet-started grants never appear as a usable count or
   // a selectable option — activeGrants is the single filtered list.
   const selectableGrants = derived?.activeGrants ?? [];
-  const ownedInventoryCount = isOpenAI
-    ? data?.openai?.available_count
-    : derived?.activeCount;
   const hasOwnedCoupons =
     credentialsStored === true &&
     !queryError &&
@@ -577,7 +582,7 @@ export function LimitResetAction({
   const unlistedCount = isOpenAI
     ? Math.max(
         0,
-        (inFlightView?.activeCount ?? data?.openai?.available_count ?? 0) -
+        (inFlightView?.activeCount ?? ownedInventoryCount ?? 0) -
           displayGroups.reduce((count, group) => count + group.remaining, 0),
       )
     : 0;
@@ -587,9 +592,7 @@ export function LimitResetAction({
   const buttonTitle = showNudge
     ? (nudge.detail ?? nudge.label ?? undefined)
     : undefined;
-  const ownedCount =
-    inFlightView?.activeCount ??
-    (isOpenAI ? data?.openai?.available_count : derived?.activeCount);
+  const ownedCount = inFlightView?.activeCount ?? ownedInventoryCount;
   const buttonCount =
     (!pendingOp || inFlightView != null) &&
     !loading &&

@@ -21,8 +21,14 @@ import {
   useClaimLimitReset,
   useLimitResetHistory,
 } from '../../lib/limitResets';
+import {
+  failedQuery,
+  idleMutation,
+  pendingQuery,
+  successQuery,
+} from '../../lib/test-utils/hook-results';
 import { makeOauthUpstream } from '../../lib/test-utils/warmup-fixtures';
-import { useCouponNudge } from './CouponNudge';
+import { type CouponNudgeState, useCouponNudge } from './CouponNudge';
 import { LimitResetAction } from './LimitResetAction';
 
 vi.mock('../../lib/limitResets', async () => ({
@@ -131,41 +137,54 @@ function quota(used = 25, resetIn = 2 * HOUR): CouponQuotaWindow[] {
 function observe(
   data: LimitResetsResponse | undefined,
   windows: CouponQuotaWindow[] = [],
-  options: { pending?: boolean; error?: boolean; inFlight?: boolean } = {},
+  options: {
+    pending?: boolean;
+    error?: boolean;
+    inFlight?: boolean;
+    nowMs?: number;
+  } = {},
 ) {
-  vi.mocked(useCouponNudge).mockReturnValue({
-    resetsQ: {
-      data,
-      isPending: options.pending ?? false,
-      isError: options.error ?? false,
-      error: options.error
-        ? new ApiError(503, null, null, 'Inventory unavailable')
-        : null,
-      isFetching: false,
-      refetch: vi.fn(),
-    },
-    nowMs: NOW,
+  let resetsQ =
+    data === undefined || options.pending
+      ? pendingQuery<LimitResetsResponse>()
+      : successQuery(data);
+  if (options.error) {
+    const failed = failedQuery<LimitResetsResponse>(
+      new ApiError(503, null, null, 'Inventory unavailable'),
+    );
+    if (!failed.isError) throw new Error('Expected a failed query fixture');
+    resetsQ =
+      data === undefined
+        ? failed
+        : {
+            ...failed,
+            data,
+            isLoadingError: false,
+            isRefetchError: true,
+          };
+  }
+  const nowMs = options.nowMs ?? NOW;
+  const state: CouponNudgeState = {
+    resetsQ,
+    nowMs,
     suppressed: true,
     nudge: null,
     derived: deriveCouponNudge(
       couponInventory(data) ?? undefined,
       windows,
-      NOW,
+      nowMs,
     ),
     claimInFlight: options.inFlight ?? false,
-  } as never);
+  };
+  vi.mocked(useCouponNudge).mockReturnValue(state);
 }
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(loadPendingLimitResetOp).mockReturnValue(null);
-  vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
-  vi.mocked(useLimitResetHistory).mockReturnValue({
-    data: { items: [], has_more: false, limit: 100 },
-    isPending: false,
-    isError: false,
-    isFetching: false,
-    refetch: vi.fn(),
-  } as never);
+  vi.mocked(useClaimLimitReset).mockReturnValue(idleMutation({ mutate }));
+  vi.mocked(useLimitResetHistory).mockReturnValue(
+    successQuery({ items: [], has_more: false, limit: 100 }),
+  );
 });
 afterEach(cleanup);
 
@@ -507,6 +526,73 @@ describe('coupon workflow focus ownership', () => {
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(opener));
+    expect(mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe('OpenAI inventory aging between polls', () => {
+  const upstream = makeOauthUpstream({ kind: 'openai_oauth' });
+  it('opens History when the complete cached credit list has expired without another provider poll', async () => {
+    const expiresAt = NOW + 1000;
+    const cached = inventory('openai', [
+      grant({ ends_at: new Date(expiresAt).toISOString() }),
+    ]);
+    observe(cached, [], { nowMs: expiresAt + 1 });
+    render(
+      <LimitResetAction upstream={upstream} credentialsStored defaultOpen />,
+    );
+    expect(
+      await screen.findByRole('dialog', { name: 'Reset activity' }),
+    ).toBeDefined();
+    expect(screen.getByText('No active coupons available.')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Use coupon' })).toBeNull();
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('keeps a confirmation already being read open when its last credit expires', async () => {
+    const expiresAt = NOW + 1000;
+    const cached = inventory('openai', [
+      grant({ ends_at: new Date(expiresAt).toISOString() }),
+    ]);
+    observe(cached);
+    const view = render(
+      <LimitResetAction upstream={upstream} credentialsStored defaultOpen />,
+    );
+    expect(
+      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeDefined();
+    observe(cached, [], { nowMs: expiresAt + 1 });
+    view.rerender(
+      <LimitResetAction upstream={upstream} credentialsStored defaultOpen />,
+    );
+    expect(
+      screen.getByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeDefined();
+    expect(
+      (screen.getByRole('button', { name: 'Use coupon' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('retains the native summary for a capped credit list instead of inventing zero inventory', async () => {
+    const expiresAt = NOW + 1000;
+    const cached = inventory('openai', [
+      grant({ ends_at: new Date(expiresAt).toISOString() }),
+    ]);
+    if (!cached.openai) throw new Error('Missing native fixture');
+    cached.openai.available_count = 2;
+    observe(cached, [], { nowMs: expiresAt + 1 });
+    render(
+      <LimitResetAction upstream={upstream} credentialsStored defaultOpen />,
+    );
+    expect(
+      await screen.findByRole('dialog', { name: 'Use a reset coupon?' }),
+    ).toBeDefined();
+    expect(
+      (screen.getByRole('button', { name: 'Use coupon' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
     expect(mutate).not.toHaveBeenCalled();
   });
 });

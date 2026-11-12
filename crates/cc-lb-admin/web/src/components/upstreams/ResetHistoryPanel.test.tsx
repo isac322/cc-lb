@@ -16,8 +16,14 @@ import {
   useClaimLimitReset,
   useLimitResetHistory,
 } from '../../lib/limitResets';
+import {
+  failedQuery,
+  idleMutation,
+  pendingQuery,
+  successQuery,
+} from '../../lib/test-utils/hook-results';
 import { makeOauthUpstream } from '../../lib/test-utils/warmup-fixtures';
-import { useCouponNudge } from './CouponNudge';
+import { type CouponNudgeState, useCouponNudge } from './CouponNudge';
 import { LimitResetAction } from './LimitResetAction';
 import { ResetHistoryPanel } from './ResetHistoryPanel';
 
@@ -67,14 +73,13 @@ function setHistory(
   data: LimitResetHistoryResponse | undefined,
   error: Error | null = null,
 ) {
-  vi.mocked(useLimitResetHistory).mockReturnValue({
-    data,
-    error,
-    isPending: !data && !error,
-    isError: error != null,
-    isFetching: false,
-    refetch: vi.fn(),
-  } as never);
+  vi.mocked(useLimitResetHistory).mockReturnValue(
+    error
+      ? failedQuery<LimitResetHistoryResponse>(error)
+      : data
+        ? successQuery(data)
+        : pendingQuery<LimitResetHistoryResponse>(),
+  );
 }
 
 beforeEach(() => {
@@ -169,14 +174,7 @@ describe('recorded reset activity', () => {
   it('expands the real recent-history bound up to 1000, then states the limit honestly', () => {
     vi.mocked(useLimitResetHistory).mockImplementation(
       (_upstreamId, _enabled, limit = 100) =>
-        ({
-          data: { items: [attempt()], has_more: true, limit },
-          error: null,
-          isPending: false,
-          isError: false,
-          isFetching: false,
-          refetch: vi.fn(),
-        }) as never,
+        successQuery({ items: [attempt()], has_more: true, limit }),
     );
     render(<ResetHistoryPanel upstreamId="upstream-a" open />);
     for (let limit = 200; limit <= 1000; limit += 100) {
@@ -201,21 +199,16 @@ describe('recorded reset activity', () => {
 describe('reset activity entry availability', () => {
   it('opens recorded history without credentials and never dispatches a coupon claim', async () => {
     const mutate = vi.fn();
-    vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
-    vi.mocked(useCouponNudge).mockReturnValue({
-      resetsQ: {
-        data: undefined,
-        isError: false,
-        isPending: true,
-        isFetching: false,
-        refetch: vi.fn(),
-      },
+    vi.mocked(useClaimLimitReset).mockReturnValue(idleMutation({ mutate }));
+    const state: CouponNudgeState = {
+      resetsQ: pendingQuery<LimitResetsResponse>(),
       nowMs: Date.now(),
       suppressed: true,
       nudge: null,
       derived: null,
       claimInFlight: false,
-    } as never);
+    };
+    vi.mocked(useCouponNudge).mockReturnValue(state);
     render(
       <LimitResetAction
         upstream={makeOauthUpstream()}
@@ -237,21 +230,16 @@ describe('reset activity entry availability', () => {
 
   it('keeps recorded history reachable while the provider inventory is loading', async () => {
     const mutate = vi.fn();
-    vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
-    vi.mocked(useCouponNudge).mockReturnValue({
-      resetsQ: {
-        data: undefined,
-        isError: false,
-        isPending: true,
-        isFetching: true,
-        refetch: vi.fn(),
-      },
+    vi.mocked(useClaimLimitReset).mockReturnValue(idleMutation({ mutate }));
+    const state: CouponNudgeState = {
+      resetsQ: pendingQuery<LimitResetsResponse>(),
       nowMs: Date.now(),
       suppressed: true,
       nudge: null,
       derived: null,
       claimInFlight: false,
-    } as never);
+    };
+    vi.mocked(useCouponNudge).mockReturnValue(state);
     render(
       <LimitResetAction
         upstream={makeOauthUpstream()}
@@ -341,7 +329,7 @@ describe('manual native coupon availability', () => {
     'gates manual redemption for $used used, failed refresh $failedRefresh, observed $observed, unknown coverage $coverageUnreported, sibling $sibling',
     ({ used, failedRefresh, observed, coverageUnreported, sibling }) => {
       const mutate = vi.fn();
-      vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
+      vi.mocked(useClaimLimitReset).mockReturnValue(idleMutation({ mutate }));
       const data: LimitResetsResponse = {
         provider: 'openai',
         account_id: 'native-account',
@@ -394,23 +382,21 @@ describe('manual native coupon availability', () => {
         },
       };
       const inventory = couponInventory(data);
-      vi.mocked(useCouponNudge).mockReturnValue({
-        resetsQ: {
-          data,
-          isError: failedRefresh,
-          isPending: false,
-          isFetching: false,
-          error: failedRefresh
-            ? new ApiError(503, null, null, 'Usage refresh unavailable')
-            : null,
-          refetch: vi.fn(),
-        },
+      const failure = failedQuery<LimitResetsResponse>(
+        new ApiError(503, null, null, 'Usage refresh unavailable'),
+      );
+      if (!failure.isError) throw new Error('Expected a failed query fixture');
+      const state: CouponNudgeState = {
+        resetsQ: failedRefresh
+          ? { ...failure, data, isLoadingError: false, isRefetchError: true }
+          : successQuery(data),
         nowMs: Date.now(),
         suppressed: true,
         nudge: null,
         derived: deriveCouponNudge(inventory ?? undefined, [], Date.now()),
         claimInFlight: false,
-      } as never);
+      };
+      vi.mocked(useCouponNudge).mockReturnValue(state);
       render(
         <LimitResetAction
           upstream={makeOauthUpstream({ kind: 'openai_oauth' })}
