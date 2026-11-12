@@ -85,8 +85,8 @@ export async function installFixtures(page: Page, observations: QuotaSnapshot[])
       upstream_id: ID, subscription_metadata: null, organization_metadata: null,
     });
     if (path.endsWith('/warmup')) return json({
-      upstream_id: ID, last_attempt: null, recent_attempts: [], next_scheduled_at_unix_secs: null,
-      recent_summary_7d: { success: 0, skipped: 0, transient_failure: 0, permanent_failure: 0 }, dialect_plugin: null,
+      upstream_id: ID, dialect_plugin: null,
+      lanes: [{ lane: 'primary', eligible: true, ineligible_reason: null, target_windows: ['5h', '7d'], next_scheduled_at_unix_secs: null, last_attempt: null, recent_attempts: [] }],
     });
     if (path === '/admin/v1/status') return json({
       version: 'fixture', git_sha: 'fixture', uptime_secs: 1, generation: 1,

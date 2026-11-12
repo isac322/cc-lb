@@ -1,7 +1,12 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import * as queries from '../../../lib/queries';
-import { makeOauthUpstream } from '../../../lib/test-utils/warmup-fixtures';
+import {
+  makeOauthUpstream,
+  makeWarmupAttempt,
+  makeWarmupLane,
+  makeWarmupSummary,
+} from '../../../lib/test-utils/warmup-fixtures';
 import { WarmupCardMinimal } from './WarmupCardMinimal';
 
 vi.mock('../../../lib/queries', async () => {
@@ -27,45 +32,18 @@ const upstream = makeOauthUpstream();
 function makeAttempt(
   overrides: Partial<queries.WarmupAttempt> = {},
 ): queries.WarmupAttempt {
-  return {
-    id: 'attempt-1',
-    upstream_id: upstream.id,
-    attempted_at_unix_secs: 1_718_380_800,
-    completed_at_unix_secs: 1_718_380_801,
-    scheduled_for_unix_secs: 1_718_380_800,
-    trigger: 'scheduled',
-    status: 'success',
-    reason: 'cycle_advanced',
-    dispatch_kind: 'http',
-    http_status: 200,
-    cycle_key: 1_718_380_800,
-    expected_cycle_key: 1_718_380_800,
-    idle_secs_since_prev_window: 300,
-    replica_id: 'replica-1',
-    lease_holder: 'replica-1',
-    upstream_spec_revision: 1,
-    dialect_plugin_snapshot: null,
-    error_detail: null,
-    ...overrides,
-  };
+  return makeWarmupAttempt({ upstream_id: upstream.id, ...overrides });
 }
 
+/** Single primary lane; `recent` is newest first. */
 function makeSummary(
-  lastAttempt: queries.WarmupAttempt,
+  lastAttempt: queries.WarmupAttempt | null,
+  recent: queries.WarmupAttempt[] = lastAttempt ? [lastAttempt] : [],
 ): queries.WarmupSummary {
-  return {
-    upstream_id: upstream.id,
-    last_attempt: lastAttempt,
-    recent_attempts: [lastAttempt],
-    next_scheduled_at_unix_secs: 1_718_398_800,
-    recent_summary_7d: {
-      success: lastAttempt.status === 'success' ? 1 : 0,
-      skipped: lastAttempt.status === 'skipped' ? 1 : 0,
-      transient_failure: lastAttempt.status === 'transient_failure' ? 1 : 0,
-      permanent_failure: lastAttempt.status === 'permanent_failure' ? 1 : 0,
-    },
-    dialect_plugin: null,
-  };
+  return makeWarmupSummary(
+    [makeWarmupLane({ last_attempt: lastAttempt, recent_attempts: recent })],
+    { upstreamId: upstream.id },
+  );
 }
 
 function setSummaryQuery(
@@ -99,7 +77,7 @@ beforeEach(() => {
   } as never);
   vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
     isPending: false,
-    mutate: vi.fn(),
+    mutateAsync: vi.fn(),
   } as never);
   setRegistryPending(false);
   setSummaryQuery(makeSummary(makeAttempt()), false);
@@ -143,10 +121,7 @@ describe('WarmupCardMinimal current state', () => {
         error_detail: 'token rejected',
       });
       const skipped = makeAttempt({ id: 'skip', status: 'skipped' });
-      setSummaryQuery(
-        { ...makeSummary(skipped), recent_attempts: [skipped, failure] },
-        false,
-      );
+      setSummaryQuery(makeSummary(skipped, [skipped, failure]), false);
       render(<WarmupCardMinimal upstream={upstream} />);
 
       expect(screen.getByTestId('warmup-status-value').textContent).toBe(
@@ -165,10 +140,7 @@ describe('WarmupCardMinimal current state', () => {
       error_detail: 'token rejected',
     });
     const success = makeAttempt({ id: 'recovered' });
-    setSummaryQuery(
-      { ...makeSummary(success), recent_attempts: [success, failure] },
-      false,
-    );
+    setSummaryQuery(makeSummary(success, [success, failure]), false);
     render(<WarmupCardMinimal upstream={upstream} />);
 
     expect(screen.getByTestId('warmup-status-value').textContent).toBe(
@@ -247,15 +219,34 @@ describe('WarmupCardMinimal current state', () => {
     );
   });
 
+  test('Fire now stays disabled until the warm-up summary has loaded', () => {
+    setSummaryQuery(undefined, true);
+    const { rerender } = render(<WarmupCardMinimal upstream={upstream} />);
+
+    const fire = () =>
+      screen.getByTestId('warmup-fire-now') as HTMLButtonElement;
+    expect(fire().disabled).toBe(true);
+
+    setSummaryQuery(makeSummary(makeAttempt()), false);
+    rerender(<WarmupCardMinimal upstream={upstream} />);
+    expect(fire().disabled).toBe(false);
+  });
+
+  test('Fire now stays disabled when the summary failed with no data', () => {
+    vi.mocked(queries.useWarmupSummary).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+    } as never);
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    expect(
+      (screen.getByTestId('warmup-fire-now') as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
   test('no recorded attempts stays pending rather than healthy', () => {
-    setSummaryQuery(
-      {
-        ...makeSummary(makeAttempt()),
-        last_attempt: null,
-        recent_attempts: [],
-      },
-      false,
-    );
+    setSummaryQuery(makeSummary(null), false);
     render(<WarmupCardMinimal upstream={upstream} />);
 
     expect(screen.getByTestId('warmup-status-value').textContent).toBe(

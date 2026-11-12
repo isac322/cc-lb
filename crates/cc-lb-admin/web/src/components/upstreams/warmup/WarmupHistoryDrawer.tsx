@@ -1,5 +1,6 @@
 import { ChevronRight, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { COPY } from '../../../lib/copy/warmup';
 import {
   formatRelativeUnixSeconds,
   httpStatusTextClass,
@@ -9,6 +10,7 @@ import {
   useWarmupAttempts,
   type WarmupAttempt,
   type WarmupAttemptStatus,
+  type WarmupLane,
 } from '../../../lib/queries';
 import {
   Button,
@@ -30,10 +32,16 @@ import {
   SEVERITY_TEXT_CLASS,
 } from './parts/warmupViewModel';
 
+export type WarmupLaneFilter = WarmupLane | 'all';
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   upstream: Upstream;
+  /** The upstream's lanes; the lane filter appears only when there are two or more. */
+  lanes?: readonly WarmupLane[];
+  laneFilter?: WarmupLaneFilter;
+  onLaneFilterChange?: (lane: WarmupLaneFilter) => void;
 }
 
 type Horizon = '24h' | '7d' | 'all';
@@ -178,15 +186,27 @@ function AttemptListSkeleton() {
   );
 }
 
-export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
+const NO_LANES: readonly WarmupLane[] = [];
+
+export function WarmupHistoryDrawer({
+  open,
+  onOpenChange,
+  upstream,
+  lanes = NO_LANES,
+  laneFilter = 'all',
+  onLaneFilterChange,
+}: Props) {
   const [filter, setFilter] = useState<WarmupAttemptStatus | 'all'>('all');
   const [horizon, setHorizon] = useState<Horizon>('24h');
   const [selected, setSelected] = useState<WarmupAttempt | null>(null);
+  const multiLane = lanes.length > 1;
+  const lane = multiLane && laneFilter !== 'all' ? laneFilter : null;
 
   const query = useWarmupAttempts(
     upstream.id,
     {
       status: filter === 'all' ? null : filter,
+      lane,
       limit: 50,
     },
     open,
@@ -211,15 +231,43 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
       width="xl"
     >
       <div data-testid="warmup-history-drawer" className="flex h-full flex-col">
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-subtle px-4 py-2">
-          <span className="text-body-sm text-text-muted">Range</span>
-          <SegmentedControl
-            ariaLabel="History range"
-            size="sm"
-            value={horizon}
-            onChange={setHorizon}
-            options={HORIZON_OPTIONS}
-          />
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-subtle px-4 py-2">
+          <span className="inline-flex items-center gap-3">
+            <span className="text-body-sm text-text-muted">Range</span>
+            <SegmentedControl
+              ariaLabel="History range"
+              size="sm"
+              value={horizon}
+              onChange={setHorizon}
+              options={HORIZON_OPTIONS}
+            />
+          </span>
+          {multiLane && onLaneFilterChange && (
+            <span
+              className="inline-flex items-center gap-3"
+              data-testid="warmup-history-lane-filter"
+            >
+              <span className="text-body-sm text-text-muted">
+                {COPY.laneFilterLabel}
+              </span>
+              <SegmentedControl
+                ariaLabel={COPY.laneFilterLabel}
+                size="sm"
+                value={laneFilter}
+                onChange={(next) => {
+                  setSelected(null);
+                  onLaneFilterChange(next);
+                }}
+                options={[
+                  { value: 'all', label: COPY.laneHistoryAllOption },
+                  ...lanes.map((l) => ({
+                    value: l,
+                    label: COPY.laneShortLabels[l],
+                  })),
+                ]}
+              />
+            </span>
+          )}
         </div>
 
         <OverviewStrip
@@ -275,6 +323,7 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
                   <AttemptListRow
                     key={a.id}
                     attempt={a}
+                    showLane={multiLane && lane === null}
                     isSelected={selected?.id === a.id}
                     onSelect={() => setSelected(a)}
                   />
@@ -301,6 +350,7 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
               <AttemptDetail
                 key={selected.id}
                 attempt={selected}
+                showLane={multiLane}
                 onClose={() => setSelected(null)}
               />
             </div>
@@ -313,10 +363,13 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
 
 function AttemptListRow({
   attempt,
+  showLane,
   isSelected,
   onSelect,
 }: {
   attempt: WarmupAttempt;
+  /** Name the lane when the list mixes lanes. */
+  showLane: boolean;
   isSelected: boolean;
   onSelect: () => void;
 }) {
@@ -352,6 +405,14 @@ function AttemptListRow({
               ts={formatRelativeUnixSeconds(attempt.attempted_at_unix_secs)}
             />
           </span>
+          {showLane && (
+            <span
+              className="text-caption text-text-faint"
+              data-testid="warmup-attempt-lane"
+            >
+              · {COPY.laneShortLabels[attempt.lane]}
+            </span>
+          )}
           {attempt.trigger === 'manual' && (
             <span className="text-caption text-text-faint">· Manual</span>
           )}
@@ -378,9 +439,11 @@ function AttemptListRow({
 
 function AttemptDetail({
   attempt,
+  showLane,
   onClose,
 }: {
   attempt: WarmupAttempt;
+  showLane: boolean;
   onClose: () => void;
 }) {
   const [rawOpen, setRawOpen] = useState(false);
@@ -431,6 +494,17 @@ function AttemptDetail({
 
       {/* Tier 2: 5 secondary fields */}
       <dl className="grid grid-cols-[96px_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2 text-body-sm">
+        {showLane && (
+          <>
+            <dt className="text-label text-text-faint">
+              {COPY.laneFilterLabel}
+            </dt>
+            <dd className="text-text" data-testid="warmup-attempt-detail-lane">
+              {COPY.laneLabels[attempt.lane]}
+            </dd>
+          </>
+        )}
+
         <dt className="text-label text-text-faint">Trigger</dt>
         <dd className="text-text">
           {attempt.trigger === 'manual' ? 'Manual fire-now' : 'Scheduled'}

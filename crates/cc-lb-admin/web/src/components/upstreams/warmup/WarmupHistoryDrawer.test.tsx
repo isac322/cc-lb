@@ -29,6 +29,7 @@ function makeAttempt(
   return {
     id: 'attempt-1',
     upstream_id: upstream.id,
+    lane: 'primary',
     attempted_at_unix_secs: attemptedAt,
     completed_at_unix_secs: attemptedAt + 1,
     scheduled_for_unix_secs: attemptedAt,
@@ -307,5 +308,102 @@ describe('WarmupHistoryDrawer outcome colors', () => {
     const slot = screen.getByTestId('warmup-history-dominant-failure-slot');
     const reason = within(slot).getByText('Upstream 5xx (1×)');
     expect(reason.classList.contains('text-warn-text')).toBe(true);
+  });
+});
+
+describe('WarmupHistoryDrawer lanes', () => {
+  function renderLaneDrawer(
+    laneFilter: 'all' | queries.WarmupLane,
+    onLaneFilterChange = vi.fn(),
+  ) {
+    render(
+      <WarmupHistoryDrawer
+        open={true}
+        onOpenChange={() => {}}
+        upstream={upstream}
+        lanes={['primary', 'third_party']}
+        laneFilter={laneFilter}
+        onLaneFilterChange={onLaneFilterChange}
+      />,
+    );
+    return onLaneFilterChange;
+  }
+
+  function lastAttemptsFilters() {
+    return vi.mocked(queries.useWarmupAttempts).mock.calls.at(-1)?.[1];
+  }
+
+  test('a single-lane upstream has no model group filter and sends no lane', () => {
+    renderDrawer();
+
+    expect(
+      screen.queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    expect(lastAttemptsFilters()?.lane ?? null).toBeNull();
+    expect(screen.queryByTestId('warmup-attempt-lane')).toBeNull();
+  });
+
+  test('All lists every lane and captions each row with its lane', () => {
+    setAttemptsQuery([
+      makeAttempt({ id: 'p', lane: 'primary' }),
+      makeAttempt({ id: 't', lane: 'third_party' }),
+    ]);
+    renderLaneDrawer('all');
+
+    const group = screen.getByRole('radiogroup', { name: 'Model group' });
+    expect(
+      within(group)
+        .getByRole('radio', { name: 'All' })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(lastAttemptsFilters()?.lane ?? null).toBeNull();
+    expect(
+      screen.getAllByTestId('warmup-attempt-lane').map((el) => el.textContent),
+    ).toEqual(['· Gemini', '· Claude·OSS']);
+  });
+
+  test('a selected lane is sent as the lane filter and drops the row caption', () => {
+    setAttemptsQuery([makeAttempt({ id: 't', lane: 'third_party' })]);
+    renderLaneDrawer('third_party');
+
+    expect(lastAttemptsFilters()).toEqual(
+      expect.objectContaining({ lane: 'third_party' }),
+    );
+    expect(screen.queryByTestId('warmup-attempt-lane')).toBeNull();
+  });
+
+  test('choosing a model group reports the new lane filter', () => {
+    const onChange = renderLaneDrawer('all');
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Claude·OSS' }));
+
+    expect(onChange).toHaveBeenCalledWith('third_party');
+  });
+
+  test('attempt detail names the model group', () => {
+    setAttemptsQuery([makeAttempt({ id: 't', lane: 'third_party' })]);
+    renderLaneDrawer('all');
+
+    fireEvent.click(within(screen.getByRole('list')).getByRole('button'));
+
+    expect(screen.getByTestId('warmup-attempt-detail-lane').textContent).toBe(
+      'Claude and GPT-OSS models',
+    );
+  });
+
+  test('a quota group skip reads as Model group not available', () => {
+    setAttemptsQuery([
+      makeAttempt({
+        id: 's',
+        lane: 'third_party',
+        status: 'skipped',
+        reason: 'quota_group_unavailable',
+      }),
+    ]);
+    renderLaneDrawer('third_party');
+
+    expect(
+      within(screen.getByRole('list')).getByText('Model group not available'),
+    ).toBeTruthy();
   });
 });

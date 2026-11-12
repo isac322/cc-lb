@@ -1,8 +1,24 @@
 export const COPY = {
   cardTitle: 'Warmup',
   cardSubtitle: 'Prepares the next quota window during idle gaps.',
+  helpText:
+    'Warm-up sends a tiny background request during idle time so the next quota window is ready when traffic resumes. It uses only windows the account reports. Gemini upstreams warm Gemini models and Claude and GPT-OSS models separately; each group follows its own reset.',
   geminiCardSubtitle:
-    'Prepares the next Gemini models quota window during idle gaps.',
+    "Prepares each model group's next quota window during idle gaps.",
+  /** Long lane names, shown only when an upstream has more than one lane. */
+  laneLabels: {
+    primary: 'Gemini models',
+    third_party: 'Claude and GPT-OSS models',
+  },
+  /** Compact lane names for segmented controls and row captions. */
+  laneShortLabels: {
+    primary: 'Gemini',
+    third_party: 'Claude·OSS',
+  },
+  laneFilterLabel: 'Model group',
+  laneFireBothOption: 'Both',
+  laneHistoryAllOption: 'All',
+  laneNotReported: 'Not reported by this account',
   lastCycleLabel: 'Last cycle',
   dialectPluginLabel: 'Shape plugin',
   defaultPluginOption: 'None (default request shape)',
@@ -26,6 +42,7 @@ export const COPY = {
   confirmFireBody:
     'This sends a real request to {upstreamName} and consumes a small amount of quota. The next scheduled attempt follows the subscription window reset.',
   fireSuccess: 'Warmup request completed',
+  fireSuccessLaneTemplate: 'Warmup request completed for {lane}',
   leaseHeldTemplate:
     'Another replica ({heldBy}) is currently priming this upstream. Try again in ~30 seconds.',
   staleRevisionHint: 'Settings changed elsewhere — re-apply your changes.',
@@ -48,6 +65,8 @@ export const COPY = {
       'Warmup skipped: the 7-day subscription quota is exhausted. The scheduler will retry after the reset window.',
     upstream_disabled: 'Warmup skipped: upstream is disabled.',
     upstream_deleted: 'Warmup skipped: upstream was deleted.',
+    quota_group_unavailable:
+      'Warmup skipped: this account does not report quota for this model group.',
     rate_limited_cycle_key_missing:
       'Warmup failed: 429 without quota reset headers.',
     upstream_5xx: 'Warmup failed: upstream returned 5xx.',

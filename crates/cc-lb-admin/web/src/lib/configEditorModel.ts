@@ -248,7 +248,11 @@ export const CONFIG_EDITOR_SECTIONS = [
     categoryId: 'scheduling',
     label: 'Warm-up models',
     description: 'Models used for OpenAI and Gemini OAuth warm-up requests.',
-    paths: ['warmup.openai_model', 'warmup.gemini_model'],
+    paths: [
+      'warmup.openai_model',
+      'warmup.gemini_model',
+      'warmup.gemini_third_party_model',
+    ],
     advancedPaths: [],
     danger: [],
   },
@@ -1900,6 +1904,16 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       impactDimensions: ['availability'],
     },
   },
+  {
+    pattern: 'warmup.gemini_third_party_model',
+    guidance: {
+      description:
+        'Model used for the Claude and GPT-OSS warm-up on Antigravity Gemini upstreams. It must start with claude- or gpt-oss-; the default is gpt-oss-120b-medium.',
+      recommendation:
+        'Keep the cheapest model billed to the Claude and GPT-OSS quota group.',
+      impactDimensions: ['availability'],
+    },
+  },
 ];
 
 const GENERIC_LEAF_GUIDANCE: Record<
@@ -2077,6 +2091,7 @@ export function isConfigLeafActive(
 const CONFIG_KEY_LABELS: Record<string, string> = {
   openai_model: 'OpenAI model',
   gemini_model: 'Gemini model',
+  gemini_third_party_model: 'Gemini Claude and GPT-OSS model',
   drain_secs: 'Shutdown drain period',
   tick_secs: 'Tick interval',
   writer_flush_ms: 'Writer flush interval',

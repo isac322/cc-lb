@@ -60,16 +60,18 @@ function oauthStatus(): UpstreamOAuthStatusResponse {
 async function serveOAuth(routeEnvelope: RouteEnvelope, upstream: Upstream) {
   const warmup: WarmupSummary = {
     upstream_id: OAUTH_ID,
-    last_attempt: null,
-    recent_attempts: [],
-    next_scheduled_at_unix_secs: null,
-    recent_summary_7d: {
-      success: 0,
-      skipped: 0,
-      transient_failure: 0,
-      permanent_failure: 0,
-    },
     dialect_plugin: null,
+    lanes: [
+      {
+        lane: 'primary',
+        eligible: true,
+        ineligible_reason: null,
+        target_windows: ['5h', '7d'],
+        next_scheduled_at_unix_secs: null,
+        last_attempt: null,
+        recent_attempts: [],
+      },
+    ],
   };
   const limitResets: LimitResetsResponse = {
     account_id: null,
