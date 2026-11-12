@@ -59,7 +59,7 @@ export function UpstreamCouponTrigger({
       aria-label={`Coupons for ${upstream.name}: ${summary}`}
       aria-haspopup="dialog"
       className={cx(
-        'inline-flex min-h-10 w-full items-center justify-end gap-1 rounded-sm px-1 text-caption tabular-nums text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 md:min-h-7',
+        'inline-flex w-auto items-center justify-center gap-1 rounded-sm px-1 py-1 text-caption tabular-nums text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
         disabled && 'control-disabled',
       )}
       data-testid="upstream-coupons"

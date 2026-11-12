@@ -796,7 +796,7 @@ function UpstreamUsageRows({
       <div
         aria-hidden="true"
         className={cx(
-          'relative hidden border-b border-row py-2 pl-3 pr-24 text-label text-text-faint @4xl:grid',
+          'relative hidden border-b border-row py-2 pl-3 pr-20 text-label text-text-faint @4xl:grid',
           rowGrid,
         )}
       >
@@ -819,7 +819,7 @@ function UpstreamUsageRows({
               className={cx(
                 ROW_CLASS,
                 rowGrid,
-                'hover:bg-overlay-2 @4xl:pr-24',
+                'hover:bg-overlay-2 @4xl:pr-20',
               )}
               search={{ selectedId: row.upstream.id }}
               title={row.runtimeError ?? undefined}
@@ -833,7 +833,7 @@ function UpstreamUsageRows({
                 tableWindows={tableWindows}
               />
             </Link>
-            <div className="absolute right-0 top-1 w-16 @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
+            <div className="absolute right-0 top-1 w-max @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
               <UpstreamCouponTrigger
                 upstream={row.upstream}
                 inventory={data.coupons?.get(row.upstream.id)}
