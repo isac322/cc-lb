@@ -7,9 +7,12 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/api';
+import { deriveCouponNudge } from '../../lib/couponNudge';
+import { couponInventory } from '../../lib/couponPresentation';
 import {
   type LimitResetHistoryItem,
   type LimitResetHistoryResponse,
+  type LimitResetsResponse,
   useClaimLimitReset,
   useLimitResetHistory,
 } from '../../lib/limitResets';
@@ -284,4 +287,166 @@ describe('reset activity entry availability', () => {
     ).toBeNull();
     expect(mutate).not.toHaveBeenCalled();
   });
+});
+
+describe('manual native coupon availability', () => {
+  it.each([
+    {
+      used: 20,
+      failedRefresh: false,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'none',
+    },
+    {
+      used: 20.001,
+      failedRefresh: false,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'none',
+    },
+    {
+      used: 21,
+      failedRefresh: true,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'none',
+    },
+    {
+      used: 21,
+      failedRefresh: false,
+      observed: false,
+      coverageUnreported: false,
+      sibling: 'none',
+    },
+    {
+      used: 21,
+      failedRefresh: false,
+      observed: true,
+      coverageUnreported: true,
+      sibling: 'none',
+    },
+    {
+      used: 21,
+      failedRefresh: false,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'missing',
+    },
+    {
+      used: 21,
+      failedRefresh: false,
+      observed: true,
+      coverageUnreported: false,
+      sibling: 'stale',
+    },
+  ])(
+    'gates manual redemption for $used used, failed refresh $failedRefresh, observed $observed, unknown coverage $coverageUnreported, sibling $sibling',
+    ({ used, failedRefresh, observed, coverageUnreported, sibling }) => {
+      const mutate = vi.fn();
+      vi.mocked(useClaimLimitReset).mockReturnValue({ mutate } as never);
+      const data: LimitResetsResponse = {
+        provider: 'openai',
+        account_id: 'native-account',
+        organization_id: null,
+        cedar_ember: null,
+        openai: {
+          available_count: 1,
+          credits: [
+            {
+              id: 'native-credit',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              is_supported_by_plan: true,
+              granted_at: null,
+              expires_at: null,
+              title: null,
+              description: null,
+            },
+          ],
+          manual_redemption: observed
+            ? {
+                eligible: used > 20 && !coverageUnreported,
+                reason: coverageUnreported
+                  ? 'coverage_unreported'
+                  : used > 20
+                    ? null
+                    : 'below_redemption_threshold',
+                windows: coverageUnreported
+                  ? []
+                  : [
+                      {
+                        window: '7d',
+                        used_percent: used,
+                        resets_at_unix_secs: null,
+                        duration_seconds: 604800,
+                      },
+                      ...(sibling === 'stale'
+                        ? [
+                            {
+                              window: '5h' as const,
+                              used_percent: null,
+                              resets_at_unix_secs: null,
+                              duration_seconds: 18000,
+                            },
+                          ]
+                        : []),
+                    ],
+              }
+            : null,
+        },
+      };
+      const inventory = couponInventory(data);
+      vi.mocked(useCouponNudge).mockReturnValue({
+        resetsQ: {
+          data,
+          isError: failedRefresh,
+          isPending: false,
+          isFetching: false,
+          error: failedRefresh
+            ? new ApiError(503, null, null, 'Usage refresh unavailable')
+            : null,
+          refetch: vi.fn(),
+        },
+        nowMs: Date.now(),
+        suppressed: true,
+        nudge: null,
+        derived: deriveCouponNudge(inventory ?? undefined, [], Date.now()),
+        claimInFlight: false,
+      } as never);
+      render(
+        <LimitResetAction
+          upstream={makeOauthUpstream({ kind: 'openai_oauth' })}
+          credentialsStored
+          defaultOpen
+        />,
+      );
+      const useCoupon = screen.getByRole('button', { name: 'Use coupon' });
+      const enabled =
+        used > 20 && observed && !failedRefresh && !coverageUnreported;
+      expect((useCoupon as HTMLButtonElement).disabled).toBe(!enabled);
+      if (!enabled) fireEvent.click(useCoupon);
+      expect(mutate).not.toHaveBeenCalled();
+      if (used === 20)
+        expect(screen.getByText(/less than 80% remaining/)).toBeDefined();
+      if (failedRefresh) expect(screen.queryByText(/21% used/)).toBeNull();
+      if (coverageUnreported) {
+        expect(
+          screen.getByText(/Covered allowances could not be confirmed/),
+        ).toBeDefined();
+        expect(
+          screen.queryByText(/not supported by the current plan/),
+        ).toBeNull();
+      }
+      if (sibling === 'stale') {
+        expect((useCoupon as HTMLButtonElement).disabled).toBe(false);
+        expect(screen.getByText('Unknown')).toBeDefined();
+        expect(screen.getByText('5-hour')).toBeDefined();
+      }
+      if (sibling === 'missing') {
+        expect((useCoupon as HTMLButtonElement).disabled).toBe(false);
+        expect(screen.queryByText('5-hour')).toBeNull();
+      }
+    },
+  );
 });

@@ -19,6 +19,7 @@ struct ProviderState {
     usage_status: AtomicU16,
     inventory_status: AtomicU16,
     delay_next_usage: AtomicBool,
+    delay_reset_usage: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
     usage_calls: AtomicUsize,
@@ -47,6 +48,7 @@ impl Provider {
             usage_status: AtomicU16::new(200),
             inventory_status: AtomicU16::new(200),
             delay_next_usage: AtomicBool::new(false),
+            delay_reset_usage: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
             usage_calls: AtomicUsize::new(0),
@@ -68,6 +70,9 @@ impl Provider {
                     assert_eq!(payload["credit_id"], "opaque-credit");
                     assert!(Uuid::parse_str(payload["redeem_request_id"].as_str().unwrap()).is_ok());
                     state.consume_calls.fetch_add(1, Ordering::SeqCst);
+                    if state.delay_reset_usage.load(Ordering::SeqCst) {
+                        state.delay_next_usage.store(true, Ordering::SeqCst);
+                    }
                     *state.usage.lock().unwrap() = usage(kind, state.reset_percent.load(Ordering::SeqCst) as u64);
                     state.usage_status.store(state.reset_usage_status.load(Ordering::SeqCst), Ordering::SeqCst);
                     return (http::StatusCode::OK, axum::Json(json!({"code": "reset", "windows_reset": 1})));
@@ -403,6 +408,17 @@ async fn inventory_failure_is_unknown_not_zero_and_does_not_block_usage_publicat
     assert_eq!(value.available_count, 2);
     assert_eq!(value.credits.len(), 1);
     assert_eq!(value.applicable_available_count, Some(2));
+    let manual = value.manual_redemption.unwrap();
+    assert!(manual.eligible);
+    assert_eq!(manual.windows.len(), 1);
+    assert_eq!(manual.windows[0].window, "7d");
+    assert_eq!(manual.windows[0].duration_seconds, Some(604800));
+    assert_eq!(manual.windows[0].resets_at_unix_secs, Some(1_700_500_000));
+    assert_eq!(
+        provider.state.usage_calls.load(Ordering::SeqCst),
+        1,
+        "inventory reuses the existing usage response"
+    );
     provider.state.inventory_status.store(503, Ordering::SeqCst);
     *provider.state.usage.lock().unwrap() = usage(upstream.kind, 10);
     assert_eq!(
@@ -566,7 +582,7 @@ async fn admin_claim_awaits_actual_usage_publication_before_next_routing_selecti
             }
         );
         assert_eq!(provider.state.consume_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 3);
     }
 }
 
@@ -602,7 +618,7 @@ async fn dropped_admin_request_does_not_cancel_committed_claim_usage_refresh() {
     assert_eq!(selected(&fixture, &upstream), Uuid::from_u128(1));
     provider
         .state
-        .delay_next_usage
+        .delay_reset_usage
         .store(true, Ordering::SeqCst);
     let finished = Arc::new(tokio::sync::Notify::new());
     let app = admin_router(
@@ -626,7 +642,7 @@ async fn dropped_admin_request_does_not_cancel_committed_claim_usage_refresh() {
         .expect("continuation finishes after request drop");
     assert_eq!(selected(&fixture, &upstream), upstream.id);
     assert_eq!(provider.state.consume_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -673,5 +689,98 @@ async fn refresh_missing_upstream_is_not_applicable() {
             .refresh_upstream_usage(Uuid::new_v4(), &CancellationToken::new())
             .await,
         LimitResetUsageRefresh::NotApplicable,
+    );
+}
+
+#[tokio::test]
+async fn reset_inventory_eligibility_uses_this_poll_main_usage_without_an_extra_usage_get() {
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 20).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let mut body = usage(upstream.kind, 20);
+    body["ordinary_usage_allowed"] = json!(false);
+    body["additional_rate_limits"] = json!([{"rate_limit":{"primary_window":{
+        "limit_window_seconds":604800,"used_percent":100,"reset_at":1_700_500_000
+    }}}]);
+    *provider.state.usage.lock().unwrap() = body;
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    let manual = inventory(&fixture, upstream.id)
+        .await
+        .inventory
+        .unwrap()
+        .manual_redemption
+        .unwrap();
+    assert!(!manual.eligible);
+    assert_eq!(manual.reason.as_deref(), Some("below_redemption_threshold"));
+    assert_eq!(manual.windows.len(), 1);
+    assert_eq!(
+        manual.windows[0].used_percent,
+        Some(serde_json::Number::from(20))
+    );
+    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.state.inventory_calls.load(Ordering::SeqCst), 1);
+    let mut body = usage(upstream.kind, 21);
+    body["plan_type"] = json!("unverified_business");
+    *provider.state.usage.lock().unwrap() = body;
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    let manual = inventory(&fixture, upstream.id)
+        .await
+        .inventory
+        .unwrap()
+        .manual_redemption
+        .unwrap();
+    assert!(manual.eligible);
+    assert!(
+        manual.reason.is_none(),
+        "native main usage establishes coverage without a plan catalog"
+    );
+    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn admin_claim_refuses_when_cached_reset_eligibility_no_longer_matches_live_usage() {
+    use tower::ServiceExt;
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    assert!(
+        inventory(&fixture, upstream.id)
+            .await
+            .inventory
+            .unwrap()
+            .manual_redemption
+            .unwrap()
+            .eligible
+    );
+    *provider.state.usage.lock().unwrap() = usage(upstream.kind, 20);
+    let response = admin_router(&fixture, Arc::new(fixture.dispatch.clone()))
+        .oneshot(claim_request(upstream.id))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+    assert_eq!(provider.state.consume_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        selected(&fixture, &upstream),
+        Uuid::from_u128(1),
+        "refused claim never optimistically clears the existing routing sample"
+    );
+    assert!(
+        fixture
+            .storage
+            .get_meta_value(&openai_limit_reset_epoch_meta_key(upstream.id))
+            .await
+            .unwrap()
+            .is_none()
     );
 }

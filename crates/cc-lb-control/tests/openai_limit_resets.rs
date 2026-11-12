@@ -535,3 +535,243 @@ fn snapshot_keys_and_epoch_fences_are_provider_scoped_and_fail_closed() {
     assert_eq!(restored.epoch, Some(attempt));
     assert!(restored.inventory.is_none());
 }
+
+fn manual_usage(plan: &str, windows: &[(u64, Value)]) -> Value {
+    let mut usage = json!({"plan_type":plan, "rate_limit":{}});
+    for (index, (duration, used)) in windows.iter().enumerate() {
+        usage["rate_limit"][if index == 0 {
+            "primary_window"
+        } else {
+            "secondary_window"
+        }] = json!({
+            "limit_window_seconds": duration, "used_percent": used, "reset_at": 4_000_000_000u64
+        });
+    }
+    usage
+}
+
+#[test]
+fn manual_reset_requires_strictly_more_than_twenty_percent_of_a_covered_window() {
+    use cc_lb_control::openai_limit_resets::classify_openai_manual_redemption;
+    for (five, weekly, eligible) in [
+        (0.0, 0.0, false),
+        (20.0, 20.0, false),
+        (20.1, 0.0, true),
+        (0.0, 20.1, true),
+        (100.0, 100.0, true),
+    ] {
+        let mut usage = manual_usage("plus", &[(18000, json!(five)), (604800, json!(weekly))]);
+        usage["ordinary_usage_allowed"] = json!(false);
+        usage["additional_rate_limits"] = json!([{"rate_limit":{"primary_window":{
+            "limit_window_seconds":604800,"used_percent":100,"reset_at":4_000_000_000u64
+        }}}]);
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert_eq!(classified.eligible, eligible, "{usage}");
+        assert_eq!(
+            classified.reason.as_deref(),
+            (!eligible).then_some("below_redemption_threshold")
+        );
+        assert_eq!(classified.windows.len(), 2);
+        assert_eq!(classified.windows[0].window, "5h");
+        assert_eq!(classified.windows[1].window, "7d");
+    }
+}
+
+#[test]
+fn manual_reset_coverage_comes_from_actual_main_windows_not_plan_labels() {
+    use cc_lb_control::openai_limit_resets::classify_openai_manual_redemption;
+    for plan in [
+        "pro",
+        "prolite",
+        "promax",
+        "plus",
+        "business",
+        "team",
+        "self_serve_business_prolite",
+        "self_serve_business_usage_based",
+        "future_plan",
+    ] {
+        let pair = classify_openai_manual_redemption(
+            &manual_usage(plan, &[(18000, json!(21)), (604800, json!(20))]),
+            1_800_000_000,
+        );
+        assert!(
+            pair.eligible,
+            "reported main windows qualify independently of {plan}"
+        );
+        assert!(pair.reason.is_none());
+        assert_eq!(pair.windows.len(), 2);
+        assert_eq!(pair.windows[0].window, "5h");
+        assert_eq!(pair.windows[1].window, "7d");
+        let weekly_only = classify_openai_manual_redemption(
+            &manual_usage(plan, &[(604800, json!(20.1))]),
+            1_800_000_000,
+        );
+        assert!(weekly_only.eligible);
+        assert_eq!(
+            weekly_only.windows.len(),
+            1,
+            "no phantom five-hour allowance"
+        );
+        assert_eq!(weekly_only.windows[0].window, "7d");
+    }
+    for duration in [2_419_200, 2_505_600, 2_592_000, 2_678_400] {
+        let classified = classify_openai_manual_redemption(
+            &manual_usage("go", &[(duration, json!(21))]),
+            1_800_000_000,
+        );
+        assert!(classified.eligible);
+        assert_eq!(classified.windows.len(), 1);
+        assert_eq!(classified.windows[0].window, "monthly");
+        assert_eq!(classified.windows[0].duration_seconds, Some(duration));
+        assert_eq!(
+            classified.windows[0].resets_at_unix_secs,
+            Some(4_000_000_000)
+        );
+    }
+    let mut no_plan = manual_usage("ignored", &[(604800, json!(21))]);
+    no_plan.as_object_mut().unwrap().remove("plan_type");
+    no_plan["title"] = json!("Go monthly full reset");
+    let classified = classify_openai_manual_redemption(&no_plan, 1_800_000_000);
+    assert!(classified.eligible);
+    assert_eq!(
+        classified.windows[0].window, "7d",
+        "labels cannot relabel native scope"
+    );
+    for usage in [
+        manual_usage("business", &[]),
+        manual_usage("plus", &[(12345, json!(100))]),
+        json!({"plan_type":"go","rate_limit":{},"additional_rate_limits":[{
+            "rate_limit":{"primary_window":{"limit_window_seconds":2592000,"used_percent":100,"reset_at":4_000_000_000u64}}
+        }]}),
+    ] {
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert!(!classified.eligible);
+        assert_eq!(classified.reason.as_deref(), Some("coverage_unreported"));
+        assert!(classified.windows.is_empty());
+    }
+    for usage in [json!({}), json!({"rate_limit":null})] {
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert!(!classified.eligible);
+        assert_eq!(classified.reason.as_deref(), Some("usage_unavailable"));
+    }
+}
+
+#[test]
+fn manual_reset_unknown_malformed_duplicate_and_stale_windows_fail_closed() {
+    use cc_lb_control::openai_limit_resets::classify_openai_manual_redemption;
+    for invalid in [Value::Null, json!("100"), json!(-1), json!(100.1)] {
+        let classified = classify_openai_manual_redemption(
+            &manual_usage("plus", &[(18000, json!(20)), (604800, invalid)]),
+            1_800_000_000,
+        );
+        assert!(!classified.eligible);
+        assert_eq!(classified.reason.as_deref(), Some("incomplete_usage"));
+        assert!(classified.windows[1].used_percent.is_none());
+    }
+    let mut stale = manual_usage("pro", &[(604800, json!(100))]);
+    stale["rate_limit"]["primary_window"]["reset_at"] = json!(1_800_000_000);
+    let duplicate = manual_usage("pro", &[(604800, json!(100)), (604800, json!(0))]);
+    for usage in [stale, duplicate] {
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert!(!classified.eligible);
+        assert_eq!(classified.reason.as_deref(), Some("incomplete_usage"));
+    }
+    let missing_duration =
+        json!({"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":100}}});
+    assert_eq!(
+        classify_openai_manual_redemption(&missing_duration, 1_800_000_000)
+            .reason
+            .as_deref(),
+        Some("coverage_unreported")
+    );
+    let mut unknown_reset = manual_usage("pro", &[(604800, json!(100))]);
+    unknown_reset["rate_limit"]["primary_window"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reset_at");
+    let classified = classify_openai_manual_redemption(&unknown_reset, 1_800_000_000);
+    assert!(!classified.eligible);
+    assert!(classified.windows[0].resets_at_unix_secs.is_none());
+    let classified = classify_openai_manual_redemption(&Value::Null, 1_800_000_000);
+    assert_eq!(classified.reason.as_deref(), Some("usage_unavailable"));
+    let historical: OpenAiLimitResetInventory = serde_json::from_value(json!({
+        "available_count":1,"credits":[]
+    }))
+    .unwrap();
+    assert!(
+        historical.manual_redemption.is_none(),
+        "historical inventory is unknown, not eligible"
+    );
+}
+
+#[test]
+fn manual_reset_any_fresh_covered_allowance_can_qualify_with_unknown_siblings() {
+    use cc_lb_control::openai_limit_resets::classify_openai_manual_redemption;
+    for usage in [
+        manual_usage("plus", &[(18000, json!(21))]),
+        manual_usage("plus", &[(604800, json!(21))]),
+        manual_usage("plus", &[(18000, json!(21)), (604800, Value::Null)]),
+    ] {
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert!(classified.eligible);
+        assert!(classified.reason.is_none());
+        assert_eq!(
+            classified.windows.len(),
+            usage["rate_limit"].as_object().unwrap().len(),
+            "missing slots do not create phantom allowances"
+        );
+    }
+    for reset in [Value::Null, json!(1_800_000_000), json!(1_700_000_000)] {
+        let mut usage = manual_usage("plus", &[(18000, json!(21)), (604800, json!(100))]);
+        usage["rate_limit"]["secondary_window"]["reset_at"] = reset;
+        let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+        assert!(classified.eligible);
+        assert!(classified.reason.is_none());
+        assert!(
+            classified.windows[1].used_percent.is_none(),
+            "stale usage is not current UI data"
+        );
+    }
+    let usage = manual_usage("plus", &[(18000, json!(20))]);
+    let classified = classify_openai_manual_redemption(&usage, 1_800_000_000);
+    assert!(!classified.eligible);
+    assert_eq!(
+        classified.reason.as_deref(),
+        Some("below_redemption_threshold")
+    );
+}
+
+#[tokio::test]
+async fn manual_reset_usage_fetch_uses_native_account_headers_without_reserve_opt_in() {
+    use cc_lb_control::openai_limit_resets::fetch_openai_reset_usage;
+    let fixture = Fixture::new(
+        StatusCode::OK,
+        manual_usage("pro", &[(604800, json!(20.1))]),
+    )
+    .await;
+    let usage = fetch_openai_reset_usage(
+        &make_metadata_http_client(),
+        &fixture.base,
+        auth(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(usage["plan_type"], "pro");
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/codex/usage");
+    assert_eq!(
+        requests[0].headers["chatgpt-account-id"],
+        "selected-account"
+    );
+    assert_eq!(requests[0].headers["authorization"], "Bearer fixture-token");
+    assert_eq!(requests[0].headers["originator"], "codex_cli_rs");
+    assert!(
+        !requests[0]
+            .headers
+            .contains_key("x-openai-codex-luna-reserve")
+    );
+}

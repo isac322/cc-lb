@@ -9,18 +9,19 @@ import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
 import { formatWait, type NudgeQuotaWindow } from '../../lib/couponNudge';
 import {
+  type CouponEffects as CouponEffectsView,
   type CouponGroup,
   type CouponPresentation,
   chooseCouponGrant,
   chooseCouponGroupGrant,
   couponClaimMessage,
-  couponEffectDescription,
   couponGroupKey,
   couponInventory,
   couponScopeLabel,
   couponUsageLabel,
   groupCouponGrants,
   presentCoupon,
+  presentCouponEffects,
 } from '../../lib/couponPresentation';
 import {
   claimErrorReason,
@@ -34,10 +35,10 @@ import {
   useClaimLimitReset,
 } from '../../lib/limitResets';
 import type { Upstream } from '../../lib/queries';
-import { formatQuotaPercent } from '../../lib/quotaSeverity';
 import { Button, Drawer, Modal, Notice } from '../ui/primitives';
 import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
 import { Select } from '../ui/Select';
+import { CouponEffects } from './CouponEffects';
 import { CouponActionButton, useCouponNudge } from './CouponNudge';
 import { ResetHistoryPanel } from './ResetHistoryPanel';
 
@@ -95,6 +96,28 @@ function grantBlock(grant: LimitResetGrant, nowMs: number): GrantBlock | null {
       case 'plan_support_unreported':
         return {
           label: 'Plan support not reported',
+          surface: false,
+        };
+      case 'coverage_unreported':
+        return {
+          label: 'Covered allowances could not be confirmed.',
+          surface: false,
+        };
+      case 'manual_usage_not_needed':
+        return {
+          label:
+            'At least one covered allowance must have less than 80% remaining (more than 20% used).',
+          surface: false,
+        };
+      case 'manual_usage_unknown':
+        return {
+          label:
+            'Manual reset eligibility is not confirmed. Refresh usage before using a coupon.',
+          surface: false,
+        };
+      case 'unsupported_reset_type':
+        return {
+          label: 'This reset type is not supported here.',
           surface: false,
         };
       default:
@@ -209,6 +232,7 @@ export function LimitResetAction({
   const [inFlightView, setInFlightView] = useState<{
     grant: LimitResetGrant;
     presentation: CouponPresentation;
+    effects: CouponEffectsView;
     grants: LimitResetGrant[];
     activeCount: number;
   } | null>(null);
@@ -306,6 +330,13 @@ export function LimitResetAction({
   }, [dialogOpen, selectedGroupKey, selectionKey, selectionId]);
   const selectedPresentation = selected
     ? presentCoupon(selected, quotaWindows, observationOptions)
+    : null;
+  const selectedEffects = selected
+    ? presentCouponEffects(selected, quotaWindows, {
+        ...observationOptions,
+        provider,
+        weeklyResetsAt: ember?.weekly_resets_at,
+      })
     : null;
   const selectedBlocking = selected
     ? blockingReason(selected, ember?.cooldown_until ?? null, nowMs)
@@ -459,6 +490,7 @@ export function LimitResetAction({
   const displayBlocking = inFlightView ? null : selectedBlocking;
   const displayPresentation =
     inFlightView?.presentation ?? selectedPresentation;
+  const displayEffects = inFlightView?.effects ?? selectedEffects;
   const displayGrants = inFlightView?.grants ?? selectableGrants;
   const displayGroups = groupCouponGrants(displayGrants, provider);
   const displayGroup = displayGrant
@@ -612,6 +644,11 @@ export function LimitResetAction({
                           quotaWindows,
                           observationOptions,
                         ),
+                        effects: presentCouponEffects(selected, quotaWindows, {
+                          ...observationOptions,
+                          provider,
+                          weeklyResetsAt: ember?.weekly_resets_at,
+                        }),
                         grants: structuredClone(selectableGrants),
                         activeCount: ownedCount ?? 0,
                       },
@@ -757,25 +794,10 @@ export function LimitResetAction({
                 ) : null}
                 {displayGrant ? (
                   <>
-                    <p className="text-text">
-                      {couponEffectDescription(displayGrant, provider)}
-                    </p>
+                    {displayEffects ? (
+                      <CouponEffects effects={displayEffects} />
+                    ) : null}
                     <dl className="space-y-2">
-                      {displayPresentation?.targets
-                        .slice(0, 2)
-                        .map((reading) => (
-                          <div
-                            key={reading.window}
-                            className="flex items-baseline justify-between gap-4"
-                          >
-                            <dt>{reading.label}</dt>
-                            <dd className="text-right text-text">
-                              {reading.state === 'unknown'
-                                ? 'Usage unknown'
-                                : `${formatQuotaPercent(reading.percentUsed)} used${reading.state === 'stale' ? ' · stale' : ''}`}
-                            </dd>
-                          </div>
-                        ))}
                       <div className="flex items-baseline justify-between gap-4">
                         <dt>Expires</dt>
                         <dd className="text-right text-text">
@@ -841,8 +863,36 @@ export function LimitResetAction({
                             ? 'Main Codex allowance'
                             : couponScopeLabel(displayGrant)}
                         </p>
+                        {displayGrant.clears.length > 0 ? (
+                          <p>
+                            Provider scope reference:{' '}
+                            <code className="font-mono text-data">
+                              {displayGrant.clears.join(', ')}
+                            </code>
+                          </p>
+                        ) : null}
                         {displayGrant.openai_credit?.description ? (
                           <p>{displayGrant.openai_credit.description}</p>
+                        ) : null}
+                        {displayGrant.openai_credit ? (
+                          <p>
+                            Plan support:{' '}
+                            {displayGrant.openai_credit.is_supported_by_plan ===
+                            true
+                              ? 'Supported'
+                              : displayGrant.openai_credit
+                                    .is_supported_by_plan === false
+                                ? 'Not supported'
+                                : 'Not reported'}
+                          </p>
+                        ) : null}
+                        {displayGrant.openai_manual_redemption?.reason ? (
+                          <p>
+                            Manual eligibility reference:{' '}
+                            <code className="font-mono text-data">
+                              {displayGrant.openai_manual_redemption.reason}
+                            </code>
+                          </p>
                         ) : null}
                         {displayPresentation ? (
                           <ul className="space-y-1">

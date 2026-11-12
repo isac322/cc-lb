@@ -4,6 +4,7 @@ import type {
   LimitResetClaimResponse,
   LimitResetGrant,
   LimitResetsResponse,
+  OpenAILimitResets,
 } from './limitResets';
 import { formatQuotaPercent } from './quotaSeverity';
 
@@ -24,6 +25,7 @@ const WINDOW_LABELS: Record<string, string> = {
   '7d_oauth_apps': 'Weekly (OAuth apps)',
   '7d_overage_included': 'Weekly (included usage)',
   overage: 'Extra usage',
+  monthly: 'Monthly',
 };
 
 export function couponWindowLabel(window: string): string {
@@ -48,6 +50,24 @@ export function couponProductLabel(grant: LimitResetGrant): string {
   return 'Reset coupon';
 }
 
+export function openAIManualRedemptionBlock(
+  inventory: OpenAILimitResets | null | undefined,
+): string | null {
+  const manual = inventory?.manual_redemption;
+  if (manual?.reason === 'coverage_unreported') return 'coverage_unreported';
+  if (!manual || manual.windows.length === 0) return 'manual_usage_unknown';
+  const readings = manual.windows.map((window) => window.used_percent);
+  const allKnown = readings.every(
+    (used) => used != null && Number.isFinite(used) && used >= 0,
+  );
+  const anyQualifying = readings.some(
+    (used) => used != null && Number.isFinite(used) && used > 20,
+  );
+  if (manual.eligible && manual.reason == null && anyQualifying) return null;
+  if (allKnown && !anyQualifying) return 'manual_usage_not_needed';
+  return 'manual_usage_unknown';
+}
+
 /** Adapt presentation only. Native provider inventory and claim IDs stay intact. */
 export function couponInventory(
   data: LimitResetsResponse | undefined,
@@ -55,6 +75,7 @@ export function couponInventory(
   if (!data) return null;
   if (data.provider !== 'openai') return data.cedar_ember;
   if (!data.openai) return null;
+  const manualBlock = openAIManualRedemptionBlock(data.openai);
   return {
     eligible: true,
     ineligible_reason: null,
@@ -69,6 +90,7 @@ export function couponInventory(
       gives_back_weekly: null,
       unavailable_reason: null,
       openai_credit: credit,
+      openai_manual_redemption: data.openai?.manual_redemption,
       resets_total: null,
       resets_left: credit.status === 'available' ? 1 : 0,
       starts_at: null,
@@ -76,7 +98,10 @@ export function couponInventory(
       clears: [],
       paused: false,
       usable_now:
-        credit.status === 'available' && credit.is_supported_by_plan === true,
+        credit.status === 'available' &&
+        credit.is_supported_by_plan === true &&
+        credit.reset_type === 'codex_rate_limits' &&
+        manualBlock == null,
       use_requires_limit: false,
       percent_used: {},
       blocking:
@@ -84,33 +109,13 @@ export function couponInventory(
           ? ['unsupported_plan']
           : credit.is_supported_by_plan == null
             ? ['plan_support_unreported']
-            : [],
+            : credit.reset_type !== 'codex_rate_limits'
+              ? ['unsupported_reset_type']
+              : manualBlock != null
+                ? [manualBlock]
+                : [],
     })),
   };
-}
-
-export function couponEffectDescription(
-  grant: LimitResetGrant,
-  provider: LimitResetsResponse['provider'],
-): string {
-  if (provider === 'openai') {
-    return grant.openai_credit?.reset_type === 'codex_rate_limits'
-      ? 'Resets the Codex quota; OpenAI may change the reset schedule.'
-      : 'Resets the provider-reported allowance; OpenAI may change the reset schedule.';
-  }
-  if (isFableRebateGrant(grant)) {
-    return grant.clears.includes('5h')
-      ? 'Returns Fable usage to the weekly allowance and resets 5-hour usage.'
-      : 'Returns Fable usage to the weekly allowance.';
-  }
-  if (grant.gives_back_weekly === true) {
-    return 'Returns the weekly usage covered by this coupon.';
-  }
-  if (grant.type === 'weekly' && grant.clears.includes('7d'))
-    return 'Resets weekly usage.';
-  return grant.clears.length > 0
-    ? `Resets ${couponScopeLabel(grant).toLowerCase()}.`
-    : 'Uses the reset allowance reported by the provider; scope is not reported.';
 }
 
 export function couponClaimMessage(response: LimitResetClaimResponse): string {
@@ -325,6 +330,162 @@ export function couponUsageLabel(reading: CouponWindowUsage): string {
   return reading.state === 'stale'
     ? `${percent} · stale ${source}`
     : `${percent} · ${source}`;
+}
+
+export type CouponQuotaEffect =
+  | 'reset'
+  | 'unchanged'
+  | 'fable_weekly'
+  | 'fable_scoped'
+  | 'conditional_5h'
+  | 'unknown';
+
+export interface CouponEffectRow {
+  window: string;
+  label: string;
+  current: CouponWindowUsage;
+  effect: CouponQuotaEffect;
+  schedule:
+    | 'unchanged'
+    | 'confirmed_after_use'
+    | 'updated_after_use'
+    | 'unknown';
+  resetsAtUnixSecs: number | null;
+}
+
+export interface CouponEffects {
+  rows: CouponEffectRow[];
+  otherLimitsUnchanged: boolean;
+}
+
+/** Expected future effects, not a prediction of a successful claim or a
+ * numeric Fable rebate. Internal scope keys never become visible quota aliases. */
+export function presentCouponEffects(
+  grant: LimitResetGrant,
+  windows: readonly CouponQuotaWindow[],
+  options: CouponObservationOptions & {
+    provider: LimitResetsResponse['provider'];
+    weeklyResetsAt?: string | null;
+  },
+): CouponEffects {
+  if (options.provider === 'openai') {
+    const full = grant.openai_credit?.reset_type === 'codex_rate_limits';
+    if (!full) return { rows: [], otherLimitsUnchanged: false };
+    return {
+      otherLimitsUnchanged: full,
+      rows: (
+        grant.openai_manual_redemption?.windows ?? []
+      ).map<CouponEffectRow>((window) => {
+        const currentKnown =
+          options.providerFresh && validPercent(window.used_percent);
+        const unchanged = currentKnown && window.used_percent === 0;
+        return {
+          window: window.window,
+          label: couponWindowLabel(window.window),
+          current: {
+            window: window.window,
+            label: couponWindowLabel(window.window),
+            percentUsed: currentKnown ? window.used_percent : null,
+            state: currentKnown ? 'fresh' : 'unknown',
+            source: currentKnown ? 'coupon' : null,
+          },
+          effect: unchanged ? 'unchanged' : 'reset',
+          schedule: unchanged ? 'unchanged' : 'updated_after_use',
+          resetsAtUnixSecs:
+            window.resets_at_unix_secs != null &&
+            Number.isFinite(window.resets_at_unix_secs) &&
+            window.resets_at_unix_secs > 0
+              ? window.resets_at_unix_secs
+              : null,
+        };
+      }),
+    };
+  }
+
+  const fable = isFableRebateGrant(grant);
+  const byWindow = new Map(windows.map((window) => [window.window, window]));
+  const names = new Set([
+    ...windows
+      .filter((window) => window.state !== 'absent')
+      .map((window) => window.window),
+    ...grant.clears,
+    ...Object.keys(grant.percent_used),
+    ...(fable ? ['5h', '7d'] : []),
+  ]);
+  const visibleNames = [...names].filter(
+    (name) =>
+      Object.hasOwn(WINDOW_LABELS, name) &&
+      name !== '7d_overage_included' &&
+      byWindow.get(name)?.state !== 'absent',
+  );
+  const order = ['5h', '7d', '7d_fable', '7d_sonnet', '7d_opus', 'overage'];
+  visibleNames.sort((a, b) => {
+    const aIndex = order.indexOf(a);
+    const bIndex = order.indexOf(b);
+    return (
+      (aIndex < 0 ? order.length : aIndex) -
+      (bIndex < 0 ? order.length : bIndex)
+    );
+  });
+  const readings = presentCoupon(
+    { ...grant, clears: visibleNames },
+    windows,
+    options,
+  ).targets;
+  const weeklyFallback =
+    options.weeklyResetsAt == null
+      ? null
+      : Date.parse(options.weeklyResetsAt) / 1000;
+  return {
+    otherLimitsUnchanged: false,
+    rows: readings.map<CouponEffectRow>((current) => {
+      const window = byWindow.get(current.window);
+      const known5h =
+        current.window === '5h' &&
+        ((window != null &&
+          window.state !== 'unobserved' &&
+          window.state !== 'absent') ||
+          (options.providerFresh && validPercent(grant.percent_used['5h'])));
+      let effect: CouponQuotaEffect;
+      if (fable && current.window === '5h')
+        effect = known5h ? 'reset' : 'conditional_5h';
+      else if (fable && current.window === '7d') effect = 'fable_weekly';
+      else if (fable && current.window === '7d_fable') effect = 'fable_scoped';
+      else if (current.window === 'overage') effect = 'unchanged';
+      else if (grant.clears.includes(current.window)) effect = 'reset';
+      else if (current.window.startsWith('7d_')) effect = 'unknown';
+      else if (
+        fable ||
+        grant.type === 'weekly' ||
+        grant.type === 'full' ||
+        (grant.clears.length > 0 && grant.clears.every((name) => name === '5h'))
+      )
+        effect = 'unchanged';
+      else effect = 'unknown';
+      const weekly = current.window.startsWith('7d');
+      const reportedReset =
+        window?.resets_at_unix_secs ?? (weekly ? weeklyFallback : null);
+      return {
+        window: current.window,
+        label: current.label,
+        current,
+        effect,
+        schedule:
+          weekly || effect === 'unchanged'
+            ? 'unchanged'
+            : current.window === '5h' &&
+                (effect === 'reset' || effect === 'conditional_5h')
+              ? 'confirmed_after_use'
+              : 'unknown',
+        resetsAtUnixSecs:
+          reportedReset != null &&
+          Number.isFinite(reportedReset) &&
+          reportedReset > 0
+            ? reportedReset
+            : null,
+      };
+    }),
+  };
 }
 
 /** Explicit choices never fall back to another grant, even if they disappear.

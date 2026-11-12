@@ -84,6 +84,10 @@ pub struct OpenAiLimitResetInventory {
     pub available_count: i64,
     /// Preserve provider applicability when present; missing means unknown.
     pub applicable_available_count: Option<i64>,
+    /// Local manual-redemption eligibility from the same fresh native usage
+    /// observation. Historical records and the provider inventory omit it.
+    #[serde(default)]
+    pub manual_redemption: Option<OpenAiManualRedemption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +101,117 @@ pub struct OpenAiLimitResetCredit {
     pub expires_at: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiManualRedemption {
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub windows: Vec<OpenAiResetWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiResetWindow {
+    pub window: String,
+    pub used_percent: Option<serde_json::Number>,
+    pub resets_at_unix_secs: Option<u64>,
+    pub duration_seconds: Option<u64>,
+}
+
+/// Manual banked full resets require a covered allowance below 80% remaining.
+/// Only native main windows are considered; additional/model/feature quotas and
+/// ordinary-usage permission do not authorize redemption.
+///
+/// https://help.openai.com/en/articles/20001498-how-resets-work-in-codex
+pub fn classify_openai_manual_redemption(
+    usage: &serde_json::Value,
+    now_unix_secs: u64,
+) -> OpenAiManualRedemption {
+    let denied = |reason: &str| OpenAiManualRedemption {
+        eligible: false,
+        reason: Some(reason.to_owned()),
+        windows: Vec::new(),
+    };
+    if !usage.is_object() {
+        return denied("usage_unavailable");
+    }
+    let Some(rate_limit) = usage.get("rate_limit").filter(|value| !value.is_null()) else {
+        return denied("usage_unavailable");
+    };
+    if !rate_limit.is_object() {
+        return denied("incomplete_usage");
+    }
+    let mut windows: Vec<OpenAiResetWindow> = Vec::with_capacity(2);
+    let mut incomplete = false;
+    // The provider's main pair establishes coverage, not its plan label. An
+    // omitted companion slot does not establish another expected allowance.
+    for key in ["primary_window", "secondary_window"] {
+        let Some(raw) = rate_limit.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let duration = raw
+            .get("limit_window_seconds")
+            .and_then(serde_json::Value::as_u64);
+        let name = match duration {
+            Some(18_000) => "5h",
+            Some(604_800) => "7d",
+            Some(2_419_200 | 2_505_600 | 2_592_000 | 2_678_400) => "monthly",
+            _ => {
+                incomplete = true;
+                continue;
+            }
+        };
+        if let Some(duplicate) = windows.iter_mut().find(|window| window.window == name) {
+            duplicate.used_percent = None;
+            incomplete = true;
+            continue;
+        }
+        let mut window = OpenAiResetWindow {
+            window: name.to_owned(),
+            used_percent: None,
+            resets_at_unix_secs: None,
+            duration_seconds: duration,
+        };
+        window.used_percent = raw
+            .get("used_percent")
+            .and_then(serde_json::Value::as_number)
+            .filter(|number| {
+                number
+                    .as_f64()
+                    .is_some_and(|used| (0.0..=100.0).contains(&used))
+            })
+            .cloned();
+        window.resets_at_unix_secs = raw.get("reset_at").and_then(serde_json::Value::as_u64);
+        if window
+            .resets_at_unix_secs
+            .is_none_or(|reset| reset <= now_unix_secs)
+        {
+            window.used_percent = None;
+        }
+        incomplete |= window.used_percent.is_none();
+        windows.push(window);
+    }
+    if windows.is_empty() {
+        return denied("coverage_unreported");
+    }
+    let eligible = windows.iter().any(|window| {
+        window
+            .used_percent
+            .as_ref()
+            .and_then(serde_json::Number::as_f64)
+            .is_some_and(|used| used > 20.0)
+    });
+    OpenAiManualRedemption {
+        eligible,
+        reason: if eligible {
+            None
+        } else if incomplete {
+            Some("incomplete_usage".to_owned())
+        } else {
+            Some("below_redemption_threshold".to_owned())
+        },
+        windows,
+    }
 }
 
 /// Borrowed request identity. Deliberately not `Debug`: contains a bearer token.
@@ -189,6 +304,32 @@ pub async fn list_openai_limit_reset_credits(
     cancel: &CancellationToken,
 ) -> Result<OpenAiLimitResetInventory, OpenAiLimitResetError> {
     let url = openai_limit_reset_credits_url(base_url);
+    let body = send_request(
+        client,
+        Request::get(url.as_str()),
+        auth,
+        Bytes::new(),
+        FETCH_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    serde_json::from_slice(&body).map_err(|error| OpenAiLimitResetError::Parse(error.to_string()))
+}
+
+/// Fetches current native main usage for the selected account immediately before
+/// a manual claim. The ordinary GET endpoints never call this.
+pub async fn fetch_openai_reset_usage(
+    client: &MetadataHttpClient,
+    base_url: &Url,
+    auth: OpenAiLimitResetAuth<'_>,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value, OpenAiLimitResetError> {
+    let mut url = openai_limit_reset_credits_url(base_url);
+    let path = url
+        .path()
+        .strip_suffix("/rate-limit-reset-credits")
+        .expect("credits URL has a fixed endpoint suffix");
+    url.set_path(&format!("{path}/usage"));
     let body = send_request(
         client,
         Request::get(url.as_str()),

@@ -1369,10 +1369,31 @@ async fn mount_openai_inventory(provider: &MockServer) {
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_inventory()))
         .mount(provider)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(wiremock::matchers::header(
+            "chatgpt-account-id",
+            ACCOUNT_UUID,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_usage("pro", 100.0)))
+        .mount(provider)
+        .await;
 }
 
 fn openai_claim_body(credit_id: &str) -> Value {
     json!({"account_id":ACCOUNT_UUID,"grant_id":credit_id,"request_id":REQUEST_ID})
+}
+
+fn openai_usage(plan: &str, weekly_used: f64) -> Value {
+    json!({
+        "account_id": ACCOUNT_UUID,
+        "plan_type": plan,
+        "rate_limit": {"primary_window": {
+            "limit_window_seconds":604800,
+            "used_percent":weekly_used,
+            "reset_at":4_000_000_000u64
+        }}
+    })
 }
 
 #[tokio::test]
@@ -2022,4 +2043,171 @@ async fn history_publishes_verified_coupon_and_normalized_claim_outcomes() {
 async fn v1_limit_reset_history_suite() {
     history_filters_before_limit_and_keeps_legacy_outcomes_unknown().await;
     history_publishes_verified_coupon_and_normalized_claim_outcomes().await;
+}
+
+#[tokio::test]
+async fn openai_claim_uses_fresh_main_usage_instead_of_cached_or_scoped_eligibility() {
+    let mut additional_high = openai_usage("pro", 20.0);
+    additional_high["additional_rate_limits"] = json!([{"rate_limit":{"primary_window":{
+        "used_percent":100,"limit_window_seconds":604800,"reset_at":4_000_000_000u64
+    }}}]);
+    let mut stale = openai_usage("pro", 100.0);
+    stale["rate_limit"]["primary_window"]["reset_at"] = json!(1);
+    let mut missing = openai_usage("plus", 20.0);
+    missing["ordinary_usage_allowed"] = json!(false);
+    let mut unreported = openai_usage("future_plan", 100.0);
+    unreported["rate_limit"]["primary_window"]["limit_window_seconds"] = json!(12345);
+    for live_usage in [
+        openai_usage("pro", 20.0),
+        additional_high,
+        stale,
+        missing,
+        unreported,
+    ] {
+        let provider = MockServer::start().await;
+        mount_openai_inventory(&provider).await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(live_usage))
+            .with_priority(1)
+            .expect(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&provider)
+            .await;
+        let server = admin_test_common::spawn_admin_server().await;
+        let upstream =
+            seed_provider_oauth_upstream(&server, &provider.uri(), UpstreamKind::OpenaiOauth).await;
+        use_production_staleness_window(&server);
+        let mut cached: OpenAiLimitResetInventory =
+            serde_json::from_value(openai_inventory()).unwrap();
+        cached.manual_redemption = Some(
+            cc_lb_control::openai_limit_resets::classify_openai_manual_redemption(
+                &openai_usage("pro", 100.0),
+                now_unix_millis() / 1_000,
+            ),
+        );
+        store_openai_inventory(
+            &server,
+            &upstream,
+            &OpenAiLimitResetPollRecord {
+                credential_fingerprint: upstream.oauth_credential_fingerprint().unwrap(),
+                oauth_token_generation: upstream.oauth_token_generation,
+                account_id: ACCOUNT_UUID.to_owned(),
+                epoch: None,
+                observed_at_unix_millis: now_unix_millis(),
+                inventory: Some(cached),
+            },
+        )
+        .await;
+        assert_eq!(
+            get_ok(&server, upstream.id).await["openai"]["manual_redemption"]["eligible"],
+            true
+        );
+        let (status, _, response) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/upstreams/{}/limit-resets/claim", upstream.id),
+                openai_claim_body("Credit:Chosen/02"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(response["error"], "conflict");
+        assert!(response.get("usage_refresh").is_none());
+        assert!(
+            server
+                .storage
+                .get_meta_value(&openai_limit_reset_epoch_meta_key(upstream.id))
+                .await
+                .unwrap()
+                .is_none(),
+            "ineligible attempts do not acquire or advance the consume fence"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_claim_accepts_fractional_twenty_point_one_used_without_changing_provider_result() {
+    for plan in ["pro", "business", "team", "future_plan"] {
+        let provider = MockServer::start().await;
+        mount_openai_inventory(&provider).await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_usage(plan, 20.1)))
+            .with_priority(1)
+            .expect(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":"nothing_to_reset","windows_reset":0})),
+            )
+            .expect(1)
+            .mount(&provider)
+            .await;
+        let server = admin_test_common::spawn_admin_server().await;
+        let upstream =
+            seed_provider_oauth_upstream(&server, &provider.uri(), UpstreamKind::OpenaiOauth).await;
+        let (status, _, response) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/upstreams/{}/limit-resets/claim", upstream.id),
+                openai_claim_body("Credit:Chosen/02"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["result"], "not_limited");
+        assert_eq!(response["windows_reset"], 0);
+        assert!(response.get("usage_refresh").is_none());
+        let requests = provider.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.method.as_str() == "POST")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_claim_rejects_expired_malformed_or_unknown_type_credit_before_consumption() {
+    for (field, invalid) in [
+        ("expires_at", json!("2020-01-01T00:00:00Z")),
+        ("expires_at", json!("invalid-expiry")),
+        ("reset_type", json!("future_reset_type")),
+        ("status", json!("redeemed")),
+    ] {
+        let provider = MockServer::start().await;
+        mount_openai_inventory(&provider).await;
+        let mut inventory = openai_inventory();
+        inventory["credits"][0][field] = invalid;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/rate-limit-reset-credits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(inventory))
+            .with_priority(1)
+            .expect(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&provider)
+            .await;
+        let server = admin_test_common::spawn_admin_server().await;
+        let upstream =
+            seed_provider_oauth_upstream(&server, &provider.uri(), UpstreamKind::OpenaiOauth).await;
+        let (status, _, _) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/upstreams/{}/limit-resets/claim", upstream.id),
+                openai_claim_body("Credit:Chosen/02"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
 }

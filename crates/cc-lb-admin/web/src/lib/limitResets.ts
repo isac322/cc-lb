@@ -21,6 +21,8 @@ export interface LimitResetGrant {
   unavailable_reason: string | null;
   /** Present only on the local adapter for native OpenAI inventory. */
   openai_credit?: OpenAILimitResetCredit;
+  /** Native manual-redemption observation attached by the presentation adapter. */
+  openai_manual_redemption?: OpenAIManualRedemption | null;
   /** Null when the provider does not report a total; resets_left stays
    *  authoritative. */
   resets_total: number | null;
@@ -66,9 +68,24 @@ export interface OpenAILimitResetCredit {
   description: string | null;
 }
 
+export interface OpenAIManualResetWindow {
+  window: '5h' | '7d' | 'monthly';
+  used_percent: number | null;
+  resets_at_unix_secs: number | null;
+  duration_seconds: number | null;
+}
+
+export interface OpenAIManualRedemption {
+  eligible: boolean;
+  reason: string | null;
+  windows: OpenAIManualResetWindow[];
+}
+
 export interface OpenAILimitResets {
   available_count: number;
   applicable_available_count?: number | null;
+  /** Missing on older servers; an unknown manual gate must not enable a claim. */
+  manual_redemption?: OpenAIManualRedemption | null;
   credits: OpenAILimitResetCredit[];
 }
 

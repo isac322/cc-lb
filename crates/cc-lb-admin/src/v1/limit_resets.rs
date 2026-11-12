@@ -29,7 +29,8 @@ use cc_lb_control::anthropic_metadata::{
 use cc_lb_control::openai_limit_resets::{
     OpenAiLimitResetAuth, OpenAiLimitResetConsumeOutcome, OpenAiLimitResetConsumeRequest,
     OpenAiLimitResetConsumeResult, OpenAiLimitResetError, OpenAiLimitResetInventory,
-    OpenAiLimitResetPollRecord, consume_openai_limit_reset_credit, list_openai_limit_reset_credits,
+    OpenAiLimitResetPollRecord, classify_openai_manual_redemption,
+    consume_openai_limit_reset_credit, fetch_openai_reset_usage, list_openai_limit_reset_credits,
     openai_limit_reset_epoch_fence, openai_limit_reset_epoch_meta_key, openai_limit_reset_meta_key,
     settled_openai_limit_reset_epoch,
 };
@@ -755,12 +756,43 @@ async fn dispatch_openai_limit_reset_claim(
         credit.id == body.grant_id
             && credit.status == "available"
             && credit.is_supported_by_plan == Some(true)
+            && credit.reset_type == "codex_rate_limits"
     }) else {
         return Err(UpstreamError::Conflict {
             detail: "selected credit is unavailable or its plan support is unknown; refetch limit-resets".to_owned(),
         });
     };
     metadata.coupon_type = Some(credit.reset_type.clone());
+    let usage = fetch_openai_reset_usage(&client, &base_url, auth, &cancel)
+        .await
+        .map_err(openai_read_error)?;
+    if usage
+        .get("account_id")
+        .is_some_and(|id| id.as_str() != Some(account_id.as_str()))
+    {
+        return Err(UpstreamError::StaleIdentity);
+    }
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    if credit.expires_at.as_deref().is_some_and(|expires_at| {
+        chrono::DateTime::parse_from_rfc3339(expires_at)
+            .ok()
+            .and_then(|date| u64::try_from(date.timestamp()).ok())
+            .is_none_or(|expiry| expiry <= now_secs)
+    }) {
+        return Err(UpstreamError::Conflict {
+            detail: "selected credit has expired or its expiry is malformed; refetch limit-resets"
+                .to_owned(),
+        });
+    }
+    let manual = classify_openai_manual_redemption(&usage, now_secs);
+    if !manual.eligible {
+        return Err(UpstreamError::Conflict {
+            detail: format!(
+                "manual limit reset is not eligible: {}",
+                manual.reason.as_deref().unwrap_or("usage_unavailable")
+            ),
+        });
+    }
     if UpstreamStore::read_oauth_token_generation(storage.as_ref(), upstream.id).await?
         != Some(current.oauth_token_generation)
     {

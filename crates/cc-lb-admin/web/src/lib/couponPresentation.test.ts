@@ -5,7 +5,6 @@ import {
   chooseCouponGrant,
   chooseCouponGroupGrant,
   couponClaimMessage,
-  couponEffectDescription,
   couponGroupKey,
   couponInventory,
   couponOptionLabel,
@@ -16,6 +15,7 @@ import {
   groupCouponGrants,
   isFableRebateGrant,
   presentCoupon,
+  presentCouponEffects,
 } from './couponPresentation';
 import type {
   CedarEmberLimitResets,
@@ -308,6 +308,24 @@ function openAIStatus(
     openai: {
       available_count: 2,
       applicable_available_count: null,
+      manual_redemption: {
+        eligible: true,
+        reason: null,
+        windows: [
+          {
+            window: '5h',
+            used_percent: 80,
+            resets_at_unix_secs: NOW / 1000 + 3600,
+            duration_seconds: 18000,
+          },
+          {
+            window: '7d',
+            used_percent: 40,
+            resets_at_unix_secs: NOW / 1000 + 86400,
+            duration_seconds: 604800,
+          },
+        ],
+      },
       credits: [
         {
           id: 'opaque-credit',
@@ -342,12 +360,6 @@ describe('provider-specific reset semantics', () => {
     const observed = presentCoupon(live, [quota('7d_fable', 0)], FRESH);
     expect(observed.targets[0].window).toBe('7d_overage_included');
     expect(observed.fullNonTargets[0].window).toBe('7d');
-    const copy = couponEffectDescription(live, 'anthropic');
-    expect(copy.toLowerCase()).toContain('return');
-    expect(copy).not.toContain('5-hour');
-    expect(copy).not.toContain('untouched');
-    expect(copy).not.toContain('unaffected');
-    expect(copy).not.toContain('100%');
   });
 
   it('does not infer a full-account reset from unknown taxonomy or unknown scopes', () => {
@@ -410,15 +422,19 @@ describe('provider-specific reset semantics', () => {
     expect(data.openai?.available_count).toBe(2);
   });
 
-  it('warns about OpenAI schedule changes without inventing plan-specific windows', () => {
+  it('uses native covered OpenAI windows without calculating their new schedule', () => {
     const coupon = couponInventory(openAIStatus())?.grants[0];
-    expect(coupon).toBeDefined();
     if (!coupon) throw new Error('Missing coupon fixture');
-    const copy = couponEffectDescription(coupon, 'openai');
-    expect(copy).toContain('Codex quota');
-    expect(copy).toContain('may change the reset schedule');
-    expect(copy).not.toContain('5-hour');
-    expect(copy).not.toContain('weekly reset schedule stays');
+    const effects = presentCouponEffects(coupon, [], {
+      ...FRESH,
+      provider: 'openai',
+    });
+    expect(effects.rows.map((row) => row.window)).toEqual(['5h', '7d']);
+    expect(
+      effects.rows.every(
+        (row) => row.effect === 'reset' && row.schedule === 'updated_after_use',
+      ),
+    ).toBe(true);
   });
 
   it('freezes the confirmed native credit and usage independently of later poll mutations', () => {
@@ -565,19 +581,311 @@ describe('coupon type groups', () => {
       chooseCouponGrant([sibling], [sibling], [], chosen.id, FRESH),
     ).toBeNull();
   });
+});
 
-  it('mentions a Fable five-hour reset only when that scope is declared', () => {
-    const fable = grant({
-      type: 'full',
-      gives_back_weekly: true,
-      clears: ['7d_overage_included'],
-    });
-    expect(couponEffectDescription(fable, 'anthropic')).not.toContain('5-hour');
+describe('expected quota effects', () => {
+  const anthropic = { ...FRESH, provider: 'anthropic' as const };
+  const fable = grant({
+    type: 'full',
+    gives_back_weekly: true,
+    clears: ['7d_overage_included'],
+    percent_used: { '7d_overage_included': 0 },
+  });
+
+  it('restores existing 5h and Fable weekly usage without subtracting percentage windows', () => {
+    const effects = presentCouponEffects(
+      fable,
+      [quota('5h', 0.6), quota('7d', 0.8), quota('7d_fable', 0.5)],
+      anthropic,
+    );
+    expect(effects.rows.map((row) => [row.window, row.effect])).toEqual([
+      ['5h', 'reset'],
+      ['7d', 'fable_weekly'],
+      ['7d_fable', 'fable_scoped'],
+    ]);
+    expect(effects.rows[0].schedule).toBe('confirmed_after_use');
+    expect(effects.rows[1].schedule).toBe('unchanged');
+    expect(effects.rows[1].current.percentUsed).toBe(80);
     expect(
-      couponEffectDescription(
-        { ...fable, clears: [...fable.clears, '5h'] },
-        'anthropic',
-      ),
-    ).toContain('5-hour');
+      effects.rows.some((row) => row.window === '7d_overage_included'),
+    ).toBe(false);
+    // Effects are qualitative, not an invented 80% - 50% = 30% prediction.
+    expect(effects.rows[1]).not.toHaveProperty('afterPercent');
+  });
+
+  it('does not turn fresh zero Fable-bar usage into no-benefit advice', () => {
+    const effects = presentCouponEffects(
+      fable,
+      [quota('7d', 1), quota('7d_fable', 0)],
+      anthropic,
+    );
+    expect(effects.rows.find((row) => row.window === '7d')?.effect).toBe(
+      'fable_weekly',
+    );
+    expect(effects.rows.find((row) => row.window === '7d_fable')?.effect).toBe(
+      'fable_scoped',
+    );
+  });
+
+  it('distinguishes absent 5h from unobserved existence and stale known existence', () => {
+    expect(
+      presentCouponEffects(
+        fable,
+        [quota('5h', null, 'absent')],
+        anthropic,
+      ).rows.some((row) => row.window === '5h'),
+    ).toBe(false);
+    expect(
+      presentCouponEffects(
+        fable,
+        [quota('5h', null, 'unobserved')],
+        anthropic,
+      ).rows.find((row) => row.window === '5h')?.effect,
+    ).toBe('conditional_5h');
+    expect(
+      presentCouponEffects(
+        fable,
+        [quota('5h', 0.8, 'stale')],
+        anthropic,
+      ).rows.find((row) => row.window === '5h'),
+    ).toMatchObject({
+      effect: 'reset',
+      current: { state: 'stale' },
+    });
+  });
+
+  it('keeps every relevant window and distinguishes undeclared Fable-bar effects', () => {
+    const effects = presentCouponEffects(
+      grant({ type: 'weekly', clears: ['7d'] }),
+      [
+        quota('5h', 0.3),
+        quota('7d', 1),
+        quota('7d_fable', 0.4),
+        quota('7d_sonnet', 0.2),
+        quota('7d_opus', 0.1),
+      ],
+      anthropic,
+    );
+    expect(effects.rows).toHaveLength(5);
+    expect(effects.rows.find((row) => row.window === '5h')?.effect).toBe(
+      'unchanged',
+    );
+    expect(effects.rows.find((row) => row.window === '7d')?.effect).toBe(
+      'reset',
+    );
+    expect(effects.rows.find((row) => row.window === '7d_fable')?.effect).toBe(
+      'unknown',
+    );
+  });
+
+  it.each([
+    '7d_fable',
+    '7d_sonnet',
+    '7d_opus',
+    '7d_oauth_apps',
+    '7d_cowork',
+    '7d_omelette',
+  ])(
+    'does not infer an undeclared effect on %s, but honors an explicit reset',
+    (scope) => {
+      for (const coupon of [
+        grant({ type: 'weekly', clears: ['7d'] }),
+        grant({ type: 'full', clears: ['7d'] }),
+        grant({ clears: ['5h'] }),
+      ]) {
+        const observed = [quota(scope, 0.4)];
+        const undeclared = presentCouponEffects(coupon, observed, anthropic);
+        expect(
+          undeclared.rows.find((row) => row.window === scope)?.effect,
+        ).toBe('unknown');
+        const declared = presentCouponEffects(
+          { ...coupon, clears: [...coupon.clears, scope] },
+          observed,
+          anthropic,
+        );
+        expect(declared.rows.find((row) => row.window === scope)?.effect).toBe(
+          'reset',
+        );
+      }
+    },
+  );
+
+  it('keeps overall weekly usage unchanged but leaves undeclared Fable effects unknown for a five-hour-only reset', () => {
+    const effects = presentCouponEffects(
+      grant({ clears: ['5h'] }),
+      [quota('5h', 1), quota('7d', 0.7), quota('7d_fable', 0.2)],
+      anthropic,
+    );
+    expect(effects.rows.map((row) => row.effect)).toEqual([
+      'reset',
+      'unchanged',
+      'unknown',
+    ]);
+  });
+
+  it('preserves actual weekly reset times and accepts the observed weekly fallback', () => {
+    const observed = quota('7d', 0.8);
+    const weeklyReset = '2026-11-20T00:00:00Z';
+    const effects = presentCouponEffects(fable, [observed], {
+      ...anthropic,
+      weeklyResetsAt: weeklyReset,
+    });
+    expect(
+      effects.rows.find((row) => row.window === '7d')?.resetsAtUnixSecs,
+    ).toBe(observed.resets_at_unix_secs);
+    const fallback = presentCouponEffects(fable, [], {
+      ...anthropic,
+      weeklyResetsAt: weeklyReset,
+    });
+    expect(
+      fallback.rows.find((row) => row.window === '7d')?.resetsAtUnixSecs,
+    ).toBe(Date.parse(weeklyReset) / 1000);
+  });
+
+  it('keeps unknown provider scope in diagnostics instead of inventing a visible alias', () => {
+    const effects = presentCouponEffects(
+      grant({ type: 'future', clears: ['future_window'] }),
+      [quota('7d', 0.8)],
+      anthropic,
+    );
+    expect(effects.rows).toHaveLength(1);
+    expect(effects.rows[0]).toMatchObject({ window: '7d', effect: 'unknown' });
+  });
+
+  it('freezes expected effects independently of later native observations', () => {
+    const status = openAIStatus();
+    const coupon = couponInventory(status)?.grants[0];
+    if (!coupon || !status.openai?.manual_redemption)
+      throw new Error('Missing native fixture');
+    const effects = presentCouponEffects(coupon, [], {
+      ...FRESH,
+      provider: 'openai',
+    });
+    status.openai.manual_redemption.windows[0].used_percent = 0;
+    expect(effects.rows[0].current.percentUsed).toBe(80);
+    expect(effects.rows[0].effect).toBe('reset');
+  });
+});
+
+describe('manual OpenAI redemption', () => {
+  it.each([0, 19.999, 20, 20.001, 100])(
+    'uses strict >20%% used eligibility at %s',
+    (used) => {
+      const status = openAIStatus();
+      if (!status.openai) throw new Error('Missing native fixture');
+      status.openai.manual_redemption = {
+        eligible: used > 20,
+        reason: used > 20 ? null : 'below_redemption_threshold',
+        windows: [
+          {
+            window: '7d',
+            used_percent: used,
+            resets_at_unix_secs: NOW / 1000 + 86400,
+            duration_seconds: 604800,
+          },
+        ],
+      };
+      const coupon = couponInventory(status)?.grants[0];
+      expect(coupon?.usable_now).toBe(used > 20);
+      expect(coupon?.blocking).toEqual(
+        used > 20 ? [] : ['manual_usage_not_needed'],
+      );
+    },
+  );
+
+  it('does not promote cached credit availability without a manual eligibility observation', () => {
+    const status = openAIStatus();
+    if (!status.openai) throw new Error('Missing native fixture');
+    delete status.openai.manual_redemption;
+    const coupon = couponInventory(status)?.grants[0];
+    expect(coupon?.resets_left).toBe(1);
+    expect(coupon?.usable_now).toBe(false);
+    expect(coupon?.blocking).toEqual(['manual_usage_unknown']);
+  });
+
+  it('allows a qualifying covered allowance despite an unknown sibling and preserves backend denials', () => {
+    const status = openAIStatus();
+    if (!status.openai?.manual_redemption)
+      throw new Error('Missing native fixture');
+    status.openai.manual_redemption.windows[1].used_percent = null;
+    expect(couponInventory(status)?.grants[0].usable_now).toBe(true);
+    status.openai.manual_redemption.windows[1].used_percent = 60;
+    status.openai.manual_redemption.eligible = false;
+    expect(couponInventory(status)?.grants[0].usable_now).toBe(false);
+  });
+
+  it('preserves a zero-usage covered allowance and its actual reset time', () => {
+    const status = openAIStatus();
+    if (!status.openai?.manual_redemption)
+      throw new Error('Missing native fixture');
+    status.openai.manual_redemption.windows[1].used_percent = 0;
+    const coupon = couponInventory(status)?.grants[0];
+    if (!coupon) throw new Error('Missing native credit');
+    const effects = presentCouponEffects(coupon, [quota('7d_fable', 1)], {
+      ...FRESH,
+      provider: 'openai',
+    });
+    expect(effects.rows.map((row) => row.window)).toEqual(['5h', '7d']);
+    expect(effects.rows[0]).toMatchObject({
+      effect: 'reset',
+      schedule: 'updated_after_use',
+    });
+    expect(effects.rows[1]).toMatchObject({
+      effect: 'unchanged',
+      schedule: 'unchanged',
+      resetsAtUnixSecs:
+        status.openai.manual_redemption.windows[1].resets_at_unix_secs,
+    });
+  });
+
+  it('uses the actual monthly window without manufacturing a weekly allowance', () => {
+    const status = openAIStatus();
+    if (!status.openai) throw new Error('Missing native fixture');
+    status.openai.manual_redemption = {
+      eligible: false,
+      reason: 'below_redemption_threshold',
+      windows: [
+        {
+          window: 'monthly',
+          used_percent: 20,
+          resets_at_unix_secs: NOW / 1000 + 2592000,
+          duration_seconds: 2592000,
+        },
+      ],
+    };
+    const coupon = couponInventory(status)?.grants[0];
+    if (!coupon) throw new Error('Missing native credit');
+    expect(coupon.usable_now).toBe(false);
+    expect(
+      presentCouponEffects(coupon, [], {
+        ...FRESH,
+        provider: 'openai',
+      }).rows.map((row) => row.window),
+    ).toEqual(['monthly']);
+  });
+
+  it('does not assign known full-reset scope to an unsupported reset type', () => {
+    const coupon = couponInventory(openAIStatus({ reset_type: 'future_reset' }))
+      ?.grants[0];
+    if (!coupon) throw new Error('Missing native credit');
+    expect(coupon.usable_now).toBe(false);
+    expect(coupon.blocking).toEqual(['unsupported_reset_type']);
+    expect(
+      presentCouponEffects(coupon, [], { ...FRESH, provider: 'openai' }).rows,
+    ).toEqual([]);
+  });
+
+  it('preserves provider plan support while failing closed on unknown local coverage', () => {
+    const status = openAIStatus();
+    if (!status.openai) throw new Error('Missing native fixture');
+    status.openai.manual_redemption = {
+      eligible: false,
+      reason: 'coverage_unreported',
+      windows: [],
+    };
+    const coupon = couponInventory(status)?.grants[0];
+    expect(coupon?.openai_credit?.is_supported_by_plan).toBe(true);
+    expect(coupon?.usable_now).toBe(false);
+    expect(coupon?.blocking).toEqual(['coverage_unreported']);
   });
 });

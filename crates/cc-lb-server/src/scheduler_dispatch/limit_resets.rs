@@ -6,9 +6,9 @@ use cc_lb_control::anthropic_metadata::{
 };
 use cc_lb_control::openai_limit_resets::{
     OPENAI_LIMIT_RESET_FENCE_RECOVERY_AFTER_MILLIS, OpenAiLimitResetAuth,
-    OpenAiLimitResetPollRecord, list_openai_limit_reset_credits, openai_limit_reset_epoch_meta_key,
-    openai_limit_reset_fence_started_at_millis, openai_limit_reset_meta_key,
-    settled_openai_limit_reset_epoch,
+    OpenAiLimitResetPollRecord, classify_openai_manual_redemption, list_openai_limit_reset_credits,
+    openai_limit_reset_epoch_meta_key, openai_limit_reset_fence_started_at_millis,
+    openai_limit_reset_meta_key, settled_openai_limit_reset_epoch,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
@@ -166,6 +166,10 @@ impl SchedulerDispatch {
         .await
         {
             Ok(mut inventory) => {
+                inventory.manual_redemption = Some(classify_openai_manual_redemption(
+                    summary.as_ref().unwrap_or(&serde_json::Value::Null),
+                    now_unix_millis(&*self.clock) / 1_000,
+                ));
                 // Applicability comes from this cycle's account-bound usage
                 // response only when the inventory total agrees. A truncated
                 // credit list is not the total and is never used to infer it.
