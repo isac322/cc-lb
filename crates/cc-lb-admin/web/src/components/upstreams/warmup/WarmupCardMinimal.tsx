@@ -388,6 +388,7 @@ function WarmupCardMinimalInner({
     { lane: FireTarget; reason: FireErrorReason }[]
   >([]);
   const [fireCooldown, setFireCooldown] = useState(false);
+  const [firing, setFiring] = useState(false);
   const [fireLaneChoice, setFireLaneChoice] = useState<FireLaneChoice>('both');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyLane, setHistoryLane] = useState<WarmupLane | 'all'>('all');
@@ -395,6 +396,21 @@ function WarmupCardMinimalInner({
 
   const [confirmFireOpen, setConfirmFireOpen] = useState(false);
   const [confirmClearPluginOpen, setConfirmClearPluginOpen] = useState(false);
+  const unavailableFireLane =
+    fireLaneChoice !== 'both' && !fireLaneChoices.includes(fireLaneChoice)
+      ? fireLaneChoice
+      : null;
+  const noEligibleFireLanes = multiLane && fireLaneChoices.length === 0;
+  const onlyFireLane =
+    fireLaneChoices.length === 1 ? fireLaneChoices[0] : undefined;
+
+  useEffect(() => {
+    if (confirmFireOpen && onlyFireLane) {
+      setFireLaneChoice((choice) =>
+        choice === 'both' ? onlyFireLane : choice,
+      );
+    }
+  }, [confirmFireOpen, onlyFireLane]);
 
   const storedPluginId = upstream.warmup_dialect_plugin?.wasm_registry_id ?? '';
   const selectedPluginValue = pendingPluginValue ?? storedPluginId;
@@ -516,50 +532,58 @@ function WarmupCardMinimalInner({
   };
 
   const handleFireNow = async () => {
+    if (!summary || firing || unavailableFireLane || noEligibleFireLanes)
+      return;
+    setFiring(true);
     setLeasePanels([]);
     setErrorPanels([]);
-    const targets: FireTarget[] =
-      fireLaneChoices.length === 0
-        ? [undefined]
-        : fireLaneChoice === 'both' || !fireLaneChoices.includes(fireLaneChoice)
-          ? [...fireLaneChoices]
-          : [fireLaneChoice];
-    // One request per lane; each lane reports its own outcome.
-    const results = await Promise.allSettled(
-      targets.map((lane) => fireWarmup.mutateAsync({ id: upstream.id, lane })),
-    );
-    setConfirmFireOpen(false);
-    const leases: { lane: FireTarget; heldBy: string }[] = [];
-    const errors: { lane: FireTarget; reason: FireErrorReason }[] = [];
-    let firedAny = false;
-    results.forEach((result, index) => {
-      const lane = targets[index];
-      const name = laneName(lane);
-      if (result.status === 'rejected') {
-        const message = errorMessage(result.reason, 'Failed to fire warmup');
-        toast.error(name ? `${name}: ${message}` : message);
-        return;
+    const targets: FireTarget[] = !multiLane
+      ? [undefined]
+      : fireLaneChoice === 'both'
+        ? [...fireLaneChoices]
+        : [fireLaneChoice];
+    try {
+      // One request per lane; each lane reports its own outcome.
+      const results = await Promise.allSettled(
+        targets.map((lane) =>
+          fireWarmup.mutateAsync({ id: upstream.id, lane }),
+        ),
+      );
+      setConfirmFireOpen(false);
+      const leases: { lane: FireTarget; heldBy: string }[] = [];
+      const errors: { lane: FireTarget; reason: FireErrorReason }[] = [];
+      let firedAny = false;
+      results.forEach((result, index) => {
+        const lane = targets[index];
+        const name = laneName(lane);
+        if (result.status === 'rejected') {
+          const message = errorMessage(result.reason, 'Failed to fire warmup');
+          toast.error(name ? `${name}: ${message}` : message);
+          return;
+        }
+        const res: FireNowResponse = result.value;
+        if (res.fired) {
+          firedAny = true;
+          toast.success(
+            name
+              ? COPY.fireSuccessLaneTemplate.replace('{lane}', name)
+              : COPY.fireSuccess,
+            { duration: TOAST_DURATIONS.success },
+          );
+        } else if (res.reason === 'lease_held') {
+          leases.push({ lane, heldBy: res.held_by });
+        } else {
+          errors.push({ lane, reason: res.reason });
+        }
+      });
+      setLeasePanels(leases);
+      setErrorPanels(errors);
+      if (firedAny) {
+        setFireCooldown(true);
+        setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
       }
-      const res: FireNowResponse = result.value;
-      if (res.fired) {
-        firedAny = true;
-        toast.success(
-          name
-            ? COPY.fireSuccessLaneTemplate.replace('{lane}', name)
-            : COPY.fireSuccess,
-          { duration: TOAST_DURATIONS.success },
-        );
-      } else if (res.reason === 'lease_held') {
-        leases.push({ lane, heldBy: res.held_by });
-      } else {
-        errors.push({ lane, reason: res.reason });
-      }
-    });
-    setLeasePanels(leases);
-    setErrorPanels(errors);
-    if (firedAny) {
-      setFireCooldown(true);
-      setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
+    } finally {
+      setFiring(false);
     }
   };
 
@@ -660,6 +684,7 @@ function WarmupCardMinimalInner({
         // silently drop the default "Both" on multi-lane upstreams.
         disabled={
           !summary ||
+          firing ||
           fireWarmup.isPending ||
           fireCooldown ||
           !upstream.warmup_enabled
@@ -945,7 +970,15 @@ function WarmupCardMinimalInner({
           onConfirm={() => {
             void handleFireNow();
           }}
-          confirmDisabled={!summary || fireWarmup.isPending}
+          closeOnConfirm={false}
+          pending={firing}
+          confirmDisabled={
+            !summary ||
+            firing ||
+            fireWarmup.isPending ||
+            !!unavailableFireLane ||
+            noEligibleFireLanes
+          }
         >
           {fireLaneChoices.length > 1 ? (
             <div
@@ -970,6 +1003,14 @@ function WarmupCardMinimalInner({
               />
             </div>
           ) : null}
+          {unavailableFireLane && (
+            <div role="status" className={WARN_PANEL_CLASS}>
+              {COPY.fireLaneUnavailableTemplate.replace(
+                '{lane}',
+                COPY.laneLabels[unavailableFireLane],
+              )}
+            </div>
+          )}
         </ConfirmDialog>
 
         <ConfirmDialog

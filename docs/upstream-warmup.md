@@ -212,7 +212,7 @@ Cross-replica safety is guaranteed by two layers:
 
 A crash between dispatch and the database write can cause one extra provider request. This at-least-once cost is accepted.
 
-During a rolling deploy, a replica older than the lane change runs a claimed `third_party` job as a Gemini warm-up. This costs at most one extra request per upstream.
+During rolling deploys, older replicas ignore `lane`: a claimed `third_party` job warms Gemini and schedules a primary successor. The new watchdog re-seeds the third-party job on its next tick, so repeated claims by older replicas can keep warming Gemini without warming Claude/GPT-OSS. Finish the rollout quickly, or set `warmup_enabled=false` on Gemini OAuth upstreams during the rollout and re-enable it afterward.
 
 ## Cost
 

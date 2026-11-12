@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import * as queries from '../../../lib/queries';
@@ -786,6 +786,141 @@ describe('WarmupCardMinimal fire now lanes', () => {
     expect(fireMock().mock.calls).toEqual([
       [{ id: gemini.id, lane: 'primary' }],
       [{ id: gemini.id, lane: 'third_party' }],
+    ]);
+  });
+
+  test.each(['resolved', 'rejected'] as const)(
+    'both fire buttons stay disabled until the earlier lane request is %s',
+    async (firstOutcome) => {
+      setSummaryQuery(
+        makeGeminiWarmupSummary({ upstreamId: gemini.id }),
+        false,
+      );
+      const {
+        promise: primary,
+        resolve: resolvePrimary,
+        reject: rejectPrimary,
+      } = Promise.withResolvers<queries.FireNowResponse>();
+      const { promise: thirdParty, resolve: resolveThirdParty } =
+        Promise.withResolvers<queries.FireNowResponse>();
+      const mutateAsync = vi.fn(({ lane }: { lane?: queries.WarmupLane }) =>
+        lane === 'primary' ? primary : thirdParty,
+      );
+      vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
+        // The latest mutation can be idle while an earlier one is still pending.
+        isPending: false,
+        mutateAsync,
+      } as never);
+      const user = userEvent.setup();
+      render(<WarmupCardMinimal upstream={gemini} />);
+
+      const headerButton = screen.getByTestId('warmup-fire-now');
+      await user.click(headerButton);
+      const dialog = await screen.findByRole('alertdialog');
+      const confirmButton = within(dialog).getByRole('button', {
+        name: 'Fire now',
+      });
+      await user.click(confirmButton);
+
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+      expect(headerButton.hasAttribute('disabled')).toBe(true);
+      expect(confirmButton.hasAttribute('disabled')).toBe(true);
+
+      await act(async () => {
+        resolveThirdParty(makeFireNowLeaseHeld('third-party-replica'));
+        await thirdParty;
+      });
+      expect(headerButton.hasAttribute('disabled')).toBe(true);
+      expect(confirmButton.hasAttribute('disabled')).toBe(true);
+      await user.click(confirmButton);
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        if (firstOutcome === 'resolved') {
+          resolvePrimary(makeFireNowLeaseHeld('primary-replica'));
+        } else {
+          rejectPrimary(new Error('Primary warmup failed'));
+        }
+        await Promise.allSettled([primary]);
+      });
+      expect(headerButton.hasAttribute('disabled')).toBe(false);
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  test('an explicit lane becoming ineligible blocks confirmation without substituting another lane', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    const { rerender } = render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('radio', { name: 'Claude·OSS' }));
+
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'quota_group_absent',
+        },
+      }),
+      false,
+    );
+    rerender(<WarmupCardMinimal upstream={gemini} />);
+
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Fire now',
+    });
+    expect(confirmButton.hasAttribute('disabled')).toBe(true);
+    expect(within(dialog).getByRole('status').textContent).toContain(
+      'Claude and GPT-OSS models are no longer available for this account.',
+    );
+    await user.click(confirmButton);
+    expect(fireMock()).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(screen.getByTestId('warmup-fire-now'));
+    const reopenedDialog = await screen.findByRole('alertdialog');
+    expect(within(reopenedDialog).queryByRole('status')).toBeNull();
+    await user.click(
+      within(reopenedDialog).getByRole('button', { name: 'Fire now' }),
+    );
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
+    ]);
+  });
+
+  test('Both follows eligible lanes when a summary update hides the selector', async () => {
+    setSummaryQuery(makeGeminiWarmupSummary({ upstreamId: gemini.id }), false);
+    const user = userEvent.setup();
+    const { rerender } = render(<WarmupCardMinimal upstream={gemini} />);
+
+    await user.click(screen.getByRole('button', { name: 'Fire now' }));
+    const dialog = await screen.findByRole('alertdialog');
+    setSummaryQuery(
+      makeGeminiWarmupSummary({
+        upstreamId: gemini.id,
+        thirdParty: {
+          eligible: false,
+          ineligible_reason: 'quota_group_absent',
+        },
+      }),
+      false,
+    );
+    rerender(<WarmupCardMinimal upstream={gemini} />);
+
+    expect(
+      within(dialog).queryByRole('radiogroup', { name: 'Model group' }),
+    ).toBeNull();
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Fire now',
+    });
+    expect(confirmButton.hasAttribute('disabled')).toBe(false);
+    await user.click(confirmButton);
+    expect(fireMock().mock.calls).toEqual([
+      [{ id: gemini.id, lane: 'primary' }],
     ]);
   });
 

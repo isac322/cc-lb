@@ -17,6 +17,8 @@ export const COPY = {
   },
   laneFilterLabel: 'Model group',
   laneFireBothOption: 'Both',
+  fireLaneUnavailableTemplate:
+    '{lane} are no longer available for this account. Close this dialog and choose again.',
   laneHistoryAllOption: 'All',
   laneNotReported: 'Not reported by this account',
   lastCycleLabel: 'Last cycle',
