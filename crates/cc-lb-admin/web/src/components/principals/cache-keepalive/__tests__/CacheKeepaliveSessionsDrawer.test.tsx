@@ -12,8 +12,12 @@ import type { CacheKeepaliveRow } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
 import { apiRowFromFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import * as visibilityManager from '../../../../lib/visibilityManager';
+import { Drawer } from '../../../ui/primitives';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
-import { CacheKeepaliveSessionsDrawer } from '../CacheKeepaliveSessionsDrawer';
+import {
+  CacheKeepaliveSessionsDrawer,
+  splitUsdNoTrailingZeros,
+} from '../CacheKeepaliveSessionsDrawer';
 
 const mockPrincipal: queries.Principal = {
   id: 'p-123',
@@ -213,7 +217,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     } as never);
   });
 
-  it('renders dialog with title, principal name, and single-line summary bar', () => {
+  it('renders dialog with title, principal name, and quiet three-value summary strip', () => {
     const onOpenChange = vi.fn();
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
@@ -228,11 +232,192 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     ).toBeDefined();
     expect(screen.getByText('Test Principal')).toBeDefined();
     const eq = screen.getByTestId('cache-keepalive-pnl-equation');
-    expect(eq.textContent).toContain('Saved $16.65 · Spent $4.18');
+    const metrics = within(eq).getAllByRole('term');
+    expect(metrics.map((term) => term.textContent)).toEqual([
+      'Net',
+      'Saved',
+      'Spent',
+    ]);
+    expect(
+      within(eq)
+        .getAllByRole('definition')
+        .map((value) => value.textContent),
+    ).toEqual(['+$4.56', '$16.65', '$4.18']);
+    expect(within(eq).queryByText(/Follow-up|Price unknown/)).toBeNull();
+    expect(within(eq).queryByText(/^Showing /)).toBeNull();
+    expect(within(eq).getByRole('radio', { name: 'All time' })).toBeDefined();
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+
+  it('omits complete-list filler and gives the two desktop panes their own scroll containers', () => {
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open
+        principal={mockPrincipal}
+        onOpenChange={() => {}}
+      />,
+    );
+    const body = screen.getByTestId('cache-keepalive-sessions-body');
+    expect(body.parentElement?.className).toContain('overflow-hidden');
+    const region = screen.getByTestId('cache-keepalive-session-list-region');
+    expect(region.className).toContain('md:overflow-hidden');
+    const grid = region.firstElementChild!;
+    expect(grid.className).toContain('md:h-full');
+    for (const pane of Array.from(grid.children)) {
+      expect(pane.className).toContain('md:overflow-y-auto');
+      expect(pane.className).toContain('min-h-0');
+    }
+    expect(screen.queryByText(/^All \d+ sessions shown$/)).toBeNull();
+    expect(screen.queryByTestId('cache-keepalive-session-count')).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Load more sessions' }),
+    ).toBeNull();
+    const detail = screen.getByTestId('session-detail-content');
+    const header = detail.children[1];
+    expect(header.className).toContain('md:sticky');
+    expect(header.className).toContain('md:top-0');
+    const back = within(detail).getByRole('button', {
+      name: 'Back to sessions',
+    });
+    expect(back.className).toContain('max-md:min-h-11');
+    expect(back.querySelector('svg')).not.toBeNull();
+    const label = grid.children[0].querySelector('[data-session-id] .truncate');
+    expect(label).not.toBeNull();
+  });
+
+  it.each(['error', 'loading', 'empty', 'off'] as const)(
+    'keeps the non-split %s branch scrollable on desktop',
+    (branch) => {
+      const original = vi
+        .mocked(queries.useCacheKeepaliveSessions)
+        .getMockImplementation()!('p-123', { horizon: '24h' }, true);
+      const refetch = vi.fn();
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        ...original,
+        data:
+          branch === 'error' || branch === 'loading'
+            ? undefined
+            : {
+                pages: [
+                  {
+                    summary: summaryBase,
+                    groups: [],
+                    rows: [],
+                    next_cursor: null,
+                  },
+                ],
+                pageParams: [null],
+              },
+        isError: branch === 'error',
+        isLoading: branch === 'loading',
+        refetch,
+      } as never);
+      renderWithProviders(
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={
+            branch === 'off'
+              ? {
+                  ...mockPrincipal,
+                  cache_keepalive: {
+                    ...mockPrincipal.cache_keepalive!,
+                    enabled: false,
+                  },
+                }
+              : mockPrincipal
+          }
+          onOpenChange={() => {}}
+        />,
+      );
+      const region = screen.getByTestId('cache-keepalive-session-list-region');
+      expect(region.className).toContain('overflow-y-auto');
+      expect(region.className).not.toContain('md:overflow-hidden');
+      if (branch === 'error') {
+        fireEvent.click(
+          within(region).getByRole('button', { name: 'Retry sessions' }),
+        );
+        expect(refetch).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it('keeps the shared Drawer body scrollable unless content explicitly owns scrolling', () => {
+    render(
+      <Drawer open onOpenChange={() => {}} title="Other drawer" width="md">
+        <div data-testid="other-drawer-content">Content</div>
+      </Drawer>,
+    );
+    const body = screen.getByTestId('other-drawer-content').parentElement!;
+    expect(body.className).toContain('overflow-y-auto');
+    expect(body.className).not.toContain('overflow-hidden');
+  });
+
+  it.each([
+    [null, 'observed', 'Price unknown'],
+    [4.56, 'pending', 'Follow-up pending'],
+  ] as const)(
+    'qualifies summary economics only when required (%s, %s)',
+    (net, evidence, label) => {
+      const original = vi
+        .mocked(queries.useCacheKeepaliveSessions)
+        .getMockImplementation()!('p-123', { horizon: '24h' }, true);
+      if (!original.data) throw new Error('Expected mocked session data');
+      original.data.pageParams ??= [null];
+      original.data.pages = original.data.pages.map((page) => ({
+        ...page,
+        summary: {
+          ...summaryBase,
+          cost_saved: net,
+          evidence_status: evidence,
+        },
+      }));
+      renderWithProviders(
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={mockPrincipal}
+          onOpenChange={() => {}}
+        />,
+      );
+      expect(
+        within(screen.getByTestId('cache-keepalive-pnl-equation')).getByText(
+          label,
+        ),
+      ).toBeDefined();
+    },
+  );
+
+  it('keeps error-overlap rows danger toned without replacing their lifecycle label', () => {
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open
+        principal={mockPrincipal}
+        onOpenChange={() => {}}
+      />,
+    );
+    const errorRow = cacheKeepaliveRows.find((row) => row.error != null)!;
+    const row = screen.getByTitle(errorRow.id);
+    expect(row.querySelector('.status-dot')?.className).toContain('danger');
+    const status = within(row).getByRole('status', {
+      name: 'Session state: Warm',
+    });
+    expect(status.firstElementChild?.className).toContain('text-danger-text');
+  });
+
+  it.each([
+    [84.9, '+$84.90'],
+    [0.09996, '+$0.10'],
+    [0.0326, '+$0.0326'],
+  ] as const)(
+    'uses the same rounded money precision in aligned list values (%s)',
+    (amount, expected) => {
+      const parts = splitUsdNoTrailingZeros(amount, true);
+      expect(
+        `${parts.intPart}${parts.hasDot ? '.' : ''}${parts.fracDigits}`,
+      ).toBe(expected);
+    },
+  );
 
   it('groups tracked terminal reasons under Agent in-turn and never under TTL expired or Max renewals reached', () => {
     renderWithProviders(
@@ -288,7 +473,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     ).toBeGreaterThan(0);
   });
 
-  it('aligns group and item decimal points in separate scopes without trailing zero padding', () => {
+  it('aligns group and item decimal points in separate scopes with cents for larger amounts', () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -304,8 +489,14 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(
       region.querySelectorAll('[data-decimal-dot="item"]').length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText('+$0.0936').length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText(/\.\d*00$/)).toBeNull();
+    expect(
+      Array.from(region.querySelectorAll('[data-decimal-scope="item"]')).some(
+        (value) => value.textContent === '+$0.0936',
+      ),
+    ).toBe(true);
+    expect(
+      region.querySelector('[data-decimal-scope]')?.className,
+    ).not.toContain('font-mono');
   });
 
   it('keeps long tool triggers truncated while USD values stay nowrap and decimal-aligned', () => {
@@ -402,7 +593,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       expect(usd.className).toContain('shrink-0');
       expect(usd.querySelector('[data-decimal-dot]')).not.toBeNull();
     }
-    expect(group.textContent).not.toMatch(/\.\d*00/);
+    expect(groupUsd.textContent).toBe('+$0.10');
   });
 
   it('selects a session row and renders its D3 time-rail in the right split pane', async () => {
@@ -668,9 +859,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       />,
     );
 
-    expect(screen.getByTestId('cache-keepalive-scope').textContent).toContain(
-      'Principal-wide history',
-    );
+    expect(screen.queryByText(/Principal-wide|All providers/)).toBeNull();
     expect(queries.useCacheKeepaliveSessions).toHaveBeenCalledWith(
       'p-123',
       { horizon: '24h', status: 'visible' },
@@ -704,12 +893,12 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   });
 
   it.each([
-    ['renewed', 'Renewed', 'ok'],
-    ['scheduled', 'Scheduled', 'live'],
-    ['in_request', 'In request', 'neutral'],
-    ['capped', 'Capped', 'neutral'],
+    ['renewed', 'Warm', 'live'],
+    ['scheduled', 'Warm', 'live'],
+    ['in_request', 'In use', 'neutral'],
+    ['capped', 'At limit', 'neutral'],
     ['expired', 'Expired', 'neutral'],
-    ['cancelled', 'Cancelled', 'neutral'],
+    ['cancelled', 'Returned', 'ok'],
     ['failed', 'Failed', 'danger'],
     ['not_tracked', 'Not tracked', 'neutral'],
   ] as const)(
@@ -762,9 +951,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       );
 
       const button = screen.getByTitle(row.id);
-      expect(
-        within(button).getByText(state === 'scheduled' ? 'scheduled' : '0×'),
-      ).toBeDefined();
+      expect(within(button).getByText('0 renewals')).toBeDefined();
       expect(
         button.querySelector('.status-dot')?.classList.contains(dotTone),
       ).toBe(true);
@@ -774,11 +961,13 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       expect(badge.textContent).toBe(badgeLabel);
       expect(within(button).getAllByRole('status')).toHaveLength(1);
       const toneClass =
-        state === 'failed'
+        dotTone === 'danger'
           ? 'text-danger-text'
-          : state === 'renewed'
-            ? 'text-traffic-success-text'
-            : 'text-text-muted';
+          : dotTone === 'live'
+            ? 'text-accent-text'
+            : dotTone === 'ok'
+              ? 'text-traffic-success-text'
+              : 'text-text-muted';
       expect(badge.firstElementChild?.className).toContain(toneClass);
       if (state === 'in_request' || state === 'expired') {
         expect(within(button).queryByText(/Cancelled|Failed/)).toBeNull();
@@ -851,6 +1040,9 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       />,
     );
 
+    expect(
+      screen.getByTestId('cache-keepalive-session-count').textContent,
+    ).toBe('1 of 2 sessions shown');
     expect(fetchNextPage).not.toHaveBeenCalled();
     await user.click(
       screen.getByRole('button', { name: /Load more sessions/i }),

@@ -410,20 +410,21 @@ The **Quota** section's `Reset quota` action (`LimitResetAction`) is always visi
 
 The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys**, and **Access**, each full width. Shape is a plain section, always expanded.
 
-Cache keepalive sessions use a neutral **In request** badge while a real request
-pauses renewal. The detail pane explains the pause even when retained renewal
-history is present; it never labels this provisional state Cancelled. When its
-request deadline passes without recorded completion, the session shows the
-neutral explanation “Request did not complete before its deadline” as Expired,
-without inferring an abort or error. In request stays visible but is not included
-in the Renewing now metric. Existing final cancellation causes remain visible.
+### Cache keepalive sessions sheet
+
+- **Split pane**: the sheet title, summary and toolbar stay fixed. From `md`, the session list and detail pane scroll independently; the detail header stays sticky inside its pane. Below `md`, show the list or the selected detail, with a shared ghost `Button` labelled `Back to sessions`, a lucide arrow and a 44px minimum touch target. Other drawers keep their default body scroll.
+- **Summary**: a quiet three-column strip, **Net**, **Saved**, **Spent**, with each label above its value. Show a qualification line below only when needed (`Price unknown` or a follow-up evidence qualification). The range selector sits on the right from `md`; on phones it sits above the strip. No scope note or provider hint.
+- **Session rows**: truncate the identifier, retain distinguishing ID tails, and write `1 renewal` / `N renewals`, never `N×`. Use filled `Badge`s with client-facing wording: `scheduled` and `renewed` → **Warm** (`live` / accent); `in_request` → **In use** (neutral); `cancelled` → **Returned** (`ok` / green); `capped` → **At limit** (neutral); `expired` → **Expired** (neutral); `failed` → **Failed** (danger); `not_tracked` → **Not tracked** (neutral). An error overrides the row's tone to danger. Internal states, filters and API values stay unchanged.
+- **Detail header**: three lines — session identifier, lifecycle label and last-request time; Net with Saved and Spent; then follow-up outcomes. Show nonzero outcome counts visually and keep every count available to assistive technology. Money and time use sans tabular figures; IDs stay mono. Money at or rounding to $0.10 and above keeps two decimals; smaller amounts retain up to four decimals without trailing zeros.
+- **Renewal history**: sessions with a timeline rail do not repeat a Renewals table. Each pulse opens details on hover, focus or tap; clicking pins it, and Escape or an outside click closes it. Details contain hit/miss, the full timestamp with timezone, time since the last request and renewal, Spent, per-renewal Net and Follow-up. Miss marks use `warn`, not danger. Match retained turns by cycle ID and ordinal first, then by the nearest timestamp within three seconds. Mark estimated per-renewal spend on synthesized legacy rails with `≈`; unmatched turns remain in Additional evidence. A compact caption carries the renewal count, spent amount and duration; the track is `rounded-xs`. Sessions without a rail, including 12h sessions, keep a cycle-grouped renewal list.
+- **Pause and completion**: **In use** means a real request has paused renewal. Explain the pause even when retained renewal history is present. If its deadline passes without recorded completion, show **Expired** with the neutral explanation “Request did not complete before its deadline”, without inferring an abort or error. In use stays visible but is not included in Renewing now. Keep known final cancellation causes visible; never add a bare Cancelled box when the cause is unknown.
 
 Follow-up evidence is separate from renewal scheduling. A paid current cycle
 stays “Follow-up pending” while a request pauses renewal, including when the
 request marker expires before the cache does. Its neutral rail endpoint is the
 observation time, not a scheduled renewal or request deadline. Matching evidence
 resolves it; otherwise the evidence window ends at the last renewal's own TTL.
-In request and expired request markers never advertise a next renewal. Empty
+In use and expired request markers never advertise a next renewal. Empty
 paused cycles do not invent a renewal or a pending follow-up.
 The same evidence TTL applies when renewal scheduling is still active: an
 overdue job does not keep a paid renewal's follow-up window pending. Scheduling
@@ -506,7 +507,7 @@ The audit trail (`routes/audit.tsx`, a `FullPage` console capped at 90rem with 4
 
 - `Modal`: raised surface (`bg-sub`, 1px `border-strong`, overlay shadow, `rounded-md`), `text-title-section` title, `text-body-sm` muted description, body `p-4`, footer right-aligned.
 - `ConfirmDialog`: `text-title-card` title, `text-body` muted description, `secondary` Cancel and `primary` confirm, or `danger-solid` when `destructive` (focus then lands on Cancel). While the confirmed action is pending, backdrop clicks, Escape and Cancel cannot close it.
-- `Drawer`: right-hand sheet (`width="md" | "lg" | "xl"`) on the raised surface with a 1px `border-strong` left line, full width below `sm`, `text-title-section` title. It fades instead of sliding under reduced motion.
+- `Drawer`: right-hand sheet (`width="md" | "lg" | "xl"`) on the raised surface with a 1px `border-strong` left line, full width below `sm`, `text-title-section` title. It fades instead of sliding under reduced motion. Its body scrolls by default; `bodyScroll={false}` lets content own its scroll containers, as in the cache keepalive sessions sheet.
 
 ### Changes that affect the pool
 
@@ -557,6 +558,7 @@ The audit trail (`routes/audit.tsx`, a `FullPage` console capped at 90rem with 4
 
 ### Time UX Contract
 - **Compact Controls**: Time ranges use a dense preset selector (`All time`, `1h`, `6h`, `24h`, `7d`, `Custom`) alongside optional `Since` and `Until` inputs.
+- **Keepalive sheet range**: use `1h`, `6h`, `24h`, `7d`, `All time` in its horizon selector, without a repeated `Showing …` label. Its summary, list and selected detail use the same horizon.
 - **Range changes keep the reader's place**: a range, preset or filter change is a search-only `navigate()` and passes `resetScroll: false` — the router runs with `scrollRestoration`, which otherwise snaps the page to the top on every navigation. Data keeps its previous response on screen until the new one lands (`keepPreviousData` is the query client default), so the region never collapses to skeletons under the reader.
 - **Timezone Awareness**: Custom bounds use dashboard-styled `YYYY-MM-DD HH:mm` text inputs interpreted in the user's effective configured timezone (via `useTimezone()`), not blindly in the browser's local timezone. Each field pairs the validated text entry with a date-only `react-day-picker` calendar: a Base UI popover at desktop width and the existing Base UI Modal surface below 1024px. Picking a date preserves an existing time or supplies the bound's start/end-of-day default. Since resolves to the first second of its displayed minute; inclusive Until resolves to the final second.
 - **Validation**: Invalid calendar values, nonexistent spring-forward times, and ambiguous fall-back times are deterministically distinguished with programmatically linked inline errors. URL bounds outside the JavaScript Date range or inverted Custom bounds are removed before rendering or querying.
@@ -573,5 +575,6 @@ The audit trail (`routes/audit.tsx`, a `FullPage` console capped at 90rem with 4
 - **Export Behavior**: The Export action includes all filtered retained rows, not just the current page.
 - **Older History:** `paged` Next loads a cursor page from the current final row when local page snapshots and retained history are exhausted; `infinite` requests the same cursor page once every retained row is shown. Neither uses a backend infinite-scroll sentinel.
 - **Pagination Controls**: `paged` feeds show accessible controls with labeled Prev and Next buttons and an `aria-live` region for screen readers; `infinite` feeds grow on scroll with no page controls.
+- **Keepalive sheet pagination**: partial session lists show `X of Y sessions shown` and `Load more sessions`. A complete list has no count footer.
 - **Backend Paging**: The exact 200, 200, 100 backend paging limits remain unchanged.
 - **Live Tailing**: Tailing is automatically paused when a fixed custom time range is selected, and resumes based on user preference when returning to a relative preset or "All time".

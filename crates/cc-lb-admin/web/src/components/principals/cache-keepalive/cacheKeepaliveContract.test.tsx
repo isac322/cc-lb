@@ -58,10 +58,10 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
   );
 });
 
-test('keeps in-request state and status-filter copy aligned with the API', () => {
+test('keeps in-request state and client-facing lifecycle wording aligned with the API', () => {
   expect(CACHE_KEEPALIVE_STATES).toEqual(API_STATES);
   expect(API_STATES).toContain('in_request');
-  expect(cacheKeepaliveDrawerCopy.filters).toContain('In request');
+  expect(cacheKeepaliveDrawerCopy.stateLabels).toContain('In use');
 });
 
 test('freezes decision-backed, error-overlap, state, reason, and multi-turn fixtures', () => {
