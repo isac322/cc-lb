@@ -289,7 +289,7 @@ async function installCycleFixtures(page: Page) {
     attempts: 1,
     retained_renewals: 3,
     max_attempts: 12,
-    reason: state === 'cancelled' ? 'Cancelled: new request' : state,
+    reason: state === 'cancelled' ? 'A new request arrived' : state,
     cancel_reason: state === 'cancelled' ? 'new_request' : null,
     generation: 3,
     upstream: 'Fixture upstream',
@@ -411,13 +411,13 @@ for (const width of [390, 1440]) {
     fixture.rows[0].state = 'cancelled';
     fixture.rows[0].is_active = false;
     fixture.rows[0].cancel_reason = 'new_request';
-    fixture.rows[0].reason = 'Cancelled: new request';
+    fixture.rows[0].reason = 'A new request arrived';
     await page.clock.fastForward(5_000);
     await expect(page.getByTestId('session-detail-loading')).toBeVisible();
     await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`lifecycle-loading-${width}.png`), animations: 'disabled' });
     resume.resolve();
-    await expect(page.getByText('Cancelled: new request', { exact: true })).toBeVisible();
+    await expect(page.getByText('A new request arrived', { exact: true })).toBeVisible();
     await expect(page.getByText(/Next renewal at/)).not.toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`lifecycle-cancelled-${width}.png`), animations: 'disabled' });
   });

@@ -110,8 +110,9 @@ The All time horizon includes their retained historical renewals and spend.
 
 Cancellation stores its nullable `cancel_reason` independently of the
 schedule-time trigger in `display_reason`. List and detail responses expose
-that cause and render a human-readable cancellation reason. Legacy rows with
-no cause show the Returned lifecycle label without a separate cancellation box;
+that cause and render its reason without a cancellation prefix, such as
+“A new request arrived”. Legacy rows with no cause use “Renewals ended” in the
+API and show the Returned lifecycle label without a separate cancellation box;
 they never infer why the session stopped. Terminal
 rows do not advertise a scheduled first or next renewal. Trigger grouping
 continues to use the original schedule-time descriptor.

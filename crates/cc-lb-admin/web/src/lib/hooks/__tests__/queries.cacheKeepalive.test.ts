@@ -1014,7 +1014,7 @@ describe('in-request detail polling', () => {
           nextState === 'expired'
             ? 'Request did not complete before its deadline'
             : nextState === 'cancelled'
-              ? 'Cancelled: user turn detected'
+              ? 'The agent is waiting for the user'
               : 'agent-in-turn — first renewal in 4m 30s',
       };
       const fetchMock = vi
