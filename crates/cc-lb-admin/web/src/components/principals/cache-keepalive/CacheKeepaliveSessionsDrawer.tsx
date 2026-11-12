@@ -528,6 +528,10 @@ export function CacheKeepaliveSessionsDrawer({
     : null;
   const showMobileDetail = hasSelection;
   const summary = query.data?.pages[0]?.summary ?? undefined;
+  const hasSplitContent =
+    !query.isLoading &&
+    !(query.isError && !query.data) &&
+    (groups.length > 0 || (summary?.unlisted_sessions ?? 0) > 0);
   const totalSessions = groups.reduce(
     (total, group) => total + group.sessions,
     0,
@@ -584,7 +588,10 @@ export function CacheKeepaliveSessionsDrawer({
         ) : null}
 
         <div
-          className="min-h-0 flex-1 overflow-y-auto md:overflow-hidden"
+          className={cx(
+            'min-h-0 flex-1 overflow-y-auto',
+            hasSplitContent && 'md:overflow-hidden',
+          )}
           data-testid="cache-keepalive-session-list-region"
           aria-busy={query.isLoading}
         >

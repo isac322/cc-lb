@@ -1081,7 +1081,11 @@ export function SessionDetailPane({
         ) : null}
 
         {railGaps.length > 0 ? (
-          <div className="space-y-2.5" data-testid="session-detail-time-rail">
+          <div
+            key={sessionId}
+            className="space-y-2.5"
+            data-testid="session-detail-time-rail"
+          >
             {railGaps.map((gap, index) => (
               <section
                 key={gap.cycle_id ?? `${gap.pause_at_ms}-${index}`}

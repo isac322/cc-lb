@@ -287,6 +287,62 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(label).not.toBeNull();
   });
 
+  it.each(['error', 'loading', 'empty', 'off'] as const)(
+    'keeps the non-split %s branch scrollable on desktop',
+    (branch) => {
+      const original = vi
+        .mocked(queries.useCacheKeepaliveSessions)
+        .getMockImplementation()!('p-123', { horizon: '24h' }, true);
+      const refetch = vi.fn();
+      vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+        ...original,
+        data:
+          branch === 'error' || branch === 'loading'
+            ? undefined
+            : {
+                pages: [
+                  {
+                    summary: summaryBase,
+                    groups: [],
+                    rows: [],
+                    next_cursor: null,
+                  },
+                ],
+                pageParams: [null],
+              },
+        isError: branch === 'error',
+        isLoading: branch === 'loading',
+        refetch,
+      } as never);
+      renderWithProviders(
+        <CacheKeepaliveSessionsDrawer
+          open
+          principal={
+            branch === 'off'
+              ? {
+                  ...mockPrincipal,
+                  cache_keepalive: {
+                    ...mockPrincipal.cache_keepalive!,
+                    enabled: false,
+                  },
+                }
+              : mockPrincipal
+          }
+          onOpenChange={() => {}}
+        />,
+      );
+      const region = screen.getByTestId('cache-keepalive-session-list-region');
+      expect(region.className).toContain('overflow-y-auto');
+      expect(region.className).not.toContain('md:overflow-hidden');
+      if (branch === 'error') {
+        fireEvent.click(
+          within(region).getByRole('button', { name: 'Retry sessions' }),
+        );
+        expect(refetch).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it('keeps the shared Drawer body scrollable unless content explicitly owns scrolling', () => {
     render(
       <Drawer open onOpenChange={() => {}} title="Other drawer" width="md">

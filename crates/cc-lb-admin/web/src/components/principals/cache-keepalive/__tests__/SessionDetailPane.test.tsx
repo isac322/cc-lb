@@ -1484,4 +1484,65 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       ).toBeNull();
     },
   );
+
+  it('clears pinned renewal details when the session changes despite identical gap identities', () => {
+    const pulseMs = 1794373221291;
+    const detail: CacheKeepaliveDetail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      id: 'session-a',
+      gaps: [
+        {
+          cycle_id: null,
+          pause_at_ms: pulseMs - 270_000,
+          cached_tokens: 20_000,
+          pulses: [
+            {
+              pulse_number: 1,
+              time_ms: pulseMs,
+              offset_sec: 270,
+              since_prev_renewal_sec: null,
+              spent_usd: 0.0123,
+              hit: true,
+            },
+          ],
+          ending_kind: 'ttl_expired_no_followup',
+          ending_at_ms: pulseMs + 300_000,
+          total_duration_sec: 570,
+          since_last_renewal_sec: 300,
+          spent_usd: 0.0123,
+          avoided_usd: 0,
+          net_pnl_usd: -0.0123,
+        },
+      ],
+      turns: [],
+    };
+    const query = vi
+      .spyOn(queries, 'useCacheKeepaliveSessionDetail')
+      .mockReturnValue(successQuery(detail));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const view = (sessionId: string) => (
+      <QueryClientProvider client={client}>
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId={sessionId}
+          onClose={() => {}}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view('session-a'));
+    fireEvent.click(screen.getByRole('button', { name: /Renewal #1:/ }));
+    expect(screen.getByRole('tooltip')).toBeDefined();
+    rerender(view('session-a'));
+    expect(screen.getByRole('tooltip')).toBeDefined();
+    query.mockReturnValue(successQuery({ ...detail, id: 'session-b' }));
+    rerender(view('session-b'));
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: /Renewal #1:/ })
+        .getAttribute('aria-pressed'),
+    ).toBe('false');
+  });
 });
