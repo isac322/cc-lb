@@ -1396,6 +1396,171 @@ async fn non_json_relay_with_hook_matches_control_headers_and_accounting()
     Ok(())
 }
 
+async fn non_json_relay_with_hook_preserves_local_limit_headers() {
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+    let body = Bytes::from_static(b"\xffaudio-response\x00tail");
+    for with_hook in [false, true] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));
+        headers.insert(
+            "x-ratelimit-limit-requests",
+            HeaderValue::from_static("999999"),
+        );
+        let lifecycle = lifecycle_with_record(
+            with_hook.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
+            Arc::new(ChunkedDispatch {
+                status: StatusCode::OK,
+                headers,
+                chunks: vec![body.slice(..7), body.slice(7..)],
+            }),
+            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        )
+        .with_static_limit_subject(
+            LimitEngine::new(
+                Arc::new(KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_clock::SystemClock),
+            ),
+            "principal-test".to_owned(),
+            "key-test".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "key-test".to_owned(),
+                status: KeyStatus::Active,
+                limit_overrides: vec![
+                    Limit {
+                        kind: LimitKind::Requests,
+                        window_secs: 60,
+                        cap_micros: 10,
+                    },
+                    Limit {
+                        kind: LimitKind::TotalTokens,
+                        window_secs: 60,
+                        cap_micros: 100_000,
+                    },
+                ],
+                ..StoredApiKeyRecord::default()
+            },
+        );
+        let response = handle_authenticated(&lifecycle, openai_audio_request("/v1/audio/speech"))
+            .await
+            .expect("audio relay succeeds with local limits");
+        let (status, headers, received) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(received, body);
+        assert!(transform.seen_bodies().is_empty());
+        assert_eq!(
+            headers.get("x-ratelimit-limit-requests"),
+            Some(&HeaderValue::from_static("10")),
+            "with_hook={with_hook}: local request cap replaces upstream spoof"
+        );
+        assert_eq!(
+            headers.get("x-ratelimit-limit-tokens"),
+            Some(&HeaderValue::from_static("100000")),
+            "with_hook={with_hook}: local token cap is retained"
+        );
+        for name in [
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-reset-tokens",
+        ] {
+            assert!(
+                headers.contains_key(name),
+                "with_hook={with_hook}: missing local limit header {name}"
+            );
+        }
+    }
+}
+
+async fn explicit_non_sse_streams_ignore_sse_shaped_error_and_usage_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = Bytes::from_static(
+        b"event: error\ndata: {\"error\":{\"type\":\"server_error\",\"message\":\"literal sse example\"}}\n\nevent: message_delta\ndata: {\"usage\":{\"input_tokens\":77,\"output_tokens\":88}}\n\n",
+    );
+    for (case, content_type) in [
+        "application/octet-stream",
+        "text/plain; charset=utf-8",
+        "audio/mpeg",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for with_hook in [false, true] {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+            let filename = format!("explicit-non-sse-{case}-{with_hook}.sqlite");
+            let storage = Arc::new(sqlite_storage(&dir, &filename).await?);
+            let test_bus = TestLifecycleBus::new()
+                .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+            let mut updates = test_bus.bus.subscribe();
+            let transform = Arc::new(UnchangedBufferedTransform::default());
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+            let lifecycle = lifecycle_with_record(
+                with_hook.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
+                Arc::new(ChunkedDispatch {
+                    status: StatusCode::OK,
+                    headers,
+                    chunks: vec![body.slice(..17), body.slice(17..83), body.slice(83..)],
+                }),
+                upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            )
+            .with_event_bus(test_bus.bus_arc());
+            let response =
+                handle_authenticated(&lifecycle, binary_response_request("/v1/responses")).await?;
+            let (status, headers, received) = collect_body(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                headers.get(CONTENT_TYPE),
+                Some(&HeaderValue::from_static(content_type))
+            );
+            assert_eq!(received, body, "{content_type}, with_hook={with_hook}");
+            assert!(transform.seen_bodies().is_empty());
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if matches!(
+                        updates.recv().await.expect("request event channel is open"),
+                        cc_lb_request_log::RequestEventUpdate::Final(_)
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("final request event is persisted");
+            let rows = common::stored_request_events(storage.as_ref()).await?;
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(row.status, 200);
+            assert_eq!(row.error_code, None);
+            assert_eq!(row.upstream_error_type, None);
+            assert_eq!(row.upstream_error_message, None);
+            assert_eq!(row.input_tokens, None);
+            assert_eq!(row.output_tokens, None);
+
+            let samples = snapshotter.snapshot().into_vec();
+            let terminal: Vec<_> = samples
+                .iter()
+                .filter(|(key, _, _, _)| key.key().name() == "cc_lb_stream_terminations_total")
+                .collect();
+            assert_eq!(terminal.len(), 1, "no upstream_error series");
+            let (key, _, _, value) = terminal[0];
+            let labels: HashMap<_, _> = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect();
+            assert_eq!(labels["outcome"], "completed");
+            assert_eq!(labels["cause"], "none");
+            assert_eq!(*value, metrics_util::debugging::DebugValue::Counter(1));
+        }
+    }
+    Ok(())
+}
+
 async fn relayed_binary_downstream_drop_with_hook_cancels_upstream_stream() {
     let recorder = metrics_util::debugging::DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -5667,6 +5832,10 @@ async fn response_transform_paths_suite_part_5() {
     chunked_and_compressed_json_responses_run_buffered_transform().await;
     non_stream_non_json_skips_buffered_transform_and_preserves_body().await;
     non_json_relay_with_hook_matches_control_headers_and_accounting()
+        .await
+        .unwrap();
+    non_json_relay_with_hook_preserves_local_limit_headers().await;
+    explicit_non_sse_streams_ignore_sse_shaped_error_and_usage_text()
         .await
         .unwrap();
     relayed_binary_downstream_drop_with_hook_cancels_upstream_stream().await;

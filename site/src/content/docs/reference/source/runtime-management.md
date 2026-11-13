@@ -188,8 +188,9 @@ correlate turn events without new database fields.
 
 On `/v1/responses` WebSocket turns, a clean provider `response.incomplete` event
 with an absent or `null` `response.error` completes the turn with
-`outcome="completed"` and reconciles observed usage as complete, recording any
-non-empty, redacted, bounded `incomplete_details.reason` under
+`outcome="completed"` and reconciles observed usage as complete. The assigned
+upstream signer scrubs any non-empty `incomplete_details.reason` before redaction
+and bounding; the credential-scrubbed, redacted, bounded reason is recorded under
 `upstream_stream_warning_type="response.incomplete"` and
 `upstream_stream_warning_message`. Explicit non-null `response.error` objects
 and `response.failed` frames carrying `response.error.code` or

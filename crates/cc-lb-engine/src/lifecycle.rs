@@ -4670,8 +4670,30 @@ impl Lifecycle {
                         upstream_name: candidate.name,
                     }),
             );
+            let mut candidate_signers = HashMap::with_capacity(candidates.len());
+            for candidate in &candidates {
+                let Some(record) = view
+                    .upstreams_snapshot()
+                    .iter()
+                    .find(|record| record.id == candidate.upstream_id)
+                else {
+                    continue;
+                };
+                let Ok(upstream) = upstream_for_record(record) else {
+                    continue;
+                };
+                if let Ok(signer) = view
+                    .signer_factory
+                    .with_router_choice(record.name.clone())
+                    .build(&upstream)
+                    .await
+                {
+                    candidate_signers.insert(candidate.upstream_id, signer);
+                }
+            }
             Ok(PreparedWebSocketTurn {
                 candidates,
+                candidate_signers,
                 route_info,
                 observer: observer.clone(),
                 completion_observer: Arc::clone(&self.completion_observer),
@@ -4998,6 +5020,7 @@ impl Lifecycle {
     }
 
     /// Sign only a newly opened upstream connection, using its current credentials.
+    #[cfg(test)]
     pub(crate) async fn sign_websocket_connection(
         &self,
         auth: &crate::Authenticated,
@@ -5005,6 +5028,18 @@ impl Lifecycle {
         candidate: &WebSocketCandidate,
         query: Option<&str>,
     ) -> Result<(Url, HeaderMap), WebSocketError> {
+        self.sign_websocket_connection_with_signer(auth, headers, candidate, query)
+            .await
+            .map(|(url, headers, _)| (url, headers))
+    }
+
+    pub(crate) async fn sign_websocket_connection_with_signer(
+        &self,
+        auth: &crate::Authenticated,
+        headers: &HeaderMap,
+        candidate: &WebSocketCandidate,
+        query: Option<&str>,
+    ) -> Result<(Url, HeaderMap, Arc<dyn Signer>), WebSocketError> {
         let view = self.dynamic_view.load();
         let record = view
             .upstreams_snapshot()
@@ -5051,7 +5086,7 @@ impl Lifecycle {
             WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, error.to_string())
         })?;
         let factory = view.signer_factory.with_router_choice(record.name.clone());
-        let signer = factory.build(&upstream).await.map_err(|error| {
+        let signer: Arc<dyn Signer> = factory.build(&upstream).await.map_err(|error| {
             WebSocketError::new(502, "upstream_signing_failed", error.to_string())
         })?;
         let signed = sign_request(signer.as_ref(), shaped)
@@ -5082,7 +5117,7 @@ impl Lifecycle {
         })?;
         let mut headers = signed.headers().clone();
         strip_hop_by_hop(&mut headers);
-        Ok((url, headers))
+        Ok((url, headers, signer))
     }
 
     /// Persist recognized state before the gateway exposes it to another connection.
@@ -6536,7 +6571,7 @@ impl Lifecycle {
                 dispatch_started,
                 dispatch_unix_secs,
             );
-            self.attach_limit_headers(&mut response, None, provider);
+            self.attach_limit_headers(&mut response, active_limit.as_ref(), provider);
             return response;
         }
 
@@ -7662,7 +7697,11 @@ impl Lifecycle {
         .with_response_accounting_guard(response_accounting_guard)
         .with_keepalive_completion(keepalive, keepalive_completion);
         let completion_observer = Arc::clone(&self.completion_observer);
-        let parse_sse_events = !upstream_error_status || upstream_is_sse;
+        let explicit_non_sse_non_json = parts.headers.contains_key(CONTENT_TYPE)
+            && !upstream_is_sse
+            && !has_json_content_type(&parts.headers);
+        let parse_sse_events =
+            upstream_is_sse || (!upstream_error_status && !explicit_non_sse_non_json);
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
         let has_retry_after_header = parts.headers.get(RETRY_AFTER).is_some();

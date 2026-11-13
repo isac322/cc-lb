@@ -27,7 +27,7 @@ use crate::terminal_observer::{
     UpstreamErrorCode, record_websocket_terminal_span,
 };
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
-use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
+use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug)]
 pub struct WebSocketError {
@@ -151,6 +151,7 @@ pub(crate) struct WebSocketIngress<'a> {
 
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
+    pub(crate) candidate_signers: HashMap<Uuid, Arc<dyn Signer>>,
     pub observer: Option<LifecycleContext>,
     pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
     pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
@@ -320,6 +321,7 @@ pub struct ResponsesWebSocketGateway {
     owners: HashMap<String, ResponseOwner>,
     recent: HashMap<(u64, Option<String>), String>,
     connections: HashMap<u64, Uuid>,
+    connection_signers: HashMap<u64, Arc<dyn Signer>>,
     successors: HashMap<String, u64>,
 }
 impl ResponsesWebSocketGateway {
@@ -345,6 +347,7 @@ impl ResponsesWebSocketGateway {
             owners: HashMap::new(),
             recent: HashMap::new(),
             connections: HashMap::new(),
+            connection_signers: HashMap::new(),
             successors: HashMap::new(),
         }
     }
@@ -844,9 +847,16 @@ impl ResponsesWebSocketGateway {
             .get(&dispatch.turn_id)
             .and_then(|turn| turn.plugin_request.as_ref())
             .map_or(&self.headers, |(_, request)| &request.headers);
-        self.lifecycle
-            .sign_websocket_connection(&auth, headers, candidate, self.query.as_deref())
-            .await
+        let (url, headers, signer) = self
+            .lifecycle
+            .sign_websocket_connection_with_signer(&auth, headers, candidate, self.query.as_deref())
+            .await?;
+        if let Some(turn) = self.turns.get_mut(&dispatch.turn_id) {
+            turn.prepared
+                .candidate_signers
+                .insert(candidate.upstream_id, signer);
+        }
+        Ok((url, headers))
     }
 
     fn prepare_plugin_request(
@@ -964,6 +974,9 @@ impl ResponsesWebSocketGateway {
     ) {
         self.connections.entry(connection_id).or_insert(upstream_id);
         if let Some(turn) = self.turns.get_mut(&turn_id) {
+            if let Some(signer) = turn.prepared.candidate_signers.get(&upstream_id).cloned() {
+                self.connection_signers.insert(connection_id, signer);
+            }
             turn.connection_id = Some(connection_id);
             turn.upstream_id = Some(upstream_id);
             if let Some(context) = turn.prepared.prompt_cache_observation_context.as_mut() {
@@ -1537,7 +1550,9 @@ impl ResponsesWebSocketGateway {
             if let Some(error) = transform_error {
                 self.finish_turn(turn_id, Some(error));
             } else {
-                let (failure, incomplete_reason) = classify_terminal_frame(kind, &value, &lane);
+                let signer = self.connection_signers.get(&connection_id).map(Arc::as_ref);
+                let (failure, incomplete_reason) =
+                    classify_terminal_frame(kind, &value, &lane, signer);
                 if let Some(turn) = self.turns.get_mut(&turn_id) {
                     turn.incomplete_reason = incomplete_reason;
                 }
@@ -1992,6 +2007,7 @@ impl ResponsesWebSocketGateway {
             self.finish_turn(id, Some(&error));
             result.errors.push(error);
         }
+        self.connection_signers.remove(&connection_id);
         let dead_owners: Vec<_> = self
             .owners
             .iter()
@@ -2039,6 +2055,7 @@ impl ResponsesWebSocketGateway {
         self.owners.clear();
         self.recent.clear();
         self.connections.clear();
+        self.connection_signers.clear();
         self.successors.clear();
         self.used_bytes = 0;
         self.control_slots = 0;
@@ -2141,12 +2158,15 @@ fn resolve_turn_upstream_label<'a>(
         .unwrap_or("unknown")
 }
 
-fn extract_incomplete_reason(value: &Value) -> Option<String> {
+fn extract_incomplete_reason(value: &Value, signer: Option<&dyn Signer>) -> Option<String> {
     let reason = value
         .pointer("/response/incomplete_details/reason")
         .and_then(Value::as_str)
         .filter(|reason| !reason.is_empty())?;
-    let redacted = cc_lb_observability::RedactionPolicy::default().redact_text(reason);
+    let scrubbed = signer.map_or(std::borrow::Cow::Borrowed(reason), |signer| {
+        signer.scrub_secrets(reason)
+    });
+    let redacted = cc_lb_observability::RedactionPolicy::default().redact_text(&scrubbed);
     Some(cc_lb_observability::truncate_reason(&redacted))
 }
 
@@ -2154,6 +2174,7 @@ fn classify_terminal_frame(
     kind: &str,
     value: &Value,
     lane: &Option<String>,
+    signer: Option<&dyn Signer>,
 ) -> (Option<WebSocketError>, Option<Option<String>>) {
     match kind {
         "response.completed" => (None, None),
@@ -2162,7 +2183,7 @@ fn classify_terminal_frame(
                 .pointer("/response/error")
                 .is_some_and(|error| !error.is_null());
             if !has_response_error {
-                (None, Some(extract_incomplete_reason(value)))
+                (None, Some(extract_incomplete_reason(value, signer)))
             } else {
                 let mut error = native_terminal_error(value, lane);
                 if error.native_code.is_none() {
@@ -2457,6 +2478,7 @@ pub(crate) mod tests {
                 "response.incomplete",
                 &serde_json::json!({"response": response}),
                 &lane,
+                None,
             );
             assert!(failure.is_none());
             assert_eq!(reason, Some(Some("max_output_tokens".to_owned())));
@@ -2483,6 +2505,7 @@ pub(crate) mod tests {
                 "response.incomplete",
                 &serde_json::json!({"response": {"error": payload}}),
                 &lane,
+                None,
             );
             let failure = failure.expect("every non-null error is a provider failure");
             assert_eq!(failure.code, "upstream_stream_error");
@@ -2490,10 +2513,11 @@ pub(crate) mod tests {
             assert_eq!(reason, None);
         }
         let (failure, reason) =
-            classify_terminal_frame("response.completed", &serde_json::json!({}), &lane);
+            classify_terminal_frame("response.completed", &serde_json::json!({}), &lane, None);
         assert!(failure.is_none() && reason.is_none());
         for kind in ["response.failed", "error"] {
-            let (failure, reason) = classify_terminal_frame(kind, &serde_json::json!({}), &lane);
+            let (failure, reason) =
+                classify_terminal_frame(kind, &serde_json::json!({}), &lane, None);
             assert!(failure.is_some() && reason.is_none());
         }
     }
@@ -2515,6 +2539,7 @@ pub(crate) mod tests {
                 auth: fixture.auth.clone(),
                 prepared: PreparedWebSocketTurn {
                     candidates: Vec::new(),
+                    candidate_signers: HashMap::new(),
                     observer,
                     completion_observer: Arc::new(
                         crate::completion_observer::CompletionObserver::new(),
@@ -2567,11 +2592,15 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn extract_incomplete_reason_redacts_and_bounds_utf8() {
-        assert_eq!(extract_incomplete_reason(&serde_json::json!({})), None);
+        assert_eq!(
+            extract_incomplete_reason(&serde_json::json!({}), None),
+            None
+        );
         for reason in [Value::Null, serde_json::json!(""), serde_json::json!(42)] {
             assert_eq!(
                 extract_incomplete_reason(
-                    &serde_json::json!({"response": {"incomplete_details": {"reason": reason}}})
+                    &serde_json::json!({"response": {"incomplete_details": {"reason": reason}}}),
+                    None,
                 ),
                 None
             );
@@ -2579,6 +2608,7 @@ pub(crate) mod tests {
         let extract = |reason: String| {
             extract_incomplete_reason(
                 &serde_json::json!({"response": {"incomplete_details": {"reason": reason}}}),
+                None,
             )
             .unwrap()
         };
@@ -2614,12 +2644,101 @@ pub(crate) mod tests {
         assert_eq!(gateway.turns[&1].incomplete_reason, None);
     }
 
+    #[test]
+    fn incomplete_reason_scrubs_exact_secret_before_redaction_and_truncation() {
+        use cc_lb_signer_anthropic_key::{ProviderKeyKind, ProviderKeySigner};
+
+        let secret = "opaque_custom_cred_xyz987";
+        let signer = ProviderKeySigner::new(ProviderKeyKind::Openai, secret).unwrap();
+        let policy = cc_lb_observability::RedactionPolicy::default();
+        assert_eq!(policy.redact_text(secret), secret);
+        for prefix_len in [0, 990, 1000, 1015] {
+            let reason = format!(
+                "{}{secret} Bearer sk-secret-abcdefghijklmnopqrstuvwxyz123456789 {}",
+                "x".repeat(prefix_len),
+                "한".repeat(200)
+            );
+            let value = serde_json::json!({
+                "response": {"incomplete_details": {"reason": reason}}
+            });
+            let sanitized = extract_incomplete_reason(&value, Some(&signer)).unwrap();
+            let expected = cc_lb_observability::truncate_reason(
+                &policy.redact_text(&reason.replace(secret, "[REDACTED]")),
+            );
+            assert_eq!(sanitized, expected, "prefix length {prefix_len}");
+            assert!(!sanitized.contains("opaque"));
+            assert!(!sanitized.contains("sk-secret"));
+            assert!(sanitized.len() <= 1024);
+            assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn assigned_connection_retains_signer_until_connection_or_session_closes() {
+        use cc_lb_signer_anthropic_key::{ProviderKeyKind, ProviderKeySigner};
+
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.attach_lifecycle_assembler(16);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let observer = LifecycleContext::new("exact-secret-terminal".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
+        let secret = "opaque_custom_cred_xyz987";
+        let signer: Arc<dyn Signer> =
+            Arc::new(ProviderKeySigner::new(ProviderKeyKind::Openai, secret).unwrap());
+        gateway
+            .turns
+            .get_mut(&1)
+            .unwrap()
+            .prepared
+            .candidate_signers
+            .insert(Uuid::nil(), signer.clone());
+        gateway.assign_connection(1, 1, Uuid::nil(), "assigned");
+        assert!(Arc::ptr_eq(&gateway.connection_signers[&1], &signer));
+        let frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp_fixture",
+                    "incomplete_details": {"reason": secret},
+                    "usage": {"input_tokens": 12, "output_tokens": 16}
+                }
+            }))
+            .unwrap(),
+        );
+        let original_frame = frame.clone();
+        let result = gateway
+            .observe_provider_message(1, &frame, None)
+            .await
+            .unwrap();
+        assert!(result.forward);
+        assert!(result.frames.is_none());
+        assert!(result.errors.is_empty());
+        assert_eq!(frame, original_frame);
+        let mut warnings = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let LifecycleEvent::UpstreamStreamDiagnosticsObserved { diagnostics, .. } = event {
+                warnings.push(diagnostics.warning_message);
+            }
+        }
+        assert_eq!(warnings, vec![Some("[REDACTED]".to_owned())]);
+        assert!(gateway.turns.is_empty());
+        assert!(gateway.connection_signers.contains_key(&1));
+        gateway.connection_closed(1, "provider closed");
+        assert!(gateway.connection_signers.is_empty());
+        gateway.connection_signers.insert(2, signer);
+        gateway.close();
+        assert!(gateway.connection_signers.is_empty());
+    }
+
     #[tokio::test]
     async fn terminal_transform_error_overrides_incomplete_completion() {
         use cc_lb_control::RequestEventBus;
         let fixture = DirectAccountingFixture::new().await;
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let mut events = bus.subscribe_lifecycle();
+        let mut assembler_events = bus.attach_lifecycle_assembler(16);
         let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let observer = LifecycleContext::new("transform-terminal".to_owned(), bus, &clock);
         observer.mark_authn_reached();
@@ -2635,15 +2754,21 @@ pub(crate) mod tests {
         let mut completions = 0;
         while let Ok(event) = events.try_recv() {
             match event {
-                LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. } => {
-                    panic!("transform failure must not emit incomplete-completion diagnostics")
-                }
                 LifecycleEvent::StreamCompleted { result, .. } => {
                     completions += 1;
                     assert_eq!(result.unwrap_err().error_type, "plugin_transform_error");
                 }
                 _ => {}
             }
+        }
+        while let Ok(event) = assembler_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
+                ),
+                "transform failure must not emit incomplete-completion diagnostics"
+            );
         }
         assert_eq!(completions, 1);
         assert!(gateway.turns.is_empty());
@@ -2993,6 +3118,7 @@ pub(crate) mod tests {
                     auth: fixture.auth.clone(),
                     prepared: PreparedWebSocketTurn {
                         candidates: Vec::new(),
+                        candidate_signers: HashMap::new(),
                         observer: None,
                         completion_observer: Arc::new(
                             crate::completion_observer::CompletionObserver::new(),

@@ -1019,6 +1019,13 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
 }
 
 async fn responses_matrix_gateway(test_bus: &TestLifecycleBus) -> ResponsesWebSocketGateway {
+    responses_matrix_gateway_with_signer_secret(test_bus, None).await
+}
+
+async fn responses_matrix_gateway_with_signer_secret(
+    test_bus: &TestLifecycleBus,
+    secret: Option<&'static str>,
+) -> ResponsesWebSocketGateway {
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: Vec::new(),
         terminal: TerminalStrategy::FirstPick,
@@ -1052,8 +1059,20 @@ async fn responses_matrix_gateway(test_bus: &TestLifecycleBus) -> ResponsesWebSo
         ..UpstreamRecord::default()
     })
     .collect();
+    let signer_factory: Arc<dyn cc_lb_upstream::ApiKeyAwareSignerFactory> =
+        if let Some(secret) = secret {
+            Arc::new(ResponsesReasonScrubbingSignerFactory {
+                inner: cc_lb_upstream::ApiKeyAwareSignerFactory::with_router_choice(
+                    &authn,
+                    "responses-matrix-upstream".to_owned(),
+                ),
+                secret,
+            })
+        } else {
+            Arc::new(authn.clone())
+        };
     let view = DynamicViewBuilder::new(0)
-        .signer_factory(Arc::new(authn.clone()))
+        .signer_factory(signer_factory)
         .principal_view(authn.principal_view.clone())
         .upstream_records(upstreams)
         .build();
@@ -1070,6 +1089,64 @@ async fn responses_matrix_gateway(test_bus: &TestLifecycleBus) -> ResponsesWebSo
     let headers = messages_request(Bytes::new()).headers().clone();
     let auth = lifecycle.authenticate(&headers).await.unwrap();
     ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1 << 20, 8)
+}
+
+struct ResponsesReasonScrubbingSignerFactory {
+    inner: Arc<dyn cc_lb_upstream::SignerFactory>,
+    secret: &'static str,
+}
+
+impl cc_lb_upstream::ApiKeyAwareSignerFactory for ResponsesReasonScrubbingSignerFactory {
+    fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+        Arc::new(Self {
+            inner: Arc::clone(&self.inner),
+            secret: self.secret,
+        })
+    }
+}
+
+#[async_trait]
+impl cc_lb_upstream::SignerFactory for ResponsesReasonScrubbingSignerFactory {
+    async fn build(
+        &self,
+        upstream: &cc_lb_domain::Upstream,
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Ok(Arc::new(ResponsesReasonScrubbingSigner {
+            inner: self.inner.build(upstream).await?,
+            secret: self.secret,
+        }))
+    }
+}
+
+struct ResponsesReasonScrubbingSigner {
+    inner: Arc<dyn cc_lb_upstream::Signer>,
+    secret: &'static str,
+}
+
+#[async_trait]
+impl cc_lb_upstream::Signer for ResponsesReasonScrubbingSigner {
+    async fn sign(
+        &self,
+        shaped: cc_lb_upstream::ShapedRequest,
+        capability: &mut cc_lb_upstream::SigningCapability,
+    ) -> Result<SignedRequest, cc_lb_upstream::SignerError> {
+        self.inner.sign(shaped, capability).await
+    }
+
+    async fn on_unauthorized(
+        &self,
+        error: &cc_lb_upstream::UpstreamError,
+    ) -> cc_lb_upstream::RetryDecision {
+        self.inner.on_unauthorized(error).await
+    }
+
+    fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if text.contains(self.secret) {
+            std::borrow::Cow::Owned(text.replace(self.secret, "[REDACTED]"))
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        }
+    }
 }
 
 async fn responses_matrix_admit(
@@ -1373,6 +1450,84 @@ async fn responses_websocket_incomplete_records_completed_metric_and_durable_war
         assert_eq!(fields["error.cause"], "none");
         assert!(!fields.contains_key("error.type"));
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_incomplete_reason_scrubs_assigned_signer_credential_while_preserving_frame()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SECRET: &str = "custom-unprefixed-credential-7f9a2b";
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway_with_signer_secret(&test_bus, Some(SECRET)).await;
+    let turn = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("response.create is admitted");
+    let candidate = &turn.candidates[0];
+    gateway
+        .prepare_connection(&turn, candidate)
+        .await
+        .expect("connection is signed with the credential-scrubbing signer");
+    gateway.assign_connection(
+        turn.turn_id,
+        1131,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    gateway
+        .validate_send(turn.turn_id)
+        .await
+        .expect("assigned turn validates");
+    gateway.sent(turn.turn_id);
+    gateway
+        .provider_message(
+            1131,
+            &Bytes::from_static(
+                br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_scrubbed","store":false}}"#,
+            ),
+        )
+        .await?;
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_scrubbed","error":null,"incomplete_details":{"reason":"stopped: echoed custom-unprefixed-credential-7f9a2b in reason"}}}"#,
+    );
+    let unchanged = frame.clone();
+    let result = gateway.provider_message(1131, &frame).await?;
+    assert!(result.forward);
+    assert!(result.frames.is_none(), "no replacement wire frames");
+    assert_eq!(
+        frame, unchanged,
+        "provider frame is forwarded byte-for-byte"
+    );
+    gateway.close();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                updates.recv().await.expect("request event channel is open"),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("terminal warning is persisted");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.error_code, None);
+    assert_eq!(
+        row.upstream_stream_warning_type.as_deref(),
+        Some("response.incomplete")
+    );
+    let reason = row
+        .upstream_stream_warning_message
+        .as_deref()
+        .expect("incomplete warning has a reason");
+    assert!(!reason.contains(SECRET));
+    assert_eq!(reason, "stopped: echoed [REDACTED] in reason");
     Ok(())
 }
 
