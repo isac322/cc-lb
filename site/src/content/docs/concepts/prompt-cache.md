@@ -20,7 +20,7 @@ Replay remains disabled until storage-backed signing is available for this path.
 
 For GPT-5.6 and later, opted-in OpenAI Responses sessions require both `cache_keepalive.enabled` and `cache_keepalive.classifier.openai_responses_enabled`. They accept `prompt_cache_options.ttl` values of `"30m"` or `"12h"`; omitted TTL defaults to `"30m"`. A positive native cached-token read of at least 1,024 tokens and the existing refresh budget are required, including at least 13 refreshes for GPT-5.6 with a 30-minute lifetime.
 
-The selector uses the last supported explicit content breakpoint, or the latest eligible implicit message ending when no explicit breakpoint exists. A selected `"12h"` prefix records `not_tracked` without scheduling a renewal because reads do not restart its clock. Renewals use `max_output_tokens: 16` with `stream: false`, so they can consume paid output tokens and do not guarantee a cache hit or cost saving. See the [OpenAI keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for the full TTL, breakpoint provenance, and refresh-budget rules.
+The selector uses the last supported explicit content breakpoint, or the latest eligible implicit message ending when no explicit breakpoint exists. A selected `"12h"` prefix records `not_tracked` without scheduling a renewal because reads do not restart its clock. Renewals use `max_output_tokens: 16` with `stream: false`, so they can consume paid output tokens and do not guarantee a cache hit; any saving is credited only when a matching follow-up starts after natural expiry. See the [OpenAI keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for the full TTL, breakpoint provenance, and refresh-budget rules.
 
 For `openai_api_key` upstreams, snapshots preserve client-supplied `OpenAI-Organization`, `OpenAI-Project`, and `OpenAI-Processing-Region` selectors; absent selectors remain absent. Credentials remain signer-owned and are never captured in snapshots. Historical snapshots without those selectors require a fresh eligible real request.
 
@@ -65,6 +65,20 @@ Keepalive renewals use Anthropic's nested 5-minute and 1-hour cache-creation cou
 
 This applies to future renewals. Historical usage rows are not rewritten.
 
+## Anthropic renewal economics
+
+Savings are the cache-creation cost a matching follow-up would have paid
+without keep-alive. A follow-up is credited only when it starts after the
+cycle's natural expiry (`cycle_anchor_ms + ttl_ms`), and credit goes to the
+earliest renewal whose TTL window covers it. Avoided tokens are the minimum of
+the follow-up's cache read and the credited renewal's kept tokens.
+
+A follow-up at or before natural expiry is `not_needed`: it has zero savings
+and the cycle retains the full renewal spend. Missing or ambiguous anchors and
+evidence remain unknown rather than being treated as zero. The Admin Web
+summary exposes `not_needed_cycles`, and follow-up outcomes distinguish
+`not_needed` from saved follow-ups.
+
 ## Anthropic request eligibility
 
 An explicit `x-claude-code-request-class: auxiliary` excludes a request from keep-alive completion sequencing, generation observation or mutation, enqueueing, cancellation, and detached bookkeeping. The exclusion follows the explicit header even when body classification reports `unknown`, `subagent`, `main`, or `advisor`. Existing named side-request exclusions remain in place. Headerless `unknown` and `subagent` requests retain their existing eligibility, and real subagent turns remain isolated under their agent-scoped session key.
@@ -87,7 +101,7 @@ The following configuration is an Anthropic example. OpenAI 30-minute sessions r
 {
   "cache_keepalive": {
     "enabled": true,
-    "refresh_lead_time_5m_secs": 30,
+    "refresh_lead_time_5m_secs": 10,
     "refresh_lead_time_1h_secs": 300,
     "max_refreshes_per_session": 4,
     "max_total_duration_secs": 14400,

@@ -59,32 +59,45 @@ effective prefix up to a bounded candidate set, positive cache read, and
 request identity. Evidence writes are committed atomically with their
 request-event or renewal projection.
 
-A renewal receives avoided credit at most once. The first positive-cache-read
-follow-up that matches a cycle's candidate prefix hashes is attributed to the
-latest renewal in that cycle whose TTL window contains it. Legacy, missing,
-malformed, or ambiguous evidence is `unknown`, never an inferred zero. Final
-scheduler caps do not close the evidence window.
+A cycle selects its earliest matching follow-up first. That follow-up earns
+avoided credit only if it starts after the cycle's natural expiry. A later
+post-expiry follow-up never rescues a cycle whose earliest match arrived while
+the original cache was warm. The cycle anchor is the real request's
+response-start anchor (`message_start` for streaming);
+`natural_expiry_ms = cycle_anchor_ms + ttl_ms`. Credit goes to the earliest
+renewal whose TTL window contains the selected follow-up.
+For legacy rows, storage derives the anchor at read time from the first renewal
+minus `max(TTL − lead, 1 s)`. The lead comes from the renewal's decision snapshot,
+or from the session snapshot only when that session still owns the cycle.
+Without an anchor, the cycle is `unknown`. Missing, malformed, or ambiguous evidence is also
+`unknown`, never an inferred zero. Final scheduler caps do not close the
+evidence window.
 
 ### Retained economics and aggregate reads
 
 The read model treats retained history as accounting history, not lifetime
 session state. Exact persisted spend is summed from retained turn rows,
-including misses, and survives session reset or session purge. Money is
-real-time: pending or unknown follow-up evidence counts as zero avoided so far,
-so net is avoided minus spent. Avoided and net are null only when catalog
-pricing or a turn's cost is unknown. A valid
-renewal without a proven follow-up has spend but no avoided credit.
+including misses, and survives session reset or session purge. Savings are the
+cache-creation cost a follow-up would have paid without keep-alive. For a
+follow-up after natural expiry, avoided tokens are
+`min(follow-up cache read, credited renewal kept tokens)`, where kept tokens
+are the renewal's cache-read plus cache-creation tokens. Avoided value is
+those tokens multiplied by the applicable TTL's `(cache-creation price −
+cache-read price)`. The follow-up still pays to read the preserved cache.
 
-For a renewal with a proven follow-up, avoided cost is its cache-read token
-count multiplied by the applicable TTL's cache-creation price minus the
-cache-read price. The follow-up still pays to read the preserved cache; that
-read cost is not a saving. Each renewal is priced and rounded to microdollars
-before summing, identically for rows, groups, and the header. Both rates must
-be known; incomplete pricing leaves avoided cost and net null.
+A follow-up at or before natural expiry is `not_needed`: it receives zero
+avoided savings while every renewal's spend remains. A cycle with no proven
+follow-up has no avoided credit and may remain pending while its newest
+renewal window is open. Wire summaries expose `not_needed_cycles`;
+`follow_up_outcomes.not_needed` counts these outcomes, while `observed`
+counts only saved follow-ups. Gaps expose `natural_expiry_ms` and use
+`followup_before_expiry` for the not-needed outcome.
 
-Summary-only requests use SQL aggregates over retained turns and evidence,
-including grouped model/TTL avoided-token totals. They do not materialize all
-sessions, turns, or snapshots in Rust.
+Avoided and net are null when catalog pricing, costs, anchors, or evidence are
+unknown. Summary-only requests use SQL aggregates over retained turns and
+evidence, including grouped model/TTL avoided-token totals. They do not
+materialize all sessions, turns, or snapshots in Rust.
+
 
 The session sheet lists with the `visible` status: tracked sessions plus
 not-tracked rows that carry an error or a 12h TTL. Other not-tracked decisions

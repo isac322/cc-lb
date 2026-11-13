@@ -978,6 +978,10 @@ pub(crate) fn row_to_record(
             row.try_get("first_scheduled_at").map_err(map_sqlx_error)?,
             "cache keepalive first_scheduled_at",
         )?,
+        last_message_at_ms: i64_to_u64(
+            row.try_get("last_message_at_ms").map_err(map_sqlx_error)?,
+            "cache keepalive last_message_at_ms",
+        )?,
         cache_anchor_at_unix_secs: i64_to_u64(
             row.try_get("cache_anchor_at").map_err(map_sqlx_error)?,
             "cache keepalive cache_anchor_at",

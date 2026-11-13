@@ -56,6 +56,7 @@ const summaryBase = {
   unlisted_net: 0,
   evidence_status: 'observed' as const,
   unknown_cycles: 0,
+  not_needed_cycles: 0,
   retained_from_ms: 1_699_395_200_000,
 };
 
@@ -151,6 +152,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 1,
           pending: 0,
           no_follow_up: 0,
@@ -193,6 +195,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
             ],
             ending_kind: 'followup_hit',
             ending_at_ms: 1_700_000_323_000,
+            natural_expiry_ms: 1_700_000_300_000,
             total_duration_sec: 323,
             since_last_renewal_sec: 53,
             spent_usd: 0.1209,
@@ -355,11 +358,13 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   });
 
   it.each([
-    [null, 'observed', 'Price unknown'],
-    [4.56, 'pending', 'Follow-up pending'],
+    [null, 'observed', 0, 'Price unknown'],
+    [4.56, 'pending', 0, 'Follow-up pending'],
+    [-0.006, 'observed', 1, '1 not needed'],
+    [null, 'unknown', 2, 'Price unknown · 2 not needed'],
   ] as const)(
-    'qualifies summary economics only when required (%s, %s)',
-    (net, evidence, label) => {
+    'qualifies summary economics only when required (%s, %s, %s)',
+    (net, evidence, notNeeded, label) => {
       const original = vi
         .mocked(queries.useCacheKeepaliveSessions)
         .getMockImplementation()!('p-123', { horizon: '24h' }, true);
@@ -371,6 +376,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
           ...summaryBase,
           cost_saved: net,
           evidence_status: evidence,
+          not_needed_cycles: notNeeded,
         },
       }));
       renderWithProviders(

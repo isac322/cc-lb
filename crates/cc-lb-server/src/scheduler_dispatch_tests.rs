@@ -2263,7 +2263,7 @@ async fn cache_keepalive_hit_reschedule_saturates_configured_lead_time() {
 #[tokio::test]
 async fn cache_keepalive_hit_reschedule_legacy_config_uses_default_lead_times() {
     for (ttl, initial, full) in [
-        (cc_lb_storage_api::CacheTtl::Ttl5m, 150, 270),
+        (cc_lb_storage_api::CacheTtl::Ttl5m, 170, 290),
         (cc_lb_storage_api::CacheTtl::Ttl1h, 3_180, 3_300),
     ] {
         assert_renewal_cadence(ttl, 120, 17, initial, full, true).await;

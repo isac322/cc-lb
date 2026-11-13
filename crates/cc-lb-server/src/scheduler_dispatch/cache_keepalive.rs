@@ -410,7 +410,7 @@ impl SchedulerDispatch {
             cc_lb_storage_api::CacheTtl::Ttl5m | cc_lb_storage_api::CacheTtl::Ttl30m => record
                 .config_snapshot
                 .as_ref()
-                .map_or(30, |config| config.refresh_lead_time_5m_secs),
+                .map_or(10, |config| config.refresh_lead_time_5m_secs),
             cc_lb_storage_api::CacheTtl::Ttl1h | cc_lb_storage_api::CacheTtl::Ttl12h => record
                 .config_snapshot
                 .as_ref()

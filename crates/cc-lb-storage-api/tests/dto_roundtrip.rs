@@ -305,6 +305,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         refresh_count: 3,
         first_scheduled_at_unix_secs: 1_716_000_100,
         cache_anchor_at_unix_secs: 1_716_000_200,
+        last_message_at_ms: 1_716_000_100_000,
         run_at_unix_secs: 1_716_000_470,
         ttl: CacheTtl::Ttl5m,
         status: CacheKeepaliveSessionStatus::Terminal,

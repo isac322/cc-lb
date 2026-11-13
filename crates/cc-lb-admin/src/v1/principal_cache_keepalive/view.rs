@@ -4,7 +4,8 @@ mod serialize;
 mod wire;
 
 use crate::cache_keepalive_view::{
-    CacheKeepaliveActivitySource, derive_activity_view,
+    CacheKeepaliveActivitySource, CacheKeepaliveEvidenceIndex, derive_activity_view,
+    derive_activity_view_with_index,
     trigger::{CacheKeepaliveTriggerKind, extract_trigger_descriptor},
 };
 use cc_lb_pricing::PriceCatalog;
@@ -45,6 +46,7 @@ struct LoadedActivity {
 pub(crate) struct CacheKeepaliveActivityBatch {
     turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>>,
     evidence: Vec<CacheKeepaliveEvidenceRecord>,
+    evidence_index: CacheKeepaliveEvidenceIndex,
 }
 
 impl CacheKeepaliveActivityBatch {
@@ -52,6 +54,7 @@ impl CacheKeepaliveActivityBatch {
         turns: Vec<CacheKeepaliveTurnRecord>,
         evidence: Vec<CacheKeepaliveEvidenceRecord>,
     ) -> Self {
+        let evidence_index = CacheKeepaliveEvidenceIndex::new(&evidence, turns.iter());
         let mut turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>> = HashMap::new();
         for turn in turns {
             turns_by_session
@@ -62,7 +65,13 @@ impl CacheKeepaliveActivityBatch {
         Self {
             turns_by_session,
             evidence,
+            evidence_index,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_cycle_count(&self) -> usize {
+        self.evidence_index.cached_cycle_count()
     }
 
     fn turns_for_item(
@@ -165,8 +174,9 @@ pub(crate) fn summary_for_items(
     let mut renewals_fired = 0_u64;
     let mut total_spent_micros = 0_i64;
     let mut total_avoided_micros = 0_i64;
-    let mut cost_saved_micros = 0_i64;
+    let mut economics_known = true;
     let mut unknown_cycles = 0_u64;
+    let mut not_needed_cycles = 0_u64;
     let mut evidence_status = "none";
     let cutoff = now_ms.saturating_sub(FIVE_MINUTES_MS);
     let mut retained_from_ms: Option<u64> = None;
@@ -185,6 +195,13 @@ pub(crate) fn summary_for_items(
         let activity = activity_for_item(catalog, now_ms, item, None, batch, None)?;
         total_spent_micros = total_spent_micros.saturating_add(activity.total_spent_micros);
         unknown_cycles = unknown_cycles.saturating_add(activity.unknown_cycles);
+        not_needed_cycles = not_needed_cycles.saturating_add(
+            activity
+                .gaps
+                .iter()
+                .filter(|gap| gap.ending_kind == "followup_before_expiry")
+                .count() as u64,
+        );
         if activity.evidence_status == "unknown" {
             evidence_status = "unknown";
         } else if activity.evidence_status == "pending" && evidence_status != "unknown" {
@@ -193,16 +210,23 @@ pub(crate) fn summary_for_items(
             evidence_status = "observed";
         }
         renewals_fired = renewals_fired.saturating_add(u64::from(activity.retained_renewals));
-        if let Some(pnl) = activity.pnl {
-            cost_saved_micros = cost_saved_micros.saturating_add(pnl.net_micros);
-            total_avoided_micros = total_avoided_micros.saturating_add(pnl.avoided_micros);
-        }
+        economics_known &= batch
+            .turns_for_item(item)?
+            .iter()
+            .all(|turn| turn.cost_micros.is_some())
+            && activity
+                .turns
+                .iter()
+                .all(|turn| turn.action == "follow-up evidence unavailable" || turn.pnl.is_some());
+        total_avoided_micros = activity
+            .turns
+            .iter()
+            .filter_map(|turn| turn.pnl)
+            .fold(total_avoided_micros, |total, pnl| {
+                total.saturating_add(pnl.avoided_micros)
+            });
     }
-    let economics_known = items.iter().all(|item| {
-        activity_for_item(catalog, now_ms, item, None, batch, None)
-            .map(|activity| activity.pnl.is_some())
-            .unwrap_or(false)
-    });
+    let cost_saved_micros = total_avoided_micros.saturating_sub(total_spent_micros);
     Ok(CacheKeepaliveSummaryResponse {
         renewing_now,
         sessions_last_5m,
@@ -220,6 +244,7 @@ pub(crate) fn summary_for_items(
         unlisted_net: Some(0.0),
         evidence_status: evidence_status.to_owned(),
         unknown_cycles,
+        not_needed_cycles,
         retained_from_ms,
     })
 }
@@ -315,6 +340,7 @@ pub(super) async fn detail_for_item(
             Ok(CacheKeepaliveGapResponse {
                 cycle_id: gap.cycle_id.map(|cycle_id| cycle_id.to_string()),
                 pause_at_ms: gap.pause_at_ms,
+                natural_expiry_ms: gap.natural_expiry_ms,
                 cached_tokens: gap.cached_tokens,
                 pulses,
                 ending_kind: gap.ending_kind,
@@ -398,7 +424,7 @@ pub(crate) fn activity_for_item(
     batch: &CacheKeepaliveActivityBatch,
     horizon_start_ms: Option<u64>,
 ) -> StorageResult<crate::cache_keepalive_view::CacheKeepaliveActivityView> {
-    Ok(derive_activity_view(
+    Ok(derive_activity_view_with_index(
         CacheKeepaliveActivitySource {
             item,
             session,
@@ -408,6 +434,7 @@ pub(crate) fn activity_for_item(
             horizon_start_ms,
         },
         catalog,
+        &batch.evidence_index,
     ))
 }
 

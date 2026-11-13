@@ -212,12 +212,14 @@ pub struct CacheKeepaliveEvidenceRecord {
     pub event_ref: Option<String>,
     #[serde(default)]
     pub session_key_hash: Option<String>,
+    #[serde(default)]
+    pub cycle_anchor_ms: Option<u64>,
 }
-/// Proven follow-up hits for one `(model, ttl, cache-read size)`.
+/// Saved cycles grouped by `(model, ttl, avoided cache-read size)`.
 ///
-/// Every renewal in a group read the same number of tokens, so the reader can
-/// price one renewal and multiply. That keeps the header's rounding identical
-/// to the per-row sum.
+/// The avoided size is capped by the earliest matching renewal's kept tokens.
+/// `avoided_cache_read_tokens` sums that size over the group's `renewals` cycles;
+/// dividing before pricing preserves per-cycle rounding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKeepaliveSummaryGroup {
     pub model: String,
@@ -234,6 +236,7 @@ pub struct CacheKeepaliveSummaryAggregate {
     pub total_spent_micros: i64,
     pub successful_hits: u64,
     pub unknown_cycles: u64,
+    pub not_needed_cycles: u64,
     pub unknown_costs: u64,
     pub unlisted_sessions: u64,
     pub unlisted_renewals: u64,

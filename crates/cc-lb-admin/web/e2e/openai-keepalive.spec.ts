@@ -56,6 +56,7 @@ const summary = {
   unlisted_net: 0,
   evidence_status: 'none',
   unknown_cycles: 0,
+  not_needed_cycles: 0,
   retained_from_ms: null,
 };
 
@@ -312,9 +313,10 @@ async function installCycleFixtures(page: Page) {
       since_prev_renewal_sec: null, spent_usd: 0.01, hit: true,
     }],
     ending_kind: 'followup_hit',
-    ending_at_ms: pauseMs + 290_000,
-    total_duration_sec: 290,
-    since_last_renewal_sec: 20,
+    ending_at_ms: pauseMs + 320_000,
+    natural_expiry_ms: pauseMs + 300_000,
+    total_duration_sec: 320,
+    since_last_renewal_sec: 50,
     spent_usd: 0.01,
     avoided_usd: 0.06,
     net_pnl_usd: 0.05,
@@ -329,7 +331,7 @@ async function installCycleFixtures(page: Page) {
     const row = rows.find((entry) => entry.id === url.searchParams.get('session_id')) ?? rows[0];
     const body = url.pathname.endsWith('/detail') ? {
       ...row,
-      follow_up_outcomes: { observed: 1, pending: row.state === 'scheduled' ? 1 : 0, no_follow_up: 0, unknown: row.state === 'scheduled' ? 0 : 1 },
+      follow_up_outcomes: { observed: 1, not_needed: 0, pending: row.state === 'scheduled' ? 1 : 0, no_follow_up: 0, unknown: row.state === 'scheduled' ? 0 : 1 },
       renewal_tokens: 20_000, total_renewals_current_cycle: row.state === 'scheduled' ? 0 : 1,
       is_last_pending: false, config_snapshot: null,
       raw_record: {
@@ -372,9 +374,9 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('region', { name: 'Cycle 1 timeline' })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Cycle 2 timeline' })).toBeVisible();
     await expect(page.getByText('11-10 23:58:00', { exact: true })).toBeVisible();
-    await expect(page.getByText('Next message 11-11 00:02:50', { exact: true })).toBeVisible();
+    await expect(page.getByText('Next message 11-11 00:03:20', { exact: true })).toBeVisible();
     await expect(page.getByRole('table')).toHaveCount(0);
-    await expect(page.getByLabel('Follow-up outcomes')).toHaveAttribute('title', '1 observed · 0 no follow-up · 1 unknown · 0 pending');
+    await expect(page.getByLabel('Follow-up outcomes')).toHaveAttribute('title', '1 observed · 0 not needed · 0 no follow-up · 1 unknown · 0 pending');
     const firstCycle = page.getByRole('region', { name: 'Cycle 1 timeline' });
     await firstCycle.getByRole('button', { name: /Renewal #1:/ }).click();
     await expect(page.getByRole('tooltip')).toContainText('Hit');

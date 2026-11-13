@@ -100,6 +100,11 @@ impl SchedulerDispatch {
                 request_ref: Some(event_id.clone()),
                 event_ref: Some(source_ref_id.to_owned()),
                 session_key_hash: Some(record.session_key_hash.clone()),
+                // Request fencing can provisionally move first_scheduled_at;
+                // last_message_at_ms remains the owning cycle's real-request anchor.
+                // Rows that predate it store 0; leave those to the read-time fallback.
+                cycle_anchor_ms: (record.last_message_at_ms > 0)
+                    .then_some(record.last_message_at_ms),
             });
         }
         RequestEventStore::append_request_event_with_projections(
@@ -305,6 +310,7 @@ mod tests {
             generation: 1,
             refresh_count: 0,
             first_scheduled_at_unix_secs: 1,
+            last_message_at_ms: 1_000,
             cache_anchor_at_unix_secs: 1,
             run_at_unix_secs: 2,
             ttl: CacheTtl::Ttl5m,
