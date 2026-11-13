@@ -148,8 +148,27 @@ async fn realtime_requires_an_allowed_model_before_provider_selection() {
 
 #[tokio::test]
 async fn gemini_live_rejects_unsupported_operation_before_upgrade() {
-    let router = websocket_test_router(Vec::new(), TerminalStrategy::FirstPick).await;
-    let (proxy, task) = spawn_proxy_router(router).await;
+    use cc_lb_request_log::{RequestEventKind, RequestEventUpdate};
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut updates = bus.subscribe();
+    let state = native_websocket_observed_state(
+        "127.0.0.1:1".parse().unwrap(),
+        true,
+        bus.clone(),
+        None,
+    )
+    .await;
+    replace_websocket_upstreams(&state, Vec::new());
+    let storage = state.storage.clone();
+    let assembler = cc_lb_engine::spawn_request_event_assembler(
+        bus.attach_lifecycle_assembler(128),
+        storage.clone(),
+        Some(bus),
+        Arc::new(cc_lb_observability::NoopMetricsHook),
+    );
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
     let error = tokio::time::timeout(
         Duration::from_secs(5),
         connect_async(realtime_request(proxy, "/gemini/ws/unsupported")),
@@ -161,10 +180,36 @@ async fn gemini_live_rejects_unsupported_operation_before_upgrade() {
         panic!("HTTP operation rejection expected")
     };
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("unsupported operation persists a final request event");
+    assembler.shutdown().await;
+    let cursor = storage.current_request_event_cursor().await.unwrap();
+    let rows = storage
+        .query_request_events_between_cursors(0, cursor, 10, &RequestEventStreamFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0].1;
+    assert_eq!(row.status, 404);
+    assert_eq!(row.error_code.as_deref(), Some("operation_not_supported"));
+    assert_eq!(row.event_kind, Some(RequestEventKind::Other));
+    assert!(row.upstream_id.is_none());
     let body = response.body().as_ref().expect("error body");
     let body: serde_json::Value = serde_json::from_slice(body).expect("JSON error body");
+    assert_eq!(body["error"]["code"], 404);
     assert_eq!(body["error"]["type"], "operation_not_supported");
     assert_eq!(body["error"]["status"], "NOT_FOUND");
+    assert_eq!(
+        body["error"]["message"],
+        "GET /ws/unsupported is not supported by cc-lb yet",
+    );
     task.abort();
 }
 
@@ -187,23 +232,68 @@ async fn gemini_live_rejects_without_eligible_api_key_upstream_before_upgrade() 
         vec![deleted],
         vec![other_provider],
     ] {
-        let router = websocket_test_router(records, TerminalStrategy::FirstPick).await;
-        let (proxy, task) = spawn_proxy_router(router).await;
-        let result = connect_async(realtime_request(
-            proxy,
-            "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
-        ))
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let state = native_websocket_observed_state(
+            "127.0.0.1:1".parse().unwrap(),
+            true,
+            bus,
+            None,
+        )
         .await;
-        task.abort();
-        let error = result.expect_err("ineligible Live request must not upgrade");
+        replace_websocket_upstreams(&state, records);
+        let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_async(realtime_request(proxy, native_websocket_path(true))),
+        )
+        .await
+        .expect("local routing rejection arrives")
+        .expect_err("ineligible Live request must not upgrade");
         let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
             panic!("HTTP routing rejection expected")
         };
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json"),
+        );
         let body: serde_json::Value =
             serde_json::from_slice(response.body().as_ref().expect("error body")).unwrap();
-        assert_eq!(body["error"]["code"], "route_no_upstream_after_filter");
+        assert_eq!(body["error"]["code"], 503);
+        assert_eq!(body["error"]["status"], "UNAVAILABLE");
+        assert_eq!(body["error"]["type"], "route_no_upstream_after_filter");
         assert_eq!(body["error"]["message"], "no eligible provider API-key upstream");
+        let (client_status, reason, internal_errors) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let LifecycleEvent::RequestTerminated {
+                        client_status,
+                        reason,
+                        internal_errors,
+                        ..
+                    } = events.recv().await.unwrap()
+                    {
+                        break (client_status, reason, internal_errors);
+                    }
+                }
+            })
+            .await
+            .expect("local rejection terminates the lifecycle");
+        assert_eq!(client_status, 503);
+        assert_eq!(
+            reason,
+            cc_lb_lifecycle::TerminationReason::ErrorCode(
+                "route_no_upstream_after_filter".to_owned(),
+            ),
+        );
+        assert!(internal_errors.iter().any(|error| {
+            error.stage == cc_lb_domain::InternalErrorStage::RouterFilter
+                && error.kind == cc_lb_domain::InternalErrorKind::Unavailable
+        }));
+        task.abort();
     }
 }
 
@@ -308,15 +398,111 @@ async fn realtime_client_close_reaches_pinned_provider() {
 
 #[tokio::test]
 async fn live_waiting_for_setup_and_realtime_active_connections_respect_drain() {
-    let drain = DrainController::new();
-    let mut record = websocket_upstream(1, "live-key", Url::parse("http://127.0.0.1:1/").unwrap());
-    record.kind = UpstreamKind::GeminiApiKey;
-    let router = websocket_test_router_with_drain(vec![record], TerminalStrategy::FirstPick, drain.clone()).await;
-    let (proxy, task) = spawn_proxy_router(router).await;
-    let (mut client, _) = connect_async(realtime_request(proxy, "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")).await.unwrap();
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let mut updates = bus.subscribe();
+    let state = native_websocket_observed_state(
+        "127.0.0.1:1".parse().unwrap(),
+        true,
+        bus.clone(),
+        None,
+    )
+    .await;
+    let drain = state.drain_controller.clone();
+    let storage = state.storage.clone();
+    let assembler = cc_lb_engine::spawn_request_event_assembler(
+        bus.attach_lifecycle_assembler(128),
+        storage.clone(),
+        Some(bus),
+        Arc::new(cc_lb_observability::NoopMetricsHook),
+    );
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, response) =
+        connect_async(realtime_request(proxy, native_websocket_path(true)))
+            .await
+            .unwrap();
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
     drain.trigger();
-    let _ = tokio::time::timeout(Duration::from_secs(5), client.next()).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("draining closes the waiting Live connection");
+    assert!(matches!(message, Some(Ok(UpstreamMessage::Close(_))) | None));
     assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    let (client_status, reason, internal_errors) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let LifecycleEvent::RequestTerminated {
+                    client_status,
+                    reason,
+                    internal_errors,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    break (client_status, reason, internal_errors);
+                }
+            }
+        })
+        .await
+        .expect("draining the waiting Live connection terminates its lifecycle");
+    assert_eq!(client_status, 101);
+    assert_eq!(
+        reason,
+        cc_lb_lifecycle::TerminationReason::ErrorCode("drain_rejected".to_owned()),
+    );
+    assert!(internal_errors.iter().any(|error| {
+        error.stage == cc_lb_domain::InternalErrorStage::Relay
+            && error.kind == cc_lb_domain::InternalErrorKind::Unavailable
+            && error.message.as_deref() == Some("server is draining")
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("draining persists the final Live request event");
+    assembler.shutdown().await;
+    let cursor = storage.current_request_event_cursor().await.unwrap();
+    let rows = storage
+        .query_request_events_between_cursors(0, cursor, 10, &RequestEventStreamFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.status, 101);
+    assert_eq!(rows[0].1.error_code.as_deref(), Some("drain_rejected"));
+    task.abort();
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let state = native_websocket_observed_state(
+        "127.0.0.1:1".parse().unwrap(),
+        true,
+        bus.clone(),
+        None,
+    )
+    .await;
+    state.drain_controller.trigger();
+    let mut events = bus.subscribe_lifecycle();
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(proxy, native_websocket_path(true))),
+    )
+    .await
+    .expect("pre-authentication drain rejection arrives")
+    .expect_err("draining server must reject before upgrade");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("HTTP drain rejection expected");
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty),
+    ));
     task.abort();
 }
 
@@ -527,6 +713,48 @@ async fn gemini_rejection_attempt(
         assert_ne!(value["error"]["code"], "authentication_error");
     }
     assert_safe_json_rejection(&value, expected_status, expect_headers);
+}
+
+#[tokio::test]
+async fn gemini_live_provider_503_persists_upstream_error_classification() {
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    let (address, attempts, provider_task) =
+        rejecting_provider(StatusCode::SERVICE_UNAVAILABLE).await;
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut updates = bus.subscribe();
+    let state = native_websocket_observed_state(address, true, bus.clone(), None).await;
+    let storage = state.storage.clone();
+    let assembler = cc_lb_engine::spawn_request_event_assembler(
+        bus.attach_lifecycle_assembler(128),
+        storage.clone(),
+        Some(bus),
+        Arc::new(cc_lb_observability::NoopMetricsHook),
+    );
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    gemini_rejection_attempt(proxy, StatusCode::SERVICE_UNAVAILABLE, true).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("provider rejection persists a final Live request event");
+    assembler.shutdown().await;
+    let cursor = storage.current_request_event_cursor().await.unwrap();
+    let rows = storage
+        .query_request_events_between_cursors(0, cursor, 10, &RequestEventStreamFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.status, 503);
+    assert_eq!(rows[0].1.error_code.as_deref(), Some("upstream_5xx"));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    task.abort();
+    provider_task.abort();
 }
 
 #[tokio::test]
