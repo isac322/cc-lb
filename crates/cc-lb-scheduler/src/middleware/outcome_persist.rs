@@ -34,6 +34,14 @@ pub(crate) struct OutcomePersistLayer {
     fatal_error: Arc<Mutex<Option<String>>>,
 }
 
+pub(crate) struct WorkerHeartbeatGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for WorkerHeartbeatGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl OutcomePersistLayer {
     #[cfg(feature = "sqlite")]
     pub(crate) fn sqlite(pool: sqlx::SqlitePool, cancel: CancellationToken) -> Self {
@@ -54,6 +62,28 @@ impl OutcomePersistLayer {
             fatal_abort: CancellationToken::new(),
             fatal_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn spawn_heartbeat(&self, worker_id: String) -> WorkerHeartbeatGuard {
+        let pool = self.pool.clone();
+        let cancel = self.cancel.clone();
+        let fatal_abort = self.fatal_abort.clone();
+        WorkerHeartbeatGuard(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    () = fatal_abort.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    () = fatal_abort.cancelled() => return,
+                    () = pool.touch_worker(&worker_id) => {}
+                }
+            }
+        }))
     }
 
     pub(crate) fn wrap_storage<B>(&self, inner: B) -> DrainableStorage<B> {
@@ -351,6 +381,27 @@ pub(crate) fn sqlite_retry_run_at_secs(now_since_epoch: Duration, delay: Duratio
 }
 
 impl OutcomePool {
+    async fn touch_worker(&self, worker_id: &str) {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(pool) => {
+                let _ = sqlx::query(
+                    "UPDATE Workers SET last_seen = strftime('%s', 'now') WHERE id = ?1",
+                )
+                .bind(worker_id)
+                .execute(pool)
+                .await;
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => {
+                let _ = sqlx::query("UPDATE apalis.workers SET last_seen = now() WHERE id = $1")
+                    .bind(worker_id)
+                    .execute(pool)
+                    .await;
+            }
+        }
+    }
+
     async fn recover_queued_lease(
         &self,
         task_id: &str,
@@ -390,14 +441,18 @@ impl OutcomePool {
         lock_by: &str,
         pre_attempt: i64,
     ) -> Result<u64, sqlx::Error> {
-        match self {
+        let rows_affected = match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(pool) => sqlx::query("UPDATE Jobs SET status = 'Running', lock_at = strftime('%s', 'now') WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status = 'Queued'")
                 .bind(task_id).bind(lock_by).bind(pre_attempt).execute(pool).await.map(|result| result.rows_affected()),
             #[cfg(feature = "postgres")]
             Self::Postgres(pool) => sqlx::query("UPDATE apalis.jobs SET status = 'Running', lock_at = now() WHERE id = $1 AND lock_by = $2 AND attempts = $3 AND status = 'Queued'")
                 .bind(task_id).bind(lock_by).bind(i32::try_from(pre_attempt).unwrap_or(i32::MAX)).execute(pool).await.map(|result| result.rows_affected()),
+        }?;
+        if rows_affected > 0 {
+            self.touch_worker(lock_by).await;
         }
+        Ok(rows_affected)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -411,7 +466,7 @@ impl OutcomePool {
         status: &str,
         delay: Option<Duration>,
     ) -> Result<u64, sqlx::Error> {
-        match self {
+        let rows_affected = match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(pool) => {
                 let result = if let Some(delay) = delay {
@@ -425,7 +480,7 @@ impl OutcomePool {
                     sqlx::query("UPDATE Jobs SET status = ?6, attempts = ?4, last_result = ?5, done_at = strftime('%s', 'now') WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(status).execute(pool).await?
                 };
-                Ok(result.rows_affected())
+                result.rows_affected()
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(pool) => {
@@ -438,9 +493,13 @@ impl OutcomePool {
                     sqlx::query("UPDATE apalis.jobs SET status = $6, attempts = $4, last_result = $5::jsonb, done_at = now() WHERE id = $1 AND lock_by = $2 AND attempts = $3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(status).execute(pool).await?
                 };
-                Ok(result.rows_affected())
+                result.rows_affected()
             }
+        };
+        if rows_affected > 0 {
+            self.touch_worker(lock_by).await;
         }
+        Ok(rows_affected)
     }
 }
 
@@ -678,7 +737,99 @@ mod sqlite_tests {
             .expect("sqlite pool");
         sqlx::query("CREATE TABLE Jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL, lock_by TEXT, lock_at INTEGER, run_at INTEGER, done_at INTEGER, last_result TEXT)")
             .execute(&pool).await.expect("sqlite fixture schema");
+        sqlx::query("CREATE TABLE Workers (id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("sqlite worker fixture schema");
         pool
+    }
+
+    #[tokio::test]
+    async fn sqlite_worker_heartbeat_tracks_only_successful_lease_transitions() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO Workers (id, last_seen) VALUES ('worker', 1)")
+            .execute(&pool)
+            .await
+            .expect("insert worker");
+        let outcome_pool = OutcomePool::Sqlite(pool.clone());
+        outcome_pool.reset_row("worker").await;
+
+        assert_eq!(
+            outcome_pool
+                .start("lease-test", "worker", 1)
+                .await
+                .expect("missed start fence"),
+            0
+        );
+        let last_seen: i64 =
+            sqlx::query_scalar("SELECT last_seen FROM Workers WHERE id = 'worker'")
+                .fetch_one(&pool)
+                .await
+                .expect("worker heartbeat");
+        assert_eq!(last_seen, 1);
+
+        assert_eq!(
+            outcome_pool
+                .start("lease-test", "worker", 0)
+                .await
+                .expect("start"),
+            1
+        );
+        let last_seen: i64 =
+            sqlx::query_scalar("SELECT last_seen FROM Workers WHERE id = 'worker'")
+                .fetch_one(&pool)
+                .await
+                .expect("worker heartbeat");
+        assert!(last_seen > 1);
+
+        sqlx::query("UPDATE Workers SET last_seen = 1 WHERE id = 'worker'")
+            .execute(&pool)
+            .await
+            .expect("reset heartbeat");
+        assert_eq!(
+            outcome_pool
+                .finish(
+                    "lease-test",
+                    "worker",
+                    1,
+                    2,
+                    "{\"Ok\":\"Done\"}",
+                    "Done",
+                    None
+                )
+                .await
+                .expect("missed finish fence"),
+            0
+        );
+        let last_seen: i64 =
+            sqlx::query_scalar("SELECT last_seen FROM Workers WHERE id = 'worker'")
+                .fetch_one(&pool)
+                .await
+                .expect("worker heartbeat");
+        assert_eq!(last_seen, 1);
+
+        assert_eq!(
+            outcome_pool
+                .finish(
+                    "lease-test",
+                    "worker",
+                    0,
+                    1,
+                    "{\"Ok\":\"Done\"}",
+                    "Done",
+                    None
+                )
+                .await
+                .expect("finish"),
+            1
+        );
+        let last_seen: i64 =
+            sqlx::query_scalar("SELECT last_seen FROM Workers WHERE id = 'worker'")
+                .fetch_one(&pool)
+                .await
+                .expect("worker heartbeat");
+        assert!(last_seen > 1);
+        pool.close().await;
     }
 
     #[test]
@@ -778,6 +929,8 @@ mod postgres_tests {
             sqlx::Postgres::create_database(database_url.as_str()).await?;
             let result = tokio::time::timeout(Duration::from_secs(30), AssertUnwindSafe(async {
                 sqlx::query("CREATE SCHEMA apalis").execute(&pool).await.expect("postgres fixture schema");
+                sqlx::query("CREATE TABLE apalis.workers (id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL)")
+                    .execute(&pool).await.expect("postgres worker fixture table");
                 sqlx::query("CREATE TABLE apalis.jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL, lock_by TEXT, lock_at TIMESTAMPTZ, run_at TIMESTAMPTZ, done_at TIMESTAMPTZ, last_result JSONB)")
                     .execute(&pool).await.expect("postgres fixture table");
                 super::test_support::fencing(OutcomePool::Postgres(pool.clone()), &handle).await;

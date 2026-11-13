@@ -112,7 +112,7 @@ fn build_sqlite_worker(
                 let persist_layer = OutcomePersistLayer::sqlite(pool, cancel.clone());
                 let persist_drain = persist_layer.clone();
                 let fatal_check = persist_layer.clone();
-                let worker = ApalisWorkerBuilder::new(worker_name)
+                let worker = ApalisWorkerBuilder::new(worker_name.clone())
                     .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
                     .layer(persist_layer)
@@ -122,6 +122,7 @@ fn build_sqlite_worker(
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
                     .build(entity_job_handler);
+                let _heartbeat = fatal_check.spawn_heartbeat(worker_name);
                 worker
                     .run_until(async move {
                         tokio::select! {
@@ -132,6 +133,7 @@ fn build_sqlite_worker(
                         Ok::<(), WorkerError>(())
                     })
                     .await?;
+                drop(_heartbeat);
                 if let Some(reason) = fatal_check.fatal_abort_reason() {
                     return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
                         reason,
@@ -157,7 +159,7 @@ fn build_postgres_worker(
                 let persist_layer = OutcomePersistLayer::postgres(pool, cancel.clone());
                 let persist_drain = persist_layer.clone();
                 let fatal_check = persist_layer.clone();
-                let worker = ApalisWorkerBuilder::new(worker_name)
+                let worker = ApalisWorkerBuilder::new(worker_name.clone())
                     .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
                     .layer(persist_layer)
@@ -167,6 +169,7 @@ fn build_postgres_worker(
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
                     .build(entity_job_handler);
+                let _heartbeat = fatal_check.spawn_heartbeat(worker_name);
                 worker
                     .run_until(async move {
                         tokio::select! {
@@ -177,6 +180,7 @@ fn build_postgres_worker(
                         Ok::<(), WorkerError>(())
                     })
                     .await?;
+                drop(_heartbeat);
                 if let Some(reason) = fatal_check.fatal_abort_reason() {
                     return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
                         reason,

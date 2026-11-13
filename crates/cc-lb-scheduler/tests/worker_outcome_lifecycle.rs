@@ -765,8 +765,8 @@ mod sqlite {
             .await?;
         // Distinct due timestamps make the first job deterministic without
         // relying on the random task IDs as the tie-breaker.
-        for index in 0..3 {
-            let key = format!("job-{index}");
+        for index in 0..4 {
+            let key = format!("live-batch-{index}");
             enqueue(&backend, ADAPTIVE_QUEUE, &key, Uuid::new_v4(), None).await?;
             sqlx::query("UPDATE Jobs SET run_at = ?1 WHERE idempotency_key = ?2")
                 .bind(i64::from(index))
@@ -776,64 +776,94 @@ mod sqlite {
         }
         let calls = Arc::new(AtomicUsize::new(0));
         let observed_calls = calls.clone();
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let entered = Arc::new(Mutex::new(Some(entered_tx)));
-        let release = Arc::new(tokio::sync::Notify::new());
-        let handler_release = release.clone();
+        let (entered0_tx, entered0_rx) = oneshot::channel();
+        let (entered1_tx, entered1_rx) = oneshot::channel();
+        let entered0 = Arc::new(Mutex::new(Some(entered0_tx)));
+        let entered1 = Arc::new(Mutex::new(Some(entered1_tx)));
+        let release0 = Arc::new(tokio::sync::Notify::new());
+        let release1 = Arc::new(tokio::sync::Notify::new());
+        let handler_release0 = release0.clone();
+        let handler_release1 = release1.clone();
         let mut ctx = fixed(JobOutcome::Done);
         ctx.config.entity_concurrency = 1;
         ctx.adaptive_dispatch = Arc::new(move |_| {
-            let entered = entered.clone();
-            let release = handler_release.clone();
-            let first = observed_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            let entered0 = entered0.clone();
+            let entered1 = entered1.clone();
+            let release0 = handler_release0.clone();
+            let release1 = handler_release1.clone();
+            let ordinal = observed_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
-                if first {
-                    if let Some(tx) = entered.lock().expect("entered barrier mutex").take() {
+                if ordinal == 0 {
+                    if let Some(tx) = entered0.lock().expect("barrier 0 mutex").take() {
                         let _ = tx.send(());
                     }
-                    release.notified().await;
+                    release0.notified().await;
+                } else if ordinal == 1 {
+                    if let Some(tx) = entered1.lock().expect("barrier 1 mutex").take() {
+                        let _ = tx.send(());
+                    }
+                    release1.notified().await;
                 }
                 Ok(JobOutcome::Done)
             })
         });
         let workers = Workers::start(&backend, ctx, ADAPTIVE_QUEUE, 1).await?;
-        timeout(DEADLINE, entered_rx).await??;
-        let (owner, last_seen) = timeout(DEADLINE, async {
+        timeout(DEADLINE, entered0_rx).await??;
+        let owner = timeout(DEADLINE, async {
             loop {
-                let first = state(&fault_pool, "job-0").await?;
-                let second = state(&fault_pool, "job-1").await?;
-                let third = state(&fault_pool, "job-2").await?;
+                let first = state(&fault_pool, "live-batch-0").await?;
+                let second = state(&fault_pool, "live-batch-1").await?;
+                let third = state(&fault_pool, "live-batch-2").await?;
+                let fourth = state(&fault_pool, "live-batch-3").await?;
                 if first.status == "Running"
                     && second.status == "Queued"
                     && third.status == "Queued"
+                    && fourth.status == "Queued"
                     && let Some(owner) = first.lock_by
                     && second.lock_by.as_deref() == Some(owner.as_str())
                     && third.lock_by.as_deref() == Some(owner.as_str())
-                    && let Some(last_seen) =
-                        sqlx::query_scalar::<_, i64>("SELECT last_seen FROM Workers WHERE id = ?1")
-                            .bind(&owner)
-                            .fetch_optional(&fault_pool)
-                            .await?
+                    && fourth.lock_by.as_deref() == Some(owner.as_str())
+                    && sqlx::query_scalar::<_, i64>("SELECT last_seen FROM Workers WHERE id = ?1")
+                        .bind(&owner)
+                        .fetch_optional(&fault_pool)
+                        .await?
+                        .is_some()
                 {
-                    return Ok::<_, anyhow::Error>((owner, last_seen));
+                    return Ok::<_, anyhow::Error>(owner);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .context("waiting for live worker's prefetched batch")??;
-        sqlx::query("UPDATE Jobs SET lock_at = ?1 WHERE idempotency_key IN ('job-1', 'job-2')")
-            .bind(last_seen - 200)
+        let now = u64::try_from(db_now(&fault_pool).await?)?;
+        let aged_at = i64::try_from(now)? - 200;
+        // Age the lease and its owner consistently while Persisted remains
+        // Buffered; the test must not fabricate a fresh owner heartbeat.
+        sqlx::query(
+            "UPDATE Jobs SET lock_at = ?1 WHERE idempotency_key IN ('live-batch-1', 'live-batch-2', 'live-batch-3')",
+        ).bind(aged_at).execute(&fault_pool).await?;
+        sqlx::query("UPDATE Workers SET last_seen = ?1 WHERE id = ?2")
+            .bind(aged_at)
+            .bind(&owner)
             .execute(&fault_pool)
             .await?;
+        release0.notify_one();
+        timeout(DEADLINE, entered1_rx).await??;
+        settled(&pool, "live-batch-0", "Done", 1).await?;
+        let refreshed_last_seen: i64 =
+            sqlx::query_scalar("SELECT last_seen FROM Workers WHERE id = ?1")
+                .bind(&owner)
+                .fetch_one(&fault_pool)
+                .await?;
+        assert!(
+            refreshed_last_seen >= i64::try_from(now)?,
+            "the live worker must refresh its heartbeat while draining Buffered",
+        );
         let store = cc_lb_storage_sqlite::SqliteStorage::new(pool.clone(), Arc::new(SystemClock));
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30))
-                .handle(
-                    ApalisHousekeepingJob::default(),
-                    u64::try_from(last_seen + 10)?,
-                    &store,
-                )
+                .handle(ApalisHousekeepingJob::default(), now, &store)
                 .await;
         assert!(
             matches!(
@@ -845,17 +875,23 @@ mod sqlite {
             ),
             "{result:?}"
         );
-        for key in ["job-1", "job-2"] {
+        for key in ["live-batch-2", "live-batch-3"] {
             let row = state(&fault_pool, key).await?;
             assert_eq!(row.status, "Queued", "{key}: {row:?}");
             assert_eq!(row.attempts, 0, "{key}: {row:?}");
             assert_eq!(row.lock_by.as_deref(), Some(owner.as_str()));
+            assert_eq!(row.lock_at, Some(aged_at), "{key}: {row:?}");
         }
-        release.notify_one();
-        for key in ["job-0", "job-1", "job-2"] {
+        release1.notify_one();
+        for key in [
+            "live-batch-0",
+            "live-batch-1",
+            "live-batch-2",
+            "live-batch-3",
+        ] {
             settled(&pool, key, "Done", 1).await?;
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         workers.stop().await
     }
 
