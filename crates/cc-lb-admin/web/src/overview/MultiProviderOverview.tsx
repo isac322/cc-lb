@@ -163,6 +163,15 @@ export function MultiProviderOverview() {
   const installation = useInstallation();
   const upstreams = useUpstreams();
   const upstreamUsage = useUpstreamUsageData();
+  // The Upstreams table's `/latest` rows double as the pool cards' provenance.
+  const poolRetention = useMemo(
+    () => ({
+      rows: upstreamUsage.rows,
+      pending: upstreamUsage.quotaPending,
+      error: upstreamUsage.quotaError,
+    }),
+    [upstreamUsage.rows, upstreamUsage.quotaPending, upstreamUsage.quotaError],
+  );
   const providers = installation.providers;
   const search = useSearch({ from: '/' }) as {
     range?: TimePreset;
@@ -233,7 +242,7 @@ export function MultiProviderOverview() {
                 key={provider}
                 provider={provider}
                 rangeSecs={TIME_PRESET_SECONDS[range]}
-                upstreamRows={upstreamUsage.rows}
+                retention={poolRetention}
               />
             ))}
           </div>

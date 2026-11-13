@@ -190,10 +190,14 @@ function renderCard({
   lots,
   history,
   rows,
+  pending = false,
+  error = false,
 }: {
   lots: Record<'gemini_5h' | 'gemini_7d', AggregateProviderLotResponse[]>;
   history: Record<'gemini_5h' | 'gemini_7d', [number, number][]>;
   rows: PoolRetentionRow[];
+  pending?: boolean;
+  error?: boolean;
 }) {
   const aggregate: AggregateResponse = {
     now_unix_secs: NOW,
@@ -225,7 +229,7 @@ function renderCard({
       provider="gemini"
       hasSubscription
       rangeSecs={86_400}
-      upstreamRows={rows}
+      retention={{ rows, pending, error }}
     />,
   );
   const legend = (window: string) =>
@@ -248,6 +252,11 @@ describe('Gemini pool card with an account retaining an earlier reading', () => 
     gemini_5h: [lot('gemini_5h', 'a', NOW), lot('gemini_5h', 'b', NOW)],
     gemini_7d: [lot('gemini_7d', 'a', NOW), lot('gemini_7d', 'b', NOW)],
   };
+  // A's 5h lot is its retained t1 reading, as the server serves it.
+  const retainedLots = {
+    gemini_5h: [lot('gemini_5h', 'a', T1), lot('gemini_5h', 'b', NOW)],
+    gemini_7d: freshLots.gemini_7d,
+  };
 
   it('keeps plotting other upstreams after the retained reading while the legend marks it stale', () => {
     // Upstream A's gemini_5h is from t1 (its later poll omitted 5h); upstream B
@@ -258,7 +267,7 @@ describe('Gemini pool card with an account retaining an earlier reading', () => 
       [NOW - 1800, 40],
     ];
     const { legend } = renderCard({
-      lots: freshLots,
+      lots: retainedLots,
       history: {
         gemini_5h: fiveHour,
         gemini_7d: [
@@ -337,5 +346,60 @@ describe('Gemini pool card with an account retaining an earlier reading', () => 
     expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
     expect(legend('gemini_7d')?.dataset.state).toBeUndefined();
     expect(screen.queryByText('Stale reading')).toBeNull();
+  });
+
+  it('treats a lot newer than the cached /latest reading as current', () => {
+    // `/latest` still caches A's retained t1 5h (weekly at now), while
+    // `/aggregate` already carries A's recovery poll: a fresh 5h of 90%.
+    const { legend } = renderCard({
+      lots: {
+        gemini_5h: [lot('gemini_5h', 'a', NOW)],
+        gemini_7d: [lot('gemini_7d', 'a', NOW)],
+      },
+      history: {
+        gemini_5h: [[NOW - 1800, 90]],
+        gemini_7d: [[NOW - 1800, 10]],
+      },
+      rows: [upstreamRow('a', [T1, NOW - 600])],
+    });
+    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
+    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(
+      document.querySelector('[data-slot="provider-pool-headline"]')
+        ?.textContent,
+    ).toBe('90%used');
+  });
+
+  it('says retained readings went unchecked when /latest failed, without inventing stale', () => {
+    const { legend } = renderCard({
+      lots: retainedLots,
+      history: {
+        gemini_5h: [[NOW - 1800, 40]],
+        gemini_7d: [[NOW - 1800, 60]],
+      },
+      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
+      error: true,
+    });
+    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
+    expect(screen.queryByText('Stale reading')).toBeNull();
+    const note = screen.getByText("Couldn't check for retained readings");
+    expect(note.className).not.toMatch(/warn|danger/);
+  });
+
+  it('flags nothing and stays quiet while /latest is pending', () => {
+    const { legend } = renderCard({
+      lots: retainedLots,
+      history: {
+        gemini_5h: [[NOW - 1800, 40]],
+        gemini_7d: [[NOW - 1800, 60]],
+      },
+      rows: [],
+      pending: true,
+    });
+    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
+    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(
+      screen.queryByText("Couldn't check for retained readings"),
+    ).toBeNull();
   });
 });

@@ -69,6 +69,7 @@ import {
 import {
   GEMINI_GROUP_PLACEHOLDER_TEXT,
   type GeminiGroupPlaceholderState,
+  POOL_RETENTION_UNAVAILABLE_TEXT,
   poolGroupPlaceholders,
   poolRetainedWindows,
 } from '../../components/upstreams/quotaWindowVisibility';
@@ -1268,6 +1269,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   legendWindows,
   placeholders,
   retained,
+  retentionUnavailable = false,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
@@ -1281,6 +1283,8 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   placeholders?: Partial<Record<PoolQuotaWindow, GeminiGroupPlaceholderState>>;
   /** `poolRetainedWindows`: windows whose current pool figure includes a retained reading. */
   retained?: ReadonlySet<PoolQuotaWindow>;
+  /** The `/latest` query failed, so retained readings were not checked. */
+  retentionUnavailable?: boolean;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -1383,6 +1387,11 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
               {(chart.observation?.stale || retainedStale) &&
               provider.observedAtUnixSecs == null ? (
                 <Badge tone="warn">Stale reading</Badge>
+              ) : null}
+              {retentionUnavailable ? (
+                <span data-slot="pool-retention-unavailable">
+                  {POOL_RETENTION_UNAVAILABLE_TEXT}
+                </span>
               ) : null}
               {proof ? <span>{proof}</span> : null}
             </>
@@ -1945,13 +1954,17 @@ export function ProviderOverviewPage({
   // Gemini group windows whose current pool figure includes a reading retained
   // from an earlier poll; per-upstream `/latest` rows share the Upstreams
   // section's query.
-  const poolUpstreamRows = useUpstreamUsageData(scopedProvider).rows;
+  const poolUpstreamUsage = useUpstreamUsageData(scopedProvider);
   // Keyed by content so a fresh rows array alone never re-renders the chart.
   const poolRetainedKey = quotaLoading
     ? ''
-    : [...poolRetainedWindows(normalizedPoolAggregate, poolUpstreamRows)].join(
-        ',',
-      );
+    : [
+        ...poolRetainedWindows(normalizedPoolAggregate, {
+          rows: poolUpstreamUsage.rows,
+          pending: poolUpstreamUsage.quotaPending,
+          error: poolUpstreamUsage.quotaError,
+        }),
+      ].join(',');
   const poolRetained = useMemo(
     (): ReadonlySet<string> =>
       new Set(poolRetainedKey === '' ? [] : poolRetainedKey.split(',')),
@@ -2180,6 +2193,9 @@ export function ProviderOverviewPage({
                 legendWindows={poolLegendWindows}
                 placeholders={poolPlaceholders}
                 retained={poolRetained}
+                retentionUnavailable={
+                  scopedProvider === 'gemini' && poolUpstreamUsage.quotaError
+                }
               />
 
               <UsageBlock

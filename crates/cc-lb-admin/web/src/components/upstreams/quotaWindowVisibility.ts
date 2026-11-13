@@ -226,31 +226,55 @@ export interface PoolRetentionRow {
 }
 
 /**
+ * Per-upstream `/latest` rows behind a pool card, with that query's state.
+ * `/latest` polls independently of `/aggregate`, so either may be newer.
+ */
+export interface PoolRetentionSource {
+  rows: readonly PoolRetentionRow[];
+  pending: boolean;
+  error: boolean;
+}
+
+/** Pool caption when `/latest` failed, so retained readings went unchecked. */
+export const POOL_RETENTION_UNAVAILABLE_TEXT =
+  "Couldn't check for retained readings";
+
+/**
  * Pool counterpart of `geminiRetainedReading`: Gemini group windows whose
  * displayed current pool figure includes a retained reading. Only accounts in
- * that fresh-only figure count (a `fresh` provider lot with a utilization);
- * each one's per-upstream `/latest` row decides retention, so a poll that
- * returned only period-unknown meters is caught as well.
+ * that fresh-only figure count (a `fresh` provider lot with a utilization),
+ * and only when the lot is that retained reading: observed no later than the
+ * retained `/latest` reading. A newer lot came from a later poll than the
+ * cached `/latest` row and is current. Each account's `/latest` row decides
+ * retention, so a poll that returned only period-unknown meters is caught as
+ * well. Nothing is flagged while `/latest` is pending or failed: provenance is
+ * then unknown, never assumed.
  */
 export function poolRetainedWindows(
   aggregate: AggregateResponse | undefined,
-  upstreamRows: readonly PoolRetentionRow[] | undefined,
+  source: PoolRetentionSource | undefined,
 ): ReadonlySet<string> {
   const retained = new Set<string>();
-  if (!aggregate || !upstreamRows) return retained;
+  if (!aggregate || !source || source.pending || source.error) return retained;
   for (const entry of aggregate.windows) {
     if (geminiGroupSibling(entry.window) == null) continue;
     for (const lot of entry.provider_lots) {
       if (
         lot.state !== 'fresh' ||
         lot.utilization == null ||
-        !Number.isFinite(lot.utilization)
+        !Number.isFinite(lot.utilization) ||
+        lot.observed_at_unix_millis == null
       ) {
         continue;
       }
-      const row = upstreamRows.find((r) => r.upstream.id === lot.upstream_id);
+      const row = source.rows.find((r) => r.upstream.id === lot.upstream_id);
+      const readingAt = row?.windows.find(
+        (snap) => snap.window === entry.window,
+      )?.observed_at_unix_millis;
       if (
         row != null &&
+        readingAt != null &&
+        lot.observed_at_unix_millis <= readingAt &&
         geminiRetainedReading(
           row.windows,
           row.periodUnknownMeters,
