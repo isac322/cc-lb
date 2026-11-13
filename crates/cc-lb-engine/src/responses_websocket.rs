@@ -2753,12 +2753,9 @@ pub(crate) mod tests {
             .unwrap();
         let mut completions = 0;
         while let Ok(event) = events.try_recv() {
-            match event {
-                LifecycleEvent::StreamCompleted { result, .. } => {
-                    completions += 1;
-                    assert_eq!(result.unwrap_err().error_type, "plugin_transform_error");
-                }
-                _ => {}
+            if let LifecycleEvent::StreamCompleted { result, .. } = event {
+                completions += 1;
+                assert_eq!(result.unwrap_err().error_type, "plugin_transform_error");
             }
         }
         while let Ok(event) = assembler_events.try_recv() {
