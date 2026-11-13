@@ -69,7 +69,7 @@ The system consists of the following components:
   - Max attempts: 1 retry (2 total runs)
   - Base delay: 60s
   - Max delay: 60s
-  - Backoff curve: one 60s delay with ±10% jitter, capped at 60s
+  - Backoff curve: one 60s base delay with ±10% jitter (54–66s); explicit positive delays are capped at 60s without jitter
 
 Within the retry budget, a positive `JobOutcome::Retry { delay: Some(d) }` reschedules without jitter at `min(d, max_delay)`. This preserves `PriceCatalogRefreshJob`'s 30s retry under the Maintenance class's 60s cap. `delay: None` uses the class's jittered backoff curve. `Duration::ZERO` returns an error and marks the row `Killed`, even when its retry budget is exhausted.
 
