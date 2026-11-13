@@ -4,7 +4,9 @@ import { usePluginRegistry, useUploadWasm } from '../../lib/queries';
 import { Route } from '../../routes/plugins';
 import {
   Badge,
+  Button,
   Modal,
+  Notice,
   PageContainer,
   PageHeader,
   Section,
@@ -141,12 +143,17 @@ export function PluginsPage() {
     setSelectedPluginId(id);
   };
 
-  const detailLoading = Boolean(selectedPluginId) && reg.isLoading;
+  const hasRegistryData = reg.data !== undefined;
+  const detailLoading =
+    Boolean(selectedPluginId) &&
+    (Boolean(reg.isLoading) || (Boolean(reg.isPending) && !hasRegistryData));
+  const detailError =
+    Boolean(selectedPluginId) && Boolean(reg.isError) && !hasRegistryData;
   const backToCatalog = () => setSelectedPluginId(null);
 
   return (
     <PageContainer>
-      {detailLoading || selectedPlugin ? (
+      {detailLoading || detailError || selectedPlugin ? (
         <div>
           <BackToCatalogLink onBack={backToCatalog} />
           <PageHeader
@@ -158,6 +165,8 @@ export function PluginsPage() {
                     <Badge tone="neutral">Built-in</Badge>
                   )}
                 </span>
+              ) : detailError ? (
+                'Plugins'
               ) : (
                 <>
                   <span className="sr-only">Loading plugin</span>
@@ -172,6 +181,18 @@ export function PluginsPage() {
       )}
       {detailLoading ? (
         <PluginDetailSkeleton />
+      ) : detailError ? (
+        <Notice
+          tone="danger"
+          title="Could not load plugin library"
+          action={
+            <Button size="sm" onClick={() => void reg.refetch()}>
+              Retry
+            </Button>
+          }
+        >
+          Check the admin connection and try again.
+        </Notice>
       ) : selectedPlugin ? (
         <PluginDetail plugin={selectedPlugin} onBack={backToCatalog} />
       ) : (

@@ -1,4 +1,6 @@
-import { expect, test } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
 import { CACHE_KEEPALIVE_STATES as API_STATES } from '../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../lib/queries';
 import {
@@ -10,6 +12,9 @@ import {
   cacheKeepaliveSettingsCopy,
 } from './__fixtures__/cacheKeepaliveContract';
 import { cacheKeepaliveRows } from './__fixtures__/cacheKeepaliveFixtures';
+import { CacheKeepaliveSettingsDrawer } from './CacheKeepaliveSettingsDrawer';
+
+afterEach(cleanup);
 
 test('freezes Cache keepalive card, drawer, settings, money, and animation contract', () => {
   expect(cacheKeepaliveCardCopy).toEqual({
@@ -43,19 +48,64 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
     'follow-up unknown',
     'no follow-up (loss)',
   ]);
+  expect(cacheKeepaliveSettingsCopy.labels).toEqual([
+    'Cache keepalive enabled',
+    'Renewal lead time · 5m / 30m',
+    'Renewal lead time · 1h / 12h',
+    'Max renewals per session',
+    'Max total duration',
+    'Snapshot max bytes',
+    'Extra wait-for-user tools',
+    'Treat end of turn as ambiguous',
+    'OpenAI Responses GPT-5.6+ keepalive',
+  ]);
   expect(cacheKeepaliveSettingsCopy.helperCopy).toEqual([
-    '→ renews 30s before the 5m cache expires',
-    '= 4h',
-    '= 512 KiB',
-    'Add tool...',
-    'Reserved for a future release',
-    'Reset',
-    'Save changes',
+    'Seconds. Renews 30s before an Anthropic 5m or OpenAI 30m cache expires.',
+    'Seconds. Renews 5m before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.',
+    'Seconds. = 4h',
+    '= 8 MiB',
   ]);
   expect(cacheKeepaliveMoneyExamples.cappedNet).toBe('+$0.0936');
   expect(cacheKeepaliveAnimationContract.riseTransition).toBe(
     'transform 560ms cubic-bezier(0.22, 1, 0.36, 1)',
   );
+});
+
+test('matches the settings copy contract to the rendered default drawer', () => {
+  const principal: queries.Principal = {
+    id: 'contract-principal',
+    name: 'Contract principal',
+    kind: 'machine',
+    enabled: true,
+    revision: 1,
+    allowed_models: [],
+    allowed_upstreams: [],
+    default_limits: [],
+    cache_keepalive: null,
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <CacheKeepaliveSettingsDrawer
+        open
+        onOpenChange={() => {}}
+        principal={principal}
+      />
+    </QueryClientProvider>,
+  );
+
+  expect(
+    screen.getByRole('dialog', { name: cacheKeepaliveSettingsCopy.title }),
+  ).toBeDefined();
+  for (const label of cacheKeepaliveSettingsCopy.labels) {
+    expect(screen.getByLabelText(label)).toBeDefined();
+  }
+  for (const hint of cacheKeepaliveSettingsCopy.helperCopy) {
+    expect(screen.getByText(hint)).toBeDefined();
+  }
 });
 
 test('keeps in-request state and client-facing lifecycle wording aligned with the API', () => {
