@@ -269,7 +269,11 @@ export function QuotaPeriodUnknownRow({
       <div className={METER_CELL_CLASS}>
         <UsageMeter
           className="min-w-0 flex-1"
-          label={`${identifier} · period unknown`}
+          label={
+            knownPeriod
+              ? `${identifier} ${knownPeriod} reset unavailable`
+              : `${identifier} period unknown`
+          }
           pacePct={null}
           usedPct={usedPct}
         />

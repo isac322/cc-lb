@@ -98,6 +98,34 @@ fn meter_normalization_and_allowlist() {
     assert_eq!(normalized.len(), MAX_GEMINI_PERIOD_UNKNOWN_METERS_PER_GROUP);
     assert_eq!(normalized[0].model_id.as_deref(), Some("model-00"));
     assert_eq!(normalized[31].model_id.as_deref(), Some("model-31"));
+    let mut five_hour = meter(group, "gemini-pro", 0.4, None);
+    five_hour.known_period = Some("5h".to_owned());
+    let mut weekly = meter(group, "gemini-pro", 0.7, None);
+    weekly.known_period = Some("7d".to_owned());
+    let mut duplicate = meter(group, "gemini-pro", 0.6, None);
+    duplicate.known_period = Some(" 5h ".to_owned());
+    let normalized =
+        normalize_gemini_period_unknown_meters(group, vec![weekly, duplicate, five_hour]);
+    assert_eq!(normalized.len(), 2);
+    assert_eq!(normalized[0].known_period.as_deref(), Some("5h"));
+    assert_eq!(normalized[0].remaining_fraction, 0.4);
+    assert_eq!(normalized[1].known_period.as_deref(), Some("7d"));
+    assert_eq!(normalized[1].remaining_fraction, 0.7);
+    assert!(
+        normalized
+            .iter()
+            .all(|meter| meter.model_id.as_deref() == Some("gemini-pro")
+                && meter.bucket_id.is_none())
+    );
+    let mut empty_period = meter(group, "gemini-pro", 0.8, None);
+    empty_period.known_period = Some(" \t ".to_owned());
+    let normalized = normalize_gemini_period_unknown_meters(
+        group,
+        vec![empty_period, meter(group, "gemini-pro", 0.9, None)],
+    );
+    assert_eq!(normalized.len(), 1);
+    assert_eq!(normalized[0].known_period, None);
+    assert_eq!(normalized[0].remaining_fraction, 0.8);
 }
 
 #[test]

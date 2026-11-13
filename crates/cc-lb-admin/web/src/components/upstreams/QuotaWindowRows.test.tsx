@@ -440,6 +440,11 @@ describe('QA-18: period-unknown meter row', () => {
     expect(row.textContent).toContain('5h · Reset unavailable');
     expect(row.textContent).not.toContain('Period unknown');
     expect(
+      screen.getByRole('meter', {
+        name: `${identifier} 5h reset unavailable`,
+      }),
+    ).not.toBeNull();
+    expect(
       screen.getByText('5h · Reset unavailable').getAttribute('title'),
     ).toContain('window period');
   });
@@ -448,6 +453,11 @@ describe('QA-18: period-unknown meter row', () => {
     const row = renderRaw({ known_period: '   ', reset_time_unix_secs: null });
     expect(row.textContent).toContain('Period unknown');
     expect(row.textContent).not.toContain('Reset unavailable');
+    expect(
+      screen.getByRole('meter', {
+        name: `${identifier} period unknown`,
+      }),
+    ).not.toBeNull();
   });
 
   it.each([NaN, Infinity, -Infinity])(

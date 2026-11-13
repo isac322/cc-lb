@@ -1638,6 +1638,7 @@ export function DetailView({
                 meter.group,
                 meter.model_id,
                 meter.bucket_id,
+                meter.known_period?.trim() ?? '',
               ])}
               meter={meter}
               nowUnixSecs={nowUnixSecs}

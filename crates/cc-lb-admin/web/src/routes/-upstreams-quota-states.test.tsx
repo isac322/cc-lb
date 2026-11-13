@@ -243,6 +243,37 @@ describe('QA-20: real upstream detail quota state branches', () => {
     },
   );
 
+  it('keeps same-model meters with different known periods as separate rows', () => {
+    setLatest(
+      latestRow(
+        [],
+        [
+          rawMeter({
+            model_id: 'gemini-pro',
+            bucket_id: null,
+            known_period: '5h',
+            reset_time_unix_secs: null,
+          }),
+          rawMeter({
+            model_id: 'gemini-pro',
+            bucket_id: null,
+            known_period: '7d',
+            reset_time_unix_secs: null,
+          }),
+        ],
+      ),
+    );
+    render(element());
+    const section = quotaSection();
+    expect(section.getAllByRole('listitem')).toHaveLength(2);
+    expect(
+      section.getByRole('meter', { name: 'gemini-pro 5h reset unavailable' }),
+    ).not.toBeNull();
+    expect(
+      section.getByRole('meter', { name: 'gemini-pro 7d reset unavailable' }),
+    ).not.toBeNull();
+  });
+
   it('updates raw, canonical and empty branches without remounting the route', () => {
     setLatest(latestRow(absentWindows('gemini')));
     const view = render(element());

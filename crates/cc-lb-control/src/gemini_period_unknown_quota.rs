@@ -161,7 +161,18 @@ pub fn normalize_gemini_period_unknown_meters(
             continue;
         }
         meter.remaining_fraction = meter.remaining_fraction.clamp(0.0, 1.0);
-        let key = (meter.model_id.clone(), meter.bucket_id.clone());
+        meter.known_period = meter
+            .known_period
+            .as_deref()
+            .map(str::trim)
+            .filter(|period| !period.is_empty())
+            .map(str::to_owned);
+        let key = (
+            group,
+            meter.model_id.clone(),
+            meter.bucket_id.clone(),
+            meter.known_period.clone(),
+        );
         match normalized.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(meter);
@@ -187,10 +198,12 @@ pub fn normalize_gemini_period_unknown_meters(
         (
             a.model_id.as_deref().unwrap_or(""),
             a.bucket_id.as_deref().unwrap_or(""),
+            a.known_period.as_deref().unwrap_or(""),
         )
             .cmp(&(
                 b.model_id.as_deref().unwrap_or(""),
                 b.bucket_id.as_deref().unwrap_or(""),
+                b.known_period.as_deref().unwrap_or(""),
             ))
     });
     meters.truncate(MAX_GEMINI_PERIOD_UNKNOWN_METERS_PER_GROUP);
