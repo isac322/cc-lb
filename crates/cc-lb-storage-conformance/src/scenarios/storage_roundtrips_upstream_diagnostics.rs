@@ -53,9 +53,28 @@ where
             duration_ms: 10,
             ..Default::default()
         };
+        let ws_incomplete_warning = RequestEvent {
+            ts: 1_800_000_102,
+            ts_ms: Some(1_800_000_102_000),
+            request_id: "req_ws_incomplete_warning".to_owned(),
+            event_id: Some("req_ws_incomplete_warning".to_owned()),
+            principal_id: Some("p_diag".to_owned()),
+            status: 101,
+            error_code: None,
+            upstream_error_type: None,
+            upstream_error_message: None,
+            upstream_error_code: None,
+            upstream_body_bytes: Some(4_096),
+            upstream_stream_warning_type: Some("response.incomplete".to_owned()),
+            upstream_stream_warning_message: Some("max_output_tokens".to_owned()),
+            input_tokens: Some(12),
+            output_tokens: Some(16),
+            ..Default::default()
+        };
 
         storage.append_request_event(&with_diagnostics).await?;
         storage.append_request_event(&without_diagnostics).await?;
+        storage.append_request_event(&ws_incomplete_warning).await?;
 
         let recent = stored_request_events(storage.as_ref()).await?;
         let got = recent
@@ -157,6 +176,23 @@ where
                 && absent.upstream_stream_warning_type.is_none()
                 && absent.upstream_stream_warning_message.is_none(),
             "event without diagnostics must read back with diagnostics absent: {absent:?}"
+        );
+        let warning = recent
+            .iter()
+            .find(|e| e.request_id == "req_ws_incomplete_warning")
+            .ok_or_else(|| anyhow::anyhow!("completed WebSocket warning must round-trip"))?;
+        ensure!(
+            warning.status == 101
+                && warning.error_code.is_none()
+                && warning.upstream_error_type.is_none()
+                && warning.upstream_error_message.is_none()
+                && warning.upstream_error_code.is_none()
+                && warning.upstream_body_bytes == Some(4_096)
+                && warning.upstream_stream_warning_type.as_deref() == Some("response.incomplete")
+                && warning.upstream_stream_warning_message.as_deref() == Some("max_output_tokens")
+                && warning.input_tokens == Some(12)
+                && warning.output_tokens == Some(16),
+            "completed WebSocket warning must retain diagnostics without errors: {warning:?}"
         );
 
         Ok(())

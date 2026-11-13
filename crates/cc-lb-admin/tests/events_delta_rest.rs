@@ -365,6 +365,48 @@ async fn event_detail_query_transport_preserves_full_id_and_audit() {
 }
 
 #[tokio::test]
+async fn event_detail_serializes_ws_incomplete_warning_without_error_code() {
+    let (_dir, storage) = temp_storage().await;
+    let event = RequestEvent {
+        status: 101,
+        error_code: None,
+        upstream_body_bytes: Some(512),
+        upstream_stream_warning_type: Some("response.incomplete".to_owned()),
+        upstream_stream_warning_message: Some("max_output_tokens".to_owned()),
+        ..request_event(1)
+    };
+    storage.append_request_event(&event).await.unwrap();
+    let admin = app(test_state(Config::default(), Some(storage)));
+
+    let (status, headers, bytes) =
+        authed_bytes(admin, "GET", &event_detail_uri("event-000001"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+    let detail: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(detail["status"], 101);
+    assert_eq!(detail["upstream_body_bytes"], 512);
+    assert_eq!(
+        detail["upstream_stream_warning_type"],
+        "response.incomplete"
+    );
+    assert_eq!(
+        detail["upstream_stream_warning_message"],
+        "max_output_tokens"
+    );
+    assert_eq!(detail["error_code"], Value::Null);
+    for key in [
+        "upstream_error_type",
+        "upstream_error_message",
+        "upstream_error_code",
+    ] {
+        assert!(
+            detail.get(key).is_none(),
+            "completed warning exposes {key}: {detail}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_detail_query_transport_rejects_missing_or_duplicate_id() {
     let (_dir, storage) = temp_storage().await;
     let admin = app(test_state(Config::default(), Some(storage.clone())));

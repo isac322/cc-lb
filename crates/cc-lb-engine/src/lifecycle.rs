@@ -4998,6 +4998,7 @@ impl Lifecycle {
     }
 
     /// Sign only a newly opened upstream connection, using its current credentials.
+    #[cfg(test)]
     pub(crate) async fn sign_websocket_connection(
         &self,
         auth: &crate::Authenticated,
@@ -5005,6 +5006,18 @@ impl Lifecycle {
         candidate: &WebSocketCandidate,
         query: Option<&str>,
     ) -> Result<(Url, HeaderMap), WebSocketError> {
+        self.sign_websocket_connection_with_signer(auth, headers, candidate, query)
+            .await
+            .map(|(url, headers, _)| (url, headers))
+    }
+
+    pub(crate) async fn sign_websocket_connection_with_signer(
+        &self,
+        auth: &crate::Authenticated,
+        headers: &HeaderMap,
+        candidate: &WebSocketCandidate,
+        query: Option<&str>,
+    ) -> Result<(Url, HeaderMap, Arc<dyn Signer>), WebSocketError> {
         let view = self.dynamic_view.load();
         let record = view
             .upstreams_snapshot()
@@ -5051,7 +5064,7 @@ impl Lifecycle {
             WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, error.to_string())
         })?;
         let factory = view.signer_factory.with_router_choice(record.name.clone());
-        let signer = factory.build(&upstream).await.map_err(|error| {
+        let signer: Arc<dyn Signer> = factory.build(&upstream).await.map_err(|error| {
             WebSocketError::new(502, "upstream_signing_failed", error.to_string())
         })?;
         let signed = sign_request(signer.as_ref(), shaped)
@@ -5082,7 +5095,7 @@ impl Lifecycle {
         })?;
         let mut headers = signed.headers().clone();
         strip_hop_by_hop(&mut headers);
-        Ok((url, headers))
+        Ok((url, headers, signer))
     }
 
     /// Persist recognized state before the gateway exposes it to another connection.
@@ -6502,24 +6515,14 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         // Audio endpoints also stream binary/text payloads without a JSON
-        // `stream` flag. Keep their JSON responses and ordinary JSON-protocol
-        // operations on the existing buffered path.
+        // `stream` flag. Buffered transforms apply to semantic JSON media
+        // types and Gemini OAuth envelopes, not arbitrary streamed bytes.
+        let response_is_json = has_json_content_type(response.headers());
         let audio_stream = response_affinity_context.capability == ProviderCapability::OpenaiAudio
-            && !response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .is_some_and(|mime| {
-                    let mime = mime.trim();
-                    mime.eq_ignore_ascii_case("application/json")
-                        || mime
-                            .rsplit_once('+')
-                            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
-                });
+            && !response_is_json;
         let stream_response = stream_requested || audio_stream;
-        let buffered_transform_required =
-            transform_ctx.gemini_oauth || transform_ctx.dialect.response_transform_hook().is_some();
+        let buffered_transform_required = transform_ctx.gemini_oauth
+            || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
         let force_buffered_response =
             response_affinity_context.capability == ProviderCapability::GeminiCachedContentsCreate;
         if !force_buffered_response
@@ -6546,7 +6549,7 @@ impl Lifecycle {
                 dispatch_started,
                 dispatch_unix_secs,
             );
-            self.attach_limit_headers(&mut response, None, provider);
+            self.attach_limit_headers(&mut response, active_limit.as_ref(), provider);
             return response;
         }
 
@@ -6560,8 +6563,9 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
-        // Preserve uncapped ordinary responses. Buffering a requested stream
-        // or an audio stream for a transform uses the request path's cap.
+        // Ordinary buffered responses remain uncapped. Requested streams
+        // requiring JSON/OAuth transforms use the path's cap; non-SSE,
+        // non-JSON streaming responses instead relay incrementally above.
         let body_cap = if stream_response {
             body_cap_for_path(&self.config, &transform_ctx.request_path)
         } else {
@@ -6759,6 +6763,7 @@ impl Lifecycle {
         let mut keepalive_transformed_json = None;
         let mut keepalive_body_replaced = false;
         if !body_collect_failed
+            && (transform_ctx.gemini_oauth || response_is_json)
             && let (Some(hook), Some(semantic_body)) = (
                 transform_ctx.dialect.response_transform_hook(),
                 semantic_body,
@@ -7670,7 +7675,11 @@ impl Lifecycle {
         .with_response_accounting_guard(response_accounting_guard)
         .with_keepalive_completion(keepalive, keepalive_completion);
         let completion_observer = Arc::clone(&self.completion_observer);
-        let parse_sse_events = !upstream_error_status || upstream_is_sse;
+        let explicit_non_sse_non_json = parts.headers.contains_key(CONTENT_TYPE)
+            && !upstream_is_sse
+            && !has_json_content_type(&parts.headers);
+        let parse_sse_events =
+            upstream_is_sse || (!upstream_error_status && !explicit_non_sse_non_json);
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
         let has_retry_after_header = parts.headers.get(RETRY_AFTER).is_some();
@@ -13410,6 +13419,20 @@ fn held_error_body_is_json(buffer: &[u8]) -> bool {
     serde_json::from_slice::<serde::de::IgnoredAny>(buffer).is_ok()
 }
 
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| {
+            let mime = mime.trim();
+            mime.eq_ignore_ascii_case("application/json")
+                || mime
+                    .rsplit_once('+')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
+        })
+}
+
 fn is_sse_response(
     headers: &HeaderMap,
     stream_requested: bool,
@@ -13520,6 +13543,50 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+
+    #[test]
+    fn has_json_content_type_matches_semantic_json_media_types() {
+        for (value, expected) in [
+            ("application/json", true),
+            ("APPLICATION/JSON; charset=utf-8", true),
+            (" application/json ", true),
+            ("application/problem+json", true),
+            ("application/vnd.api+JSON", true),
+            ("audio/mpeg", false),
+            ("application/octet-stream", false),
+            ("image/png", false),
+            ("text/plain", false),
+            ("text/event-stream", false),
+            ("application/jsonl", false),
+            ("application/x-ndjson", false),
+            ("text/json", false),
+            ("", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_str(value).expect("valid header"),
+            );
+            assert_eq!(has_json_content_type(&headers), expected, "{value:?}");
+        }
+        let mut headers = HeaderMap::new();
+        assert!(!has_json_content_type(&headers));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_bytes(b"\xff").expect("opaque header"),
+        );
+        assert!(!has_json_content_type(&headers));
+        // Classification follows HeaderMap::get: the first value wins.
+        for (first, second, expected) in [
+            ("application/json", "audio/mpeg", true),
+            ("audio/mpeg", "application/json", false),
+        ] {
+            headers.clear();
+            headers.append(CONTENT_TYPE, HeaderValue::from_static(first));
+            headers.append(CONTENT_TYPE, HeaderValue::from_static(second));
+            assert_eq!(has_json_content_type(&headers), expected);
+        }
+    }
     #[test]
     fn native_cache_gemini_url_model_is_authoritative() {
         for action in ["generateContent", "streamGenerateContent"] {
