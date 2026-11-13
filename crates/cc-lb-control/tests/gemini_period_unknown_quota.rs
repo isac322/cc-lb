@@ -18,6 +18,7 @@ fn meter(
         group,
         model_id: Some(model.to_owned()),
         bucket_id: None,
+        known_period: None,
         remaining_fraction: remaining,
         reset_time_unix_secs: reset,
         remaining_amount: Some("42".to_owned()),
@@ -57,6 +58,7 @@ fn meter_normalization_and_allowlist() {
     assert_eq!(normalized[2].remaining_fraction, 0.0);
     let mut full = normalized[0].clone();
     full.bucket_id = Some("bucket".to_owned());
+    full.known_period = Some("5h".to_owned());
     let encoded = serde_json::to_value(&full).unwrap();
     let keys: Vec<_> = encoded
         .as_object()
@@ -69,6 +71,7 @@ fn meter_normalization_and_allowlist() {
         vec![
             "bucket_id",
             "group",
+            "known_period",
             "model_id",
             "origin",
             "remaining_amount",
@@ -78,6 +81,7 @@ fn meter_normalization_and_allowlist() {
     );
     assert_eq!(encoded["group"], "gemini");
     assert_eq!(encoded["origin"], "retrieve_user_quota");
+    assert_eq!(encoded["known_period"], "5h");
     let mut summary = full;
     summary.model_id = None;
     summary.remaining_amount = None;
@@ -100,10 +104,15 @@ fn meter_normalization_and_allowlist() {
 fn merge_is_newest_wins_per_group() {
     let gemini = GeminiQuotaGroupKind::Gemini;
     let third = GeminiQuotaGroupKind::ThirdParty;
-    let initial =
-        merge_gemini_period_unknown_quota(None, &update(gemini, 20, 0.2), &update(third, 10, 0.4));
+    let initial = merge_gemini_period_unknown_quota(
+        None,
+        &GeminiRawQuotaBinding::unscoped(),
+        &update(gemini, 20, 0.2),
+        &update(third, 10, 0.4),
+    );
     let merged = merge_gemini_period_unknown_quota(
         Some(&initial),
+        &GeminiRawQuotaBinding::unscoped(),
         &update(gemini, 19, 0.9),
         &update(third, 11, 0.5),
     );
@@ -114,6 +123,7 @@ fn merge_is_newest_wins_per_group() {
     );
     let unchanged = merge_gemini_period_unknown_quota(
         Some(&merged),
+        &GeminiRawQuotaBinding::unscoped(),
         &GeminiGroupPollUpdate::Unchanged,
         &GeminiGroupPollUpdate::Unchanged,
     );
@@ -122,12 +132,17 @@ fn merge_is_newest_wins_per_group() {
         observed_at_unix_millis: 20,
         meters: vec![],
     });
-    let cleared =
-        merge_gemini_period_unknown_quota(Some(&merged), &clear, &GeminiGroupPollUpdate::Unchanged);
+    let cleared = merge_gemini_period_unknown_quota(
+        Some(&merged),
+        &GeminiRawQuotaBinding::unscoped(),
+        &clear,
+        &GeminiGroupPollUpdate::Unchanged,
+    );
     assert!(cleared.gemini.unwrap().meters.is_empty());
     assert_eq!(cleared.third_party, merged.third_party);
     let same_time = merge_gemini_period_unknown_quota(
         Some(&initial),
+        &GeminiRawQuotaBinding::unscoped(),
         &update(gemini, 20, 0.8),
         &GeminiGroupPollUpdate::Unchanged,
     );
@@ -181,6 +196,7 @@ async fn persist_remerges_after_cas_conflict() {
     persist_gemini_period_unknown_quota(
         &store,
         id,
+        GeminiRawQuotaBinding::unscoped(),
         GeminiGroupPollUpdate::Unchanged,
         GeminiGroupPollUpdate::Unchanged,
     )
@@ -189,6 +205,7 @@ async fn persist_remerges_after_cas_conflict() {
     assert_eq!(store.reads.load(Ordering::SeqCst), 0);
     let concurrent = merge_gemini_period_unknown_quota(
         None,
+        &GeminiRawQuotaBinding::unscoped(),
         &update(GeminiQuotaGroupKind::Gemini, 30, 0.1),
         &update(GeminiQuotaGroupKind::ThirdParty, 40, 0.3),
     );
@@ -196,6 +213,7 @@ async fn persist_remerges_after_cas_conflict() {
     persist_gemini_period_unknown_quota(
         &store,
         id,
+        GeminiRawQuotaBinding::unscoped(),
         update(GeminiQuotaGroupKind::Gemini, 20, 0.8),
         GeminiGroupPollUpdate::Unchanged,
     )
@@ -210,6 +228,7 @@ async fn persist_remerges_after_cas_conflict() {
     persist_gemini_period_unknown_quota(
         &store,
         id,
+        GeminiRawQuotaBinding::unscoped(),
         update(GeminiQuotaGroupKind::Gemini, 50, 0.6),
         GeminiGroupPollUpdate::Unchanged,
     )
@@ -236,6 +255,7 @@ async fn persist_remerges_after_cas_conflict() {
         persist_gemini_period_unknown_quota(
             &store,
             id,
+            GeminiRawQuotaBinding::unscoped(),
             update(GeminiQuotaGroupKind::Gemini, 60, 0.5),
             GeminiGroupPollUpdate::Unchanged,
         )
@@ -250,4 +270,114 @@ async fn persist_remerges_after_cas_conflict() {
             GEMINI_PERIOD_UNKNOWN_QUOTA_VERSION
         );
     }
+}
+
+#[test]
+fn binding_tracks_subject_and_credential_generation() {
+    let bound = GeminiRawQuotaBinding::from_credential(
+        Some(" Member@Example.test "),
+        Some(" project "),
+        10,
+    );
+    assert!(bound.email_bound);
+    assert_eq!(bound.identity_sha256.as_ref().unwrap().len(), 64);
+    assert!(bound.matches_credential(Some("member@example.test"), Some("project"), 11));
+    assert!(!bound.matches_credential(Some("other@example.test"), Some("project"), 11));
+    assert!(!bound.matches_credential(Some("member@example.test"), Some("other-project"), 11));
+    let initial = merge_gemini_period_unknown_quota(
+        None,
+        &bound,
+        &update(GeminiQuotaGroupKind::Gemini, 20, 0.2),
+        &update(GeminiQuotaGroupKind::ThirdParty, 20, 0.3),
+    );
+    let refreshed =
+        GeminiRawQuotaBinding::from_credential(Some("member@example.test"), Some("project"), 11);
+    let continued = merge_gemini_period_unknown_quota(
+        Some(&initial),
+        &refreshed,
+        &GeminiGroupPollUpdate::Unchanged,
+        &GeminiGroupPollUpdate::Unchanged,
+    );
+    assert_eq!(continued.gemini, initial.gemini);
+    assert_eq!(continued.third_party, initial.third_party);
+    assert_eq!(continued.binding, refreshed);
+    for switched in [
+        GeminiRawQuotaBinding::from_credential(Some("other@example.test"), Some("project"), 12),
+        GeminiRawQuotaBinding::from_credential(
+            Some("member@example.test"),
+            Some("other-project"),
+            12,
+        ),
+    ] {
+        let merged = merge_gemini_period_unknown_quota(
+            Some(&continued),
+            &switched,
+            &update(GeminiQuotaGroupKind::Gemini, 10, 0.5),
+            &GeminiGroupPollUpdate::Unchanged,
+        );
+        assert_eq!(merged.gemini.unwrap().observed_at_unix_millis, 10);
+        assert!(merged.third_party.is_none());
+        let delayed = merge_gemini_period_unknown_quota(
+            Some(&continued),
+            &bound,
+            &update(GeminiQuotaGroupKind::Gemini, 100, 0.0),
+            &GeminiGroupPollUpdate::Unchanged,
+        );
+        assert_eq!(delayed, continued);
+    }
+    let project_only = GeminiRawQuotaBinding::from_credential(None, Some("project"), 20);
+    assert!(project_only.matches_credential(None, Some("project"), 20));
+    assert!(!project_only.matches_credential(None, Some("project"), 21));
+    let old_project = merge_gemini_period_unknown_quota(
+        None,
+        &project_only,
+        &update(GeminiQuotaGroupKind::Gemini, 20, 0.2),
+        &update(GeminiQuotaGroupKind::ThirdParty, 20, 0.3),
+    );
+    let next_project = GeminiRawQuotaBinding::from_credential(None, Some("project"), 21);
+    let cleared = merge_gemini_period_unknown_quota(
+        Some(&old_project),
+        &next_project,
+        &GeminiGroupPollUpdate::Unchanged,
+        &GeminiGroupPollUpdate::Unchanged,
+    );
+    assert!(cleared.gemini.is_none() && cleared.third_party.is_none());
+    assert!(GeminiRawQuotaBinding::unscoped().is_unscoped());
+    let missing_project =
+        GeminiRawQuotaBinding::from_credential(Some("member@example.test"), Some(" "), 1);
+    assert!(!missing_project.is_unscoped());
+    assert!(!missing_project.matches_credential(Some("member@example.test"), None, 1));
+    assert!(GeminiRawQuotaBinding::unscoped().same_subject(&GeminiRawQuotaBinding::unscoped()));
+}
+
+#[tokio::test]
+async fn persist_rechecks_binding_after_concurrent_credential_replacement() {
+    let store = ConflictStore::default();
+    let binding =
+        GeminiRawQuotaBinding::from_credential(Some("old@example.test"), Some("project"), 1);
+    let replacement =
+        GeminiRawQuotaBinding::from_credential(Some("new@example.test"), Some("project"), 2);
+    let concurrent = merge_gemini_period_unknown_quota(
+        None,
+        &replacement,
+        &update(GeminiQuotaGroupKind::Gemini, 10, 0.7),
+        &update(GeminiQuotaGroupKind::ThirdParty, 10, 0.8),
+    );
+    *store.concurrent.lock().unwrap() = Some(serde_json::to_string(&concurrent).unwrap());
+    persist_gemini_period_unknown_quota(
+        &store,
+        Uuid::nil(),
+        binding,
+        update(GeminiQuotaGroupKind::Gemini, 100, 0.0),
+        GeminiGroupPollUpdate::Unchanged,
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        load_gemini_period_unknown_quota(&store, Uuid::nil())
+            .await
+            .unwrap(),
+        Some(concurrent)
+    );
 }

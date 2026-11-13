@@ -147,9 +147,26 @@ async fn seed(
         1_699_999_000_000,
     )
     .unwrap();
-    persist_gemini_period_unknown_quota(fixture.storage.as_ref(), id, raw.gemini, raw.third_party)
+    let upstream = UpstreamStore::get_by_id(fixture.storage.as_ref(), id)
         .await
+        .unwrap()
         .unwrap();
+    let bundle =
+        crate::scheduler_dispatch::http::decrypt_bundle(&upstream, fixture.aead.as_ref()).unwrap();
+    let binding = GeminiRawQuotaBinding::from_credential(
+        bundle.account_id.as_deref(),
+        bundle.project_id.as_deref(),
+        upstream.oauth_token_generation,
+    );
+    persist_gemini_period_unknown_quota(
+        fixture.storage.as_ref(),
+        id,
+        binding,
+        raw.gemini,
+        raw.third_party,
+    )
+    .await
+    .unwrap();
     let raw = load_gemini_period_unknown_quota(fixture.storage.as_ref(), id)
         .await
         .unwrap()
@@ -427,6 +444,109 @@ async fn gemini_poll_fallback_matrix() {
                 .await
                 .unwrap(),
             Some(before_raw)
+        );
+    }
+}
+
+#[tokio::test]
+async fn gemini_raw_quota_replacement_rejects_delayed_old_subject_poll() {
+    for replace_project in [false, true] {
+        let provider = Provider::new().await;
+        *provider.state.summary.lock().unwrap() = Value::Null;
+        let mut fixture = DispatchFixture::new().await;
+        let config = Arc::make_mut(&mut fixture.dispatch.config);
+        config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+        let profile = GeminiOAuthProfile::GeminiCli;
+        let upstream = provider_metadata::create_provider(
+            &fixture,
+            UpstreamKind::GeminiOauth,
+            provider.base.clone(),
+            profile,
+        )
+        .await;
+        let (_, before_raw) = seed(&fixture, upstream.id, profile).await;
+        provider.state.delay_quota.store(true, Ordering::SeqCst);
+        let old_poll = fixture.dispatch.poll_usage(upstream.id, None);
+        tokio::pin!(old_poll);
+        tokio::select! {
+            result = &mut old_poll => panic!("old poll completed before replacement: {result:?}"),
+            _ = provider.state.entered.notified() => {}
+        }
+        let mut replacement =
+            crate::scheduler_dispatch::http::decrypt_bundle(&upstream, fixture.aead.as_ref())
+                .unwrap();
+        if replace_project {
+            replacement.project_id = Some("replacement-project".to_owned());
+        } else {
+            replacement.account_id = Some("replacement@example.test".to_owned());
+        }
+        replacement.access_token = "replacement-token".to_owned();
+        let tokens = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &replacement,
+            upstream.id.as_bytes(),
+        )
+        .unwrap();
+        let replaced = UpstreamStore::update(
+            fixture.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens,
+                    never_refresh: true,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(replaced.oauth_token_generation > upstream.oauth_token_generation);
+        assert!(!before_raw.binding.matches_credential(
+            replacement.account_id.as_deref(),
+            replacement.project_id.as_deref(),
+            replaced.oauth_token_generation,
+        ));
+        *provider.state.quota.lock().unwrap() = json!({"buckets":[
+            {"modelId":"gemini-replacement","remainingFraction":0.9}
+        ]})
+        .to_string();
+        assert!(matches!(
+            fixture
+                .dispatch
+                .poll_usage(upstream.id, None)
+                .await
+                .unwrap(),
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        let current_raw = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current_raw.binding.matches_credential(
+            replacement.account_id.as_deref(),
+            replacement.project_id.as_deref(),
+            replaced.oauth_token_generation,
+        ));
+        assert_eq!(
+            current_raw.gemini.as_ref().unwrap().meters[0]
+                .model_id
+                .as_deref(),
+            Some("gemini-replacement")
+        );
+        assert!(current_raw.third_party.as_ref().unwrap().meters.is_empty());
+        provider.state.release.notify_one();
+        assert!(old_poll.await.is_err());
+        assert!(fixture._quota_rx.try_recv().is_err());
+        assert_eq!(
+            load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id,)
+                .await
+                .unwrap(),
+            Some(current_raw)
         );
     }
 }

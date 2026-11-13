@@ -219,6 +219,7 @@ export function QuotaPeriodUnknownRow({
   nowUnixSecs: number;
 }) {
   const identifier = meter.model_id ?? meter.bucket_id ?? meter.group;
+  const knownPeriod = meter.known_period?.trim();
   const usedPct = formatPeriodUnknownUsedPct(meter.remaining_fraction);
   const resetTime =
     meter.reset_time_unix_secs != null &&
@@ -245,12 +246,24 @@ export function QuotaPeriodUnknownRow({
           >
             {identifier}
           </span>
-          <span
-            className="block text-caption text-text-muted"
-            title="The provider reported remaining quota without a window duration."
-          >
-            Period unknown
-          </span>
+          {knownPeriod ? (
+            <Hint label="The provider reported this window period, but its reset time was missing or invalid.">
+              <span
+                tabIndex={0}
+                className="text-caption text-text-muted"
+                title="The provider reported this window period, but its reset time was missing or invalid."
+              >
+                {`${knownPeriod} · Reset unavailable`}
+              </span>
+            </Hint>
+          ) : (
+            <span
+              className="text-caption text-text-muted"
+              title="The provider reported remaining quota without a window duration."
+            >
+              Period unknown
+            </span>
+          )}
         </span>
       </span>
       <div className={METER_CELL_CLASS}>

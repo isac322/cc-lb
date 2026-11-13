@@ -435,6 +435,21 @@ describe('QA-18: period-unknown meter row', () => {
     },
   );
 
+  it('labels a provider-reported period when the reset is unavailable', () => {
+    const row = renderRaw({ known_period: '5h', reset_time_unix_secs: null });
+    expect(row.textContent).toContain('5h · Reset unavailable');
+    expect(row.textContent).not.toContain('Period unknown');
+    expect(
+      screen.getByText('5h · Reset unavailable').getAttribute('title'),
+    ).toContain('window period');
+  });
+
+  it('keeps the unknown-period cue for an empty known period', () => {
+    const row = renderRaw({ known_period: '   ', reset_time_unix_secs: null });
+    expect(row.textContent).toContain('Period unknown');
+    expect(row.textContent).not.toContain('Reset unavailable');
+  });
+
   it.each([NaN, Infinity, -Infinity])(
     'shows no reading for non-finite remaining %s',
     (remaining_fraction) => {

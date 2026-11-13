@@ -98,6 +98,8 @@ struct LatestPeriodUnknownMeterResponse {
     model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bucket_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    known_period: Option<String>,
     remaining_fraction: f64,
     utilization: f64,
     reset_time_unix_secs: Option<u64>,
@@ -849,73 +851,89 @@ async fn build_latest_response(
             max_staleness_secs,
         );
         let mut period_unknown_meters = Vec::new();
-        if upstream.kind == UpstreamKind::GeminiOauth
-            && include_period_unknown_meters
-            && let Some(record) = load_gemini_period_unknown_quota(storage, upstream.id)
+        if upstream.kind == UpstreamKind::GeminiOauth && include_period_unknown_meters {
+            let record = load_gemini_period_unknown_quota(storage, upstream.id)
                 .await
                 .map_err(storage_error)?
-        {
-            for (group, group_record, canonical_windows) in [
-                (
-                    GeminiQuotaGroupKind::Gemini,
-                    record.gemini,
-                    ["gemini_5h", "gemini_7d"],
-                ),
-                (
-                    GeminiQuotaGroupKind::ThirdParty,
-                    record.third_party,
-                    ["third_party_5h", "third_party_7d"],
-                ),
-            ] {
-                let Some(group_record) = group_record else {
-                    continue;
-                };
-                let latest_canonical_observed_at = snapshots
-                    .iter()
-                    .filter(|snapshot| {
-                        snapshot.state != SubscriptionQuotaDataState::Unobserved
-                            && canonical_windows.contains(&snapshot.window.as_str())
-                    })
-                    .filter_map(|snapshot| snapshot.observed_at_unix_millis)
-                    .chain(
-                        durable_latest_by_upstream
-                            .get(&upstream.id)
-                            .into_iter()
-                            .flatten()
-                            .filter(|sample| canonical_windows.contains(&sample.window.as_str()))
-                            .map(|sample| sample.observed_at_unix_millis),
-                    )
-                    .max();
-                // Same-poll absence and raw meters share a timestamp; only a
-                // strictly newer canonical observation supersedes the raw group.
-                if latest_canonical_observed_at
-                    .is_some_and(|observed_at| observed_at > group_record.observed_at_unix_millis)
-                {
-                    continue;
-                }
-                let age_millis =
-                    now_unix_millis.saturating_sub(group_record.observed_at_unix_millis);
-                let state = if age_millis <= max_staleness_secs.saturating_mul(1_000) {
-                    "fresh"
-                } else {
-                    "stale"
-                };
-                period_unknown_meters.extend(group_record.meters.into_iter().map(|meter| {
-                    LatestPeriodUnknownMeterResponse {
-                        group,
-                        model_id: meter.model_id,
-                        bucket_id: meter.bucket_id,
-                        remaining_fraction: meter.remaining_fraction,
-                        utilization: (1.0 - meter.remaining_fraction).clamp(0.0, 1.0),
-                        reset_time_unix_secs: meter.reset_time_unix_secs,
-                        remaining_amount: meter.remaining_amount,
-                        origin: meter.origin,
-                        source: "api".to_owned(),
-                        state: state.to_owned(),
-                        observed_at_unix_millis: group_record.observed_at_unix_millis,
-                        age_secs: age_millis / 1_000,
+                .filter(|record| match upstream.oauth_credentials.as_ref() {
+                    Some(credentials) => credentials
+                        .decrypt(&state.aead, upstream.id.as_bytes())
+                        .map(|bundle| {
+                            record.binding.matches_credential(
+                                bundle.account_id.as_deref(),
+                                bundle.project_id.as_deref(),
+                                upstream.oauth_token_generation,
+                            )
+                        })
+                        .unwrap_or(false),
+                    None => record.binding.is_unscoped(),
+                });
+            if let Some(record) = record {
+                for (group, group_record, canonical_windows) in [
+                    (
+                        GeminiQuotaGroupKind::Gemini,
+                        record.gemini,
+                        ["gemini_5h", "gemini_7d"],
+                    ),
+                    (
+                        GeminiQuotaGroupKind::ThirdParty,
+                        record.third_party,
+                        ["third_party_5h", "third_party_7d"],
+                    ),
+                ] {
+                    let Some(group_record) = group_record else {
+                        continue;
+                    };
+                    let latest_canonical_observed_at = snapshots
+                        .iter()
+                        .filter(|snapshot| {
+                            snapshot.state != SubscriptionQuotaDataState::Unobserved
+                                && canonical_windows.contains(&snapshot.window.as_str())
+                        })
+                        .filter_map(|snapshot| snapshot.observed_at_unix_millis)
+                        .chain(
+                            durable_latest_by_upstream
+                                .get(&upstream.id)
+                                .into_iter()
+                                .flatten()
+                                .filter(|sample| {
+                                    canonical_windows.contains(&sample.window.as_str())
+                                })
+                                .map(|sample| sample.observed_at_unix_millis),
+                        )
+                        .max();
+                    // Same-poll absence and raw meters share a timestamp; only a
+                    // strictly newer canonical observation supersedes the raw group.
+                    if latest_canonical_observed_at.is_some_and(|observed_at| {
+                        observed_at > group_record.observed_at_unix_millis
+                    }) {
+                        continue;
                     }
-                }));
+                    let age_millis =
+                        now_unix_millis.saturating_sub(group_record.observed_at_unix_millis);
+                    let state = if age_millis <= max_staleness_secs.saturating_mul(1_000) {
+                        "fresh"
+                    } else {
+                        "stale"
+                    };
+                    period_unknown_meters.extend(group_record.meters.into_iter().map(|meter| {
+                        LatestPeriodUnknownMeterResponse {
+                            group,
+                            model_id: meter.model_id,
+                            bucket_id: meter.bucket_id,
+                            known_period: meter.known_period,
+                            remaining_fraction: meter.remaining_fraction,
+                            utilization: (1.0 - meter.remaining_fraction).clamp(0.0, 1.0),
+                            reset_time_unix_secs: meter.reset_time_unix_secs,
+                            remaining_amount: meter.remaining_amount,
+                            origin: meter.origin,
+                            source: "api".to_owned(),
+                            state: state.to_owned(),
+                            observed_at_unix_millis: group_record.observed_at_unix_millis,
+                            age_secs: age_millis / 1_000,
+                        }
+                    }));
+                }
             }
         }
         let windows = snapshots

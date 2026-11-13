@@ -3005,11 +3005,13 @@ async fn subscription_quotas_period_unknown_suite() {
 fn period_unknown_record(observed_at_unix_millis: u64) -> serde_json::Value {
     json!({
         "version": 1,
+        "binding": {},
         "gemini": {
             "observed_at_unix_millis": observed_at_unix_millis,
             "meters": [{
                 "group": "gemini",
                 "model_id": "gemini-2.5-pro",
+                "known_period": "5h",
                 "remaining_fraction": 0.4,
                 "reset_time_unix_secs": CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600,
                 "origin": "retrieve_user_quota",
@@ -3027,6 +3029,15 @@ fn period_unknown_record(observed_at_unix_millis: u64) -> serde_json::Value {
             }],
         },
     })
+}
+
+fn period_unknown_record_for_binding(
+    observed_at_unix_millis: u64,
+    binding: serde_json::Value,
+) -> serde_json::Value {
+    let mut record = period_unknown_record(observed_at_unix_millis);
+    record["binding"] = binding;
+    record
 }
 
 async fn period_unknown_seed(
@@ -3097,6 +3108,8 @@ async fn latest_period_unknown_meters_contract() {
         meters[0]["reset_time_unix_secs"],
         CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600
     );
+    assert_eq!(meters[0]["known_period"], "5h");
+    assert!(meters[1].get("known_period").is_none());
     assert_eq!(meters[0]["origin"], "retrieve_user_quota");
     assert_eq!(meters[0]["source"], "api");
     assert_eq!(meters[0]["state"], "fresh");
@@ -3116,6 +3129,8 @@ async fn latest_period_unknown_meters_contract() {
     assert_eq!(meters[1]["age_secs"], 120);
     assert!(!body.to_string().contains("credential_fingerprint"));
     assert!(!body.to_string().contains("oauth_token_generation"));
+    assert!(!body.to_string().contains("identity_sha256"));
+    assert!(!body.to_string().contains("\"binding\""));
     for upstream in [anthropic, empty] {
         assert!(
             period_unknown_upstream(&body, upstream)
@@ -3249,73 +3264,185 @@ async fn latest_period_unknown_meters_follow_filters() {
     );
 }
 
-// QA-14: replacing OAuth credentials does not invalidate same-account quota state.
-async fn latest_meters_survive_credential_rotation() {
+async fn replace_gemini_credential(
+    server: &admin_test_common::SpawnedAdminServer,
+    upstream_id: Uuid,
+    account_id: Option<&str>,
+    project_id: Option<&str>,
+    access_token: &str,
+) -> cc_lb_storage_api::UpstreamRecord {
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_storage_api::{OAuthTokensCreate, UpstreamStore, UpstreamUpdate};
+
+    let upstream = UpstreamStore::get_by_id(server.storage.as_ref(), upstream_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle = OAuthTokenBundle {
+        access_token: access_token.to_owned(),
+        refresh_token: "same-account-test-refresh-token".to_owned(),
+        expires_at_unix_secs: CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: account_id.map(str::to_owned),
+        project_id: project_id.map(str::to_owned),
+        oauth_profile: Default::default(),
+        scopes: Vec::new(),
+        never_refresh: false,
+    };
+    let tokens = EncryptedOAuthTokens::encrypt(
+        &AeadService::from_master_key([0; 32]),
+        &bundle,
+        upstream_id.as_bytes(),
+    )
+    .unwrap();
+    UpstreamStore::update(
+        server.storage.as_ref(),
+        upstream_id,
+        upstream.revision,
+        UpstreamUpdate {
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens,
+                never_refresh: false,
+            }),
+            oauth_token_generation: Some(upstream.oauth_token_generation + 1),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+// QA-14: credential rotation preserves only the matching account/project subject.
+async fn latest_meters_survive_credential_rotation() {
+    use cc_lb_control::gemini_period_unknown_quota::GeminiRawQuotaBinding;
 
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
     let gemini = create_kind_oauth_upstream(&server, "rotation-gemini", "gemini_oauth").await;
+
+    let first = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-a"),
+        "initial-test-token",
+    )
+    .await;
+    let email_binding = GeminiRawQuotaBinding::from_credential(
+        Some("member@example.test"),
+        Some("proj-a"),
+        first.oauth_token_generation,
+    );
     period_unknown_seed(
         &server,
         gemini,
-        &period_unknown_record(CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000).to_string(),
+        &period_unknown_record_for_binding(
+            CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            serde_json::to_value(email_binding).unwrap(),
+        )
+        .to_string(),
     )
     .await;
-    let mut previous_meters = None;
-    let mut previous_fingerprint = None;
-    for access_token in ["initial-test-token", "rotated-test-token"] {
-        let upstream = UpstreamStore::get_by_id(server.storage.as_ref(), gemini)
-            .await
+    let baseline = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    let baseline_meters =
+        period_unknown_upstream(&baseline, gemini)["period_unknown_meters"].clone();
+    assert_eq!(baseline_meters.as_array().unwrap().len(), 2);
+    assert!(!baseline.to_string().contains("identity_sha256"));
+    assert!(!baseline.to_string().contains("\"binding\""));
+
+    // (a) Routine refresh with the same email/project keeps the meters.
+    let refreshed = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-a"),
+        "rotated-test-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["period_unknown_meters"],
+        baseline_meters
+    );
+    assert_eq!(
+        refreshed.oauth_token_generation,
+        first.oauth_token_generation + 1
+    );
+
+    // (b) Changing either project or account immediately hides the old subject.
+    replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-b"),
+        "project-replaced-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
+    replace_gemini_credential(
+        &server,
+        gemini,
+        Some("other@example.test"),
+        Some("proj-a"),
+        "account-replaced-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
+
+    // (c) Project-only imports are fenced to the OAuth token generation.
+    let project_only = replace_gemini_credential(
+        &server,
+        gemini,
+        None,
+        Some("proj-only"),
+        "project-only-token",
+    )
+    .await;
+    let project_binding = GeminiRawQuotaBinding::from_credential(
+        None,
+        Some("proj-only"),
+        project_only.oauth_token_generation,
+    );
+    period_unknown_seed(
+        &server,
+        gemini,
+        &period_unknown_record_for_binding(
+            CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            serde_json::to_value(project_binding).unwrap(),
+        )
+        .to_string(),
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+            .as_array()
             .unwrap()
-            .unwrap();
-        let bundle = OAuthTokenBundle {
-            access_token: access_token.to_owned(),
-            refresh_token: "same-account-test-refresh-token".to_owned(),
-            expires_at_unix_secs: CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600,
-            refresh_token_expires_at_unix_secs: None,
-            account_id: Some("same-account".to_owned()),
-            project_id: Some("same-project".to_owned()),
-            oauth_profile: Default::default(),
-            scopes: Vec::new(),
-            never_refresh: false,
-        };
-        let tokens = EncryptedOAuthTokens::encrypt(
-            &AeadService::from_master_key([0; 32]),
-            &bundle,
-            gemini.as_bytes(),
-        )
-        .unwrap();
-        let updated = UpstreamStore::update(
-            server.storage.as_ref(),
-            gemini,
-            upstream.revision,
-            UpstreamUpdate {
-                oauth_tokens: Some(OAuthTokensCreate {
-                    tokens,
-                    never_refresh: false,
-                }),
-                oauth_token_generation: Some(upstream.oauth_token_generation + 1),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            updated.oauth_token_generation,
-            upstream.oauth_token_generation + 1
-        );
-        if let Some(fingerprint) = previous_fingerprint {
-            assert_ne!(updated.oauth_credential_fingerprint(), Some(fingerprint));
-        }
-        previous_fingerprint = updated.oauth_credential_fingerprint();
-        let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
-        let meters = &period_unknown_upstream(&body, gemini)["period_unknown_meters"];
-        assert_eq!(meters.as_array().unwrap().len(), 2);
-        if let Some(previous) = previous_meters {
-            assert_eq!(*meters, previous);
-        }
-        previous_meters = Some(meters.clone());
-    }
+            .len(),
+        2
+    );
+    replace_gemini_credential(
+        &server,
+        gemini,
+        None,
+        Some("proj-only"),
+        "project-only-rotated-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
 }

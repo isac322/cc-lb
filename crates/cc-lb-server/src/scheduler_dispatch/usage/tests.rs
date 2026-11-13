@@ -1130,3 +1130,132 @@ fn gemini_mixed_period_evidence_preserves_explicit_summary_and_fallback_windows(
     };
     assert_eq!(raw.meters.len(), 1);
 }
+
+#[test]
+fn gemini_disabled_labeled_fallback_keeps_absent_beside_raw_meters() {
+    for (name, model, raw_group, five_hour, seven_day) in [
+        (
+            "gemini",
+            "gemini-pro",
+            GeminiQuotaGroupKind::Gemini,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            SubscriptionQuotaWindow::GeminiSevenDay,
+        ),
+        (
+            "third_party",
+            "claude-sonnet",
+            GeminiQuotaGroupKind::ThirdParty,
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+        ),
+    ] {
+        for active in [false, true] {
+            for disabled_first in [false, true] {
+                let disabled = serde_json::json!({"modelId":model,"window":"5h","disabled":true});
+                let unlabeled =
+                    serde_json::json!({"modelId":format!("{model}-raw"),"remainingFraction":0.4});
+                let mut buckets = vec![unlabeled];
+                if active {
+                    buckets.push(serde_json::json!({
+                        "modelId":format!("{model}-active"),"window":"5h",
+                        "remainingFraction":0.7,"resetTime":"2026-11-01T13:00:00Z"
+                    }));
+                }
+                if disabled_first {
+                    buckets.insert(0, disabled);
+                } else {
+                    buckets.push(disabled);
+                }
+                let value = serde_json::json!({
+                    "summary":{"groups":[]}, "fallback":{(name):{"buckets":buckets}}
+                });
+                let (records, raw) =
+                    records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+                assert_eq!(records.len(), 1);
+                assert!(!records.iter().any(|record| record.window == seven_day));
+                let sample = record(&records, five_hour);
+                if active {
+                    assert_eq!(sample.sample_kind, SubscriptionQuotaSampleKind::Sample);
+                    assert_utilization(&records, five_hour, 0.3);
+                } else {
+                    assert_eq!(sample.sample_kind, SubscriptionQuotaSampleKind::Absent);
+                }
+                let update = if raw_group == GeminiQuotaGroupKind::Gemini {
+                    raw.gemini
+                } else {
+                    raw.third_party
+                };
+                let GeminiGroupPollUpdate::Replace(raw) = update else {
+                    panic!("raw update missing")
+                };
+                assert_eq!(raw.meters.len(), 1);
+                assert_eq!(raw.meters[0].model_id, Some(format!("{model}-raw")));
+            }
+        }
+    }
+}
+
+#[test]
+fn gemini_explicit_period_with_missing_reset_is_retained_as_raw() {
+    for (name, group_name, bucket_prefix, model, raw_group) in [
+        (
+            "gemini",
+            "Gemini models",
+            "gemini",
+            "gemini-pro",
+            GeminiQuotaGroupKind::Gemini,
+        ),
+        (
+            "third_party",
+            "Claude models",
+            "3p",
+            "claude-sonnet",
+            GeminiQuotaGroupKind::ThirdParty,
+        ),
+    ] {
+        for (label, known_period) in [("5h", "5h"), ("weekly", "7d")] {
+            for reset in [serde_json::Value::Null, serde_json::json!("invalid")] {
+                for from_summary in [false, true] {
+                    let mut bucket = serde_json::json!({
+                        "window":label,"remainingFraction":0.4,"resetTime":reset
+                    });
+                    let value = if from_summary {
+                        bucket["bucketId"] = serde_json::json!(format!("{bucket_prefix}-{label}"));
+                        serde_json::json!({"summary":{"groups":[{"displayName":group_name,"buckets":[bucket]}]}})
+                    } else {
+                        bucket["modelId"] = serde_json::json!(model);
+                        serde_json::json!({"summary":{"groups":[]},"fallback":{(name):{"buckets":[bucket]}}})
+                    };
+                    let (records, raw) =
+                        records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+                    assert!(records.is_empty(), "{value}");
+                    let update = if raw_group == GeminiQuotaGroupKind::Gemini {
+                        raw.gemini
+                    } else {
+                        raw.third_party
+                    };
+                    let GeminiGroupPollUpdate::Replace(raw) = update else {
+                        panic!("raw update missing")
+                    };
+                    assert_eq!(raw.meters.len(), 1);
+                    assert_eq!(raw.meters[0].known_period.as_deref(), Some(known_period));
+                    assert_eq!(raw.meters[0].reset_time_unix_secs, None);
+                    if from_summary {
+                        let present = crate::scheduler_dispatch::http::gemini_summary_groups(
+                            &serde_json::to_vec(&value["summary"]).unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            present,
+                            if name == "gemini" {
+                                (true, false)
+                            } else {
+                                (false, true)
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

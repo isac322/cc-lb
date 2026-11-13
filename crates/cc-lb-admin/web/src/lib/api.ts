@@ -1578,6 +1578,7 @@ export interface PeriodUnknownQuotaMeter {
   group: 'gemini' | 'third_party';
   model_id?: string | null;
   bucket_id?: string | null;
+  known_period?: string | null;
   remaining_fraction: number;
   utilization: number;
   reset_time_unix_secs: number | null;

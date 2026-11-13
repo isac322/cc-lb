@@ -593,16 +593,16 @@ fn records_from_gemini_api(
                         continue;
                     }
                     present = true;
-                    if let Some(window) = window {
-                        if let Some(sample) = gemini_sample_from_bucket(
+                    if let Some(window) = window
+                        && let Some(sample) = gemini_sample_from_bucket(
                             upstream_id,
                             window,
                             bucket,
                             observed_at_unix_millis,
-                        ) {
-                            labeled_usable = true;
-                            replace_gemini_record(&mut records, sample);
-                        }
+                        )
+                    {
+                        labeled_usable = true;
+                        replace_gemini_record(&mut records, sample);
                     } else if let Some(meter) = gemini_raw_meter(
                         raw_group,
                         bucket,
@@ -650,12 +650,28 @@ fn records_from_gemini_api(
                 } else {
                     GeminiQuotaGroup::Unknown
                 };
-                if model_group != group
-                    || bucket.get("disabled").and_then(serde_json::Value::as_bool) == Some(true)
-                {
+                if model_group != group {
                     continue;
                 }
-                if let Some(window) = gemini_summary_window(group, bucket)
+                let window = gemini_summary_window(group, bucket);
+                if bucket.get("disabled").and_then(serde_json::Value::as_bool) == Some(true) {
+                    if let Some(window) = window {
+                        fallback_labeled = true;
+                        if !summary_windows.contains(&Some(window)) {
+                            replace_gemini_record(
+                                &mut records,
+                                absent_record(upstream_id, window, observed_at_unix_millis),
+                            );
+                            let index = windows
+                                .iter()
+                                .position(|candidate| *candidate == window)
+                                .expect("fallback window belongs to its group");
+                            explicit_windows[index] = Some(window);
+                        }
+                    }
+                    continue;
+                }
+                if let Some(window) = window
                     && let Some(sample) = gemini_sample_from_bucket(
                         upstream_id,
                         window,
@@ -770,7 +786,7 @@ fn gemini_summary_window(
 }
 
 pub(super) fn gemini_summary_bucket_usable(
-    group: GeminiQuotaGroup,
+    _group: GeminiQuotaGroup,
     bucket: &serde_json::Value,
 ) -> bool {
     bucket.get("disabled").and_then(serde_json::Value::as_bool) != Some(true)
@@ -778,7 +794,6 @@ pub(super) fn gemini_summary_bucket_usable(
             .get("remainingFraction")
             .and_then(serde_json::Value::as_f64)
             .is_some_and(|value| value.is_finite())
-        && (gemini_summary_window(group, bucket).is_none() || gemini_bucket_reset(bucket).is_some())
 }
 
 fn gemini_bucket_reset(bucket: &serde_json::Value) -> Option<u64> {
@@ -796,6 +811,19 @@ fn gemini_raw_meter(
 ) -> Option<GeminiPeriodUnknownMeter> {
     Some(GeminiPeriodUnknownMeter {
         group,
+        known_period: {
+            let quota_group = match group {
+                GeminiQuotaGroupKind::Gemini => GeminiQuotaGroup::Gemini,
+                GeminiQuotaGroupKind::ThirdParty => GeminiQuotaGroup::ThirdParty,
+            };
+            gemini_summary_window(quota_group, bucket).and_then(|window| match window {
+                SubscriptionQuotaWindow::GeminiFiveHour
+                | SubscriptionQuotaWindow::ThirdPartyFiveHour => Some("5h".to_owned()),
+                SubscriptionQuotaWindow::GeminiSevenDay
+                | SubscriptionQuotaWindow::ThirdPartySevenDay => Some("7d".to_owned()),
+                _ => None,
+            })
+        },
         model_id: bucket
             .get("modelId")
             .and_then(serde_json::Value::as_str)

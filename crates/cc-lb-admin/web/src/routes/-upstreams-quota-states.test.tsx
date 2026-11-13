@@ -11,10 +11,25 @@ import {
   quotaSnapshot,
   rawMeter,
 } from '../../e2e/quotaSettledStatesFixture';
-import type { UpstreamLatestSnapshots } from '../lib/api';
+import type {
+  DashboardUsageResponse,
+  LatestResponse,
+  SeriesResponse,
+  SubscriptionMetadataResponse,
+  UpstreamKeyUsageResponse,
+  UpstreamLatestSnapshots,
+  UpstreamOAuthStatusResponse,
+} from '../lib/api';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
+import {
+  failedQuery,
+  pendingQuery,
+  successQuery,
+} from '../lib/test-utils/hook-results';
 import { Route } from './upstreams';
+
+const Component = Route.options.component as ComponentType;
 
 vi.mock('@tanstack/react-router', async () => ({
   ...(await vi.importActual('@tanstack/react-router')),
@@ -86,29 +101,38 @@ const upstream: Upstream = {
     last_warmup_at_unix_secs: null,
   },
 };
-const Component = Route.options.component as ComponentType;
+type UpstreamsData = { upstreams: Upstream[] };
+type StatusData = {
+  version: string;
+  git_sha: string;
+  uptime_secs: number;
+  build: { rust_version: string; profile: string; target: string };
+  generation: number;
+  upstreams: Array<{
+    id: string;
+    name: string;
+    status: string;
+    last_apply_at_unix_secs: number | null;
+    last_apply_error: string | null;
+  }>;
+};
+type UsageData = DashboardUsageResponse;
+type KeyUsageData = UpstreamKeyUsageResponse;
+type QuotaLatestData = LatestResponse;
+type QuotaSeriesData = SeriesResponse;
+type OAuthStatusData = UpstreamOAuthStatusResponse;
+type SubscriptionMetadataData = SubscriptionMetadataResponse;
+
 let client: QueryClient;
-function result(data: unknown, pending = false) {
-  return {
-    data,
-    isPending: pending,
-    isLoading: pending,
-    isError: false,
-    isPlaceholderData: false,
-  } as never;
-}
 function setLatest(latest: UpstreamLatestSnapshots | null, pending = false) {
   vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
-    result(
-      pending
-        ? undefined
-        : {
-            now_unix_secs: NOW,
-            max_staleness_secs: 300,
-            upstreams: latest == null ? [] : [latest],
-          },
-      pending,
-    ),
+    pending
+      ? pendingQuery<QuotaLatestData>()
+      : successQuery<QuotaLatestData>({
+          now_unix_secs: NOW,
+          max_staleness_secs: 300,
+          upstreams: latest == null ? [] : [latest],
+        }),
   );
 }
 function element() {
@@ -133,21 +157,23 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   Object.assign(Route, { useSearch: () => ({ selectedId: ID }) });
   vi.mocked(queries.useUpstreams).mockReturnValue(
-    result({ upstreams: [upstream] }),
+    successQuery<UpstreamsData>({ upstreams: [upstream] }),
   );
-  vi.mocked(queries.useStatus).mockReturnValue(result(undefined, true));
-  vi.mocked(queries.useUsage).mockReturnValue(result(undefined, true));
+  vi.mocked(queries.useStatus).mockReturnValue(pendingQuery<StatusData>());
+  vi.mocked(queries.useUsage).mockReturnValue(pendingQuery<UsageData>());
   vi.mocked(queries.useUpstreamKeyUsage).mockReturnValue(
-    result(undefined, true),
+    failedQuery<KeyUsageData>(
+      new Error('API usage is not used in this OAuth test'),
+    ),
   );
   vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue(
-    result(undefined, true),
+    pendingQuery<QuotaSeriesData>(),
   );
   vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
-    result(undefined, true),
+    pendingQuery<OAuthStatusData>(),
   );
   vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
-    result(undefined, true),
+    pendingQuery<SubscriptionMetadataData>(),
   );
   setLatest(null);
 });

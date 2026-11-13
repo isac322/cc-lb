@@ -236,6 +236,16 @@ jobs:
             ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
           retention-days: 14
           if-no-files-found: error
+      - name: Publish settled quota visual evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: settled-quota-visuals-${{ github.sha }}
+          path: |
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/settled-quota.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
+          retention-days: 14
+          if-no-files-found: error
       - name: Publish keepalive and plugin visual evidence
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
