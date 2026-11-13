@@ -115,6 +115,9 @@ pub struct CacheKeepaliveSessionRecord {
     pub generation: u64,
     pub refresh_count: u32,
     pub first_scheduled_at_unix_secs: u64,
+    /// Real-request cache anchor; synthetic renewals and request fencing never move it.
+    #[serde(default)]
+    pub last_message_at_ms: u64,
     pub cache_anchor_at_unix_secs: u64,
     /// Next keepalive time, or request deadline only for a terminal/cancelled/
     /// new_request marker with a non-null `running_since_unix_secs`.
@@ -151,6 +154,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
                 "first_scheduled_at_unix_secs",
                 &self.first_scheduled_at_unix_secs,
             )
+            .field("last_message_at_ms", &self.last_message_at_ms)
             .field("cache_anchor_at_unix_secs", &self.cache_anchor_at_unix_secs)
             .field("run_at_unix_secs", &self.run_at_unix_secs)
             .field("ttl", &self.ttl)
@@ -634,6 +638,7 @@ mod tests {
             refresh_count: 0,
             first_scheduled_at_unix_secs: 10,
             cache_anchor_at_unix_secs: 10,
+            last_message_at_ms: 10_000,
             run_at_unix_secs: 280,
             ttl: CacheTtl::Ttl5m,
             status: CacheKeepaliveSessionStatus::Active,

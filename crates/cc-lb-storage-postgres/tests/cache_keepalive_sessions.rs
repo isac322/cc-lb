@@ -506,6 +506,7 @@ async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
     let evidence =
         |id: &str, kind: &str, start: u64, cycle_id: Option<Uuid>| CacheKeepaliveEvidenceRow {
             session_key_hash: None,
+            cycle_anchor_ms: None,
             evidence_id: id.to_owned(),
             cycle_id,
             evidence_kind: kind.to_owned(),
@@ -579,6 +580,7 @@ async fn append_evidence_deduplicates_follow_ups_across_sibling_renewals(
     let cycle_id = Uuid::from_u128(80);
     let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
         session_key_hash: None,
+        cycle_anchor_ms: None,
         evidence_id: id.to_owned(),
         cycle_id: (kind == "renewal").then_some(cycle_id),
         evidence_kind: kind.to_owned(),
@@ -656,6 +658,7 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(
     let cycle_id = Uuid::from_u128(82);
     let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
         session_key_hash: None,
+        cycle_anchor_ms: None,
         evidence_id: id.to_owned(),
         cycle_id: (kind == "renewal").then_some(cycle_id),
         evidence_kind: kind.to_owned(),
@@ -774,6 +777,7 @@ async fn append_evidence_waits_for_pair_advisory_lock(storage: &PostgresStorage)
     let cycle_id = Uuid::from_u128(83);
     let evidence = |id: &str, kind: &str, start: u64| CacheKeepaliveEvidenceRow {
         session_key_hash: None,
+        cycle_anchor_ms: None,
         evidence_id: id.to_owned(),
         cycle_id: (kind == "renewal").then_some(cycle_id),
         evidence_kind: kind.to_owned(),

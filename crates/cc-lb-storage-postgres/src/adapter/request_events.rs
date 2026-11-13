@@ -1081,7 +1081,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let renewal_rows = sqlx::query(
             "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
                     prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
-                    model, ttl, cache_read_input_tokens, session_key_hash
+                    model, ttl, cache_read_input_tokens, session_key_hash, cycle_anchor_ms
              FROM cache_keepalive_evidence
              WHERE evidence_kind = 'renewal'
                AND cycle_id = ANY($1)
@@ -1104,7 +1104,7 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         let follow_up_rows = sqlx::query(
             "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
                     prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
-                    model, ttl, cache_read_input_tokens, session_key_hash
+                    model, ttl, cache_read_input_tokens, session_key_hash, cycle_anchor_ms
              FROM cache_keepalive_evidence
              WHERE evidence_kind = 'follow_up'
                AND principal_id = ANY($1)
@@ -1365,8 +1365,8 @@ async fn insert_keepalive_evidence_in_tx(
     sqlx::query(
         "INSERT INTO cache_keepalive_evidence \
          (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint, prefix_hash, prefix_policy_version, prefix_schema_version,
-          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms, session_key_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms, session_key_hash, cycle_anchor_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          ON CONFLICT(evidence_id) DO NOTHING",
     )
     .bind(&row.evidence_id)
@@ -1398,6 +1398,11 @@ async fn insert_keepalive_evidence_in_tx(
         "cache keepalive evidence created_at_ms",
     )?)
     .bind(row.session_key_hash.as_deref())
+    .bind(
+        row.cycle_anchor_ms
+            .map(|value| u64_to_i64(value, "cache keepalive evidence cycle_anchor_ms"))
+            .transpose()?,
+    )
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;

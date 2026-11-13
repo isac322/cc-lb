@@ -191,6 +191,9 @@ fn summary_from_aggregate(
     let mut avoided_micros = 0_i64;
     let mut pricing_complete = aggregate.unknown_costs == 0;
     for group in &aggregate.groups {
+        if group.renewals == 0 {
+            continue;
+        }
         let Some(rates) = rates_from_catalog(
             cc_lb_pricing::global_catalog().as_ref(),
             &group.model,
@@ -226,6 +229,7 @@ fn summary_from_aggregate(
             .then(|| aggregate.unlisted_spent_micros.saturating_neg() as f64 / 1_000_000.0),
         evidence_status: aggregate.evidence_status,
         unknown_cycles: aggregate.unknown_cycles,
+        not_needed_cycles: aggregate.not_needed_cycles,
         retained_from_ms: aggregate.retained_from_ms,
     }
 }

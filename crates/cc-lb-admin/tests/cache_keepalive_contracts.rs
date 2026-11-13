@@ -93,11 +93,12 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["summary"]["unlisted_sessions"].is_number());
     assert!(body["summary"]["unlisted_renewals"].is_number());
     assert!(body["summary"]["unlisted_spent"].is_number());
-    assert!(body["summary"]["cost_saved"].is_null());
+    assert_eq!(body["summary"]["cost_saved"], -0.0432);
     assert_eq!(body["summary"]["total_spent"], 0.0432);
-    assert!(body["summary"]["total_avoided"].is_null());
+    assert_eq!(body["summary"]["total_avoided"], 0.0);
     assert_eq!(body["summary"]["evidence_status"], "unknown");
     assert_eq!(body["summary"]["unknown_cycles"], 3);
+    assert_eq!(body["summary"]["not_needed_cycles"], 0);
     assert!(body["summary"]["retained_from_ms"].is_null());
     assert_eq!(body["rows"], serde_json::json!([]));
     assert!(body.get("groups").is_some_and(Value::is_null));

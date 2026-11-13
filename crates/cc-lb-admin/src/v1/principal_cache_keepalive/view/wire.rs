@@ -25,6 +25,7 @@ pub(crate) struct CacheKeepaliveSummaryResponse {
     pub(crate) unlisted_net: Option<f64>,
     pub(crate) evidence_status: String,
     pub(crate) unknown_cycles: u64,
+    pub(crate) not_needed_cycles: u64,
     pub(crate) retained_from_ms: Option<u64>,
 }
 
@@ -83,6 +84,7 @@ pub(crate) struct CacheKeepaliveDetailResponse {
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct CacheKeepaliveFollowUpOutcomesResponse {
     pub(crate) observed: u64,
+    pub(crate) not_needed: u64,
     pub(crate) pending: u64,
     pub(crate) no_follow_up: u64,
     pub(crate) unknown: u64,
@@ -94,6 +96,7 @@ impl CacheKeepaliveFollowUpOutcomesResponse {
         for ending in endings {
             let count = match ending {
                 "followup_hit" => &mut counts.observed,
+                "followup_before_expiry" => &mut counts.not_needed,
                 "scheduled_waiting" | "followup_pending" => &mut counts.pending,
                 "capped_no_followup" | "ttl_expired_no_followup" => &mut counts.no_follow_up,
                 _ => &mut counts.unknown,
@@ -110,6 +113,7 @@ fn gap_outcome_counts_preserve_every_ending_and_unknown() {
     assert_eq!(
         CacheKeepaliveFollowUpOutcomesResponse::from_endings([
             "followup_hit",
+            "followup_before_expiry",
             "scheduled_waiting",
             "followup_pending",
             "capped_no_followup",
@@ -119,6 +123,7 @@ fn gap_outcome_counts_preserve_every_ending_and_unknown() {
         ]),
         CacheKeepaliveFollowUpOutcomesResponse {
             observed: 1,
+            not_needed: 1,
             pending: 2,
             no_follow_up: 2,
             unknown: 2,
@@ -147,6 +152,7 @@ pub(crate) struct CacheKeepaliveTurnResponse {
 pub(crate) struct CacheKeepaliveGapResponse {
     pub(crate) cycle_id: Option<String>,
     pub(crate) pause_at_ms: u64,
+    pub(crate) natural_expiry_ms: Option<u64>,
     pub(crate) cached_tokens: u64,
     pub(crate) pulses: Vec<CacheKeepalivePulseResponse>,
     pub(crate) ending_kind: &'static str,
@@ -187,4 +193,32 @@ pub(crate) struct CacheKeepaliveRawRecordResponse {
     pub(crate) ttl: Option<&'static str>,
     pub(crate) status: String,
     pub(crate) enqueue_state: Option<String>,
+}
+
+#[cfg(test)]
+#[test]
+fn not_needed_gap_wire_is_a_loss_with_natural_expiry_and_separate_outcome() {
+    let gap = CacheKeepaliveGapResponse {
+        cycle_id: None,
+        pause_at_ms: 1_000_000,
+        natural_expiry_ms: Some(1_300_000),
+        cached_tokens: 20_000,
+        pulses: Vec::new(),
+        ending_kind: "followup_before_expiry",
+        ending_at_ms: 1_271_000,
+        total_duration_sec: 271,
+        since_last_renewal_sec: Some(1),
+        spent_usd: 0.006,
+        avoided_usd: Some(0.0),
+        net_pnl_usd: Some(-0.006),
+    };
+    let wire = serde_json::to_value(gap).expect("serialize not-needed gap");
+    assert_eq!(wire["ending_kind"], "followup_before_expiry");
+    assert_eq!(wire["natural_expiry_ms"], 1_300_000);
+    assert_eq!(wire["avoided_usd"], 0.0);
+    assert_eq!(wire["net_pnl_usd"], -0.006);
+    let outcomes = CacheKeepaliveFollowUpOutcomesResponse::from_endings(["followup_before_expiry"]);
+    let wire = serde_json::to_value(outcomes).expect("serialize not-needed outcomes");
+    assert_eq!(wire["not_needed"], 1);
+    assert_eq!(wire["observed"], 0);
 }

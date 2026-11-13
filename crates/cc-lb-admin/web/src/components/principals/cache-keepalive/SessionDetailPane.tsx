@@ -197,6 +197,7 @@ interface RailPoint {
     | 'start'
     | 'pulse'
     | 'end_hit'
+    | 'end_not_needed'
     | 'end_waiting'
     | 'end_unknown'
     | 'end_miss';
@@ -212,6 +213,8 @@ interface RailPoint {
   spendEstimated?: boolean;
   net?: number | null;
   followUp?: string;
+  explanation?: string;
+  naturalExpiry?: string;
 }
 
 function buildRailPoints(
@@ -258,7 +261,14 @@ function buildRailPoints(
       spent: pulse.spent_usd,
       spendEstimated: synthesized,
       net: turn?.pnl ?? null,
-      followUp: followUpLabel(turn),
+      followUp:
+        gap.ending_kind === 'followup_before_expiry'
+          ? 'Not needed'
+          : followUpLabel(turn),
+      explanation:
+        gap.ending_kind === 'followup_before_expiry'
+          ? 'Follow-up arrived while the original cache was still warm; renewals were redundant reads.'
+          : undefined,
       sinceUserReq: plusDeltaLabel(pulse.offset_sec),
       sinceLastRenewal:
         prevPulse && sincePrevSec !== null
@@ -299,6 +309,25 @@ function buildRailPoints(
       timeMs: gap.ending_at_ms,
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
+    });
+  } else if (gap.ending_kind === 'followup_before_expiry') {
+    points.push({
+      id: 'end',
+      pct: 100,
+      kind: 'end_not_needed',
+      title: 'Not needed',
+      badgeText: fmtUsdSigned(gap.net_pnl_usd),
+      badgeTone: 'warn',
+      absTime: railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms),
+      timeMs: gap.ending_at_ms,
+      sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
+      sinceLastRenewal: sinceLastRenewalForEnd,
+      explanation:
+        'Follow-up arrived while the original cache was still warm; renewals were redundant reads.',
+      naturalExpiry:
+        gap.natural_expiry_ms !== null
+          ? fullTimestamp(gap.natural_expiry_ms, timeZone)
+          : undefined,
     });
   } else if (
     gap.ending_kind === 'scheduled_waiting' ||
@@ -448,7 +477,16 @@ function PointHoverPopover({
             </div>
           </>
         ) : null}
+        {point.naturalExpiry ? (
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <dt className="text-text-faint">Original cache expiry</dt>
+            <dd className="text-text">{point.naturalExpiry}</dd>
+          </div>
+        ) : null}
       </dl>
+      {point.explanation ? (
+        <p className="mt-2 text-caption text-text-muted">{point.explanation}</p>
+      ) : null}
     </div>
   );
 }
@@ -518,15 +556,17 @@ function TimeRailGap({
   }, [activeId]);
 
   const outcome =
-    gap.ending_kind === 'followup_hit'
-      ? `Next message ${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}`
-      : gap.ending_kind === 'followup_pending'
-        ? 'Follow-up pending'
-        : gap.ending_kind === 'scheduled_waiting'
-          ? 'Waiting'
-          : gap.ending_kind === 'followup_unknown'
-            ? `Follow-up unknown (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`
-            : `No follow-up (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`;
+    gap.ending_kind === 'followup_before_expiry'
+      ? `Not needed · Follow-up ${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}`
+      : gap.ending_kind === 'followup_hit'
+        ? `Next message ${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)}`
+        : gap.ending_kind === 'followup_pending'
+          ? 'Follow-up pending'
+          : gap.ending_kind === 'scheduled_waiting'
+            ? 'Waiting'
+            : gap.ending_kind === 'followup_unknown'
+              ? `Follow-up unknown (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`
+              : `No follow-up (${railTime(gap.ending_at_ms, timeZone, gap.pause_at_ms)})`;
 
   return (
     <div className="space-y-2 rounded-sm bg-overlay-2 px-3 py-3 tabular-nums">
@@ -613,13 +653,15 @@ function TimeRailGap({
                       ? 'border-subtle-strong bg-panel'
                       : point.kind === 'end_hit'
                         ? 'border-traffic-success-text bg-traffic-success-text'
-                        : point.kind === 'end_waiting'
-                          ? point.badgeTone === 'neutral'
-                            ? 'border-subtle-strong bg-panel'
-                            : 'border-accent bg-accent'
-                          : point.kind === 'end_unknown'
-                            ? 'border-subtle-strong bg-panel'
-                            : 'border-subtle-strong bg-bg',
+                        : point.kind === 'end_not_needed'
+                          ? 'border-warn bg-warn'
+                          : point.kind === 'end_waiting'
+                            ? point.badgeTone === 'neutral'
+                              ? 'border-subtle-strong bg-panel'
+                              : 'border-accent bg-accent'
+                            : point.kind === 'end_unknown'
+                              ? 'border-subtle-strong bg-panel'
+                              : 'border-subtle-strong bg-bg',
                     active && 'scale-125',
                     pinnedId === point.id &&
                       'ring-2 ring-subtle-strong ring-offset-2 ring-offset-bg-sub',
@@ -645,6 +687,22 @@ function TimeRailGap({
             ? `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
             : `No renewals · ${deltaLabel(gap.total_duration_sec)}`}
       </p>
+      {gap.ending_kind === 'followup_before_expiry' ? (
+        <p className="text-caption text-text-muted">
+          Follow-up arrived while the original cache was still warm; renewals
+          were redundant reads.
+          {gap.natural_expiry_ms !== null ? (
+            <>
+              {' '}
+              Original cache would have expired at{' '}
+              <time dateTime={new Date(gap.natural_expiry_ms).toISOString()}>
+                {fullTimestamp(gap.natural_expiry_ms, timeZone)}
+              </time>
+              .
+            </>
+          ) : null}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -656,7 +714,7 @@ function leadWindowSec(session: CacheKeepaliveDetail): number | null {
   const leadSec =
     session.ttl === '1h'
       ? (session.config_snapshot?.lead_1h ?? 300)
-      : (session.config_snapshot?.lead_5m ?? 30);
+      : (session.config_snapshot?.lead_5m ?? 10);
   return Math.max(0, ttlSec - leadSec);
 }
 
@@ -675,6 +733,7 @@ function synthesizeGapsFromTurns(
           pulses: [],
           ending_kind: 'scheduled_waiting',
           ending_at_ms: session.last_message_at_ms + leadSec * 1000,
+          natural_expiry_ms: null,
           total_duration_sec: leadSec,
           since_last_renewal_sec: null,
           spent_usd: 0,
@@ -743,6 +802,7 @@ function synthesizeGapsFromTurns(
               ? 'capped_no_followup'
               : 'ttl_expired_no_followup',
       ending_at_ms: endingAtMs,
+      natural_expiry_ms: null,
       total_duration_sec: totalDurationSec,
       since_last_renewal_sec: sinceLastSec,
       spent_usd: session.total_spent,
@@ -964,13 +1024,14 @@ export function SessionDetailPane({
   const outcomes = session.follow_up_outcomes;
   const followUpSummary = [
     outcomes.observed > 0 ? `${outcomes.observed} observed` : null,
+    outcomes.not_needed > 0 ? `${outcomes.not_needed} not needed` : null,
     outcomes.no_follow_up > 0 ? `${outcomes.no_follow_up} no follow-up` : null,
     outcomes.unknown > 0 ? `${outcomes.unknown} unknown` : null,
     outcomes.pending > 0 ? `${outcomes.pending} pending` : null,
   ]
     .filter(Boolean)
     .join(' · ');
-  const followUpAllCounts = `${outcomes.observed} observed · ${outcomes.no_follow_up} no follow-up · ${outcomes.unknown} unknown · ${outcomes.pending} pending`;
+  const followUpAllCounts = `${outcomes.observed} observed · ${outcomes.not_needed} not needed · ${outcomes.no_follow_up} no follow-up · ${outcomes.unknown} unknown · ${outcomes.pending} pending`;
 
   return (
     <div

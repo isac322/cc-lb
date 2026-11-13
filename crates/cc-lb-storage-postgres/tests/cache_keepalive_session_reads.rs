@@ -1744,6 +1744,8 @@ fn economics_projection(
         .evidence
         .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
             session_key_hash: None,
+            // These fixtures exercise saved follow-ups; boundary cases override this anchor.
+            cycle_anchor_ms: Some(ts.saturating_sub(300) * 1_000),
             evidence_id: format!("evidence-{source_ref_id}"),
             cycle_id,
             evidence_kind: "renewal".to_owned(),
@@ -1772,6 +1774,7 @@ fn follow_up_evidence(
 ) -> cc_lb_storage_api::CacheKeepaliveEvidenceRow {
     cc_lb_storage_api::CacheKeepaliveEvidenceRow {
         session_key_hash: None,
+        cycle_anchor_ms: None,
         evidence_id: format!("follow-up-{source_ref_id}"),
         cycle_id: None,
         evidence_kind: "follow_up".to_owned(),
@@ -1977,7 +1980,7 @@ async fn summary_aggregate_active_complete_follow_up_is_observed_case(url: &str)
     fixture.drop_schema().await
 }
 
-async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses_case(
+async fn summary_aggregate_active_follow_up_credits_kept_tokens_for_hits_and_misses_case(
     url: &str,
 ) -> Result<()> {
     let fixture = Fixture::create(url).await?;
@@ -2015,16 +2018,18 @@ async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses_case(
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
-    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 40_000);
+    assert_eq!(aggregate.groups[0].renewals, 2);
     fixture.drop_schema().await
 }
 
 #[test]
-fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
+fn summary_aggregate_active_follow_up_credits_kept_tokens_for_hits_and_misses() {
     run_postgres_case(
-        "active follow-up credits hits but not misses",
+        "active follow-up credits kept tokens for hits and misses",
         |url| async move {
-            summary_aggregate_active_follow_up_credits_hits_but_not_misses_case(&url).await
+            summary_aggregate_active_follow_up_credits_kept_tokens_for_hits_and_misses_case(&url)
+                .await
         },
     );
 }
@@ -2088,13 +2093,10 @@ async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_case
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
-    assert!(
-        aggregate
-            .groups
-            .iter()
-            .all(|group| group.avoided_cache_read_tokens == 0),
-        "the latest miss must suppress avoided-token credit for the shared follow-up"
-    );
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+    assert_eq!(aggregate.groups[0].renewals, 1);
+    assert_eq!(aggregate.not_needed_cycles, 0);
     fixture.drop_schema().await
 }
 
@@ -2214,7 +2216,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
     assert_eq!(aggregate.total_spent_micros, 12_000);
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
     assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 10_000);
     fixture.drop_schema().await
@@ -2271,7 +2273,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
     assert_eq!(aggregate.total_spent_micros, 21_000);
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
     assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
     fixture.drop_schema().await
@@ -3297,6 +3299,663 @@ fn activity_evidence_batches_session_hashes_and_deduplicates_both_identities() {
                 .count(),
             4001
         );
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_classifies_natural_expiry_and_caps_saved_tokens() {
+    run_postgres_case("counterfactual summary", |url| async move {
+        // (follow-up offset, explicit anchor, renewal read, renewal creation,
+        //  expected avoided tokens, expected not-needed cycles, expected unknown cycles)
+        for (name, follow_up, anchor, read, creation, avoided, not_needed, unknown) in [
+            (
+                "production-before-expiry",
+                Some(271),
+                Some(1_000_000),
+                20_000,
+                0,
+                0,
+                1,
+                0,
+            ),
+            (
+                "after-expiry",
+                Some(320),
+                Some(1_000_000),
+                20_000,
+                0,
+                20_000,
+                0,
+                0,
+            ),
+            ("at-expiry", Some(300), Some(1_000_000), 20_000, 0, 0, 1, 0),
+            (
+                "closed-no-follow-up",
+                None,
+                Some(1_000_000),
+                20_000,
+                0,
+                0,
+                0,
+                0,
+            ),
+            ("unknown-anchor", Some(320), None, 20_000, 0, 0, 0, 1),
+            (
+                "follow-up-read-cap",
+                Some(320),
+                Some(1_000_000),
+                30_000,
+                10_000,
+                20_000,
+                0,
+                0,
+            ),
+            (
+                "kept-token-cap",
+                Some(320),
+                Some(1_000_000),
+                5_000,
+                7_000,
+                12_000,
+                0,
+                0,
+            ),
+            (
+                "miss-keeps-created-tokens",
+                Some(320),
+                Some(1_000_000),
+                0,
+                12_000,
+                12_000,
+                0,
+                0,
+            ),
+            (
+                "empty-miss-keeps-nothing",
+                Some(320),
+                Some(1_000_000),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ] {
+            let (fixture, storage) = initialized_storage(&url).await?;
+            let cycle = Uuid::from_u128(90_001);
+            let mut replace = request(name, 1_000, "agent-in-turn");
+            replace.cycle_id = cycle;
+            storage.replace_from_real_request(&replace).await?;
+            if anchor.is_none() {
+                sqlx::query("UPDATE cache_keepalive_sessions SET config_snapshot = NULL WHERE session_key_hash = $1")
+                    .bind(name).execute(storage.pool()).await?;
+            }
+            let outcome = if read == 0 { "miss" } else { "hit" };
+            let mut projection = economics_projection(name, Some(cycle), 1_270, outcome, 6_000);
+            if anchor.is_none() {
+                projection.decision.config_snapshot = None;
+            }
+            let turn = projection.turn.as_mut().expect("renewal turn");
+            turn.session_key_hash = name.to_owned();
+            turn.cache_read_input_tokens = read;
+            turn.cache_creation_input_tokens = creation;
+            projection.evidence[0].cycle_anchor_ms = anchor;
+            projection.evidence[0].cache_read_input_tokens = Some(read);
+            if let Some(offset) = follow_up {
+                let mut follow_up =
+                    follow_up_evidence(name, 1_000 + offset, &projection.evidence[0].model);
+                follow_up.request_start_ms = (1_000 + offset) * 1_000;
+                projection.evidence.push(follow_up);
+            }
+            storage
+                .append_request_event_with_projections(&event(name, 1_270), &projection)
+                .await?;
+            let summary = storage
+                .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                .await?;
+            assert_eq!(summary.total_spent_micros, 6_000, "{name}");
+            assert_eq!(summary.not_needed_cycles, not_needed, "{name}");
+            assert_eq!(summary.unknown_cycles, unknown, "{name}");
+            assert_eq!(
+                summary.evidence_status,
+                if unknown > 0 { "unknown" } else { "observed" },
+                "{name}"
+            );
+            assert_eq!(
+                summary
+                    .groups
+                    .iter()
+                    .map(|group| group.avoided_cache_read_tokens)
+                    .sum::<u64>(),
+                avoided,
+                "{name}"
+            );
+            assert_eq!(
+                summary
+                    .groups
+                    .iter()
+                    .map(|group| group.renewals)
+                    .sum::<u64>(),
+                u64::from(avoided > 0),
+                "{name}"
+            );
+            let evidence = storage
+                .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+                .await?;
+            assert_eq!(evidence[0].cycle_anchor_ms, anchor, "{name}");
+            assert!(
+                evidence
+                    .iter()
+                    .filter(|row| row.evidence_kind == "follow_up")
+                    .all(|row| row.cycle_anchor_ms.is_none())
+            );
+            fixture.drop_schema().await?;
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn counterfactual_summary_credits_earliest_matching_renewal_and_all_spend() {
+    run_postgres_case("earliest counterfactual renewal", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let cycle = Uuid::from_u128(90_002);
+        let mut replace = request("multi-renewal", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage.replace_from_real_request(&replace).await?;
+        // All three renewals precede F. R1's window ends at A+570, so it still
+        // matches F at A+551 and must win over the two more recent renewals.
+        for (index, offset, tokens) in [(0, 270, 10_000), (1, 540, 30_000), (2, 550, 40_000)] {
+            let source = format!("multi-renewal-{index}");
+            let mut projection =
+                economics_projection(&source, Some(cycle), 1_000 + offset, "hit", 6_000);
+            projection.turn.as_mut().expect("turn").session_key_hash = "multi-renewal".to_owned();
+            projection
+                .turn
+                .as_mut()
+                .expect("turn")
+                .cache_read_input_tokens = tokens;
+            projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+            projection.evidence[0].cache_read_input_tokens = Some(tokens);
+            storage
+                .append_request_event_with_projections(&event(&source, 1_000 + offset), &projection)
+                .await?;
+        }
+        let mut follow_up = follow_up_evidence("multi-follow-up", 1_551, "claude-sonnet-4-5");
+        follow_up.request_start_ms = 1_551_000;
+        storage
+            .append_request_event_with_evidence(&event("multi-follow-up", 1_551), &[follow_up])
+            .await?;
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(summary.total_spent_micros, 18_000);
+        assert_eq!(summary.unknown_cycles, 0);
+        assert_eq!(summary.not_needed_cycles, 0);
+        assert_eq!(summary.groups.len(), 1);
+        assert_eq!(summary.groups[0].avoided_cache_read_tokens, 10_000);
+        assert_eq!(summary.groups[0].renewals, 1);
+        // Only the credited renewal contributes avoided tokens to a horizon.
+        // Later redundant turns retain their spend but add no avoided tokens.
+        let horizon = storage
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, Some(1_550_000))
+            .await?;
+        assert_eq!(horizon.total_spent_micros, 6_000);
+        assert!(horizon.groups.is_empty());
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_legacy_anchor_uses_session_snapshot_without_rewriting_rows() {
+    run_postgres_case("legacy counterfactual anchor", |url| async move {
+        for (index, ttl, lead) in [
+            (0, CacheTtl::Ttl5m, 30),
+            (1, CacheTtl::Ttl30m, 30),
+            (2, CacheTtl::Ttl1h, 300),
+            (3, CacheTtl::Ttl12h, 300),
+        ] {
+            for snapshot_present in [true, false] {
+                let (fixture, storage) = initialized_storage(&url).await?;
+                let cycle = Uuid::from_u128(90_010 + index);
+                let mut replace = request("legacy-anchor", 1_000, "agent-in-turn");
+                replace.cycle_id = cycle;
+                replace.ttl = ttl;
+                storage.replace_from_real_request(&replace).await?;
+                if !snapshot_present {
+                    sqlx::query("UPDATE cache_keepalive_sessions SET config_snapshot = NULL WHERE session_key_hash = $1")
+                        .bind("legacy-anchor").execute(storage.pool()).await?;
+                }
+                let renewal_at = 1_000 + ttl.as_secs() - lead;
+                let mut projection =
+                    economics_projection("legacy-renewal", Some(cycle), renewal_at, "hit", 6_000);
+                projection.turn.as_mut().expect("turn").session_key_hash =
+                    "legacy-anchor".to_owned();
+                // Legacy evidence can recover the owning session through its turn.
+                projection.evidence[0].session_key_hash = None;
+                projection.evidence[0].cycle_anchor_ms = None;
+                projection.evidence[0].ttl = ttl;
+                if !snapshot_present {
+                    projection.decision.config_snapshot = None;
+                }
+                let mut follow_up = follow_up_evidence(
+                    "legacy-follow-up",
+                    1_000 + ttl.as_secs() + 1,
+                    &projection.evidence[0].model,
+                );
+                follow_up.request_start_ms = (1_000 + ttl.as_secs() + 1) * 1_000;
+                projection.evidence.push(follow_up);
+                storage
+                    .append_request_event_with_projections(
+                        &event("legacy-renewal", renewal_at),
+                        &projection,
+                    )
+                    .await?;
+                let summary = storage
+                    .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                    .await?;
+                assert_eq!(summary.total_spent_micros, 6_000);
+                assert_eq!(summary.unknown_cycles, u64::from(!snapshot_present));
+                assert_eq!(
+                    summary
+                        .groups
+                        .iter()
+                        .map(|group| group.avoided_cache_read_tokens)
+                        .sum::<u64>(),
+                    if snapshot_present { 20_000 } else { 0 }
+                );
+                if snapshot_present {
+                    storage
+                        .purge_cache_keepalive_expired(1_000 + ttl.as_secs() + 301)
+                        .await?;
+                    assert!(
+                        storage
+                            .get_cache_keepalive_session("legacy-anchor")
+                            .await?
+                            .is_none()
+                    );
+                    let purged = storage
+                        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                        .await?;
+                    assert_eq!(
+                        purged.unknown_cycles, 0,
+                        "per-renewal decision snapshot survives session purge"
+                    );
+                    assert_eq!(purged.evidence_status, "observed");
+                    assert_eq!(purged.groups, summary.groups);
+                    assert_eq!(purged.total_spent_micros, summary.total_spent_micros);
+                }
+                let evidence = storage
+                    .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+                    .await?;
+                assert!(
+                    evidence.iter().all(|row| row.cycle_anchor_ms.is_none()),
+                    "read-time fallback must not rewrite stored evidence"
+                );
+                fixture.drop_schema().await?;
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn counterfactual_summary_anchor_uses_minimum_present_value_in_cycle() {
+    run_postgres_case("minimum present anchor", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let cycle = Uuid::from_u128(90_003);
+        for (source, ts, anchor) in [
+            ("minimum-anchor-first", 1_270, None),
+            ("minimum-anchor-second", 1_280, None),
+            ("minimum-anchor-third", 1_290, Some(1_000_000)),
+            ("minimum-anchor-fourth", 1_300, Some(1_100_000)),
+        ] {
+            let mut projection = economics_projection(source, Some(cycle), ts, "hit", 6_000);
+            projection.evidence[0].cycle_anchor_ms = anchor;
+            projection.decision.config_snapshot = None;
+            storage
+                .append_request_event_with_projections(&event(source, ts), &projection)
+                .await?;
+            if anchor.is_none() {
+                let summary = storage
+                    .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                    .await?;
+                assert_eq!(
+                    summary.unknown_cycles, 1,
+                    "unknown is counted once per cycle, not once per renewal"
+                );
+            }
+        }
+        let mut follow_up =
+            follow_up_evidence("minimum-anchor-follow-up", 1_320, "claude-sonnet-4-5");
+        follow_up.request_start_ms = 1_320_000;
+        storage
+            .append_request_event_with_evidence(
+                &event("minimum-anchor-follow-up", 1_320),
+                &[follow_up],
+            )
+            .await?;
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(summary.unknown_cycles, 0);
+        assert_eq!(summary.not_needed_cycles, 0);
+        assert_eq!(summary.total_spent_micros, 24_000);
+        assert_eq!(summary.groups[0].avoided_cache_read_tokens, 20_000);
+        assert_eq!(summary.groups[0].renewals, 1);
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_missing_turn_uses_renewal_evidence_token_fallback() {
+    run_postgres_case("missing turn token fallback", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let cycle = Uuid::from_u128(90_004);
+        let mut projection = economics_projection("missing-turn", Some(cycle), 1_270, "hit", 6_000);
+        projection.turn = None;
+        projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+        projection.evidence[0].cache_read_input_tokens = Some(10_000);
+        let mut follow_up =
+            follow_up_evidence("missing-turn-follow-up", 1_320, "claude-sonnet-4-5");
+        follow_up.request_start_ms = 1_320_000;
+        projection.evidence.push(follow_up);
+        storage
+            .append_request_event_with_projections(&event("missing-turn", 1_270), &projection)
+            .await?;
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(summary.total_spent_micros, 0);
+        assert_eq!(summary.unknown_cycles, 0);
+        assert_eq!(summary.not_needed_cycles, 0);
+        assert_eq!(summary.groups.len(), 1);
+        assert_eq!(summary.groups[0].avoided_cache_read_tokens, 10_000);
+        assert_eq!(summary.groups[0].renewals, 1);
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_first_follow_up_remains_not_needed_after_purge() {
+    run_postgres_case("first follow-up stays not needed", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let anchor = live_evidence_base_secs() - 320;
+        let cycle = Uuid::from_u128(91_001);
+        let mut replace = request("two-follow-ups-before-expiry", anchor, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage.replace_from_real_request(&replace).await?;
+        // A running dispatch can retain both client follow-ups. Exercise the
+        // summary before housekeeping deduplicates them, then again after it.
+        sqlx::query("UPDATE cache_keepalive_sessions SET enqueue_state = 'running' WHERE session_key_hash = $1")
+            .bind(&replace.session_key_hash).execute(storage.pool()).await?;
+        let source = "two-follow-ups-renewal";
+        let mut projection = economics_projection(source, Some(cycle), anchor + 270, "hit", 6_000);
+        projection.turn.as_mut().expect("turn").session_key_hash = replace.session_key_hash.clone();
+        projection.evidence[0].cycle_anchor_ms = Some(anchor * 1_000);
+        for (name, offset) in [
+            ("before-natural-expiry", 271),
+            ("after-natural-expiry", 320),
+        ] {
+            let mut follow_up =
+                follow_up_evidence(name, anchor + offset, &projection.evidence[0].model);
+            follow_up.request_start_ms = (anchor + offset) * 1_000;
+            projection.evidence.push(follow_up);
+        }
+        storage
+            .append_request_event_with_projections(&event(source, anchor + 270), &projection)
+            .await?;
+        sqlx::query("UPDATE cache_keepalive_sessions SET enqueue_state = 'pending' WHERE session_key_hash = $1")
+            .bind(&replace.session_key_hash).execute(storage.pool()).await?;
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+            .await?;
+        assert_eq!(evidence.len(), 3);
+        for purged in [false, true] {
+            if purged {
+                storage.purge_cache_keepalive_expired(anchor + 601).await?;
+            }
+            let summary = storage
+                .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                .await?;
+            assert_eq!(summary.evidence_status, "observed");
+            assert_eq!(summary.not_needed_cycles, 1);
+            assert_eq!(summary.unknown_cycles, 0);
+            assert_eq!(summary.total_spent_micros, 6_000);
+            assert!(summary.groups.is_empty());
+            let scoped = storage
+                .read_cache_keepalive_summary_aggregate_for_horizon(
+                    PRINCIPAL_ID,
+                    0,
+                    Some((anchor + 270) * 1_000),
+                )
+                .await?;
+            assert_eq!(scoped.not_needed_cycles, 1);
+            let outside = storage
+                .read_cache_keepalive_summary_aggregate_for_horizon(
+                    PRINCIPAL_ID,
+                    0,
+                    Some((anchor + 270) * 1_000 + 1),
+                )
+                .await?;
+            assert_eq!(outside.not_needed_cycles, 0);
+            assert!(outside.groups.is_empty());
+        }
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_open_cycles_with_follow_up_are_not_pending() {
+    run_postgres_case("open cycle follow-up settles pending", |url| async move {
+        for in_request in [false, true] {
+            for saved in [false, true] {
+                let (fixture, storage) = initialized_storage(&url).await?;
+                let anchor = live_evidence_base_secs() - if saved { 550 } else { 270 };
+                let cycle = Uuid::from_u128(91_002);
+                let mut replace = request("open-followed-cycle", anchor, "agent-in-turn");
+                replace.cycle_id = cycle;
+                storage.replace_from_real_request(&replace).await?;
+                let offsets: &[u64] = if saved { &[270, 540] } else { &[270] };
+                for (index, offset) in offsets.iter().enumerate() {
+                    let source = format!("open-followed-renewal-{index}");
+                    let mut projection =
+                        economics_projection(&source, Some(cycle), anchor + offset, "hit", 6_000);
+                    projection.turn.as_mut().expect("turn").session_key_hash =
+                        replace.session_key_hash.clone();
+                    projection.evidence[0].cycle_anchor_ms = Some(anchor * 1_000);
+                    storage
+                        .append_request_event_with_projections(
+                            &event(&source, anchor + offset),
+                            &projection,
+                        )
+                        .await?;
+                }
+                let follow_up_at = anchor + if saved { 551 } else { 271 };
+                let mut follow_up =
+                    follow_up_evidence("open-followed-client", follow_up_at, "claude-sonnet-4-5");
+                follow_up.request_start_ms = follow_up_at * 1_000;
+                storage
+                    .append_request_event_with_evidence(
+                        &event("open-followed-client", follow_up_at),
+                        &[follow_up],
+                    )
+                    .await?;
+                if in_request {
+                    sqlx::query("UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = 'cancelled', cancel_reason = 'new_request', running_since_unix_secs = $1, run_at = $2 WHERE session_key_hash = $3")
+                        .bind(i64::try_from(follow_up_at)?).bind(i64::try_from(follow_up_at + 3_600)?)
+                        .bind(&replace.session_key_hash).execute(storage.pool()).await?;
+                }
+                let summary = storage
+                    .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                    .await?;
+                assert_eq!(summary.evidence_status, "observed");
+                assert_eq!(summary.unknown_cycles, 0);
+                assert_eq!(summary.not_needed_cycles, u64::from(!saved));
+                assert_eq!(
+                    summary
+                        .groups
+                        .iter()
+                        .map(|group| group.renewals)
+                        .sum::<u64>(),
+                    u64::from(saved)
+                );
+                assert_eq!(
+                    summary.total_spent_micros,
+                    if saved { 12_000 } else { 6_000 }
+                );
+                fixture.drop_schema().await?;
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn counterfactual_summary_groups_sum_identically_sized_saved_cycles() {
+    run_postgres_case("saved group token sums", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        for (index, tokens) in [(0_u128, 10_000_u64), (1, 10_000), (2, 7_000)] {
+            let source = format!("saved-group-{index}");
+            let cycle = Uuid::from_u128(91_010 + index);
+            let mut projection = economics_projection(&source, Some(cycle), 1_270, "hit", 6_000);
+            projection.turn.as_mut().expect("turn").session_key_hash = source.clone();
+            projection
+                .turn
+                .as_mut()
+                .expect("turn")
+                .cache_read_input_tokens = tokens;
+            projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+            projection.evidence[0].cache_read_input_tokens = Some(tokens);
+            projection.evidence[0].prefix_hash = Some(source.clone());
+            let mut follow_up = follow_up_evidence(&source, 1_320, &projection.evidence[0].model);
+            follow_up.request_start_ms = 1_320_000;
+            follow_up.prefix_hash = Some(source.clone());
+            projection.evidence.push(follow_up);
+            storage
+                .append_request_event_with_projections(&event(&source, 1_270), &projection)
+                .await?;
+        }
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        let mut groups = summary
+            .groups
+            .iter()
+            .map(|group| (group.avoided_cache_read_tokens, group.renewals))
+            .collect::<Vec<_>>();
+        groups.sort_unstable();
+        assert_eq!(groups, vec![(7_000, 1), (20_000, 2)]);
+        assert_eq!(
+            summary
+                .groups
+                .iter()
+                .map(|group| group.avoided_cache_read_tokens)
+                .sum::<u64>(),
+            27_000
+        );
+        assert_eq!(
+            summary
+                .groups
+                .iter()
+                .map(|group| group.renewals)
+                .sum::<u64>(),
+            3
+        );
+        assert_eq!(summary.total_spent_micros, 18_000);
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn counterfactual_summary_legacy_delay_has_one_second_minimum() {
+    run_postgres_case("legacy delay minimum", |url| async move {
+        for lead in [300_u32, 301] {
+            let (fixture, storage) = initialized_storage(&url).await?;
+            let cycle = Uuid::from_u128(91_020);
+            let mut projection =
+                economics_projection("minimum-delay-renewal", Some(cycle), 1_270, "hit", 6_000);
+            projection.evidence[0].cycle_anchor_ms = None;
+            projection
+                .decision
+                .config_snapshot
+                .as_mut()
+                .expect("snapshot")
+                .refresh_lead_time_5m_secs = lead;
+            // The fallback anchor is 1269s, not 1270s: scheduler delay is
+            // max(ttl - lead, 1s), even when lead equals or exceeds TTL.
+            let mut follow_up =
+                follow_up_evidence("minimum-delay-follow-up", 1_569, "claude-sonnet-4-5");
+            follow_up.request_start_ms = 1_569_500;
+            projection.evidence.push(follow_up);
+            storage
+                .append_request_event_with_projections(
+                    &event("minimum-delay-renewal", 1_270),
+                    &projection,
+                )
+                .await?;
+            let summary = storage
+                .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                .await?;
+            assert_eq!(summary.unknown_cycles, 0);
+            assert_eq!(summary.not_needed_cycles, 0);
+            assert_eq!(summary.groups.len(), 1);
+            assert_eq!(summary.groups[0].avoided_cache_read_tokens, 20_000);
+            fixture.drop_schema().await?;
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn counterfactual_summary_zero_kept_renewal_cannot_select_follow_up_or_receive_credit() {
+    run_postgres_case("zero-kept renewal is ineligible", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let cycle = Uuid::from_u128(91_030);
+        let mut replace = request("zero-kept-before-saved", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage.replace_from_real_request(&replace).await?;
+        sqlx::query("UPDATE cache_keepalive_sessions SET enqueue_state = 'running' WHERE session_key_hash = $1")
+            .bind(&replace.session_key_hash).execute(storage.pool()).await?;
+        for (source, ts, outcome) in [
+            ("empty-renewal", 1_270, "miss"),
+            ("kept-renewal", 1_290, "hit"),
+        ] {
+            let mut projection = economics_projection(source, Some(cycle), ts, outcome, 6_000);
+            projection.turn.as_mut().expect("turn").session_key_hash =
+                replace.session_key_hash.clone();
+            projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+            storage
+                .append_request_event_with_projections(&event(source, ts), &projection)
+                .await?;
+        }
+        let mut follow_ups = Vec::new();
+        for (source, ts) in [("empty-only-follow-up", 1_271), ("saved-follow-up", 1_320)] {
+            let mut follow_up = follow_up_evidence(source, ts, "claude-sonnet-4-5");
+            follow_up.request_start_ms = ts * 1_000;
+            follow_ups.push(follow_up);
+        }
+        storage
+            .append_request_event_with_evidence(&event("zero-kept-follow-ups", 1_320), &follow_ups)
+            .await?;
+        sqlx::query("UPDATE cache_keepalive_sessions SET enqueue_state = 'pending' WHERE session_key_hash = $1")
+            .bind(&replace.session_key_hash).execute(storage.pool()).await?;
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(
+            summary.not_needed_cycles, 0,
+            "F at 1271 cannot match an empty renewal"
+        );
+        assert_eq!(summary.unknown_cycles, 0);
+        assert_eq!(summary.total_spent_micros, 12_000);
+        assert_eq!(summary.groups.len(), 1);
+        assert_eq!(
+            summary.groups[0].avoided_cache_read_tokens, 20_000,
+            "the empty earlier renewal cannot be credited"
+        );
+        assert_eq!(summary.groups[0].renewals, 1);
         fixture.drop_schema().await
     });
 }

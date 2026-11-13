@@ -641,6 +641,7 @@ async fn current_follow_up_evidence_matrix(
                     request_ref: Some(source.clone()),
                     event_ref: Some(source.clone()),
                     session_key_hash: None,
+                    cycle_anchor_ms: Some((now - age - 540) * 1_000),
                 };
                 seed_cycle_turn(
                     storage,
@@ -741,6 +742,7 @@ async fn current_follow_up_evidence_matrix(
                 request_ref: Some(source.clone()),
                 event_ref: Some(source.clone()),
                 session_key_hash: None,
+                cycle_anchor_ms: None,
             };
             seed_cycle_turn(storage, principal, id, source, now, None, vec![unknown]).await;
             let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
@@ -897,13 +899,15 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
                 request_ref: Some(source.clone()),
                 event_ref: Some(source.clone()),
                 session_key_hash: None,
+                cycle_anchor_ms: Some(at.saturating_sub(270) * 1_000),
             };
             if index < 2 {
                 evidence.push(CacheKeepaliveEvidenceRow {
                     evidence_id: format!("outcome-follow-up-{index}"),
                     cycle_id: None,
                     evidence_kind: "follow_up".to_owned(),
-                    request_start_ms: at * 1_000 + 1_000,
+                    cycle_anchor_ms: None,
+                    request_start_ms: at * 1_000 + 31_000,
                     request_ref: Some(format!("outcome-follow-up-request-{index}")),
                     event_ref: None,
                     ..renewal.clone()
@@ -938,7 +942,7 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
         assert_eq!(
             detail["follow_up_outcomes"],
             serde_json::json!({
-                "observed": observed, "pending": 0, "no_follow_up": 8, "unknown": 1
+                "observed": observed, "not_needed": 0, "pending": 0, "no_follow_up": 8, "unknown": 1
             }),
             "mixed known outcomes must not collapse to the one unknown gap"
         );
@@ -959,7 +963,7 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
     assert_eq!(
         detail["follow_up_outcomes"],
         serde_json::json!({
-            "observed": 2, "pending": 1, "no_follow_up": 8, "unknown": 1
+            "observed": 2, "not_needed": 0, "pending": 1, "no_follow_up": 8, "unknown": 1
         })
     );
 }

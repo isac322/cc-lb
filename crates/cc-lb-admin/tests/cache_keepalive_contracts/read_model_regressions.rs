@@ -202,13 +202,14 @@ async fn append_turn(storage: &cc_lb_storage_sqlite::SqliteStorage, params: Appe
         request_ref: Some(format!("request-{source_ref_id}")),
         event_ref: Some(source_ref_id.to_owned()),
         session_key_hash: None,
+        cycle_anchor_ms: Some(ts.saturating_sub(270).saturating_mul(1_000)),
     }];
     if with_follow_up {
         evidence.push(CacheKeepaliveEvidenceRow {
             evidence_id: format!("follow-up-{source_ref_id}"),
             cycle_id: Some(cycle_id),
             evidence_kind: "follow_up".to_owned(),
-            request_start_ms: ts.saturating_mul(1_000).saturating_add(1_000),
+            request_start_ms: ts.saturating_mul(1_000).saturating_add(31_000),
             prefix_fingerprint: Some("fingerprint".to_owned()),
             prefix_hash: Some("prefix".to_owned()),
             prefix_policy_version: Some("policy".to_owned()),
@@ -223,6 +224,7 @@ async fn append_turn(storage: &cc_lb_storage_sqlite::SqliteStorage, params: Appe
             request_ref: Some(format!("follow-up-request-{source_ref_id}")),
             event_ref: None,
             session_key_hash: None,
+            cycle_anchor_ms: None,
         });
     }
     storage
@@ -745,7 +747,7 @@ async fn paused_current_cycle_pending_http_contract_case() {
             session_key_hash: id,
             cycle_id: CYCLE_ONE,
             source_ref_id: "paused-paid",
-            ts: wall_now - 100,
+            ts: wall_now - 2,
             cache_read_input_tokens: 20_000,
             cost_micros: 6_000,
             hit_miss: "hit",
@@ -770,7 +772,7 @@ async fn paused_current_cycle_pending_http_contract_case() {
     assert_eq!(
         detail["follow_up_outcomes"],
         json!({
-            "observed": 0, "pending": 1, "no_follow_up": 0, "unknown": 0
+            "observed": 0, "not_needed": 0, "pending": 1, "no_follow_up": 0, "unknown": 0
         })
     );
     assert_eq!(detail["is_last_pending"], true);
@@ -814,17 +816,36 @@ async fn paused_current_cycle_pending_http_contract_case() {
                 request_ref: Some("paused-follow-up-request".to_owned()),
                 event_ref: None,
                 session_key_hash: None,
+                cycle_anchor_ms: None,
             }],
         )
         .await
         .expect("record matching follow-up");
     let (_, observed) = get_json(&state, &keepalive_detail_uri(&principal, id)).await;
-    assert_eq!(observed["gaps"][0]["ending_kind"], "followup_hit");
+    assert_eq!(observed["gaps"][0]["ending_kind"], "followup_before_expiry");
     assert_eq!(observed["is_last_pending"], false);
     assert_eq!(observed["turns"][0]["pending"], false);
     assert_eq!(observed["evidence_status"], "observed");
-    assert_eq!(observed["follow_up_outcomes"]["observed"], 1);
-    assert_json_dollars(&observed["total_avoided"], 69_000);
+    assert_eq!(observed["follow_up_outcomes"]["not_needed"], 1);
+    assert_json_dollars(&observed["total_avoided"], 0);
+    assert_eq!(
+        observed["gaps"][0]["natural_expiry_ms"],
+        (wall_now + 28) * 1_000
+    );
+    assert_eq!(observed["turns"][0]["followed_up"], false);
+    assert_json_dollars(&observed["net_pnl"], -6_000);
+    for query in ["?limit=10", "?summary_only=true"] {
+        let (status, body) = get_json(
+            &state,
+            &format!("/admin/v1/principals/{principal}/cache-keepalive{query}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"]["not_needed_cycles"], 1);
+        assert_json_dollars(&body["summary"]["total_avoided"], 0);
+        assert_json_dollars(&body["summary"]["total_spent"], 6_000);
+        assert_json_dollars(&body["summary"]["cost_saved"], -6_000);
+    }
 }
 
 #[test]
@@ -968,8 +989,12 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
     );
     assert_eq!(observed_body["summary"]["evidence_status"], "observed");
     assert_json_dollars(&observed_body["summary"]["total_spent"], 21_000);
+    // The first cycle's follow-up also matches the second cycle's prefix and
+    // arrives exactly at that cycle's natural expiry. Its later follow-up must
+    // not replace the earliest match or invent a second saving.
     assert_json_dollars(&observed_body["summary"]["total_avoided"], 69_000);
     assert_json_dollars(&observed_body["summary"]["cost_saved"], 48_000);
+    assert_eq!(observed_body["summary"]["not_needed_cycles"], 1);
     assert_eq!(observed_body["summary"]["retained_successful_hits"], 1);
     let (miss_detail_status, miss_detail) = get_json(
         &observed_state,
@@ -985,23 +1010,30 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
     assert_json_dollars(&miss_detail["total_avoided"], 0);
     assert_json_dollars(&miss_detail["net_pnl"], -15_000);
     assert_eq!(miss_detail["turns"][0]["followed_up"], false);
+    assert_eq!(
+        miss_detail["gaps"][0]["ending_kind"],
+        "followup_before_expiry"
+    );
+    assert_eq!(miss_detail["follow_up_outcomes"]["not_needed"], 1);
 }
 
 #[test]
-fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit() {
-    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit";
+fn active_same_cycle_hit_then_miss_shared_follow_up_credits_earliest_renewal() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_same_cycle_hit_then_miss_shared_follow_up_credits_earliest_renewal";
     if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build isolated regression runtime")
-            .block_on(active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case());
+            .block_on(
+                active_same_cycle_hit_then_miss_shared_follow_up_credits_earliest_renewal_case(),
+            );
         return;
     }
     run_isolated(TEST_NAME);
 }
 
-async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
+async fn active_same_cycle_hit_then_miss_shared_follow_up_credits_earliest_renewal_case() {
     install_regression_catalog();
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let session_key_hash = "active-same-cycle-hit-miss";
@@ -1049,8 +1081,8 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
     );
     assert_eq!(body["summary"]["evidence_status"], "observed");
     assert_json_dollars(&body["summary"]["total_spent"], 21_000);
-    assert_json_dollars(&body["summary"]["total_avoided"], 0);
-    assert_json_dollars(&body["summary"]["cost_saved"], -21_000);
+    assert_json_dollars(&body["summary"]["total_avoided"], 69_000);
+    assert_json_dollars(&body["summary"]["cost_saved"], 48_000);
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
 
     let row = body["rows"]
@@ -1061,8 +1093,8 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
         .expect("same-cycle session row");
     assert_eq!(row["evidence_status"], "observed");
     assert_json_dollars(&row["total_spent"], 21_000);
-    assert_json_dollars(&row["total_avoided"], 0);
-    assert_json_dollars(&row["net_pnl"], -21_000);
+    assert_json_dollars(&row["total_avoided"], 69_000);
+    assert_json_dollars(&row["net_pnl"], 48_000);
 
     let (detail_status, detail) = get_json(
         &state,
@@ -1076,23 +1108,26 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
     );
     assert_eq!(detail["evidence_status"], "observed");
     assert_json_dollars(&detail["total_spent"], 21_000);
-    assert_json_dollars(&detail["total_avoided"], 0);
-    assert_json_dollars(&detail["net_pnl"], -21_000);
+    assert_json_dollars(&detail["total_avoided"], 69_000);
+    assert_json_dollars(&detail["net_pnl"], 48_000);
     assert_eq!(detail["is_last_pending"], false);
     let turns = detail["turns"].as_array().expect("same-cycle detail turns");
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[0]["turn_number"], 2);
-    assert_eq!(turns[0]["label"], "no follow-up (loss)");
+    assert_eq!(
+        turns[0]["label"],
+        "redundant renewal (an earlier renewal kept the cache warm)"
+    );
     assert_eq!(turns[0]["renewals"], 0);
     assert_eq!(turns[0]["pending"], false);
     assert_eq!(turns[0]["followed_up"], false);
     assert_json_dollars(&turns[0]["pnl"], -15_000);
     assert_eq!(turns[1]["turn_number"], 1);
-    assert_eq!(turns[1]["label"], "no follow-up (loss)");
+    assert_eq!(turns[1]["label"], "cache used by follow-up");
     assert_eq!(turns[1]["renewals"], 1);
     assert_eq!(turns[1]["pending"], false);
-    assert_eq!(turns[1]["followed_up"], false);
-    assert_json_dollars(&turns[1]["pnl"], -6_000);
+    assert_eq!(turns[1]["followed_up"], true);
+    assert_json_dollars(&turns[1]["pnl"], 63_000);
 }
 
 #[test]
@@ -1154,7 +1189,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "two-follow-up list: {body:?}");
-    assert_eq!(body["summary"]["evidence_status"], "pending");
+    assert_eq!(body["summary"]["evidence_status"], "observed");
     assert_json_dollars(&body["summary"]["total_spent"], 21_000);
     assert_json_dollars(&body["summary"]["total_avoided"], 69_000);
     assert_json_dollars(&body["summary"]["cost_saved"], 48_000);
@@ -1165,7 +1200,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
         .iter()
         .find(|row| row["id"] == session_key_hash)
         .expect("two-follow-up row");
-    assert_eq!(row["evidence_status"], "pending");
+    assert_eq!(row["evidence_status"], "observed");
     assert_json_dollars(&row["total_spent"], 21_000);
     assert_json_dollars(&row["total_avoided"], 69_000);
     assert_json_dollars(&row["net_pnl"], 48_000);
@@ -1180,19 +1215,22 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
         StatusCode::OK,
         "two-follow-up detail: {detail:?}"
     );
-    assert_eq!(detail["evidence_status"], "pending");
+    assert_eq!(detail["evidence_status"], "observed");
     assert_json_dollars(&detail["total_spent"], 21_000);
     assert_json_dollars(&detail["total_avoided"], 69_000);
     assert_json_dollars(&detail["net_pnl"], 48_000);
-    assert_eq!(detail["is_last_pending"], true);
+    assert_eq!(detail["is_last_pending"], false);
     let turns = detail["turns"]
         .as_array()
         .expect("two-follow-up detail turns");
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[0]["time_ms"], json!((now_unix_secs() + 1) * 1_000));
-    assert_eq!(turns[0]["label"], "waiting for follow-up");
-    assert_eq!(turns[0]["evidence_status"], "pending");
-    assert_eq!(turns[0]["pending"], true);
+    assert_eq!(
+        turns[0]["label"],
+        "redundant renewal (an earlier renewal kept the cache warm)"
+    );
+    assert_eq!(turns[0]["evidence_status"], "observed");
+    assert_eq!(turns[0]["pending"], false);
     assert_eq!(turns[0]["followed_up"], false);
     assert_json_dollars(&turns[0]["pnl"], -15_000);
     assert_eq!(turns[1]["time_ms"], json!(now_unix_secs() * 1_000));
@@ -1426,7 +1464,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
         StatusCode::OK,
         "multiple follow-up list: {follow_ups_body:?}"
     );
-    assert_eq!(follow_ups_body["summary"]["evidence_status"], "pending");
+    assert_eq!(follow_ups_body["summary"]["evidence_status"], "observed");
     assert_json_dollars(&follow_ups_body["summary"]["total_spent"], 12_000);
     assert_json_dollars(&follow_ups_body["summary"]["cost_saved"], 57_000);
     assert_json_dollars(&follow_ups_body["summary"]["total_avoided"], 69_000);
@@ -1444,7 +1482,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
         .as_array()
         .expect("multiple follow-up detail turns");
     assert_eq!(follow_up_turns.len(), 2);
-    assert_eq!(follow_up_turns[0]["pending"], true);
+    assert_eq!(follow_up_turns[0]["pending"], false);
     assert_eq!(follow_up_turns[0]["followed_up"], false);
     assert_eq!(follow_up_turns[1]["pending"], false);
     assert_eq!(follow_up_turns[1]["followed_up"], true);
@@ -1582,9 +1620,11 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
     assert_eq!(body_7d["summary"]["retained_successful_hits"], 2);
     assert_eq!(body_7d["summary"]["evidence_status"], "unknown");
     assert_json_dollars(&body_7d["summary"]["total_spent"], 21_000);
-    // The legacy turn has no renewal evidence: it avoided $0 so far, so the
-    // real-time net still counts its spend.
+    // Missing evidence qualifies the header, but known savings and all known
+    // spend remain visible.
     assert_json_dollars(&body_7d["summary"]["cost_saved"], 48_000);
+    assert_json_dollars(&body_7d["summary"]["total_avoided"], 69_000);
+    assert_eq!(body_7d["summary"]["unknown_cycles"], 1);
 }
 
 async fn delete_turn_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, source_ref_id: &str) {
@@ -2139,13 +2179,31 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
     for horizon in ["1h", "24h", "all"] {
         let (summary, rows) = fetch_all_keepalive_pages(&state, &principal_id, horizon).await;
         let spent = sum_json_micros(&rows, "total_spent");
-        let avoided = sum_json_micros(&rows, "total_avoided");
-        let net = sum_json_micros(&rows, "net_pnl");
+        let unknown_rows = rows
+            .iter()
+            .filter(|row| row["evidence_status"] == "unknown")
+            .collect::<Vec<_>>();
+        assert!(
+            !unknown_rows.is_empty(),
+            "fixture must retain unknown cycle rows: {rows:?}"
+        );
+        for row in unknown_rows {
+            assert!(row["net_pnl"].is_null(), "{row:?}");
+            assert!(row["total_avoided"].is_null(), "{row:?}");
+        }
+        assert!(
+            summary["unknown_cycles"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
         let unlisted_spent =
             (summary["unlisted_spent"].as_f64().unwrap() * 1_000_000.0).round() as i64;
         assert_json_dollars(&summary["total_spent"], spent + unlisted_spent);
-        assert_json_dollars(&summary["cost_saved"], net - unlisted_spent);
+        // The header sums known savings and subtracts all known spend, including
+        // unknown-evidence rows whose own avoided/net values remain null.
+        let avoided = sum_json_micros(&rows, "total_avoided");
         assert_json_dollars(&summary["total_avoided"], avoided);
+        assert_json_dollars(&summary["cost_saved"], avoided - spent - unlisted_spent);
         assert!(summary.get("renewals_fired").is_none());
         assert!(summary.get("resolved_cost_saved").is_none());
         assert!(summary.get("resolved_total_avoided").is_none());
@@ -2324,8 +2382,10 @@ async fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "unknown detail: {detail:?}");
-    assert_json_dollars(&detail["net_pnl"], -41_000);
-    assert_json_dollars(&detail["total_avoided"], 0);
+    assert!(detail["net_pnl"].is_null());
+    assert!(detail["total_avoided"].is_null());
+    assert_json_dollars(&detail["total_spent"], 41_000);
+    assert!(detail["turns"][0]["pnl"].is_null());
     assert_ne!(detail["turns"][0]["label"], "no follow-up");
     assert_eq!(detail["gaps"][0]["ending_kind"], "followup_unknown");
 
@@ -2346,8 +2406,25 @@ async fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case() {
     )
     .await;
     let (summary, _) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
-    assert!(!summary["cost_saved"].is_null());
-    assert!(!summary["total_avoided"].is_null());
+    assert_json_dollars(&summary["cost_saved"], -84_000);
+    assert_json_dollars(&summary["total_avoided"], 0);
+    assert_eq!(summary["evidence_status"], "unknown");
+    assert!(
+        summary["unknown_cycles"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert_json_dollars(&summary["total_spent"], 84_000);
+    let (status, pending) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, "pending-label"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_json_dollars(&pending["net_pnl"], -43_000);
+    assert_json_dollars(&pending["total_avoided"], 0);
+    assert_eq!(pending["is_last_pending"], true);
+    assert_eq!(pending["gaps"][0]["ending_kind"], "scheduled_waiting");
     let (status, _body) = get_json(
         &state,
         &keepalive_detail_uri(&principal_id, "missing-keepalive-id"),
@@ -2939,6 +3016,7 @@ async fn session_follow_up_attribution_agrees_across_http_read_models_case() {
                 request_ref: Some(format!("{source_ref_id}-request")),
                 event_ref: Some(source_ref_id.clone()),
                 session_key_hash: Some(session_key.clone()),
+                cycle_anchor_ms: Some((ts - ordinal - 270) * 1_000),
             };
             let mut decision = cache_keepalive_decision(&principal, &source_ref_id, ts * 1_000);
             decision.session_key_hash = Some(session_key.clone());
@@ -2996,11 +3074,12 @@ async fn session_follow_up_attribution_agrees_across_http_read_models_case() {
         follow_up.evidence_id = format!("session-follow-up-{case}-evidence");
         follow_up.cycle_id = None;
         follow_up.evidence_kind = "follow_up".to_owned();
-        follow_up.request_start_ms = now_unix_secs() * 1_000;
+        follow_up.request_start_ms = (now_unix_secs() + 31) * 1_000;
         follow_up.prefix_hash = (case != 0).then(|| "serving-prefix".to_owned());
         follow_up.request_ref = Some(format!("session-follow-up-{case}-request"));
         follow_up.event_ref = None;
         follow_up.cost_micros = None;
+        follow_up.cycle_anchor_ms = None;
         match case {
             0 | 1 => {}
             2 => follow_up.cache_read_input_tokens = Some(19_999),
@@ -3029,9 +3108,9 @@ async fn session_follow_up_attribution_agrees_across_http_read_models_case() {
         let (status, detail) = get_json(&state, &detail_uri).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["is_last_pending"], !proven, "case {case}");
-        assert_eq!(detail["turns"][0]["followed_up"], proven, "case {case}");
+        assert_eq!(detail["turns"][0]["followed_up"], false, "case {case}");
         assert_eq!(detail["turns"][0]["pending"], !proven, "case {case}");
-        assert_eq!(detail["turns"][1]["followed_up"], false, "case {case}");
+        assert_eq!(detail["turns"][1]["followed_up"], proven, "case {case}");
         assert_json_dollars(&detail["total_avoided"], avoided_micros);
         assert_eq!(
             detail["evidence_status"],

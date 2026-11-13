@@ -5,8 +5,8 @@ use std::{
 
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTurnRecord, CacheTtl, StorageError,
+    CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionStatus, CacheKeepaliveTurnRecord, CacheTtl, StorageError,
 };
 use uuid::Uuid;
 
@@ -293,7 +293,8 @@ fn batched_cache_keepalive_turns_preserve_serialized_summary_behavior() {
     assert_eq!(summary.sessions_last_5m, 1);
     assert_eq!(summary.retained_successful_hits, 2);
     assert_eq!(summary.total_spent, 0.0);
-    // Unknown follow-up evidence is $0 avoided so far, not an unknown price.
+    // The header sums known savings and all known spend; missing evidence is
+    // qualified by evidence_status/unknown_cycles rather than hiding the total.
     assert_eq!(summary.total_avoided, Some(0.0));
     assert_eq!(summary.cost_saved, Some(0.0));
     assert_eq!(summary.evidence_status, "unknown");
@@ -384,8 +385,10 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         &partial_batch,
     )
     .expect("incomplete read pricing is tolerated");
-    assert_eq!(partial_summary.total_avoided, None);
-    assert_eq!(partial_summary.cost_saved, None);
+    // No cycle has proven savings, so missing catalog prices do not hide the
+    // header's zero known saving.
+    assert_eq!(partial_summary.total_avoided, Some(0.0));
+    assert_eq!(partial_summary.cost_saved, Some(0.0));
 
     let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
     let summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
@@ -393,7 +396,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
     assert_eq!(summary.renewing_now, 1);
     assert_eq!(summary.sessions_last_5m, 1);
     assert_eq!(summary.retained_successful_hits, 1);
-    assert_eq!(summary.cost_saved, None);
+    assert_eq!(summary.cost_saved, Some(0.0));
 }
 
 #[test]
@@ -455,18 +458,59 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
     let catalog = PriceCatalog::new_empty();
     let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
     let turns = vec![summary_turn("same-stored-turn", 100)];
+    let renewal = CacheKeepaliveEvidenceRecord {
+        evidence_id: "catalog-renewal".to_owned(),
+        cycle_id: Some(Uuid::from_u128(700)),
+        evidence_kind: "renewal".to_owned(),
+        request_start_ms: 100_000,
+        prefix_fingerprint: None,
+        prefix_hash: Some("catalog-prefix".to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id: Uuid::nil(),
+        model: "claude-sonnet-4-5".to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(20_000),
+        cost_micros: Some(0),
+        request_ref: None,
+        event_ref: Some("same-stored-turn".to_owned()),
+        session_key_hash: Some("session".to_owned()),
+        cycle_anchor_ms: Some(0),
+    };
+    let follow_up = CacheKeepaliveEvidenceRecord {
+        evidence_id: "catalog-followup".to_owned(),
+        cycle_id: None,
+        evidence_kind: "follow_up".to_owned(),
+        request_start_ms: 320_000,
+        event_ref: None,
+        cycle_anchor_ms: None,
+        ..renewal.clone()
+    };
+    let evidence = [renewal, follow_up];
     let before = derive_activity_view(
         CacheKeepaliveActivitySource {
             item: &session,
             session: None,
             turns: &turns,
-            evidence: &[],
+            evidence: &evidence,
             now_ms: NOW_MS,
             horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
     assert!(before.pnl.is_none());
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns.clone(), evidence.to_vec());
+    let before_summary = summary_for_items(
+        catalog.as_ref(),
+        NOW_MS,
+        std::slice::from_ref(&session),
+        &batch,
+    )
+    .expect("summary with unavailable saved-cycle pricing");
+    assert_eq!(before_summary.total_avoided, None);
+    assert_eq!(before_summary.cost_saved, None);
 
     install_priced_snapshot(catalog.as_ref(), "replacement");
     let after = derive_activity_view(
@@ -474,15 +518,32 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
             item: &session,
             session: None,
             turns: &turns,
-            evidence: &[],
+            evidence: &evidence,
             now_ms: NOW_MS,
             horizon_start_ms: None,
         },
         catalog.as_ref(),
     );
-    assert_eq!(after.pnl.map(|pnl| pnl.net_micros), Some(0));
+    assert_eq!(after.pnl.map(|pnl| pnl.net_micros), Some(69_000));
     assert_eq!(turns[0].source_ref_id, "same-stored-turn");
     assert_eq!(turns[0].cache_read_input_tokens, 20_000);
+    let mut mixed_turns = turns.clone();
+    let mut unknown = summary_turn("unknown-cycle", 90);
+    unknown.cost_micros = Some(7_000);
+    mixed_turns.push(unknown);
+    let mixed_batch = CacheKeepaliveActivityBatch::from_turns(mixed_turns, evidence.to_vec());
+    let mixed_summary = summary_for_items(
+        catalog.as_ref(),
+        NOW_MS,
+        std::slice::from_ref(&session),
+        &mixed_batch,
+    )
+    .expect("summary qualifies incomplete evidence without hiding known savings");
+    assert_eq!(mixed_summary.evidence_status, "unknown");
+    assert_eq!(mixed_summary.unknown_cycles, 1);
+    assert_eq!(mixed_summary.total_spent, 0.007);
+    assert_eq!(mixed_summary.total_avoided, Some(0.069));
+    assert_eq!(mixed_summary.cost_saved, Some(0.062));
 }
 
 #[test]

@@ -193,10 +193,22 @@ Scheduling is anchored to cache creation / response begin:
 - Non-streaming responses use the first upstream response/body event when
   available, with request dispatch time as the fallback.
 - `run_at = cache_anchor_at + ttl - lead_time`; with the default 5-minute TTL
-  and 30-second lead, the job fires 270 seconds after `message_start`, not 270
+  and 10-second lead, the job fires 290 seconds after `message_start`, not 290
   seconds after final response completion.
 - For mixed Anthropic breakpoints, scheduling uses the shortest protected TTL;
   a 1-hour system prefix plus a 5-minute message prefix renews on the 5-minute cadence.
+
+Measured on 2026-11-14 against Anthropic through cc-lb, a 5-minute cache read
+still hit up to about 309 seconds after the creating request's `message_start`
+and missed from about 310 seconds. The anchor is response start, not request
+receipt: a 175k-token write whose `message_start` arrived 17 seconds after send
+still hit 325 seconds after send. Across 4,000 production renewals, dispatch
+lateness (renewal dispatch minus scheduled time) was p99 0.84 seconds, p99.9
+1.4 seconds, and maximum 2.9 seconds. A 10-second lead covers the worst
+observed lateness plus dispatch latency with more than 6 seconds of headroom
+without relying on undocumented provider grace, and narrows the window for a
+follow-up to arrive immediately after a redundant renewal from 30 seconds to
+10 seconds.
 
 The initial schedule subtracts the existing cache anchor age. After a
 cache-hit renewal, the next schedule uses the full configured `ttl - lead_time`
@@ -312,23 +324,36 @@ lifetime total and do not imply that a session is still active.
 
 - `total_spent` is the exact persisted renewal spend from retained turn rows.
   It includes misses and remains available after session reset or purge.
-- Avoided savings are credited at most once per cycle, to the latest qualifying
-  renewal before the first matching positive-cache-read follow-up within its TTL.
-  The follow-up must use the same principal, upstream, and model, and match either
-  a candidate prefix hash or the keep-alive session key. A session-key match also
-  requires a positive renewal cache read and a follow-up cache read at least as
-  large as the renewal's. Follow-up evidence uses the routed serving cache
-  breakpoints.
-  Evidence retention uses that same full TTL window, including long-retention
-  renewals; housekeeping does not shorten it to five minutes.
-  Avoided value is `renewal tokens × (cache-creation price − cache-read price)`:
-  the follow-up still pays for its cache read.
-- Missing, legacy, malformed, or ambiguous evidence is reported as
-  `unknown`. Avoided savings and net savings are nullable when the evidence or
-  pricing is incomplete; the UI must not display a guessed zero.
-- A valid renewal with no proven follow-up has no avoided credit. It remains
-  retained spend, and may be shown as pending while its live TTL window is
-  open.
+- Each cycle has a real-request `cycle_anchor_ms` and
+  `natural_expiry_ms = cycle_anchor_ms + ttl_ms`. Streaming anchors use
+  `message_start`; non-streaming anchors use response start or the dispatch
+  fallback.
+- Savings are the cache-creation cost a follow-up would have paid without
+  keep-alive. A matching follow-up after natural expiry is credited to the
+  earliest renewal whose TTL window covers it. Avoided tokens are
+  `min(follow-up cache read, renewal kept tokens)`, where kept tokens are the
+  renewal's cache-read plus cache-creation tokens. Avoided value is those
+  tokens multiplied by `(cache-creation price − cache-read price)`.
+- A follow-up at or before natural expiry is `not_needed`: savings are zero
+  and the cycle keeps its full renewal spend. `follow_up_outcomes.not_needed`
+  counts these cycles; `observed` counts only saved follow-ups, and
+  `not_needed_cycles` counts them in summary responses.
+- Gap payloads expose `natural_expiry_ms`; `followup_before_expiry` identifies
+  the not-needed outcome.
+- Missing, legacy, malformed, or ambiguous evidence is `unknown`. A session's
+  avoided and net savings are null when its anchor, evidence, or pricing is
+  incomplete; the UI must not display a guessed zero. The summary header still
+  sums known cycles and reports the rest through `evidence_status` and
+  `unknown_cycles`; only an unknown renewal cost or missing price for a saved
+  cycle makes header savings null.
+- A valid cycle with no proven follow-up has no avoided credit. It remains
+  retained spend and may be shown as pending while its newest renewal window
+  is open.
+- Legacy rows without a stored anchor derive it at read time as the first
+  renewal minus `max(TTL − lead, 1 s)`, with the lead from the owning session
+  snapshot or, after the session is purged, the renewal's decision snapshot.
+  This estimate is later than the true anchor by the scheduler delay, so it
+  never overstates savings. Without either snapshot the cycle is unknown.
 - Summary-only requests use SQL aggregates over retained turns and evidence.
   They do not load every session, turn, or encrypted snapshot into Rust.
   List/detail requests load only the rows needed for their page or selected
@@ -375,11 +400,14 @@ unknown. `total_renewals_current_cycle` and pending status describe only the
 current cycle, so a newly replaced cycle can show zero current renewals while
 retaining earlier cycles in its history.
 
-The detail header uses `follow_up_outcomes` to count observed follow-ups,
-pending gaps, closed gaps with no follow-up, and unknown gaps separately.
-Each rail gap contributes exactly once, including an empty waiting gap as
-pending. These counts preserve mixed historical outcomes; the existing
-`evidence_status` keeps its conservative semantics for list and filter consumers.
+The detail header uses `follow_up_outcomes` to count saved follow-ups,
+`not_needed` outcomes, pending gaps, closed gaps with no follow-up, and
+unknown gaps separately. `not_needed` means the follow-up arrived at or before
+the cycle's natural expiry; `observed` counts only follow-ups after expiry
+that received savings credit. Each rail gap contributes exactly once,
+including an empty waiting gap as pending. These counts preserve mixed
+historical outcomes; the existing `evidence_status` keeps its conservative
+semantics for list and filter consumers.
 
 Renewal scheduling and pending follow-up evidence are separate. An In use
 cycle remains inactive and has no Next renewal, but a paid renewal can still
@@ -431,7 +459,7 @@ defaults; every field is optional except `enabled`.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | required | Master switch on this principal. |
-| `refresh_lead_time_5m_secs` | `30` | Fire 30 s before an Anthropic 5-minute or OpenAI 30-minute cache TTL expires (4m30s after Anthropic `message_start`, or 29m30s into an OpenAI 30m window). |
+| `refresh_lead_time_5m_secs` | `10` | Fire 10 s before an Anthropic 5-minute or OpenAI 30-minute cache TTL expires (4m50s after Anthropic `message_start`, or 29m50s into an OpenAI 30m window). |
 | `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before an Anthropic 1-hour cache TTL expires (55m after `message_start`). OpenAI 12-hour retention is recorded with this snapshot metadata without periodic renewal. |
 | `max_refreshes_per_session` | `4` | Hard cap on keep-alive fires per session. OpenAI 30-minute keep-alive requires raising this to at least `13` for GPT-5.6. |
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
