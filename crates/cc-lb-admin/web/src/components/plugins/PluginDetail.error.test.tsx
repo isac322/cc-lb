@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from '@tanstack/react-query';
 import {
   act,
   cleanup,
@@ -91,6 +95,7 @@ afterEach(() => {
   cleanup();
   for (const client of clients) client.clear();
   clients.length = 0;
+  onlineManager.setOnline(true);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -135,6 +140,47 @@ test('QA-10: an initial usage failure is not unused and Retry loads references t
   expect(screen.queryAllByRole('alert')).toHaveLength(0);
   expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   expect(screen.queryByText(emptyMessage)).toBeNull();
+  expect(referenceRequest).toHaveBeenCalledTimes(2);
+});
+
+test('QA-10: an offline initial usage Retry keeps skeletons until references recover on reconnect', async () => {
+  const referenceRequest = vi
+    .fn<() => Promise<Response>>()
+    .mockResolvedValueOnce(json({ message: 'Usage unavailable' }, 503))
+    .mockResolvedValueOnce(usageResponse());
+  stubApi(referenceRequest);
+  const client = renderDetail();
+  const alert = await screen.findByRole('alert');
+
+  act(() => onlineManager.setOnline(false));
+  fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+  await waitFor(() => {
+    expect(client.getQueryState(qk.pluginReferences(plugin.id))).toMatchObject({
+      status: 'pending',
+      fetchStatus: 'paused',
+      data: undefined,
+      error: null,
+    });
+    expect(
+      screen.getByTestId('plugin-used-by-slot').querySelectorAll('.skeleton'),
+    ).toHaveLength(2);
+    expect(screen.queryByText(emptyMessage)).toBeNull();
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  });
+  expect(referenceRequest).toHaveBeenCalledTimes(1);
+
+  act(() => onlineManager.setOnline(true));
+  const reference = await screen.findByRole('link', {
+    name: 'Production principal',
+  });
+  expect(reference.getAttribute('href')).toBe(
+    '/principals?selectedId=principal-1',
+  );
+  expect(
+    screen.getByTestId('plugin-used-by-slot').querySelector('.skeleton'),
+  ).toBeNull();
+  expect(screen.queryByText(emptyMessage)).toBeNull();
+  expect(screen.queryAllByRole('alert')).toHaveLength(0);
   expect(referenceRequest).toHaveBeenCalledTimes(2);
 });
 

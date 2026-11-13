@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from '@tanstack/react-query';
 import {
   act,
   cleanup,
@@ -131,6 +135,7 @@ afterEach(() => {
   for (const client of clients) client.clear();
   clients.length = 0;
   queryClient.clear();
+  onlineManager.setOnline(true);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -207,6 +212,49 @@ test('QA-06: initial Retry shows skeletons, restores an error on 503, and recove
   expect(registry).toHaveBeenCalledTimes(3);
 });
 
+test('QA-06: an offline initial Retry keeps count and row skeletons until reconnecting', async () => {
+  const registry = vi
+    .fn<() => Promise<Response>>()
+    .mockResolvedValueOnce(unavailable())
+    .mockResolvedValueOnce(json({ entries }));
+  stubApi(registry);
+  const client = createClient();
+  const view = renderCatalog(client);
+  await screen.findByRole('alert');
+
+  act(() => onlineManager.setOnline(false));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+  await waitFor(() => {
+    expect(client.getQueryState(qk.pluginRegistry)).toMatchObject({
+      status: 'pending',
+      fetchStatus: 'paused',
+      data: undefined,
+      error: null,
+    });
+    const count = screen.getByTestId('plugin-count-slot');
+    expect(count.querySelector('.skeleton')).not.toBeNull();
+    expect(count.textContent).not.toContain('0 available');
+    expect(count.textContent).not.toContain('Unavailable');
+    expect(screen.queryAllByText('No plugins uploaded.')).toHaveLength(0);
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    expect(
+      view.container.querySelectorAll('ul > li[aria-hidden="true"]'),
+    ).toHaveLength(3);
+    expect(
+      view.container.querySelectorAll('tbody .skeleton').length,
+    ).toBeGreaterThan(0);
+  });
+  expect(registry).toHaveBeenCalledTimes(1);
+
+  act(() => onlineManager.setOnline(true));
+  await waitFor(expectLoadedRows);
+  expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  expect(screen.queryAllByText('No plugins uploaded.')).toHaveLength(0);
+  expect(view.container.querySelector('.skeleton')).toBeNull();
+  expect(registry).toHaveBeenCalledTimes(2);
+});
+
 test('QA-07: stale registry errors retain rows and count and keep Retry busy until recovery', async () => {
   const recovery = Promise.withResolvers<Response>();
   const registry = vi
@@ -243,6 +291,50 @@ test('QA-07: stale registry errors retain rows and count and keep Retry busy unt
   });
   expectLoadedRows();
   expect(registry).toHaveBeenCalledTimes(3);
+});
+
+test('QA-07: an offline background Retry preserves cached rows and count until recovery', async () => {
+  const recovery = Promise.withResolvers<Response>();
+  const registry = vi
+    .fn<() => Promise<Response>>()
+    .mockResolvedValueOnce(json({ entries }))
+    .mockResolvedValueOnce(unavailable())
+    .mockReturnValueOnce(recovery.promise);
+  stubApi(registry);
+  const client = createClient();
+  const view = renderCatalog(client);
+  await waitFor(expectLoadedRows);
+
+  await act(async () => {
+    await client.refetchQueries({ queryKey: qk.pluginRegistry });
+  });
+  const warning = await screen.findByRole('status');
+  expect(warning.textContent).toContain('Could not refresh plugin library');
+
+  act(() => onlineManager.setOnline(false));
+  fireEvent.click(within(warning).getByRole('button', { name: 'Retry' }));
+  await waitFor(() => {
+    expect(client.getQueryState(qk.pluginRegistry)?.fetchStatus).toBe('paused');
+    expectLoadedRows();
+    expect(view.container.querySelector('.skeleton')).toBeNull();
+    expect(screen.queryAllByText('No plugins uploaded.')).toHaveLength(0);
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  });
+  expect(screen.getByText('Could not refresh plugin library')).toBeDefined();
+  expect(registry).toHaveBeenCalledTimes(2);
+
+  act(() => onlineManager.setOnline(true));
+  await waitFor(() => expect(registry).toHaveBeenCalledTimes(3));
+  expectLoadedRows();
+  expect(view.container.querySelector('.skeleton')).toBeNull();
+  await act(async () => recovery.resolve(json({ entries })));
+  await waitFor(() => {
+    expect(screen.queryByText('Could not refresh plugin library')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+  expectLoadedRows();
+  expect(screen.queryAllByText('No plugins uploaded.')).toHaveLength(0);
+  expect(view.container.querySelector('.skeleton')).toBeNull();
 });
 
 test('QA-08: a healthy empty registry still renders its genuine empty state', async () => {
@@ -305,6 +397,58 @@ test('QA-09: a failed deep link retries through the detail skeleton and opens th
     screen.queryByRole('status', { name: 'Loading plugin details' }),
   ).toBeNull();
   expect(registry).toHaveBeenCalledTimes(3);
+});
+
+test('QA-09: an offline deep-link Retry stays in the detail skeleton until reconnecting', async () => {
+  selectedPluginId = 'plugin-1';
+  const registry = vi
+    .fn<() => Promise<Response>>()
+    .mockResolvedValueOnce(unavailable())
+    .mockResolvedValueOnce(json({ entries }));
+  stubApi(registry);
+  const client = createClient();
+  render(
+    <QueryClientProvider client={client}>
+      <PluginsPage />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole('alert');
+
+  act(() => onlineManager.setOnline(false));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => {
+    expect(client.getQueryState(qk.pluginRegistry)).toMatchObject({
+      status: 'pending',
+      fetchStatus: 'paused',
+      data: undefined,
+      error: null,
+    });
+    const skeleton = screen.getByRole('status', {
+      name: 'Loading plugin details',
+    });
+    expect(skeleton.querySelectorAll('.skeleton').length).toBeGreaterThan(10);
+    expect(
+      screen.getByRole('button', { name: 'Back to plugins' }),
+    ).toBeDefined();
+    expect(screen.queryByText('Plugin library')).toBeNull();
+    expect(screen.queryByTestId('plugin-count-slot')).toBeNull();
+    expect(screen.queryAllByText('No plugins uploaded.')).toHaveLength(0);
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  });
+  expect(registry).toHaveBeenCalledTimes(1);
+
+  act(() => onlineManager.setOnline(true));
+  expect(
+    await screen.findByRole('heading', { name: 'First plugin' }),
+  ).toBeDefined();
+  expect(screen.getByRole('heading', { name: 'Used by' })).toBeDefined();
+  expect(screen.getByRole('button', { name: 'Back to plugins' })).toBeDefined();
+  expect(screen.queryByText('Plugin library')).toBeNull();
+  expect(
+    screen.queryByRole('status', { name: 'Loading plugin details' }),
+  ).toBeNull();
+  expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  expect(registry).toHaveBeenCalledTimes(2);
 });
 
 test('QA-11: registry and reference failures preserve global error toasts for other callers', async () => {

@@ -143,9 +143,12 @@ export function PluginsPage() {
     setSelectedPluginId(id);
   };
 
-  const detailLoading = Boolean(selectedPluginId) && reg.isLoading;
+  const hasRegistryData = reg.data !== undefined;
+  const detailLoading =
+    Boolean(selectedPluginId) &&
+    (Boolean(reg.isLoading) || (Boolean(reg.isPending) && !hasRegistryData));
   const detailError =
-    Boolean(selectedPluginId) && Boolean(reg.isError) && reg.data === undefined;
+    Boolean(selectedPluginId) && Boolean(reg.isError) && !hasRegistryData;
   const backToCatalog = () => setSelectedPluginId(null);
 
   return (

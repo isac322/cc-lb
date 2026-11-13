@@ -65,6 +65,8 @@ export function PluginCatalog({
 }) {
   const reg = usePluginRegistry();
   const hasRegistryData = reg.data !== undefined;
+  const pendingWithoutData =
+    Boolean(reg.isLoading) || (Boolean(reg.isPending) && !hasRegistryData);
   const initialError = Boolean(reg.isError) && !hasRegistryData;
   const staleError = Boolean(reg.isError) && hasRegistryData;
   const gc = useGcPlugins();
@@ -122,7 +124,7 @@ export function PluginCatalog({
             className="flex min-h-5 items-center sm:min-w-56"
             data-testid="plugin-count-slot"
           >
-            {reg.isLoading ? (
+            {pendingWithoutData ? (
               <Skeleton as="span" className="block h-4 w-48" />
             ) : initialError ? (
               <span>Unavailable</span>
@@ -196,7 +198,7 @@ export function PluginCatalog({
             name and how many places use it; line 2 where it runs and what it
             is. The hash, size, upload time and delete live in its detail. */}
             <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
-              {reg.isLoading ? (
+              {pendingWithoutData ? (
                 PLUGIN_LOADING_ROWS.map((row) => (
                   <li key={row} className="px-4 py-3" aria-hidden="true">
                     <Skeleton className="h-4 w-40" />
@@ -280,7 +282,7 @@ export function PluginCatalog({
                   </tr>
                 </TableHead>
                 <tbody>
-                  {reg.isLoading ? (
+                  {pendingWithoutData ? (
                     PLUGIN_LOADING_ROWS.map((row) => (
                       <SkeletonRow
                         key={row}

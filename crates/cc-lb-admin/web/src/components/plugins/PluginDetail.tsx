@@ -33,6 +33,8 @@ export function PluginDetail({
 }) {
   const refs = usePluginReferences(plugin.id);
   const hasRefData = refs.data !== undefined;
+  const refsPendingWithoutData =
+    Boolean(refs.isLoading) || (Boolean(refs.isPending) && !hasRefData);
   const initialRefError = Boolean(refs.isError) && !hasRefData;
   const staleRefError = Boolean(refs.isError) && hasRefData;
   const [pendingDelete, setPendingDelete] = useState<{
@@ -53,7 +55,7 @@ export function PluginDetail({
 
           <Section title="Used by">
             <div data-testid="plugin-used-by-slot">
-              {refs.isLoading ? (
+              {refsPendingWithoutData ? (
                 <div className="divide-y divide-row" aria-hidden="true">
                   <div className={USED_BY_ROW}>
                     <Skeleton className="h-4 w-2/3" />
