@@ -19,11 +19,16 @@ const EVIDENCE_ID_BATCH_SIZE: usize = 4_000;
 
 macro_rules! cycle_anchors_sql {
     () => {
+        cycle_anchors_sql!("")
+    };
+    ($cycle_join:literal) => {
         concat!(
             "SELECT cycle_id,
             COALESCE(MIN(cycle_anchor_ms),
                 CASE WHEN COUNT(lead_ms) > 0 THEN GREATEST(0, MIN(request_start_ms)
-                    - MIN(GREATEST(ttl_ms - lead_ms, 1000)) FILTER (WHERE lead_ms IS NOT NULL))
+                    - (ARRAY_AGG(GREATEST(ttl_ms - lead_ms, 1000)
+                        ORDER BY request_start_ms ASC, evidence_id ASC)
+                        FILTER (WHERE lead_ms IS NOT NULL))[1])
                 END) AS cycle_anchor_ms,
             BOOL_AND((prefix_hash IS NOT NULL OR session_key_hash IS NOT NULL)
                 AND prefix_policy_version IS NOT NULL
@@ -31,11 +36,13 @@ macro_rules! cycle_anchors_sql {
      FROM (
          SELECT r.*, ",
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
-            " AS ttl_ms, (COALESCE(s.config_snapshot, d.config_snapshot)::jsonb ->> CASE
+            " AS ttl_ms, (COALESCE(d.config_snapshot,
+                CASE WHEN s.cycle_id = r.cycle_id THEN s.config_snapshot END)::jsonb ->> CASE
             WHEN r.ttl IN ('5m', '30m') THEN 'refresh_lead_time_5m_secs'
             ELSE 'refresh_lead_time_1h_secs' END)::BIGINT * 1000 AS lead_ms
-         FROM cache_keepalive_evidence r
-         LEFT JOIN cache_keepalive_turns t
+         FROM cache_keepalive_evidence r ",
+            $cycle_join,
+            " LEFT JOIN cache_keepalive_turns t
            ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
          LEFT JOIN cache_keepalive_sessions s
            ON s.principal_id = r.principal_id
@@ -775,7 +782,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             let source_ref_ids = &source_ref_ids[start.min(source_ref_ids.len())
                 ..(start + EVIDENCE_ID_BATCH_SIZE).min(source_ref_ids.len())];
             let mut renewal_query = QueryBuilder::<Postgres>::new(
-                "SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
+                "WITH selected_evidence AS (SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
             );
             renewal_query.push_bind(principal_id);
             renewal_query.push(" AND (");
@@ -794,7 +801,19 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 renewal_query.push_bind(source_ref_ids);
                 renewal_query.push(")");
             }
-            renewal_query.push(") ORDER BY request_start_ms ASC, evidence_id ASC");
+            renewal_query.push(
+                ")), selected_cycles AS (\
+                    SELECT DISTINCT cycle_id FROM selected_evidence WHERE cycle_id IS NOT NULL\
+                 ), cycle_anchors AS (",
+            );
+            renewal_query.push(cycle_anchors_sql!(
+                "JOIN selected_cycles selected ON selected.cycle_id = r.cycle_id"
+            ));
+            renewal_query.push(
+                ") SELECT e.*, CASE WHEN e.evidence_kind = 'renewal' THEN a.cycle_anchor_ms END AS resolved_cycle_anchor_ms \
+                 FROM selected_evidence e LEFT JOIN cycle_anchors a ON a.cycle_id = e.cycle_id \
+                 ORDER BY e.request_start_ms ASC, e.evidence_id ASC",
+            );
             let renewal_rows = renewal_query
                 .build()
                 .fetch_all(&self.pool)
@@ -853,7 +872,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         ] {
             for hashes in hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
                 let mut follow_up_query = QueryBuilder::<Postgres>::new(
-                    "SELECT * FROM cache_keepalive_evidence \
+                    "SELECT *, NULL::BIGINT AS resolved_cycle_anchor_ms FROM cache_keepalive_evidence \
                  WHERE principal_id = ",
                 );
                 follow_up_query.push_bind(principal_id);
@@ -1444,7 +1463,7 @@ fn postgres_evidence_from_row(
         event_ref: row.try_get("event_ref").map_err(map_sqlx_error)?,
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
         cycle_anchor_ms: row
-            .try_get::<Option<i64>, _>("cycle_anchor_ms")
+            .try_get::<Option<i64>, _>("resolved_cycle_anchor_ms")
             .map_err(map_sqlx_error)?
             .map(|value| {
                 u64::try_from(value).map_err(|_| StorageError::Corrupted {

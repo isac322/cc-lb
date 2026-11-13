@@ -59,14 +59,17 @@ effective prefix up to a bounded candidate set, positive cache read, and
 request identity. Evidence writes are committed atomically with their
 request-event or renewal projection.
 
-A renewal receives avoided credit at most once, and only when a matching
-follow-up starts after the cycle's natural expiry. The cycle anchor is the
-real request's response-start anchor (`message_start` for streaming);
-`natural_expiry_ms = cycle_anchor_ms + ttl_ms`. The first matching follow-up
-after expiry is credited to the earliest renewal whose TTL window contains it.
-Legacy rows derive the anchor at read time from the first renewal minus
-`(TTL − lead)` from the owning session snapshot; if that is unavailable, the
-cycle is `unknown`. Missing, malformed, or ambiguous evidence is also
+A cycle selects its earliest matching follow-up first. That follow-up earns
+avoided credit only if it starts after the cycle's natural expiry. A later
+post-expiry follow-up never rescues a cycle whose earliest match arrived while
+the original cache was warm. The cycle anchor is the real request's
+response-start anchor (`message_start` for streaming);
+`natural_expiry_ms = cycle_anchor_ms + ttl_ms`. Credit goes to the earliest
+renewal whose TTL window contains the selected follow-up.
+For legacy rows, storage derives the anchor at read time from the first renewal
+minus `max(TTL − lead, 1 s)`. The lead comes from the renewal's decision snapshot,
+or from the session snapshot only when that session still owns the cycle.
+Without an anchor, the cycle is `unknown`. Missing, malformed, or ambiguous evidence is also
 `unknown`, never an inferred zero. Final scheduler caps do not close the
 evidence window.
 

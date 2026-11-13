@@ -4,7 +4,8 @@ mod serialize;
 mod wire;
 
 use crate::cache_keepalive_view::{
-    CacheKeepaliveActivitySource, derive_activity_view,
+    CacheKeepaliveActivitySource, CacheKeepaliveEvidenceIndex, derive_activity_view,
+    derive_activity_view_with_index,
     trigger::{CacheKeepaliveTriggerKind, extract_trigger_descriptor},
 };
 use cc_lb_pricing::PriceCatalog;
@@ -45,6 +46,7 @@ struct LoadedActivity {
 pub(crate) struct CacheKeepaliveActivityBatch {
     turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>>,
     evidence: Vec<CacheKeepaliveEvidenceRecord>,
+    evidence_index: CacheKeepaliveEvidenceIndex,
 }
 
 impl CacheKeepaliveActivityBatch {
@@ -52,6 +54,7 @@ impl CacheKeepaliveActivityBatch {
         turns: Vec<CacheKeepaliveTurnRecord>,
         evidence: Vec<CacheKeepaliveEvidenceRecord>,
     ) -> Self {
+        let evidence_index = CacheKeepaliveEvidenceIndex::new(&evidence, turns.iter());
         let mut turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>> = HashMap::new();
         for turn in turns {
             turns_by_session
@@ -62,7 +65,13 @@ impl CacheKeepaliveActivityBatch {
         Self {
             turns_by_session,
             evidence,
+            evidence_index,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_cycle_count(&self) -> usize {
+        self.evidence_index.cached_cycle_count()
     }
 
     fn turns_for_item(
@@ -415,7 +424,7 @@ pub(crate) fn activity_for_item(
     batch: &CacheKeepaliveActivityBatch,
     horizon_start_ms: Option<u64>,
 ) -> StorageResult<crate::cache_keepalive_view::CacheKeepaliveActivityView> {
-    Ok(derive_activity_view(
+    Ok(derive_activity_view_with_index(
         CacheKeepaliveActivitySource {
             item,
             session,
@@ -425,6 +434,7 @@ pub(crate) fn activity_for_item(
             horizon_start_ms,
         },
         catalog,
+        &batch.evidence_index,
     ))
 }
 

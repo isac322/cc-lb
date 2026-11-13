@@ -17,6 +17,69 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 const SESSION_HASH_BATCH_SIZE: usize = 900;
 const EVIDENCE_ID_BATCH_SIZE: usize = 4_000;
 
+// Both activity evidence and summary economics resolve anchors over the full
+// stored cycle. A later replacement's session snapshot cannot reprice history.
+// Callers supply anchor_scope(principal_id, cycle_id, event_ref, evidence_id).
+macro_rules! cycle_anchors_sql {
+    () => {
+        concat!(
+            "scoped_renewals AS MATERIALIZED (
+                SELECT r.*, a.cycle_id AS cycle_key
+                FROM (SELECT DISTINCT principal_id, cycle_id FROM anchor_scope WHERE cycle_id IS NOT NULL) a
+                CROSS JOIN cache_keepalive_evidence r INDEXED BY idx_cache_keepalive_evidence_cycle_start
+                  ON r.cycle_id = a.cycle_id AND r.principal_id = a.principal_id
+                WHERE r.evidence_kind = 'renewal'
+                UNION ALL
+                SELECT r.*, 'legacy:' || a.event_ref AS cycle_key
+                FROM (SELECT DISTINCT principal_id, event_ref FROM anchor_scope
+                      WHERE cycle_id IS NULL AND event_ref IS NOT NULL) a
+                CROSS JOIN cache_keepalive_evidence r INDEXED BY idx_cache_keepalive_evidence_principal_event_ref
+                  ON r.principal_id = a.principal_id AND r.event_ref = a.event_ref
+                WHERE r.evidence_kind = 'renewal' AND r.cycle_id IS NULL
+                UNION ALL
+                SELECT r.*, 'legacy:' || a.evidence_id AS cycle_key
+                FROM (SELECT DISTINCT principal_id, evidence_id FROM anchor_scope
+                      WHERE cycle_id IS NULL AND event_ref IS NULL) a
+                CROSS JOIN cache_keepalive_evidence r ON r.evidence_id = a.evidence_id
+                WHERE r.principal_id = a.principal_id AND r.evidence_kind = 'renewal' AND r.cycle_id IS NULL
+             ),
+             anchor_inputs AS (
+                SELECT r.principal_id, r.request_start_ms, r.evidence_id, r.cycle_anchor_ms, r.cycle_key,
+                       CASE WHEN json_valid(COALESCE(d.config_snapshot,
+                           CASE WHEN s.cycle_id = r.cycle_id THEN s.config_snapshot END))
+                       THEN MAX(",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            " - 1000 * json_extract(COALESCE(d.config_snapshot,
+                           CASE WHEN s.cycle_id = r.cycle_id THEN s.config_snapshot END),
+                           CASE WHEN r.ttl IN ('5m', '30m') THEN '$.refresh_lead_time_5m_secs'
+                                ELSE '$.refresh_lead_time_1h_secs' END), 1000)
+                       END AS delay_ms
+                FROM scoped_renewals r
+                LEFT JOIN cache_keepalive_turns t
+                  ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
+                LEFT JOIN cache_keepalive_sessions s
+                  ON s.principal_id = r.principal_id
+                 AND s.session_key_hash = COALESCE(r.session_key_hash, t.session_key_hash)
+                LEFT JOIN cache_keepalive_decisions d
+                  ON d.principal_id = r.principal_id AND d.source_ref_id = r.event_ref
+             ),
+             ranked_anchors AS (
+                SELECT principal_id, cycle_key, delay_ms,
+                       MIN(cycle_anchor_ms) OVER (PARTITION BY principal_id, cycle_key) AS stored_anchor_ms,
+                       MIN(request_start_ms) OVER (PARTITION BY principal_id, cycle_key) AS first_start_ms,
+                       ROW_NUMBER() OVER (PARTITION BY principal_id, cycle_key
+                           ORDER BY delay_ms IS NULL, request_start_ms, evidence_id) AS rn
+                FROM anchor_inputs
+             ),
+             cycle_anchors AS MATERIALIZED (
+                SELECT principal_id, cycle_key,
+                       COALESCE(stored_anchor_ms, MAX(0, first_start_ms - delay_ms)) AS anchor_ms
+                FROM ranked_anchors WHERE rn = 1
+             )"
+        )
+    };
+}
+
 // The timestamp distinguishes provisional markers from legacy final cancellations.
 const REQUEST_MARKER_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL)";
 const REQUEST_FRESH_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > CAST(strftime('%s', 'now') AS INTEGER))";
@@ -652,7 +715,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             let source_ref_ids = &source_ref_ids[start.min(source_ref_ids.len())
                 ..(start + EVIDENCE_ID_BATCH_SIZE).min(source_ref_ids.len())];
             let mut renewal_query = QueryBuilder::<Sqlite>::new(
-                "SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
+                "WITH selected_evidence AS MATERIALIZED (SELECT *, COALESCE(cycle_id, 'legacy:' || COALESCE(event_ref, evidence_id)) AS cycle_key FROM cache_keepalive_evidence WHERE principal_id = ",
             );
             renewal_query.push_bind(principal_id);
             renewal_query.push(" AND (");
@@ -677,7 +740,21 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 }
                 separated.push_unseparated(")");
             }
-            renewal_query.push(") ORDER BY request_start_ms ASC, evidence_id ASC");
+            renewal_query.push(
+                ")), anchor_scope AS (
+                SELECT principal_id, cycle_id, event_ref, evidence_id
+                FROM selected_evidence WHERE evidence_kind = 'renewal'
+            ), ",
+            );
+            renewal_query.push(cycle_anchors_sql!());
+            renewal_query.push(
+                " SELECT e.*, CASE WHEN e.evidence_kind = 'renewal'
+                    THEN a.anchor_ms ELSE NULL END AS resolved_cycle_anchor_ms
+                FROM selected_evidence e LEFT JOIN cycle_anchors a
+                  ON a.principal_id = e.principal_id
+                 AND a.cycle_key = e.cycle_key
+                ORDER BY e.request_start_ms ASC, e.evidence_id ASC",
+            );
             let renewal_rows = renewal_query
                 .build()
                 .fetch_all(self.pool())
@@ -736,7 +813,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         ] {
             for hashes in hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
                 let mut follow_up_query = QueryBuilder::<Sqlite>::new(
-                    "SELECT * FROM cache_keepalive_evidence \
+                    "SELECT *, NULL AS resolved_cycle_anchor_ms FROM cache_keepalive_evidence \
                  WHERE principal_id = ",
                 );
                 follow_up_query.push_bind(principal_id);
@@ -939,11 +1016,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                         AND t.ts * 1000 >= p.horizon_start_ms
                   ))
              ),
-             renewals AS (
-                SELECT r.*, COALESCE(r.cycle_id, 'legacy:' || COALESCE(r.event_ref, r.evidence_id)) AS cycle_key,
+             anchor_scope AS (SELECT principal_id, cycle_id, event_ref, evidence_id FROM eligible), ",
+            cycle_anchors_sql!(),
+            ", renewals AS (
+                SELECT r.*,
                        COALESCE(t.cache_read_input_tokens + t.cache_creation_input_tokens,
                                 r.cache_read_input_tokens, 0) AS kept_tokens,
-                       COALESCE(s.config_snapshot, d.config_snapshot) AS config_snapshot,
+                       a.anchor_ms AS resolved_anchor_ms,
                        (p.horizon_start_ms IS NULL OR t.ts * 1000 >= p.horizon_start_ms) AS in_horizon,
                        CASE WHEN s.cycle_id = r.cycle_id AND (s.status = 'active' OR (
                            s.status = 'terminal' AND s.terminal_reason = 'cancelled'
@@ -951,31 +1030,19 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                        )) THEN r.request_start_ms + ",
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
             " END AS open_until_ms
-                FROM cache_keepalive_evidence r
+                FROM scoped_renewals r
                 CROSS JOIN params p
                 LEFT JOIN cache_keepalive_turns t
                   ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
                 LEFT JOIN cache_keepalive_sessions s
                   ON s.principal_id = r.principal_id
                  AND s.session_key_hash = COALESCE(r.session_key_hash, t.session_key_hash)
-                LEFT JOIN cache_keepalive_decisions d
-                  ON d.principal_id = r.principal_id AND d.source_ref_id = r.event_ref
-                WHERE r.evidence_kind = 'renewal'
-                  AND EXISTS (SELECT 1 FROM eligible e WHERE e.principal_id = r.principal_id
-                              AND e.cycle_key = COALESCE(r.cycle_id, 'legacy:' || COALESCE(r.event_ref, r.evidence_id)))
+                JOIN cycle_anchors a ON a.principal_id = r.principal_id AND a.cycle_key = r.cycle_key
              ),
              cycles AS (
                 SELECT principal_id, cycle_key,
                        MAX(open_until_ms) AS open_until_ms,
-                       COALESCE(MIN(cycle_anchor_ms),
-                           MAX(0, MIN(request_start_ms) - MAX(CASE
-                               WHEN json_valid(config_snapshot) THEN ",
-            "MAX(",
-            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("ttl"),
-            " - 1000 * json_extract(config_snapshot, CASE
-                               WHEN ttl IN ('5m', '30m') THEN '$.refresh_lead_time_5m_secs'
-                               ELSE '$.refresh_lead_time_1h_secs' END), 1000)
-                           END))) AS anchor_ms,
+                       MIN(resolved_anchor_ms) AS anchor_ms,
                        MAX(CASE WHEN cycle_id IS NULL
                                OR (prefix_hash IS NULL AND session_key_hash IS NULL)
                                OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL
@@ -1218,7 +1285,7 @@ fn sqlite_evidence_from_row(
         event_ref: row.try_get("event_ref").map_err(map_sqlx_error)?,
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
         cycle_anchor_ms: row
-            .try_get::<Option<i64>, _>("cycle_anchor_ms")
+            .try_get::<Option<i64>, _>("resolved_cycle_anchor_ms")
             .map_err(map_sqlx_error)?
             .map(i64_to_u64_count)
             .transpose()?,

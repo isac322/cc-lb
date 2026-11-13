@@ -349,11 +349,12 @@ lifetime total and do not imply that a session is still active.
 - A valid cycle with no proven follow-up has no avoided credit. It remains
   retained spend and may be shown as pending while its newest renewal window
   is open.
-- Legacy rows without a stored anchor derive it at read time as the first
-  renewal minus `max(TTL − lead, 1 s)`, with the lead from the owning session
-  snapshot or, after the session is purged, the renewal's decision snapshot.
-  This estimate is later than the true anchor by the scheduler delay, so it
-  never overstates savings. Without either snapshot the cycle is unknown.
+- For legacy rows without a stored anchor, storage derives it at read time as
+  the first renewal minus `max(TTL − lead, 1 s)`. The lead comes from the
+  renewal's decision snapshot, or from the session snapshot only when that
+  session still owns the cycle. This estimate is later than the true anchor by
+  the scheduler delay, so it never overstates savings. Without either eligible
+  snapshot the cycle is unknown.
 - Summary-only requests use SQL aggregates over retained turns and evidence.
   They do not load every session, turn, or encrypted snapshot into Rust.
   List/detail requests load only the rows needed for their page or selected
