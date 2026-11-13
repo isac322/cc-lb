@@ -389,8 +389,8 @@ export function CacheKeepaliveSettingsDrawer({
           <h3 className="text-title-section text-text">Renewal</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
             <Field
-              label="Renewal lead time · 5m TTL"
-              hint={`Seconds. Renews ${formatSecs(lead5m)} before the 5m cache expires.`}
+              label="Renewal lead time · 5m / 30m"
+              hint={`Seconds. Renews ${formatSecs(lead5m)} before an Anthropic 5m or OpenAI 30m cache expires.`}
             >
               <input
                 type="number"
@@ -403,8 +403,8 @@ export function CacheKeepaliveSettingsDrawer({
             </Field>
 
             <Field
-              label="Renewal lead time · 1h TTL"
-              hint={`Seconds. Renews ${formatSecs(lead1h)} before the 1h cache expires.`}
+              label="Renewal lead time · 1h / 12h"
+              hint={`Seconds. Renews ${formatSecs(lead1h)} before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.`}
             >
               <input
                 type="number"
