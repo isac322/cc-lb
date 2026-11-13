@@ -206,7 +206,20 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         sqlx::query(
             "UPDATE Jobs
              SET status = 'Killed', done_at = ?1, lock_by = NULL, lock_at = NULL, last_result = ?3
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM Workers
+                             WHERE Workers.id = Jobs.lock_by
+                               AND (?1 - Workers.last_seen) <= ?2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND idempotency_key LIKE ?4
                AND (?1 - lock_at) > ?2",
@@ -256,7 +269,20 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<i64>, i64)>(
             "SELECT id, job_type, lock_by, lock_at, attempts
              FROM Jobs
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM Workers
+                             WHERE Workers.id = Jobs.lock_by
+                               AND (?1 - Workers.last_seen) <= ?2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND COALESCE(idempotency_key, '') NOT LIKE ?3
                AND (?1 - lock_at) > ?2",
@@ -278,7 +304,20 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
                  lock_at = NULL,
                  attempts = attempts + 1,
                  last_result = ?4
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM Workers
+                             WHERE Workers.id = Jobs.lock_by
+                               AND (?1 - Workers.last_seen) <= ?2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND COALESCE(idempotency_key, '') NOT LIKE ?3
                AND (?1 - lock_at) > ?2",
@@ -404,7 +443,20 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         sqlx::query(
             "UPDATE apalis.jobs
              SET status = 'Killed', done_at = $1, lock_by = NULL, lock_at = NULL, last_result = $3::jsonb
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM apalis.workers
+                             WHERE apalis.workers.id = apalis.jobs.lock_by
+                               AND EXTRACT(EPOCH FROM ($1::timestamptz - apalis.workers.last_seen))::BIGINT <= $2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND idempotency_key LIKE $4
                AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",
@@ -456,7 +508,20 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             sqlx::query_as::<_, (String, String, Option<String>, Option<DateTime<Utc>>, i32)>(
                 "SELECT id, job_type, lock_by, lock_at, attempts
              FROM apalis.jobs
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM apalis.workers
+                             WHERE apalis.workers.id = apalis.jobs.lock_by
+                               AND EXTRACT(EPOCH FROM ($1::timestamptz - apalis.workers.last_seen))::BIGINT <= $2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND COALESCE(idempotency_key, '') NOT LIKE $3
                AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",
@@ -478,7 +543,20 @@ impl ApalisHousekeepingJobHandler<Postgres> {
                  lock_at = NULL,
                  attempts = attempts + 1,
                  last_result = $4::jsonb
-             WHERE status IN ('Running', 'Queued')
+             WHERE (
+                 status = 'Running'
+                 OR (
+                     status = 'Queued'
+                     AND (
+                         lock_by IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1 FROM apalis.workers
+                             WHERE apalis.workers.id = apalis.jobs.lock_by
+                               AND EXTRACT(EPOCH FROM ($1::timestamptz - apalis.workers.last_seen))::BIGINT <= $2
+                         )
+                     )
+                 )
+             )
                AND lock_at IS NOT NULL
                AND COALESCE(idempotency_key, '') NOT LIKE $3
                AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",

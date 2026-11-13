@@ -111,8 +111,9 @@ fn build_sqlite_worker(
                 let pool = storage.pool().clone();
                 let persist_layer = OutcomePersistLayer::sqlite(pool, cancel.clone());
                 let persist_drain = persist_layer.clone();
+                let fatal_check = persist_layer.clone();
                 let worker = ApalisWorkerBuilder::new(worker_name)
-                    .backend(storage)
+                    .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
                     .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -124,17 +125,19 @@ fn build_sqlite_worker(
                 worker
                     .run_until(async move {
                         tokio::select! {
-                            () = cancel.cancelled_owned() => {
-                                persist_drain.wait_idle().await;
-                                Ok::<(), WorkerError>(())
-                            }
-                            reason = persist_drain.wait_fatal_abort() => {
-                                persist_drain.wait_idle().await;
-                                Err(WorkerError::BackendError(Box::new(SchedulerError::Job(reason))))
-                            }
+                            () = cancel.cancelled_owned() => {}
+                            _ = persist_drain.wait_fatal_abort() => {}
                         }
+                        persist_drain.wait_idle().await;
+                        Ok::<(), WorkerError>(())
                     })
-                    .await
+                    .await?;
+                if let Some(reason) = fatal_check.fatal_abort_reason() {
+                    return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
+                        reason,
+                    ))));
+                }
+                Ok(())
             })
         }),
     }
@@ -153,8 +156,9 @@ fn build_postgres_worker(
                 let pool = storage.pool().clone();
                 let persist_layer = OutcomePersistLayer::postgres(pool, cancel.clone());
                 let persist_drain = persist_layer.clone();
+                let fatal_check = persist_layer.clone();
                 let worker = ApalisWorkerBuilder::new(worker_name)
-                    .backend(storage)
+                    .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
                     .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -166,17 +170,19 @@ fn build_postgres_worker(
                 worker
                     .run_until(async move {
                         tokio::select! {
-                            () = cancel.cancelled_owned() => {
-                                persist_drain.wait_idle().await;
-                                Ok::<(), WorkerError>(())
-                            }
-                            reason = persist_drain.wait_fatal_abort() => {
-                                persist_drain.wait_idle().await;
-                                Err(WorkerError::BackendError(Box::new(SchedulerError::Job(reason))))
-                            }
+                            () = cancel.cancelled_owned() => {}
+                            _ = persist_drain.wait_fatal_abort() => {}
                         }
+                        persist_drain.wait_idle().await;
+                        Ok::<(), WorkerError>(())
                     })
-                    .await
+                    .await?;
+                if let Some(reason) = fatal_check.fatal_abort_reason() {
+                    return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
+                        reason,
+                    ))));
+                }
+                Ok(())
             })
         }),
     }

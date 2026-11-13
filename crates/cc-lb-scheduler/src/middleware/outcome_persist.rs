@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use apalis_core::backend::{Backend, BackendConfig, WireFormatBackend};
 use apalis_core::error::{AbortError, BoxDynError};
 use apalis_core::task::Task;
+use apalis_core::worker::context::WorkerContext;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
@@ -54,6 +56,15 @@ impl OutcomePersistLayer {
         }
     }
 
+    pub(crate) fn wrap_storage<B>(&self, inner: B) -> DrainableStorage<B> {
+        DrainableStorage {
+            inner,
+            cancel: self.cancel.clone(),
+            fatal_abort: self.fatal_abort.clone(),
+            in_flight_fetch: false,
+        }
+    }
+
     pub(crate) async fn wait_idle(&self) {
         loop {
             let notified = self.idle_notify.notified();
@@ -74,6 +85,19 @@ impl OutcomePersistLayer {
             .clone()
             .unwrap_or_else(|| "scheduler start lease recovery failed".to_owned())
     }
+
+    pub(crate) fn fatal_abort_reason(&self) -> Option<String> {
+        if !self.fatal_abort.is_cancelled() {
+            return None;
+        }
+        Some(
+            self.fatal_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| "scheduler start lease recovery failed".to_owned()),
+        )
+    }
 }
 
 impl<S> Layer<S> for OutcomePersistLayer {
@@ -89,6 +113,81 @@ impl<S> Layer<S> for OutcomePersistLayer {
             fatal_abort: self.fatal_abort.clone(),
             fatal_error: self.fatal_error.clone(),
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DrainableStorage<B> {
+    inner: B,
+    cancel: CancellationToken,
+    fatal_abort: CancellationToken,
+    in_flight_fetch: bool,
+}
+
+impl<B: Backend> Backend for DrainableStorage<B> {
+    type Task = B::Task;
+    type Error = B::Error;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut Context<'_>,
+        worker: &WorkerContext,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx, worker)
+    }
+
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        worker: &WorkerContext,
+    ) -> Poll<Option<Result<Self::Task, Self::Error>>> {
+        let draining = self.cancel.is_cancelled() || self.fatal_abort.is_cancelled();
+        if draining && !self.in_flight_fetch {
+            return Poll::Pending;
+        }
+        match self.inner.poll_next(cx, worker) {
+            Poll::Pending => {
+                self.in_flight_fetch = true;
+                Poll::Pending
+            }
+            Poll::Ready(item) => {
+                self.in_flight_fetch = false;
+                Poll::Ready(item)
+            }
+        }
+    }
+
+    fn poll_close(
+        &mut self,
+        cx: &mut Context<'_>,
+        worker: &WorkerContext,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_close(cx, worker)
+    }
+}
+
+impl<B: BackendConfig> BackendConfig for DrainableStorage<B> {
+    type Args = B::Args;
+    type Id = B::Id;
+    type Kind = B::Kind;
+    type Config = B::Config;
+    type Layer = B::Layer;
+
+    fn config(&self) -> &Self::Config {
+        self.inner.config()
+    }
+
+    fn middleware(&mut self, worker: &mut WorkerContext) -> Self::Layer {
+        self.inner.middleware(worker)
+    }
+}
+
+impl<B: WireFormatBackend> WireFormatBackend for DrainableStorage<B> {
+    type Codec = B::Codec;
+    type Compact = B::Compact;
+
+    fn codec(&self) -> &Self::Codec {
+        self.inner.codec()
     }
 }
 
@@ -155,10 +254,8 @@ where
                     "missing task id or lock owner".to_owned(),
                 )) as BoxDynError);
             };
-            if cancel.is_cancelled() {
-                if let Err(db_err) = pool.release_queued(&task_id, &lock_by, pre_attempt).await {
-                    tracing::warn!(task_id = %task_id, error = %db_err, "scheduler queued lease release failed");
-                }
+            if cancel.is_cancelled() || fatal_abort.is_cancelled() {
+                let _ = pool.release_queued(&task_id, &lock_by, pre_attempt).await;
                 return Ok(JobOutcome::Noop);
             }
             match pool.start(&task_id, &lock_by, pre_attempt).await {
@@ -694,5 +791,102 @@ mod postgres_tests {
             }
         })
         })
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    struct FetchBackend {
+        polls: usize,
+        pending_once: bool,
+    }
+
+    impl Backend for FetchBackend {
+        type Task = ();
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+            _worker: &WorkerContext,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_next(
+            &mut self,
+            cx: &mut Context<'_>,
+            _worker: &WorkerContext,
+        ) -> Poll<Option<Result<Self::Task, Self::Error>>> {
+            self.polls += 1;
+            if std::mem::take(&mut self.pending_once) {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Some(Ok(())))
+            }
+        }
+
+        fn poll_close(
+            &mut self,
+            _cx: &mut Context<'_>,
+            _worker: &WorkerContext,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn drainable_storage_stops_admission_and_completes_only_an_existing_fetch() {
+        for fatal in [false, true] {
+            for pending_once in [false, true] {
+                let cancel = CancellationToken::new();
+                let fatal_abort = CancellationToken::new();
+                let mut storage = DrainableStorage {
+                    inner: FetchBackend {
+                        polls: 0,
+                        pending_once,
+                    },
+                    cancel: cancel.clone(),
+                    fatal_abort: fatal_abort.clone(),
+                    in_flight_fetch: false,
+                };
+                let worker = WorkerContext::from("drain-test");
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                if pending_once {
+                    assert!(storage.poll_next(&mut cx, &worker).is_pending());
+                    assert_eq!(storage.inner.polls, 1);
+                }
+                if fatal {
+                    fatal_abort.cancel();
+                    assert!(
+                        !cancel.is_cancelled(),
+                        "fatal abort must not cancel the supervisor"
+                    );
+                } else {
+                    cancel.cancel();
+                }
+                if pending_once {
+                    assert!(matches!(
+                        storage.poll_next(&mut cx, &worker),
+                        Poll::Ready(Some(Ok(())))
+                    ));
+                    assert_eq!(storage.inner.polls, 2);
+                }
+                let polls_before = storage.inner.polls;
+                assert!(storage.poll_next(&mut cx, &worker).is_pending());
+                assert!(storage.poll_next(&mut cx, &worker).is_pending());
+                assert_eq!(
+                    storage.inner.polls, polls_before,
+                    "draining must never start another fetch"
+                );
+                assert!(matches!(
+                    storage.poll_close(&mut cx, &worker),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+        }
     }
 }

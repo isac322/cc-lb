@@ -153,7 +153,7 @@ Execution happens later on whichever replica's worker claims the row:
 
 - Each job has a 60 s execution timeout (`ENTITY_TIMEOUT`, `SINGLETON_TIMEOUT`).
 - Retries follow the retry classes in `docs/scheduler.md`. `JobOutcome::Retry` durably reschedules the same row as `Pending` at `now + delay`; exhausting its retry class produces `DeadLetter` and a terminal `Killed` row.
-- `ApalisHousekeepingJob` (hourly by default) checks `lock_at` against `APALIS_STALE_LOCK_THRESHOLD_SECS` (120 s). It moves non-keepalive rows stuck in `Running` or `Queued` past that threshold back to `Pending` and increments `attempts` by one, so a job lost to a worker crash runs again after the next housekeeping pass. It marks stale cache keepalive `Running` or `Queued` rows `Killed`.
+- `ApalisHousekeepingJob` (hourly by default) reaps `Running` locks older than `APALIS_STALE_LOCK_THRESHOLD_SECS` (120 s). It reaps `Queued` locks older than 120 s only when the owning worker has no fresh heartbeat within that threshold, preserving prefetched batches buffered on a live worker. It moves eligible non-keepalive rows back to `Pending` and increments `attempts` by one, so a job lost to a worker crash runs again after the next housekeeping pass. It marks eligible cache keepalive rows `Killed`.
 
 Cron ticks are produced by every replica. Duplicate rows for the same tick collide on the unique `(job_type, idempotency_key)` index, so only one job runs per tick.
 

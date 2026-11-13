@@ -258,6 +258,37 @@ mod sqlite {
         ));
         Ok((pool, backend))
     }
+    async fn open_pair(
+        dir: &tempfile::TempDir,
+    ) -> Result<(sqlx::SqlitePool, sqlx::SqlitePool, SchedulerBackend)> {
+        let url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+        let worker_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+            .create_if_missing(true)
+            .busy_timeout(Duration::from_millis(5));
+        let worker_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(worker_options)
+            .await?;
+        apalis_sqlite::SqliteStorage::setup(&worker_pool).await?;
+        cc_lb_scheduler::migrations::apply_post_setup_migrations(&worker_pool).await?;
+        let fault_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+            .busy_timeout(Duration::from_secs(1));
+        let fault_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(fault_options)
+            .await?;
+        let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+            worker_pool.clone(),
+            Arc::new(SystemClock),
+        ));
+        Ok((worker_pool, fault_pool, backend))
+    }
 
     async fn state(pool: &sqlx::SqlitePool, key: &str) -> Result<State> {
         let row = sqlx::query(
@@ -509,38 +540,6 @@ mod sqlite {
     #[tokio::test]
     async fn sqlite_transient_start_write_failure_recovers_lease_and_unrecoverable_escalates()
     -> Result<()> {
-        async fn open_pair(
-            dir: &tempfile::TempDir,
-        ) -> Result<(sqlx::SqlitePool, sqlx::SqlitePool, SchedulerBackend)> {
-            let url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
-            let worker_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
-                .create_if_missing(true)
-                .busy_timeout(Duration::from_millis(5));
-            let worker_pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .min_connections(1)
-                .max_connections(1)
-                .idle_timeout(None)
-                .max_lifetime(None)
-                .connect_with(worker_options)
-                .await?;
-            apalis_sqlite::SqliteStorage::setup(&worker_pool).await?;
-            cc_lb_scheduler::migrations::apply_post_setup_migrations(&worker_pool).await?;
-            let fault_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
-                .busy_timeout(Duration::from_secs(1));
-            let fault_pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .min_connections(1)
-                .max_connections(1)
-                .idle_timeout(None)
-                .max_lifetime(None)
-                .connect_with(fault_options)
-                .await?;
-            let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
-                worker_pool.clone(),
-                Arc::new(SystemClock),
-            ));
-            Ok((worker_pool, fault_pool, backend))
-        }
-
         let first_dir = tempfile::tempdir()?;
         let (worker_pool, fault_pool, backend) = open_pair(&first_dir).await?;
         sqlx::query("CREATE TABLE start_gate (recovered INTEGER)")
@@ -654,6 +653,210 @@ mod sqlite {
         );
         assert_eq!(unrecoverable_calls.load(Ordering::SeqCst), 0);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_fatal_recovery_quiesces_admission_while_active_handler_drains() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (pool, fault_pool, backend) = open_pair(&dir).await?;
+        sqlx::query("CREATE TABLE started_once (n INTEGER)")
+            .execute(&fault_pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_later_starts BEFORE UPDATE OF status ON Jobs
+             WHEN NEW.status = 'Running' AND (SELECT COUNT(*) FROM started_once) >= 1
+             BEGIN SELECT RAISE(ABORT, 'fatal start failure'); END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER record_first_start AFTER UPDATE OF status ON Jobs
+             WHEN NEW.status = 'Running'
+             BEGIN INSERT INTO started_once VALUES (1); END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_recovery BEFORE UPDATE OF status ON Jobs
+             WHEN OLD.status = 'Queued' AND NEW.status = 'Pending'
+               AND OLD.idempotency_key = 'fatal-drain-1'
+             BEGIN SELECT RAISE(ABORT, 'fatal recovery failure'); END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        let mut keys = HashMap::new();
+        for index in 0..8 {
+            let upstream = Uuid::new_v4();
+            let key = format!("fatal-drain-{index}");
+            enqueue(&backend, ADAPTIVE_QUEUE, &key, upstream, None).await?;
+            sqlx::query("UPDATE Jobs SET run_at = ?1 WHERE idempotency_key = ?2")
+                .bind(i64::from(index))
+                .bind(&key)
+                .execute(&fault_pool)
+                .await?;
+            keys.insert(upstream, key);
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let entered = Arc::new(Mutex::new(Some(entered_tx)));
+        let mut ctx = fixed(JobOutcome::Done);
+        ctx.config.entity_concurrency = 2;
+        ctx.adaptive_dispatch = Arc::new(move |job| {
+            let AdaptiveJob::Warmup(job) = job else {
+                unreachable!("warmup batch")
+            };
+            let key = keys[&job.upstream_id].clone();
+            let entered = entered.clone();
+            let calls = observed_calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = entered.lock().expect("entered barrier mutex").take() {
+                    let _ = tx.send(key);
+                }
+                // Keep the first handler in flight past all bounded recovery
+                // attempts (15ms + 45ms), exercising the fatal drain path.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(JobOutcome::Done)
+            })
+        });
+        let worker = build_adaptive_worker(&backend, ctx)?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut handle = tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+        let first_key = timeout(DEADLINE, entered_rx).await??;
+        let joined = timeout(Duration::from_secs(5), &mut handle).await;
+        if joined.is_err() {
+            handle.abort();
+        }
+        let result = joined.context("fatal drain must not hang behind buffered jobs")??;
+        assert!(result.is_err(), "fatal recovery must reach supervision");
+        assert!(
+            !cancel.is_cancelled(),
+            "fatal drain must not cancel its caller"
+        );
+        let first = state(&pool, &first_key).await?;
+        assert_eq!(first.status, "Done");
+        assert_eq!(first.attempts, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Only task 2's recovery is faulted, so close-time cleanup must release
+        // the untouched buffered leases without dispatching their handlers.
+        for index in 2..8 {
+            let key = format!("fatal-drain-{index}");
+            let row = state(&pool, &key).await?;
+            assert_eq!(row.status, "Pending", "{key}: {row:?}");
+            assert!(row.lock_by.is_none(), "{key}: {row:?}");
+            // Apalis poll_close reenqueue_abandoned bumps attempts to 1 on buffered rows,
+            // while unfetched or pre-start released rows remain at 0; none ran handlers.
+            assert!((0..=1).contains(&row.attempts), "{key}: {row:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_housekeeping_preserves_queued_batch_owned_by_live_worker() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (pool, fault_pool, backend) = open_pair(&dir).await?;
+        sqlx::query("CREATE TABLE cache_keepalive_sessions (session_key_hash TEXT PRIMARY KEY, principal_id TEXT, upstream_id TEXT, status TEXT NOT NULL, enqueue_state TEXT NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, terminal_reason TEXT, running_since_unix_secs INTEGER, error TEXT, encrypted_payload BLOB NOT NULL DEFAULT X'')")
+            .execute(&fault_pool).await?;
+        sqlx::query("CREATE TABLE cache_keepalive_evidence (evidence_id TEXT PRIMARY KEY, cycle_id TEXT, evidence_kind TEXT NOT NULL, request_start_ms INTEGER NOT NULL, prefix_hash TEXT, session_key_hash TEXT, prefix_policy_version TEXT, prefix_schema_version TEXT, principal_id TEXT NOT NULL, upstream_id TEXT NOT NULL, model TEXT NOT NULL, ttl TEXT NOT NULL, cache_read_input_tokens INTEGER)")
+            .execute(&fault_pool).await?;
+        sqlx::query("CREATE TABLE meta_v1 (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&fault_pool)
+            .await?;
+        // Distinct due timestamps make the first job deterministic without
+        // relying on the random task IDs as the tie-breaker.
+        for index in 0..3 {
+            let key = format!("job-{index}");
+            enqueue(&backend, ADAPTIVE_QUEUE, &key, Uuid::new_v4(), None).await?;
+            sqlx::query("UPDATE Jobs SET run_at = ?1 WHERE idempotency_key = ?2")
+                .bind(i64::from(index))
+                .bind(&key)
+                .execute(&fault_pool)
+                .await?;
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let entered = Arc::new(Mutex::new(Some(entered_tx)));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handler_release = release.clone();
+        let mut ctx = fixed(JobOutcome::Done);
+        ctx.config.entity_concurrency = 1;
+        ctx.adaptive_dispatch = Arc::new(move |_| {
+            let entered = entered.clone();
+            let release = handler_release.clone();
+            let first = observed_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    if let Some(tx) = entered.lock().expect("entered barrier mutex").take() {
+                        let _ = tx.send(());
+                    }
+                    release.notified().await;
+                }
+                Ok(JobOutcome::Done)
+            })
+        });
+        let workers = Workers::start(&backend, ctx, ADAPTIVE_QUEUE, 1).await?;
+        timeout(DEADLINE, entered_rx).await??;
+        let (owner, last_seen) = timeout(DEADLINE, async {
+            loop {
+                let first = state(&fault_pool, "job-0").await?;
+                let second = state(&fault_pool, "job-1").await?;
+                let third = state(&fault_pool, "job-2").await?;
+                if first.status == "Running"
+                    && second.status == "Queued"
+                    && third.status == "Queued"
+                    && let Some(owner) = first.lock_by
+                    && second.lock_by.as_deref() == Some(owner.as_str())
+                    && third.lock_by.as_deref() == Some(owner.as_str())
+                    && let Some(last_seen) =
+                        sqlx::query_scalar::<_, i64>("SELECT last_seen FROM Workers WHERE id = ?1")
+                            .bind(&owner)
+                            .fetch_optional(&fault_pool)
+                            .await?
+                {
+                    return Ok::<_, anyhow::Error>((owner, last_seen));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("waiting for live worker's prefetched batch")??;
+        sqlx::query("UPDATE Jobs SET lock_at = ?1 WHERE idempotency_key IN ('job-1', 'job-2')")
+            .bind(last_seen - 200)
+            .execute(&fault_pool)
+            .await?;
+        let store = cc_lb_storage_sqlite::SqliteStorage::new(pool.clone(), Arc::new(SystemClock));
+        let result =
+            ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30))
+                .handle(
+                    ApalisHousekeepingJob::default(),
+                    u64::try_from(last_seen + 10)?,
+                    &store,
+                )
+                .await;
+        assert!(
+            matches!(
+                result,
+                ApalisHousekeepingJobResult::Done {
+                    stale_locks_reaped: 0,
+                    ..
+                }
+            ),
+            "{result:?}"
+        );
+        for key in ["job-1", "job-2"] {
+            let row = state(&fault_pool, key).await?;
+            assert_eq!(row.status, "Queued", "{key}: {row:?}");
+            assert_eq!(row.attempts, 0, "{key}: {row:?}");
+            assert_eq!(row.lock_by.as_deref(), Some(owner.as_str()));
+        }
+        release.notify_one();
+        for key in ["job-0", "job-1", "job-2"] {
+            settled(&pool, key, "Done", 1).await?;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        workers.stop().await
     }
 
     #[tokio::test]
