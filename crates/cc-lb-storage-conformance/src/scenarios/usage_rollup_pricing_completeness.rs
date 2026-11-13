@@ -15,6 +15,7 @@ where
 {
     recreated_bucket_backfill(Arc::clone(&backend)).await?;
     pre_upgrade_recreated_bucket_backfill(Arc::clone(&backend)).await?;
+    pre_upgrade_interior_hole_backfill(Arc::clone(&backend)).await?;
     upstream_rename_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     partial_retention_interrupted_prune_backfill(Arc::clone(&backend)).await?;
     mixed_old_and_new_writer_effective_cache_writes(Arc::clone(&backend)).await?;
@@ -315,6 +316,197 @@ where
                     virtual_cost_micros: hour.virtual_cost_micros,
                 }) == Some(PricingCompleteness::Partial)
             );
+            Ok(())
+        }
+        .await;
+        let teardown = fixture.teardown().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
+}
+async fn pre_upgrade_interior_hole_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    for mode in [
+        "pre_upgrade_hole",
+        "intact_control",
+        "durable_marker_control",
+    ] {
+        let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+        let result: Result<()> = async {
+            let storage = fixture.storage();
+            let start = 1_800_003_600;
+            let filler_sql = match backend.kind() {
+                BackendKind::Sqlite => {
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<999) \
+                     INSERT INTO request_events_v1 \
+                     (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,model,input_tokens,list_cost_usd_micros) \
+                     SELECT 'interior-filler-'||i,'interior-filler-'||i,1800000000,1800000000000,200,0,'filler',1,1 FROM n"
+                }
+                BackendKind::Postgres => {
+                    "INSERT INTO request_events_v1 \
+                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+                     SELECT 'interior-filler-'||i,'interior-filler-'||i,to_timestamp(1800000000),1800000000000,200,0,'filler',1,1 \
+                     FROM generate_series(1,999) AS i"
+                }
+            };
+            ensure!(backend.execute_raw_sql(storage.as_ref(), filler_sql).await? == 999);
+
+            let mut older = event("interior-A", start + 350);
+            older.model = Some("interior-target".to_owned());
+            older.cost_usd_micros = Some(0);
+            older.input_tokens = Some(10);
+            ensure!(storage.append_request_event(&older).await? == 1000);
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            ensure!(
+                storage
+                    .query_usage_rollups_in_range(
+                        UsageRollupResolution::Hour,
+                        start,
+                        start + 3600,
+                    )
+                    .await?
+                    .iter()
+                    .any(|row| row.model == "interior-target")
+            );
+
+            storage
+                .prune_usage_rollups_before(start + 360, start + 330, 2000)
+                .await?;
+            ensure!(
+                storage
+                    .query_usage_rollups_in_range(
+                        UsageRollupResolution::Hour,
+                        start,
+                        start + 3600,
+                    )
+                    .await?
+                    .iter()
+                    .all(|row| row.model != "interior-target")
+            );
+            ensure!(
+                storage
+                    .query_usage_rollups_in_range(
+                        UsageRollupResolution::Minute,
+                        start + 300,
+                        start + 360,
+                    )
+                    .await?
+                    .iter()
+                    .all(|row| row.model != "interior-target")
+            );
+            ensure!(
+                storage.current_request_event_cursor().await? == 1000,
+                "the pre-upgrade raw-prune failure must retain cursors 1..=1000"
+            );
+
+            let mut recreated = event("interior-B", start + 340);
+            recreated.model = Some("interior-target".to_owned());
+            recreated.input_tokens = Some(10);
+            ensure!(storage.append_request_event(&recreated).await? == 1001);
+            let mut control = event("interior-C", start - 1);
+            control.model = Some("interior-other".to_owned());
+            control.cost_usd_micros = Some(5);
+            control.input_tokens = Some(10);
+            ensure!(storage.append_request_event(&control).await? == 1002);
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+
+            if mode != "intact_control" {
+                ensure!(
+                    storage
+                        .prune_request_events_before(
+                            (start + 345) * 1000 * 1_000_000,
+                            1000,
+                        )
+                        .await?
+                        == 1000,
+                    "{mode}: raw prune must delete the 999 fillers and B only"
+                );
+            }
+            backend
+                .execute_raw_sql(
+                    storage.as_ref(),
+                    "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0",
+                )
+                .await?;
+            backend
+                .execute_raw_sql(
+                    storage.as_ref(),
+                    "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%'",
+                )
+                .await?;
+            if mode == "pre_upgrade_hole" {
+                backend
+                    .execute_raw_sql(
+                        storage.as_ref(),
+                        "DELETE FROM usage_rollup_checkpoints_v1 WHERE id='request_events_prune_cutoff_unix_secs'",
+                    )
+                    .await?;
+            }
+            storage.rollup_usage_once().await?;
+
+            if mode != "durable_marker_control" {
+                let control_rows = storage
+                    .query_usage_rollups_in_range(
+                        UsageRollupResolution::Minute,
+                        start - 60,
+                        start,
+                    )
+                    .await?;
+                let control_row = control_rows
+                    .iter()
+                    .find(|row| row.model == "interior-other")
+                    .ok_or_else(|| anyhow::anyhow!("missing interior-other control row"))?;
+                ensure!(
+                    (
+                        control_row.request_count,
+                        control_row.priced_event_count,
+                        control_row.unpriced_event_count,
+                        control_row.unmetered_event_count,
+                    ) == (1, 1, 0, 0),
+                    "{mode}: intact suffix row must be priced: {control_row:?}"
+                );
+            }
+
+            for (resolution, bucket_start) in [
+                (UsageRollupResolution::Hour, start),
+                (UsageRollupResolution::Minute, start + 300),
+            ] {
+                let rows = storage
+                    .query_usage_rollups_in_range(
+                        resolution,
+                        bucket_start,
+                        bucket_start + if resolution == UsageRollupResolution::Hour {
+                            3600
+                        } else {
+                            60
+                        },
+                    )
+                    .await?;
+                let row = rows
+                    .iter()
+                    .find(|row| row.model == "interior-target")
+                    .ok_or_else(|| anyhow::anyhow!("missing interior-target {resolution:?} row"))?;
+                let expected = if mode == "intact_control" {
+                    (1, 0, 1, 0)
+                } else {
+                    (1, 0, 0, 0)
+                };
+                ensure!(
+                    (
+                        row.request_count,
+                        row.priced_event_count,
+                        row.unpriced_event_count,
+                        row.unmetered_event_count,
+                    ) == expected,
+                    "{mode}: interior hole classification is unsafe: {row:?}"
+                );
+            }
             Ok(())
         }
         .await;

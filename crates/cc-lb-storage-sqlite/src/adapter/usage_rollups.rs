@@ -53,11 +53,6 @@ struct PhysicalRollupKey {
     model: String,
 }
 
-struct BackfillCandidate {
-    cursor: u64,
-    class: PricingClass,
-}
-
 #[derive(Debug, Default, Clone)]
 struct RollupDelta {
     request_count: u64,
@@ -1116,7 +1111,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     let mut overview_excluded_error_deltas: BTreeMap<(UsageRollupResolution, u64), u64> =
         BTreeMap::new();
     let mut backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
-    let mut pricing_backfill_deltas: BTreeMap<PhysicalRollupKey, Vec<BackfillCandidate>> =
+    let mut pricing_backfill_deltas: BTreeMap<PhysicalRollupKey, Vec<PricingClass>> =
         BTreeMap::new();
 
     for row in &rows {
@@ -1183,23 +1178,18 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
 
     let mut next_pricing_backfill_cursor = current_pricing_backfill_cursor;
     if needs_pricing_backfill_batch {
-        next_pricing_backfill_cursor = if pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize
-        {
-            0
-        } else {
-            let last_id = i64_to_u64(
-                pricing_backfill_rows
-                    .last()
-                    .ok_or_else(|| StorageError::Corrupted {
-                        message: "empty pricing backfill batch reached full batch limit".to_owned(),
-                    })?
-                    .try_get("id")
-                    .map_err(map_sqlx_error)?,
-                "pricing backfill cursor",
-            )?;
-            if last_id <= 1 { 0 } else { last_id }
-        };
+        let mut expected_id = current_pricing_backfill_cursor.saturating_sub(1);
+        let mut hole_seen = false;
         for row in &pricing_backfill_rows {
+            let id = i64_to_u64(
+                row.try_get("id").map_err(map_sqlx_error)?,
+                "request event id",
+            )?;
+            if id != expected_id {
+                hole_seen = true;
+                break;
+            }
+            expected_id = id.saturating_sub(1);
             let table_upstream_id = row
                 .try_get::<Option<String>, _>("upstream_id")
                 .map_err(map_sqlx_error)?
@@ -1219,15 +1209,26 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
                 pricing_backfill_deltas
                     .entry(key)
                     .or_default()
-                    .push(BackfillCandidate {
-                        cursor: i64_to_u64(
-                            row.try_get("id").map_err(map_sqlx_error)?,
-                            "pricing backfill candidate cursor",
-                        )?,
-                        class: PricingClass::from_event(&event),
-                    });
+                    .push(PricingClass::from_event(&event));
             }
         }
+        next_pricing_backfill_cursor = if hole_seen
+            || pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize
+        {
+            0
+        } else {
+            let last_id = i64_to_u64(
+                pricing_backfill_rows
+                    .last()
+                    .ok_or_else(|| StorageError::Corrupted {
+                        message: "empty pricing backfill batch reached full batch limit".to_owned(),
+                    })?
+                    .try_get("id")
+                    .map_err(map_sqlx_error)?,
+                "pricing backfill cursor",
+            )?;
+            if last_id <= 1 { 0 } else { last_id }
+        };
     }
 
     let updated_rollups = u64::try_from(
@@ -1321,20 +1322,6 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         .map_err(map_sqlx_error)?;
     }
     let raw_prune_cutoff = read_named_checkpoint(&mut *tx, RAW_PRUNE_CUTOFF_ID).await?;
-    let min_retained_ts_secs = if needs_pricing_backfill_batch {
-        sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MIN(COALESCE(list_ts_ms / 1000, ts)) FROM request_events_v1 WHERE id <= ?",
-        )
-        .bind(u64_to_i64(
-            target_pricing_backfill_upper,
-            "pricing backfill upper",
-        )?)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?
-    } else {
-        None
-    };
     // Inspect hour membership before this pass consumes child-minute remainders.
     for (key, candidates) in pricing_backfill_deltas.into_iter().rev() {
         let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
@@ -1367,28 +1354,6 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         let selected = &candidates[..candidates
             .len()
             .min(usize::try_from(remaining).unwrap_or(usize::MAX))];
-        if min_retained_ts_secs.is_some_and(|min_ts| (key.bucket_start as i64) < min_ts) {
-            let oldest_selected_cursor = selected.last().expect("nonempty candidate group").cursor;
-            let retained_newer = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM request_events_v1 WHERE id > ? AND id <= ?",
-            )
-            .bind(u64_to_i64(
-                oldest_selected_cursor,
-                "oldest selected cursor",
-            )?)
-            .bind(u64_to_i64(
-                target_pricing_backfill_upper,
-                "pricing backfill upper",
-            )?)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            if i64_to_u64(retained_newer, "retained newer events")?
-                < target_pricing_backfill_upper.saturating_sub(oldest_selected_cursor)
-            {
-                continue;
-            }
-        }
         if key.resolution == UsageRollupResolution::Hour {
             let children = sqlx::query_as::<_, (i64, i64)>(
                 "SELECT bucket_start_unix_secs, request_count - \
@@ -1461,7 +1426,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         }
         let mut delta = RollupDelta::default();
         for candidate in selected {
-            match candidate.class {
+            match candidate {
                 PricingClass::Priced => delta.priced_event_count += 1,
                 PricingClass::Unpriced => delta.unpriced_event_count += 1,
                 PricingClass::Unmetered => delta.unmetered_event_count += 1,

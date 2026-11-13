@@ -379,7 +379,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .await
     .expect("install provider error code column for current writer");
     sqlx::raw_sql(include_str!(
-        "../migrations/0123_usage_rollups_pricing_completeness.sql"
+        "../migrations/0124_usage_rollups_pricing_completeness.sql"
     ))
     .execute(storage.pool())
     .await

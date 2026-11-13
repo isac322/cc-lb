@@ -15,7 +15,7 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
-async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() -> TestResult {
+async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() -> TestResult {
     let Some(fixture) = Fixture::create(166).await? else {
         return Ok(());
     };
@@ -46,17 +46,17 @@ async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() ->
         sqlx::query("LOCK TABLE usage_rollups_v2 IN ACCESS SHARE MODE").execute(&mut *blocker).await?;
         let mut connection = fixture.connect_standalone().await?;
         let started = Instant::now();
-        let blocked = migrator.run_direct(Some(167), &mut connection, false).await;
+        let blocked = migrator.run_direct(Some(168), &mut connection, false).await;
         assert!(blocked.is_err(),"migration must honor its one-second lock_timeout");
         assert!(started.elapsed() < Duration::from_secs(5));
         connection.close().await?;
         blocker.rollback().await?;
         let mut connection = fixture.connect_standalone().await?;
         let started = Instant::now();
-        migrator.run_direct(Some(167), &mut connection, false).await?;
+        migrator.run_direct(Some(168), &mut connection, false).await?;
         assert!(started.elapsed() < Duration::from_secs(15),"metadata migration exceeded startup lock-hold target");
         let started = Instant::now();
-        migrator.run_direct(Some(167), &mut connection, false).await?;
+        migrator.run_direct(Some(168), &mut connection, false).await?;
         assert!(started.elapsed() < Duration::from_secs(2),"already-applied migration should be a fast no-op");
         connection.close().await?;
         assert_eq!(totals(pool).await?,(0,0,0));
@@ -89,7 +89,7 @@ async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() ->
                 assert_eq!((row.priced_event_count,row.unpriced_event_count,row.unmetered_event_count),(0,0,0));
             }
         }
-        let fresh = Fixture::create(167).await?.expect("same PostgreSQL DSN");
+        let fresh = Fixture::create(168).await?.expect("same PostgreSQL DSN");
         let parity = shape(pool).await? == shape(fresh.storage.pool()).await?;
         fresh.drop_schema().await?;
         assert!(parity,"fast/current initialize schema must match incremental migration schema");
@@ -104,7 +104,7 @@ async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() ->
 
 #[tokio::test]
 async fn gemini_normal_and_nested_merges_preserve_pricing_classification() -> TestResult {
-    let Some(fixture) = Fixture::create(167).await? else {
+    let Some(fixture) = Fixture::create(168).await? else {
         return Ok(());
     };
     let result: TestResult = async {
@@ -190,7 +190,7 @@ impl Fixture {
             storage,
         };
         let setup: TestResult = async {
-            if version == 167 {
+            if version == 168 {
                 fixture.storage.initialize().await?;
             } else {
                 let mut connection = fixture.connect_standalone().await?;

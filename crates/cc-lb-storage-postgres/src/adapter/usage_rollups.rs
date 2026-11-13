@@ -22,6 +22,7 @@ const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
 const PRICING_BACKFILL_UPPER_ID: &str = "pricing_completeness_backfill_upper";
 const PRICING_BACKFILL_CURSOR_ID: &str = "pricing_completeness_backfill_cursor";
+const PRICING_BACKFILL_EXPECTED_SEQ_ID: &str = "pricing_completeness_backfill_expected_seq";
 const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
@@ -57,11 +58,6 @@ struct PhysicalRollupKey {
     principal: String,
     upstream_id: Uuid,
     model: String,
-}
-
-struct BackfillCandidate {
-    cursor: u64,
-    class: PricingClass,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1052,29 +1048,64 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    let (pricing_backfill_seq, pricing_backfill_xid) = if pricing_upper_checkpoint.is_some() {
-        pricing_cursor_checkpoint.unwrap_or((0, "0".to_owned()))
+    let (pricing_backfill_seq, pricing_backfill_xid, initial_expected_seq) = if let Some((
+        pricing_upper_seq,
+        pricing_upper_xid,
+    )) =
+        pricing_upper_checkpoint.as_ref()
+    {
+        let (pricing_backfill_seq, pricing_backfill_xid) =
+            pricing_cursor_checkpoint.unwrap_or((0, "0".to_owned()));
+        let expected_checkpoint = sqlx::query_as::<_, (i64, String)>(
+            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id = $1",
+        )
+        .bind(PRICING_BACKFILL_EXPECTED_SEQ_ID)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let expected_seq = expected_checkpoint
+            .map(|(value, _)| value)
+            .unwrap_or_else(|| {
+                if (pricing_backfill_xid.as_str(), pricing_backfill_seq)
+                    == (
+                        pricing_upper_xid.as_str(),
+                        pricing_upper_seq.saturating_add(1),
+                    )
+                {
+                    *pricing_upper_seq
+                } else {
+                    pricing_backfill_seq.saturating_sub(1)
+                }
+            });
+        (pricing_backfill_seq, pricing_backfill_xid, expected_seq)
     } else {
         let (init_seq, init_xid) = if previous_seq > 0 || previous_xid != "0" {
             (previous_seq.saturating_add(1), previous_xid.clone())
         } else {
             (0_i64, "0".to_owned())
         };
+        let expected_seq = if previous_seq > 0 || previous_xid != "0" {
+            previous_seq
+        } else {
+            0
+        };
         sqlx::query(
-            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
-                 VALUES ($1, $2, $3::xid8), ($4, $5, $6::xid8) \
-                 ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(PRICING_BACKFILL_UPPER_ID)
-        .bind(previous_seq)
-        .bind(&previous_xid)
-        .bind(PRICING_BACKFILL_CURSOR_ID)
-        .bind(init_seq)
-        .bind(&init_xid)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        (init_seq, init_xid)
+                "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
+                 VALUES ($1, $2, $3::xid8), ($4, $5, $6::xid8), ($7, $8, '0'::xid8) \
+                 ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, value_xid = EXCLUDED.value_xid",
+            )
+            .bind(PRICING_BACKFILL_UPPER_ID)
+            .bind(previous_seq)
+            .bind(&previous_xid)
+            .bind(PRICING_BACKFILL_CURSOR_ID)
+            .bind(init_seq)
+            .bind(&init_xid)
+            .bind(PRICING_BACKFILL_EXPECTED_SEQ_ID)
+            .bind(expected_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        (init_seq, init_xid, expected_seq)
     };
     let pricing_backfill_has_work = pricing_backfill_seq > 0 || pricing_backfill_xid != "0";
     let (pricing_upper_seq, pricing_upper_xid) =
@@ -1343,7 +1374,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         backfill_cursor_xid = upper_xid.clone();
     }
 
-    let mut pricing_backfill_deltas: BTreeMap<PhysicalRollupKey, Vec<BackfillCandidate>> =
+    let mut pricing_backfill_deltas: BTreeMap<PhysicalRollupKey, Vec<PricingClass>> =
         BTreeMap::new();
     let mut pricing_backfill_cursor_seq = pricing_backfill_seq;
     let mut pricing_backfill_cursor_xid = pricing_backfill_xid.clone();
@@ -1367,7 +1398,36 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     } else {
         Vec::new()
     };
+    let mut expected_seq = initial_expected_seq;
+    let mut hole_seen = false;
     for row in &pricing_backfill_rows {
+        let seq: i64 = row.try_get("seq").map_err(map_sqlx_error)?;
+        if seq == expected_seq {
+            expected_seq = expected_seq.saturating_sub(1);
+        } else if seq < expected_seq {
+            let gap = expected_seq - seq;
+            if gap > 64 {
+                hole_seen = true;
+                break;
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM request_events_v1 \
+                 WHERE seq >= $1 AND seq <= $2 \
+                   AND (tx_id, seq) <= ($3::xid8, $4)",
+            )
+            .bind(seq)
+            .bind(expected_seq)
+            .bind(&pricing_upper_xid)
+            .bind(pricing_upper_seq)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if count < gap.saturating_add(1) {
+                hole_seen = true;
+                break;
+            }
+            expected_seq = seq.saturating_sub(1);
+        }
         let event = RequestEvent {
             ts: i64_to_u64(
                 row.try_get("ts_secs").map_err(map_sqlx_error)?,
@@ -1434,20 +1494,17 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             pricing_backfill_deltas
                 .entry(key)
                 .or_default()
-                .push(BackfillCandidate {
-                    cursor: i64_to_u64(
-                        row.try_get("seq").map_err(map_sqlx_error)?,
-                        "pricing backfill candidate cursor",
-                    )?,
-                    class: PricingClass::from_event(&event),
-                });
+                .push(PricingClass::from_event(&event));
         }
-        pricing_backfill_cursor_seq = row.try_get("seq").map_err(map_sqlx_error)?;
+        pricing_backfill_cursor_seq = seq;
         pricing_backfill_cursor_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
     }
-    if pricing_backfill_has_work && pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize {
+    if pricing_backfill_has_work
+        && (hole_seen || pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize)
+    {
         pricing_backfill_cursor_seq = 0;
         pricing_backfill_cursor_xid = "0".to_owned();
+        expected_seq = 0;
     }
 
     let updated_rollups =
@@ -1524,19 +1581,6 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-    let min_retained_ts_secs = if pricing_backfill_has_work {
-        sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MIN(COALESCE(list_ts_ms / 1000, EXTRACT(EPOCH FROM ts)::bigint)) \
-             FROM request_events_v1 WHERE (tx_id, seq) <= ($1::xid8, $2)",
-        )
-        .bind(&pricing_upper_xid)
-        .bind(pricing_upper_seq)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?
-    } else {
-        None
-    };
     // Inspect hour membership before this pass consumes child-minute remainders.
     for (key, candidates) in pricing_backfill_deltas.into_iter().rev() {
         let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
@@ -1569,24 +1613,6 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         let selected = &candidates[..candidates
             .len()
             .min(usize::try_from(remaining).unwrap_or(usize::MAX))];
-        if min_retained_ts_secs.is_some_and(|min_ts| (key.bucket_start as i64) < min_ts) {
-            let oldest_selected_cursor = u64_to_i64(
-                selected.last().expect("nonempty candidate group").cursor,
-                "oldest selected cursor",
-            )?;
-            let retained_newer = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM request_events_v1 WHERE seq > $1 AND (tx_id, seq) <= ($2::xid8, $3)",
-            )
-            .bind(oldest_selected_cursor)
-            .bind(&pricing_upper_xid)
-            .bind(pricing_upper_seq)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            if retained_newer < pricing_upper_seq.saturating_sub(oldest_selected_cursor) {
-                continue;
-            }
-        }
         if key.resolution == UsageRollupResolution::Hour {
             let children = sqlx::query_as::<_, (i64, i64)>(
                 "SELECT bucket_start_unix_secs, request_count - \
@@ -1654,7 +1680,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         }
         let mut delta = RollupDelta::default();
         for candidate in selected {
-            match candidate.class {
+            match candidate {
                 PricingClass::Priced => delta.priced_event_count += 1,
                 PricingClass::Unpriced => delta.unpriced_event_count += 1,
                 PricingClass::Unmetered => delta.unmetered_event_count += 1,
@@ -1877,6 +1903,15 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .map_err(map_sqlx_error)?;
     }
     if pricing_backfill_has_work {
+        sqlx::query(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, '0'::xid8) \
+              ON CONFLICT (id) DO UPDATE SET value = $2, value_xid = '0'::xid8",
+        )
+        .bind(PRICING_BACKFILL_EXPECTED_SEQ_ID)
+        .bind(expected_seq)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
         sqlx::query(
             "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, $3::xid8) \
               ON CONFLICT (id) DO UPDATE SET value = $2, value_xid = $3::xid8",

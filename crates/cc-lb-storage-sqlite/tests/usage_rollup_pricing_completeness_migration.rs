@@ -30,7 +30,7 @@ async fn upgrade_122_retained_events_backfills_idle_database_resumably_and_cas_s
     ).execute(&mut connection).await.unwrap();
     // The migration itself is metadata-only: idle historical rows remain unclassified until a worker pass.
     migrator
-        .run_direct(Some(123), &mut connection, false)
+        .run_direct(Some(124), &mut connection, false)
         .await
         .unwrap();
     connection.close().await.unwrap();
