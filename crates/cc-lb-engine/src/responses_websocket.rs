@@ -297,6 +297,7 @@ struct Turn {
     charged_bytes: usize,
     usage: Option<UsageCounts>,
     usage_complete: bool,
+    incomplete_reason: Option<Option<String>>,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
     metrics: ResponsesStreamMetrics,
 }
@@ -580,6 +581,7 @@ impl ResponsesWebSocketGateway {
                 charged_bytes: charge,
                 usage: None,
                 usage_complete: false,
+                incomplete_reason: None,
                 plugin_request: None,
                 metrics: ResponsesStreamMetrics::new(),
             },
@@ -751,6 +753,7 @@ impl ResponsesWebSocketGateway {
                 charged_bytes: charge,
                 usage: None,
                 usage_complete: false,
+                incomplete_reason: None,
                 plugin_request: None,
                 metrics: ResponsesStreamMetrics::new(),
             },
@@ -1531,10 +1534,15 @@ impl ResponsesWebSocketGateway {
             ..Default::default()
         };
         if terminal {
-            let failure = transform_error.cloned().or_else(|| {
-                (kind != "response.completed").then(|| native_terminal_error(&value, &lane))
-            });
-            self.finish_turn(turn_id, failure.as_ref());
+            if let Some(error) = transform_error {
+                self.finish_turn(turn_id, Some(error));
+            } else {
+                let (failure, incomplete_reason) = classify_terminal_frame(kind, &value, &lane);
+                if let Some(turn) = self.turns.get_mut(&turn_id) {
+                    turn.incomplete_reason = incomplete_reason;
+                }
+                self.finish_turn(turn_id, failure.as_ref());
+            }
             if let Some(dispatch) = self.next_in_lane(&lane) {
                 result.dispatches.push(dispatch);
             }
@@ -1743,11 +1751,15 @@ impl ResponsesWebSocketGateway {
         record_stream_termination_metric(
             outcome,
             cause,
-            turn.prepared
-                .candidates
-                .first()
-                .map(|candidate| candidate.upstream_name.as_str())
-                .unwrap_or("unknown"),
+            resolve_turn_upstream_label(
+                outcome,
+                turn.upstream_id,
+                &turn.prepared.route_info.upstream_name,
+                turn.prepared
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.upstream_name.as_str()),
+            ),
             Some(&turn.prepared.model),
         );
         record_websocket_terminal_span(
@@ -1776,6 +1788,17 @@ impl ResponsesWebSocketGateway {
                     event_id: observer.event_id().to_owned(),
                     usage: usage_snapshot(usage.clone()),
                     source: UsageSource::NonStreamBody,
+                });
+            }
+            if complete && let Some(incomplete_reason) = turn.incomplete_reason.take() {
+                observer.emit_lifecycle(LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+                    event_id: observer.event_id().to_owned(),
+                    diagnostics: cc_lb_lifecycle::UpstreamStreamDiagnostics {
+                        body_bytes: latency.total_bytes,
+                        warning_type: Some("response.incomplete".to_owned()),
+                        warning_message: incomplete_reason,
+                        ..Default::default()
+                    },
                 });
             }
             observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
@@ -2101,6 +2124,57 @@ fn transform_websocket_event(
     }
 }
 
+fn resolve_turn_upstream_label<'a>(
+    outcome: StreamTerminationOutcome,
+    assigned_upstream_id: Option<Uuid>,
+    routed_name: &'a str,
+    first_candidate_name: Option<&'a str>,
+) -> &'a str {
+    let candidate =
+        if assigned_upstream_id.is_some() || outcome == StreamTerminationOutcome::ClientCancelled {
+            Some(routed_name)
+        } else {
+            first_candidate_name
+        };
+    candidate
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown")
+}
+
+fn extract_incomplete_reason(value: &Value) -> Option<String> {
+    let reason = value
+        .pointer("/response/incomplete_details/reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())?;
+    let redacted = cc_lb_observability::RedactionPolicy::default().redact_text(reason);
+    Some(cc_lb_observability::truncate_reason(&redacted))
+}
+
+fn classify_terminal_frame(
+    kind: &str,
+    value: &Value,
+    lane: &Option<String>,
+) -> (Option<WebSocketError>, Option<Option<String>>) {
+    match kind {
+        "response.completed" => (None, None),
+        "response.incomplete" => {
+            let has_response_error = value
+                .pointer("/response/error")
+                .is_some_and(|error| !error.is_null());
+            if !has_response_error {
+                (None, Some(extract_incomplete_reason(value)))
+            } else {
+                let mut error = native_terminal_error(value, lane);
+                if error.native_code.is_none() {
+                    error = error.with_native_code("response.incomplete".to_owned());
+                }
+                (Some(error), None)
+            }
+        }
+        _ => (Some(native_terminal_error(value, lane)), None),
+    }
+}
+
 fn native_terminal_error(value: &Value, lane: &Option<String>) -> WebSocketError {
     let status = value
         .get("status")
@@ -2344,6 +2418,236 @@ pub(crate) mod tests {
     use tracing::{Event, Level, Subscriber};
     use tracing_subscriber::layer::{Context, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
+
+    #[test]
+    fn resolve_turn_upstream_label_handles_assigned_queued_and_empty_names() {
+        use StreamTerminationOutcome::{ClientCancelled, Completed, ProxyError};
+        for (outcome, assigned, routed, candidate, expected) in [
+            (
+                Completed,
+                Some(Uuid::nil()),
+                "assigned",
+                Some("first"),
+                "assigned",
+            ),
+            (Completed, Some(Uuid::nil()), "reused", None, "reused"),
+            (ProxyError, None, "unassigned", Some("queued"), "queued"),
+            (ProxyError, None, "openai", None, "unknown"),
+            (ClientCancelled, None, "openai", None, "openai"),
+            (ClientCancelled, None, "openai", Some("queued"), "openai"),
+            (ClientCancelled, None, "", None, "unknown"),
+            (ProxyError, None, "unassigned", Some(""), "unknown"),
+            (Completed, Some(Uuid::nil()), "", Some("first"), "unknown"),
+        ] {
+            assert_eq!(
+                resolve_turn_upstream_label(outcome, assigned, routed, candidate),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_terminal_classification_distinguishes_clean_and_error_payloads() {
+        let lane = Some("main".to_owned());
+        for response in [
+            serde_json::json!({"incomplete_details": {"reason": "max_output_tokens"}}),
+            serde_json::json!({"error": null, "incomplete_details": {"reason": "max_output_tokens"}}),
+        ] {
+            let (failure, reason) = classify_terminal_frame(
+                "response.incomplete",
+                &serde_json::json!({"response": response}),
+                &lane,
+            );
+            assert!(failure.is_none());
+            assert_eq!(reason, Some(Some("max_output_tokens".to_owned())));
+        }
+        for (payload, code) in [
+            (
+                serde_json::json!({"code": "provider_code"}),
+                "provider_code",
+            ),
+            (
+                serde_json::json!({"type": "provider_type"}),
+                "provider_type",
+            ),
+            (
+                serde_json::json!({"message": "failed"}),
+                "response.incomplete",
+            ),
+            (serde_json::json!({}), "response.incomplete"),
+            (serde_json::json!("boom"), "response.incomplete"),
+            (serde_json::json!(true), "response.incomplete"),
+            (serde_json::json!(0), "response.incomplete"),
+        ] {
+            let (failure, reason) = classify_terminal_frame(
+                "response.incomplete",
+                &serde_json::json!({"response": {"error": payload}}),
+                &lane,
+            );
+            let failure = failure.expect("every non-null error is a provider failure");
+            assert_eq!(failure.code, "upstream_stream_error");
+            assert_eq!(failure.native_code.as_deref(), Some(code));
+            assert_eq!(reason, None);
+        }
+        let (failure, reason) =
+            classify_terminal_frame("response.completed", &serde_json::json!({}), &lane);
+        assert!(failure.is_none() && reason.is_none());
+        for kind in ["response.failed", "error"] {
+            let (failure, reason) = classify_terminal_frame(kind, &serde_json::json!({}), &lane);
+            assert!(failure.is_some() && reason.is_none());
+        }
+    }
+
+    fn terminal_fixture_gateway(
+        fixture: &DirectAccountingFixture,
+        observer: Option<LifecycleContext>,
+    ) -> ResponsesWebSocketGateway {
+        let mut gateway = ResponsesWebSocketGateway::new(
+            fixture.lifecycle.clone(),
+            &fixture.auth,
+            HeaderMap::new(),
+            16_384,
+            8,
+        );
+        gateway.turns.insert(
+            1,
+            Turn {
+                auth: fixture.auth.clone(),
+                prepared: PreparedWebSocketTurn {
+                    candidates: Vec::new(),
+                    observer,
+                    completion_observer: Arc::new(
+                        crate::completion_observer::CompletionObserver::new(),
+                    ),
+                    prompt_cache_observation_context: None,
+                    reservation: None,
+                    limit_engine: None,
+                    principal_id: DIRECT_PRINCIPAL.to_owned(),
+                    key_id: fixture.record.key_hash_b64.clone(),
+                    model: "gpt-test".to_owned(),
+                    store: false,
+                    span: Span::none(),
+                    route_info: serde_json::from_value(serde_json::json!({
+                        "upstream_id": Uuid::nil(), "upstream_name": "assigned", "model": "gpt-test"
+                    }))
+                    .unwrap(),
+                    request_id: "terminal-fixture".to_owned(),
+                },
+                body: Arc::new(serde_json::json!({})),
+                frame: Bytes::new(),
+                lane: None,
+                connection_id: Some(1),
+                upstream_id: Some(Uuid::nil()),
+                pinned: None,
+                response_id: Some("resp_fixture".to_owned()),
+                previous_response_id: None,
+                steer_parent: None,
+                steer_submissions: 0,
+                accepted_steers: HashSet::new(),
+                controls: VecDeque::new(),
+                sent: true,
+                attempted: true,
+                charged_bytes: 0,
+                usage: None,
+                usage_complete: false,
+                incomplete_reason: None,
+                plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
+            },
+        );
+        gateway.lanes.insert(
+            None,
+            Lane {
+                active: Some(1),
+                ..Default::default()
+            },
+        );
+        gateway
+    }
+
+    #[tokio::test]
+    async fn extract_incomplete_reason_redacts_and_bounds_utf8() {
+        assert_eq!(extract_incomplete_reason(&serde_json::json!({})), None);
+        for reason in [Value::Null, serde_json::json!(""), serde_json::json!(42)] {
+            assert_eq!(
+                extract_incomplete_reason(
+                    &serde_json::json!({"response": {"incomplete_details": {"reason": reason}}})
+                ),
+                None
+            );
+        }
+        let extract = |reason: String| {
+            extract_incomplete_reason(
+                &serde_json::json!({"response": {"incomplete_details": {"reason": reason}}}),
+            )
+            .unwrap()
+        };
+        assert_eq!(extract("a".repeat(600)), "a".repeat(600));
+        let unicode = extract("한".repeat(600));
+        assert!(unicode.len() <= 1024);
+        assert!(unicode.ends_with("...[truncated]"));
+        assert!(std::str::from_utf8(unicode.as_bytes()).is_ok());
+        let secret = "sk-secret-abcdefghijklmnopqrstuvwxyz123456789";
+        let reason = format!("{} Bearer {secret} {}", "x".repeat(990), "z".repeat(200));
+        let sanitized = extract(reason.clone());
+        assert_eq!(
+            sanitized,
+            cc_lb_observability::truncate_reason(
+                &cc_lb_observability::RedactionPolicy::default().redact_text(&reason)
+            )
+        );
+        assert!(!sanitized.contains("sk-secret"));
+        assert!(!sanitized.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(sanitized.len() <= 1024);
+        let fixture = DirectAccountingFixture::new().await;
+        let mut gateway = terminal_fixture_gateway(&fixture, None);
+        let delta = Bytes::from_static(
+            br#"{"type":"response.output_text.delta","delta":"unchanged","response":{"incomplete_details":{"reason":"not terminal"}}}"#
+        );
+        assert!(
+            gateway
+                .observe_provider_message(1, &delta, None)
+                .await
+                .unwrap()
+                .forward
+        );
+        assert_eq!(gateway.turns[&1].incomplete_reason, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_transform_error_overrides_incomplete_completion() {
+        use cc_lb_control::RequestEventBus;
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let observer = LifecycleContext::new("transform-terminal".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
+        let frame = Bytes::from_static(
+            br#"{"type":"response.incomplete","response":{"id":"resp_fixture","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12,"output_tokens":16}}}"#
+        );
+        let error = WebSocketError::new(502, "plugin_transform_error", "transform rejected");
+        gateway
+            .observe_provider_message(1, &frame, Some(&error))
+            .await
+            .unwrap();
+        let mut completions = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. } => {
+                    panic!("transform failure must not emit incomplete-completion diagnostics")
+                }
+                LifecycleEvent::StreamCompleted { result, .. } => {
+                    completions += 1;
+                    assert_eq!(result.unwrap_err().error_type, "plugin_transform_error");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(completions, 1);
+        assert!(gateway.turns.is_empty());
+    }
 
     pub(crate) static DIRECT_PRICING_LOCK: tokio::sync::Mutex<()> =
         tokio::sync::Mutex::const_new(());
@@ -2724,6 +3028,7 @@ pub(crate) mod tests {
                     charged_bytes: 0,
                     usage: Some(usage),
                     usage_complete,
+                    incomplete_reason: None,
                     plugin_request: None,
                     metrics: ResponsesStreamMetrics::new(),
                 },

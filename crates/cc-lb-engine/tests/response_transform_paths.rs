@@ -1012,6 +1012,7 @@ async fn audio_json_response_preserves_the_ordinary_buffered_path() {
 }
 
 async fn non_json_response_relays_first_chunk_before_upstream_eof() {
+    let mut cases = Vec::new();
     for content_type in [
         Some("audio/mpeg"),
         Some("application/octet-stream"),
@@ -1020,18 +1021,36 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
         None,
     ] {
         for path in ["/v1/audio/speech", "/v1/audio/transcriptions"] {
+            cases.push((path, content_type));
+        }
+    }
+    cases.extend([
+        ("/v1/responses", Some("application/octet-stream")),
+        ("/v1/messages", Some("application/octet-stream")),
+    ]);
+    for (path, content_type) in cases {
+        for with_hooks in [false, true] {
+            let buffered = Arc::new(UnchangedBufferedTransform::default());
+            let sse = Arc::new(UnchangedSseTransform::default());
             let release = Arc::new(tokio::sync::Notify::new());
-            let lifecycle = lifecycle_with_record(
-                None,
+            let record = if path == "/v1/messages" {
+                default_upstream_record()
+            } else {
+                upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/")
+            };
+            let lifecycle = lifecycle_with_record_and_config(
+                with_hooks.then(|| buffered.clone() as Arc<dyn ResponseTransformHook>),
+                with_hooks.then(|| sse.clone() as Arc<dyn SseEventTransformHook>),
                 Arc::new(BinaryFirstChunkThenGatedDispatch {
                     content_type,
                     release: release.clone(),
                 }),
-                upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+                LifecycleConfig::default(),
+                record,
             );
             let response = tokio::time::timeout(
-                Duration::from_secs(1),
-                handle_authenticated(&lifecycle, openai_audio_request(path)),
+                Duration::from_secs(2),
+                handle_authenticated(&lifecycle, binary_response_request(path)),
             )
             .await
             .expect("binary response headers do not await upstream EOF")
@@ -1041,8 +1060,9 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
                 response.headers().get(CONTENT_TYPE),
                 content_type.map(HeaderValue::from_static).as_ref(),
             );
+            assert!(response.headers().get(CONTENT_LENGTH).is_none());
             let mut body = response.into_body();
-            let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            let first = tokio::time::timeout(Duration::from_secs(2), body.frame())
                 .await
                 .expect("first binary chunk does not await upstream EOF")
                 .expect("first binary frame exists")
@@ -1050,21 +1070,25 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
                 .into_data()
                 .expect("first binary frame is data");
             assert_eq!(first, Bytes::from_static(b"\xfffirst-chunk"));
+            assert!(buffered.seen_bodies().is_empty());
+            assert!(sse.seen_events().is_empty());
 
             release.notify_one();
-            let rest = body
-                .collect()
+            let rest = tokio::time::timeout(Duration::from_secs(2), body.collect())
                 .await
+                .expect("released binary stream finishes")
                 .expect("remaining binary body collects");
             assert_eq!(rest.to_bytes(), Bytes::from_static(b"\x00last-chunk"));
+            assert!(buffered.seen_bodies().is_empty());
+            assert!(sse.seen_events().is_empty());
         }
     }
 }
 
-async fn non_json_buffered_transform_is_bounded_without_truncating_body() {
+async fn non_json_streaming_responses_relay_uncapped_with_buffered_hook() {
     for content_type in ["audio/mpeg", "application/octet-stream", "image/png"] {
         for (path, cap) in [("/v1/audio/speech", 128), ("/v1/audio/transcriptions", 192)] {
-            for body_len in [cap, cap + 1] {
+            for body_len in [cap, cap + 1, cap * 4] {
                 let transform = Arc::new(UnchangedBufferedTransform::default());
                 let body = Bytes::from(vec![0xff; body_len]);
                 let mut headers = HeaderMap::new();
@@ -1086,27 +1110,485 @@ async fn non_json_buffered_transform_is_bounded_without_truncating_body() {
                 );
                 let response = handle_authenticated(&lifecycle, openai_audio_request(path))
                     .await
-                    .expect("lifecycle handles bounded binary transform");
-                let (status, headers, received) = collect_body(response).await;
+                    .expect("lifecycle relays uncapped binary response");
+                let (status, _headers, received) = collect_body(response).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(received, body);
+                assert!(transform.seen_bodies().is_empty());
+            }
+        }
+    }
+}
 
-                if body_len == cap {
-                    assert_eq!(status, StatusCode::OK);
-                    assert_eq!(received, body);
-                    assert_eq!(transform.seen_bodies(), vec![body]);
-                } else {
-                    assert_eq!(status, StatusCode::BAD_GATEWAY);
-                    assert!(transform.seen_bodies().is_empty());
-                    assert_eq!(
-                        headers.get(CONTENT_TYPE),
-                        Some(&HeaderValue::from_static("application/json; charset=utf-8")),
-                    );
-                    assert!(
-                        String::from_utf8_lossy(&received)
-                            .contains("upstream response body could not be read"),
-                    );
+async fn large_binary_stream_exceeding_sse_parse_budget_relays_cleanly_with_hook()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "large-binary-relay.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let buffered = Arc::new(UnchangedBufferedTransform::default());
+    let sse = Arc::new(UnchangedSseTransform::default());
+    let body = Bytes::from(vec![0xff; 2048]);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let lifecycle = lifecycle_with_transforms_and_config(
+        Some(buffered.clone()),
+        Some(sse.clone()),
+        Arc::new(ChunkedDispatch {
+            status: StatusCode::OK,
+            headers,
+            chunks: body.chunks(16).map(Bytes::copy_from_slice).collect(),
+        }),
+        LifecycleConfig {
+            messages_body_cap_bytes: 128,
+            ..LifecycleConfig::default()
+        },
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response =
+        handle_authenticated(&lifecycle, binary_response_request("/v1/messages")).await?;
+    let (status, _headers, received) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(received, body);
+    assert!(buffered.seen_bodies().is_empty());
+    assert!(sse.seen_events().is_empty());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(update) = updates.recv().await {
+            if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("final request event published");
+    let events = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].error_code, None);
+    Ok(())
+}
+
+async fn chunked_and_compressed_json_responses_run_buffered_transform() {
+    let decoded_json = buffered_upstream_body();
+    for content_type in [
+        "application/json",
+        "application/problem+json; charset=utf-8",
+        "application/vnd.api+json",
+    ] {
+        for path in ["/v1/messages", "/v1/audio/speech"] {
+            for stream in [false, true] {
+                for compressed in [false, true] {
+                    for replace in [false, true] {
+                        let unchanged = Arc::new(UnchangedBufferedTransform::default());
+                        let replacing = Arc::new(BufferedToolNameTransform::default());
+                        let hook: Arc<dyn ResponseTransformHook> = if replace {
+                            replacing.clone()
+                        } else {
+                            unchanged.clone()
+                        };
+                        let wire_body = if compressed {
+                            gzip_bytes(&decoded_json)
+                        } else {
+                            decoded_json.clone()
+                        };
+                        let mut headers = HeaderMap::new();
+                        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+                        if compressed {
+                            headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                        }
+                        let record = if path == "/v1/messages" {
+                            default_upstream_record()
+                        } else {
+                            upstream_record(
+                                StorageUpstreamKind::OpenaiApiKey,
+                                "https://api.openai.com/",
+                            )
+                        };
+                        let lifecycle = lifecycle_with_record_and_config(
+                            Some(hook),
+                            None,
+                            Arc::new(ChunkedDispatch {
+                                status: StatusCode::OK,
+                                headers,
+                                chunks: vec![wire_body.slice(..7), wire_body.slice(7..)],
+                            }),
+                            LifecycleConfig::default(),
+                            record,
+                        );
+                        let mut request = binary_response_request(path);
+                        *request.body_mut() = Bytes::from(format!(
+                            r#"{{"model":"claude-test","messages":[],"input":"hello","voice":"alloy","stream":{stream}}}"#,
+                        ));
+                        let response = handle_authenticated(&lifecycle, request)
+                            .await
+                            .expect("semantic JSON response transforms");
+                        let (status, headers, received) = collect_body(response).await;
+                        assert_eq!(status, StatusCode::OK);
+                        if replace {
+                            assert_eq!(
+                                received,
+                                replace_bytes(
+                                    &decoded_json,
+                                    br#""name":"Bash""#,
+                                    br#""name":"bash""#
+                                ),
+                            );
+                            assert_eq!(replacing.seen_bodies(), vec![decoded_json.clone()]);
+                            assert_eq!(
+                                headers.get(CONTENT_LENGTH),
+                                Some(&HeaderValue::from_str(&received.len().to_string()).unwrap()),
+                            );
+                            assert_eq!(
+                                headers.get("x-plugin-header"),
+                                Some(&HeaderValue::from_static("kept")),
+                            );
+                            assert!(headers.get(CONTENT_ENCODING).is_none());
+                        } else {
+                            assert_eq!(received, wire_body);
+                            assert_eq!(unchanged.seen_bodies(), vec![decoded_json.clone()]);
+                            assert_eq!(
+                                headers.get(CONTENT_ENCODING),
+                                compressed
+                                    .then(|| HeaderValue::from_static("gzip"))
+                                    .as_ref(),
+                            );
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+async fn non_stream_non_json_skips_buffered_transform_and_preserves_body() {
+    for (content_type, upstream_status) in [
+        (Some("text/plain"), StatusCode::BAD_GATEWAY),
+        (None, StatusCode::OK),
+    ] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let body = Bytes::from_static(b"gateway returned a non-JSON response");
+        let mut headers = HeaderMap::new();
+        if let Some(content_type) = content_type {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        }
+        let lifecycle = lifecycle_with_transforms(
+            Some(transform.clone()),
+            None,
+            Arc::new(ChunkedDispatch {
+                status: upstream_status,
+                headers,
+                chunks: vec![body.slice(..9), body.slice(9..)],
+            }),
+        );
+        let response = handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[],"stream":false}"#,
+            )),
+        )
+        .await
+        .expect("non-stream non-JSON response succeeds");
+        let (status, headers, received) = collect_body(response).await;
+        assert_eq!(status, upstream_status);
+        assert_eq!(received, body);
+        assert_eq!(
+            headers.get(CONTENT_TYPE),
+            content_type.map(HeaderValue::from_static).as_ref(),
+        );
+        assert!(transform.seen_bodies().is_empty());
+    }
+}
+
+async fn non_json_relay_with_hook_matches_control_headers_and_accounting()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = Bytes::from_static(b"\xffbinary-response\x00tail");
+    let mut control_headers = None;
+    for with_hook in [false, true] {
+        let storage = Arc::new(
+            sqlite_storage(
+                &dir,
+                if with_hook {
+                    "hook.sqlite"
+                } else {
+                    "control.sqlite"
+                },
+            )
+            .await?,
+        );
+        let test_bus =
+            TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+        let mut updates = test_bus.bus.subscribe();
+        let mut events_rx = test_bus.bus.subscribe_lifecycle();
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let mut headers = with_upstream_unified_headers(HeaderMap::new());
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert("connection", HeaderValue::from_static("x-hop, keep-alive"));
+        headers.insert("x-hop", HeaderValue::from_static("remove"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("x-safe", HeaderValue::from_static("preserve"));
+        let lifecycle = lifecycle_with_transforms(
+            with_hook.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
+            None,
+            Arc::new(ChunkedDispatch {
+                status: StatusCode::OK,
+                headers,
+                chunks: vec![body.slice(..7), body.slice(7..)],
+            }),
+        )
+        .with_event_bus(test_bus.bus_arc());
+        let response =
+            handle_authenticated(&lifecycle, binary_response_request("/v1/messages")).await?;
+        let (status, headers, received) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(received, body);
+        assert!(headers.get(CONTENT_LENGTH).is_none());
+        for name in ["connection", "x-hop", "keep-alive"] {
+            assert!(headers.get(name).is_none(), "{name}");
+        }
+        assert_eq!(
+            headers.get("x-safe"),
+            Some(&HeaderValue::from_static("preserve"))
+        );
+        assert_client_rate_limit_headers(&headers, true);
+        // Request attribution is intentionally unique per request.
+        let mut comparable_headers = headers;
+        comparable_headers.remove("x-cc-lb-request-id");
+        comparable_headers.remove("x-request-id");
+        if let Some(control) = &control_headers {
+            assert_eq!(&comparable_headers, control);
+        } else {
+            control_headers = Some(comparable_headers);
+        }
+        assert!(transform.seen_bodies().is_empty());
+        let success = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let LifecycleEvent::StreamCompleted { result, .. } =
+                    events_rx.recv().await.unwrap()
+                {
+                    break result.expect("binary relay completes successfully");
+                }
+            }
+        })
+        .await
+        .expect("stream completion is published");
+        assert_eq!(success.body_bytes, Some(body.len() as u64));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Ok(update) = updates.recv().await {
+                if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("final request event published");
+        let events = common::stored_request_events(storage.as_ref()).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, 200);
+        assert_eq!(events[0].error_code, None);
+    }
+    Ok(())
+}
+
+async fn relayed_binary_downstream_drop_with_hook_cancels_upstream_stream() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let transform = Arc::new(UnchangedBufferedTransform::default());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let lifecycle = lifecycle_with_transforms(
+        Some(transform.clone()),
+        None,
+        Arc::new(GatedBodyDispatch {
+            headers,
+            first: Bytes::from_static(b"\xfffirst-chunk"),
+            last: Bytes::from_static(b"\x00last-chunk"),
+            waiting: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            dropped: dropped.clone(),
+        }),
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_authenticated(&lifecycle, binary_response_request("/v1/messages")),
+    )
+    .await
+    .expect("binary response does not buffer")
+    .expect("binary response succeeds");
+    let mut downstream = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(2), downstream.frame())
+        .await
+        .expect("first chunk arrives")
+        .expect("first frame exists")
+        .expect("first frame succeeds")
+        .into_data()
+        .expect("data frame");
+    assert_eq!(frame, Bytes::from_static(b"\xfffirst-chunk"));
+    drop(downstream);
+    tokio::time::timeout(Duration::from_secs(2), dropped.notified())
+        .await
+        .expect("downstream cancellation promptly drops upstream stream");
+    assert!(transform.seen_bodies().is_empty());
+    let cancelled: u64 = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, _, _, _)| {
+            key.key().name() == "cc_lb_stream_terminations_total"
+                && key
+                    .key()
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == "client_cancelled")
+        })
+        .map(|(_, _, _, value)| match value {
+            metrics_util::debugging::DebugValue::Counter(value) => value,
+            _ => panic!("stream termination metric is a counter"),
+        })
+        .sum();
+    assert_eq!(cancelled, 1);
+}
+
+async fn streamed_non_json_error_with_hook_relays_and_scrubs_stored_secret()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SECRET: &str = "sk-ant-initial";
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "binary-error-secret.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let transform = Arc::new(UnchangedBufferedTransform::default());
+    let body = Bytes::from(format!(
+        "gateway rejected credential {SECRET}; please retry"
+    ));
+    let split = body
+        .windows(SECRET.len())
+        .position(|bytes| bytes == SECRET.as_bytes())
+        .unwrap()
+        + 5;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    let lifecycle = lifecycle_with_options_and_keepalive(
+        Some(transform.clone()),
+        None,
+        Arc::new(ChunkedDispatch {
+            status: StatusCode::BAD_GATEWAY,
+            headers,
+            chunks: vec![body.slice(..split), body.slice(split..)],
+        }),
+        LifecycleConfig::default(),
+        default_upstream_record(),
+        true,
+        Vec::new(),
+        None,
+        Some(SECRET),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response =
+        handle_authenticated(&lifecycle, binary_response_request("/v1/messages")).await?;
+    let (status, _headers, received) = collect_body(response).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(received, body);
+    assert!(transform.seen_bodies().is_empty());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(update) = updates.recv().await {
+            if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("final request event published");
+    let events = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].error_code.as_deref(), Some("upstream_5xx"));
+    let message = events[0]
+        .upstream_error_message
+        .as_deref()
+        .expect("stored upstream error");
+    assert!(!message.contains(SECRET));
+    assert!(message.contains("gateway rejected credential"));
+    Ok(())
+}
+
+async fn gemini_cached_contents_create_stays_buffered_with_hook() {
+    let body = Bytes::from_static(
+        br#"{"name":"cachedContents/test-cache","expireTime":"2100-01-01T00:00:00Z"}"#,
+    );
+    for content_type in ["application/json", "application/octet-stream"] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        let lifecycle = lifecycle_with_record(
+            Some(transform.clone()),
+            Arc::new(GatedBodyDispatch {
+                headers,
+                first: body.slice(..15),
+                last: body.slice(15..),
+                waiting: waiting.clone(),
+                release: release.clone(),
+                dropped: Arc::new(tokio::sync::Notify::new()),
+            }),
+            upstream_record(
+                StorageUpstreamKind::GeminiApiKey,
+                "https://generativelanguage.googleapis.com/",
+            ),
+        )
+        .with_upstream_affinity_store(Arc::new(
+            crate::upstream_affinity::MemoryAffinityStore::default(),
+        ));
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1beta/cachedContents")
+            .header("x-api-key", common::managed_api_key())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","contents":[],"stream":true}"#,
+            ))
+            .expect("cached contents request");
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Gemini));
+        let pending = handle_authenticated(&lifecycle, request);
+        tokio::pin!(pending);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                biased;
+                result = &mut pending => panic!("cached creation returned before upstream EOF: {result:?}"),
+                () = waiting.notified() => {}
+            }
+        })
+        .await
+        .expect("cached creation polls the upstream body");
+        assert!(transform.seen_bodies().is_empty());
+        release.notify_one();
+        let response = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("cached creation finishes after EOF")
+            .expect("cached creation succeeds");
+        let (status, _headers, received) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(received, body);
+        assert_eq!(
+            transform.seen_bodies(),
+            if content_type == "application/json" {
+                vec![body.clone()]
+            } else {
+                vec![]
+            },
+        );
     }
 }
 
@@ -3773,6 +4255,30 @@ async fn handle_authenticated(
     lifecycle.handle(request, &auth).await
 }
 
+fn binary_response_request(path: &str) -> http::Request<Bytes> {
+    if path.starts_with("/v1/audio/") {
+        return openai_audio_request(path);
+    }
+    if path == "/v1/messages" {
+        return messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        ));
+    }
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-api-key", common::managed_api_key())
+        .header(CONTENT_TYPE, "application/json")
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+        ))
+        .expect("OpenAI Responses request builds");
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+    request
+}
+
 fn openai_audio_request(path: &str) -> http::Request<Bytes> {
     let (content_type, body) = if path == "/v1/audio/transcriptions" {
         (
@@ -3877,6 +4383,7 @@ fn lifecycle_with_record_config_and_keepalive(
         true,
         Vec::new(),
         cache_keepalive,
+        None,
     )
 }
 
@@ -3898,6 +4405,7 @@ fn lifecycle_with_options(
         refresh_allowed,
         limits,
         None,
+        None,
     )
 }
 
@@ -3911,6 +4419,7 @@ fn lifecycle_with_options_and_keepalive(
     refresh_allowed: bool,
     limits: Vec<cc_lb_storage_api::principal::Limit>,
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    signer_secret: Option<&'static str>,
 ) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
@@ -3947,8 +4456,20 @@ fn lifecycle_with_options_and_keepalive(
         Arc::new(PrincipalView::from_db(&[principal], chains)),
     );
     authn.refresh_allowed = refresh_allowed;
+    let signer_factory: Arc<dyn cc_lb_upstream::ApiKeyAwareSignerFactory> =
+        if let Some(secret) = signer_secret {
+            Arc::new(ScrubbingSignerFactory {
+                inner: cc_lb_upstream::ApiKeyAwareSignerFactory::with_router_choice(
+                    &authn,
+                    record.name.clone(),
+                ),
+                secret,
+            })
+        } else {
+            Arc::new(authn.clone())
+        };
     let view = DynamicViewBuilder::new(0)
-        .signer_factory(Arc::new(authn.clone()))
+        .signer_factory(signer_factory)
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![record])
         .build();
@@ -3959,6 +4480,64 @@ fn lifecycle_with_options_and_keepalive(
         config,
         Arc::new(cc_lb_clock::SystemClock),
     )
+}
+
+struct ScrubbingSignerFactory {
+    inner: Arc<dyn cc_lb_upstream::SignerFactory>,
+    secret: &'static str,
+}
+
+impl cc_lb_upstream::ApiKeyAwareSignerFactory for ScrubbingSignerFactory {
+    fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+        Arc::new(Self {
+            inner: self.inner.clone(),
+            secret: self.secret,
+        })
+    }
+}
+
+#[async_trait]
+impl cc_lb_upstream::SignerFactory for ScrubbingSignerFactory {
+    async fn build(
+        &self,
+        upstream: &Upstream,
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Ok(Arc::new(ScrubbingSigner {
+            inner: self.inner.build(upstream).await?,
+            secret: self.secret,
+        }))
+    }
+}
+
+struct ScrubbingSigner {
+    inner: Arc<dyn cc_lb_upstream::Signer>,
+    secret: &'static str,
+}
+
+#[async_trait]
+impl cc_lb_upstream::Signer for ScrubbingSigner {
+    async fn sign(
+        &self,
+        shaped: ShapedRequest,
+        capability: &mut cc_lb_upstream::SigningCapability,
+    ) -> Result<SignedRequest, cc_lb_upstream::SignerError> {
+        self.inner.sign(shaped, capability).await
+    }
+
+    async fn on_unauthorized(
+        &self,
+        error: &cc_lb_upstream::UpstreamError,
+    ) -> cc_lb_upstream::RetryDecision {
+        self.inner.on_unauthorized(error).await
+    }
+
+    fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if text.contains(self.secret) {
+            std::borrow::Cow::Owned(text.replace(self.secret, "[REDACTED]"))
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        }
+    }
 }
 
 fn with_test_limit_subject(lifecycle: Lifecycle) -> Lifecycle {
@@ -4091,6 +4670,44 @@ impl UpstreamDispatch for BinaryFirstChunkThenGatedDispatch {
                 .headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
         }
+        Ok(response)
+    }
+}
+
+struct GatedBodyDispatch {
+    headers: HeaderMap,
+    first: Bytes,
+    last: Bytes,
+    waiting: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+}
+
+struct NotifyBodyDropped(Arc<tokio::sync::Notify>);
+
+impl Drop for NotifyBodyDropped {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for GatedBodyDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let first = self.first.clone();
+        let last = self.last.clone();
+        let waiting = self.waiting.clone();
+        let release = self.release.clone();
+        let dropped = self.dropped.clone();
+        let stream = async_stream::stream! {
+            let _drop_guard = NotifyBodyDropped(dropped);
+            yield Ok::<Bytes, std::convert::Infallible>(first);
+            waiting.notify_one();
+            release.notified().await;
+            yield Ok::<Bytes, std::convert::Infallible>(last);
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.headers_mut() = self.headers.clone();
         Ok(response)
     }
 }
@@ -4901,7 +5518,7 @@ async fn response_transform_paths_suite_part_1() {
     ingress_cap_does_not_limit_existing_response_paths().await;
     audio_json_response_preserves_the_ordinary_buffered_path().await;
     non_json_response_relays_first_chunk_before_upstream_eof().await;
-    non_json_buffered_transform_is_bounded_without_truncating_body().await;
+    non_json_streaming_responses_relay_uncapped_with_buffered_hook().await;
     genuine_sse_uses_event_hook_without_waiting_for_body_eof().await;
     buffered_unchanged_preserves_compressed_upstream_bytes().await;
 }
@@ -5040,4 +5657,21 @@ async fn response_transform_paths_suite_part_4() {
     sse_explicitly_dropped_question_is_not_renewed().await;
     sse_multi_event_question_is_user_turn_without_keepalive_enqueue().await;
     failed_open_question_transform_preserves_original_body_and_usage().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_transform_paths_suite_part_5() {
+    large_binary_stream_exceeding_sse_parse_budget_relays_cleanly_with_hook()
+        .await
+        .unwrap();
+    chunked_and_compressed_json_responses_run_buffered_transform().await;
+    non_stream_non_json_skips_buffered_transform_and_preserves_body().await;
+    non_json_relay_with_hook_matches_control_headers_and_accounting()
+        .await
+        .unwrap();
+    relayed_binary_downstream_drop_with_hook_cancels_upstream_stream().await;
+    streamed_non_json_error_with_hook_relays_and_scrubs_stored_secret()
+        .await
+        .unwrap();
+    gemini_cached_contents_create_stays_buffered_with_hook().await;
 }

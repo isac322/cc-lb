@@ -186,6 +186,18 @@ usage, the reservation is refunded once; `null` or an empty usage object alone
 does not count as measured usage. Existing request and trace identifiers
 correlate turn events without new database fields.
 
+On `/v1/responses` WebSocket turns, a clean provider `response.incomplete` event
+with an absent or `null` `response.error` completes the turn with
+`outcome="completed"` and reconciles observed usage as complete, recording any
+non-empty, redacted, bounded `incomplete_details.reason` under
+`upstream_stream_warning_type="response.incomplete"` and
+`upstream_stream_warning_message`. Explicit non-null `response.error` objects
+and `response.failed` frames carrying `response.error.code` or
+`response.error.type` remain upstream provider errors.
+`cc_lb_stream_terminations_total` attributes turns to their assigned upstream
+name, using `"unknown"` only when a dispatched turn fails before upstream
+assignment.
+
 ### Generation usage accounting
 
 Gemini GenerateContent's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
