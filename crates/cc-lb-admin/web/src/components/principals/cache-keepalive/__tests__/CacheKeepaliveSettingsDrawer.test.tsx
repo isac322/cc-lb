@@ -108,11 +108,27 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
 
     expect(screen.getAllByText('Cache keepalive enabled')[0]).toBeDefined();
-    expect(screen.getAllByText('Renewal lead time · 5m TTL')[0]).toBeDefined();
+    const shortLead = screen.getByLabelText(
+      'Renewal lead time · 5m / 30m',
+    ) as HTMLInputElement;
+    const longLead = screen.getByLabelText(
+      'Renewal lead time · 1h / 12h',
+    ) as HTMLInputElement;
+    expect(shortLead.value).toBe('45');
+    expect(longLead.value).toBe('400');
+    expect(shortLead.getAttribute('min')).toBe('0');
+    expect(longLead.getAttribute('min')).toBe('0');
     expect(
-      screen.getByText('Seconds. Renews 45s before the 5m cache expires.'),
+      screen.getByText(
+        'Seconds. Renews 45s before an Anthropic 5m or OpenAI 30m cache expires.',
+      ),
     ).toBeDefined();
-    expect(screen.getAllByText('Renewal lead time · 1h TTL')[0]).toBeDefined();
+    expect(
+      screen.getByText(
+        'Seconds. Renews 400s before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText(/5m TTL|1h TTL/)).toBeNull();
     expect(screen.getAllByText('Max renewals per session')[0]).toBeDefined();
     expect(screen.getAllByText('Max total duration')[0]).toBeDefined();
     expect(screen.getByText('Seconds. = 2h')).toBeDefined();
@@ -126,6 +142,68 @@ describe('CacheKeepaliveSettingsDrawer', () => {
 
     expect(screen.getAllByText('Reset')[0]).toBeDefined();
     expect(screen.getAllByText('Save changes')[0]).toBeDefined();
+  });
+
+  it('keeps dual-horizon lead labels static across provider configs and OpenAI switch toggles', () => {
+    const assertLeadCopy = () => {
+      expect(
+        screen.getByLabelText('Renewal lead time · 5m / 30m'),
+      ).toBeDefined();
+      expect(
+        screen.getByLabelText('Renewal lead time · 1h / 12h'),
+      ).toBeDefined();
+      expect(
+        screen.getByText(
+          'Seconds. Renews 45s before an Anthropic 5m or OpenAI 30m cache expires.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.getByText(
+          'Seconds. Renews 400s before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.',
+        ),
+      ).toBeDefined();
+      expect(screen.queryByText(/5m TTL|1h TTL/)).toBeNull();
+    };
+
+    for (const config of [
+      {
+        allowed_models: ['claude-sonnet-4-6'],
+        openai_responses_enabled: false,
+      },
+      {
+        allowed_models: ['gpt-5.6'],
+        openai_responses_enabled: true,
+      },
+      {
+        allowed_models: ['claude-sonnet-4-6', 'gpt-5.6'],
+        openai_responses_enabled: true,
+      },
+    ]) {
+      const principal = freshPrincipal();
+      principal.allowed_models = config.allowed_models;
+      principal.cache_keepalive!.classifier!.openai_responses_enabled =
+        config.openai_responses_enabled;
+      const { unmount } = renderWithProviders(
+        <CacheKeepaliveSettingsDrawer
+          open
+          onOpenChange={() => {}}
+          principal={principal}
+        />,
+      );
+      const openaiSwitch = screen.getByRole('switch', {
+        name: 'OpenAI Responses GPT-5.6+ keepalive',
+      }) as HTMLInputElement;
+
+      expect(openaiSwitch.checked).toBe(config.openai_responses_enabled);
+      assertLeadCopy();
+      fireEvent.click(openaiSwitch);
+      expect(openaiSwitch.checked).toBe(!config.openai_responses_enabled);
+      assertLeadCopy();
+      fireEvent.click(openaiSwitch);
+      expect(openaiSwitch.checked).toBe(config.openai_responses_enabled);
+      assertLeadCopy();
+      unmount();
+    }
   });
 
   it('helper text follows the edited values', () => {
@@ -202,6 +280,30 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(inputs[2].value).toBe('4');
     expect(inputs[3].value).toBe('14400');
     expect(inputs[4].value).toBe('8388608');
+    expect(
+      (
+        screen.getByLabelText(
+          'Renewal lead time · 5m / 30m',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('30');
+    expect(
+      (
+        screen.getByLabelText(
+          'Renewal lead time · 1h / 12h',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('300');
+    expect(
+      screen.getByText(
+        'Seconds. Renews 30s before an Anthropic 5m or OpenAI 30m cache expires.',
+      ),
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        'Seconds. Renews 5m before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.',
+      ),
+    ).toBeDefined();
   });
 
   it('calls update mutation on save', async () => {
@@ -605,16 +707,41 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       name: 'Cache keepalive settings',
     });
     const input = within(dialog).getAllByLabelText(
-      'Renewal lead time · 5m TTL',
+      'Renewal lead time · 5m / 30m',
     )[0] as HTMLInputElement;
     fireEvent.change(input, { target: { value: '' } });
     expect(input.value).toBe('');
+    expect(
+      within(dialog).getByText(
+        'Seconds. Renews — before an Anthropic 5m or OpenAI 30m cache expires.',
+      ),
+    ).toBeDefined();
     fireEvent.click(
       within(dialog).getByRole('button', { name: 'Save changes' }),
     );
     expect(mutateMock).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith(
       'Numeric fields must be valid non-negative numbers',
+    );
+
+    fireEvent.change(input, { target: { value: '0' } });
+    expect(input.value).toBe('0');
+    expect(
+      within(dialog).getByText(
+        'Seconds. Renews 0s before an Anthropic 5m or OpenAI 30m cache expires.',
+      ),
+    ).toBeDefined();
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Save changes' }),
+    );
+    expect(mutateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 0,
+          refresh_lead_time_1h_secs: 400,
+        }),
+      }),
+      expect.any(Object),
     );
   });
   it('locks every control and retains the drawer while saving', () => {
