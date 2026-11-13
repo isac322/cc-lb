@@ -217,39 +217,48 @@ export function geminiRetainedReading(
   return own.observed_at_unix_millis < newest;
 }
 
+/** One upstream's `/latest` reading, as the pool's retained-reading check needs it. */
+export interface PoolRetentionRow {
+  upstream: { id: string };
+  windows: readonly QuotaSnapshot[];
+  periodUnknownMeters: readonly PeriodUnknownQuotaMeter[];
+}
+
 /**
- * Pool counterpart of `geminiRetainedReading`: for each Gemini group window
- * where an upstream's lot was observed before that upstream's sibling lot,
- * the earliest such observation (unix seconds). The pool figure then carries
- * a retained reading: it is stale, and the plot after that time is not a
- * current reading.
+ * Pool counterpart of `geminiRetainedReading`: Gemini group windows whose
+ * displayed current pool figure includes a retained reading. Only accounts in
+ * that fresh-only figure count (a `fresh` provider lot with a utilization);
+ * each one's per-upstream `/latest` row decides retention, so a poll that
+ * returned only period-unknown meters is caught as well.
  */
-export function poolRetainedSince(
+export function poolRetainedWindows(
   aggregate: AggregateResponse | undefined,
-): Partial<Record<string, number>> {
-  const retained: Partial<Record<string, number>> = {};
-  for (const entry of aggregate?.windows ?? []) {
-    const sibling = geminiGroupSibling(entry.window);
-    if (sibling == null) continue;
-    const siblingLots =
-      aggregate?.windows.find((candidate) => candidate.window === sibling)
-        ?.provider_lots ?? [];
+  upstreamRows: readonly PoolRetentionRow[] | undefined,
+): ReadonlySet<string> {
+  const retained = new Set<string>();
+  if (!aggregate || !upstreamRows) return retained;
+  for (const entry of aggregate.windows) {
+    if (geminiGroupSibling(entry.window) == null) continue;
     for (const lot of entry.provider_lots) {
       if (
-        lot.state === 'absent' ||
+        lot.state !== 'fresh' ||
         lot.utilization == null ||
-        lot.observed_at_unix_millis == null
+        !Number.isFinite(lot.utilization)
       ) {
         continue;
       }
-      const newer = siblingLots.find(
-        (candidate) => candidate.upstream_id === lot.upstream_id,
-      )?.observed_at_unix_millis;
-      if (newer == null || lot.observed_at_unix_millis >= newer) continue;
-      retained[entry.window] = Math.min(
-        retained[entry.window] ?? Number.POSITIVE_INFINITY,
-        lot.observed_at_unix_millis / 1000,
-      );
+      const row = upstreamRows.find((r) => r.upstream.id === lot.upstream_id);
+      if (
+        row != null &&
+        geminiRetainedReading(
+          row.windows,
+          row.periodUnknownMeters,
+          entry.window,
+        )
+      ) {
+        retained.add(entry.window);
+        break;
+      }
     }
   }
   return retained;

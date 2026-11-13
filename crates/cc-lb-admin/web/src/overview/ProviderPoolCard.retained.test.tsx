@@ -1,11 +1,13 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { PoolRetentionRow } from '../components/upstreams/quotaWindowVisibility';
 import type {
   AggregateProviderLotResponse,
   AggregateResponse,
   AggregateWindowResponse,
   PoolHistoryWindowResponse,
+  QuotaSnapshot,
 } from '../lib/api';
 import * as queries from '../lib/queries';
 import { successQuery } from '../lib/test-utils/hook-results';
@@ -64,13 +66,14 @@ function lot(
   window: string,
   upstream: string,
   observedAtUnixSecs: number,
+  state = 'fresh',
 ): AggregateProviderLotResponse {
   return {
     upstream_id: upstream,
     upstream_name: upstream,
     window,
     source: 'api',
-    state: 'fresh',
+    state,
     provider_start_unix_secs: null,
     provider_reset_unix_secs: NOW + 3600,
     observed_at_unix_millis: observedAtUnixSecs * 1000,
@@ -135,70 +138,204 @@ function historyWindow(
   };
 }
 
-describe('Gemini pool card with one upstream retaining an earlier reading', () => {
+/** One upstream's `/latest` row: 5h and weekly observation times, raw meters. */
+function upstreamRow(
+  id: string,
+  [fiveHourAt, weeklyAt]: readonly [number, number],
+  rawMeterAt?: number,
+): PoolRetentionRow {
+  const snapshot = (window: QuotaSnapshot['window'], at: number) => ({
+    window,
+    state: 'fresh' as const,
+    source: 'api',
+    utilization: 0.5,
+    status: null,
+    resets_at_unix_secs: NOW + 3600,
+    surpassed_threshold: null,
+    representative_claim: null,
+    disabled_reason: null,
+    extra_usage_enabled: null,
+    extra_usage_monthly_limit: null,
+    extra_usage_used_credits: null,
+    observed_at_unix_millis: at * 1000,
+    age_secs: NOW - at,
+  });
+  return {
+    upstream: { id },
+    windows: [
+      snapshot('gemini_5h', fiveHourAt),
+      snapshot('gemini_7d', weeklyAt),
+    ],
+    periodUnknownMeters:
+      rawMeterAt == null
+        ? []
+        : [
+            {
+              group: 'gemini',
+              model_id: 'gemini-unlabeled',
+              remaining_fraction: 0.5,
+              utilization: 0.5,
+              reset_time_unix_secs: null,
+              origin: 'retrieve_user_quota_summary',
+              source: 'api',
+              state: 'fresh',
+              observed_at_unix_millis: rawMeterAt * 1000,
+              age_secs: NOW - rawMeterAt,
+            },
+          ],
+  };
+}
+
+function renderCard({
+  lots,
+  history,
+  rows,
+}: {
+  lots: Record<'gemini_5h' | 'gemini_7d', AggregateProviderLotResponse[]>;
+  history: Record<'gemini_5h' | 'gemini_7d', [number, number][]>;
+  rows: PoolRetentionRow[];
+}) {
+  const aggregate: AggregateResponse = {
+    now_unix_secs: NOW,
+    window_anchor_unix_secs: NOW,
+    max_staleness_secs: 300,
+    upstream_count: 2,
+    caveats: [],
+    windows: [
+      aggregateWindow('gemini_5h', lots.gemini_5h),
+      aggregateWindow('gemini_7d', lots.gemini_7d),
+    ],
+  };
+  vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue(
+    successQuery(aggregate),
+  );
+  vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue(
+    successQuery({
+      now_unix_secs: NOW,
+      range_secs: 86_400,
+      windows: [
+        historyWindow('gemini_5h', history.gemini_5h),
+        historyWindow('gemini_7d', history.gemini_7d),
+      ],
+    }),
+  );
+  render(
+    <ProviderPoolCard
+      compact
+      provider="gemini"
+      hasSubscription
+      rangeSecs={86_400}
+      upstreamRows={rows}
+    />,
+  );
+  const legend = (window: string) =>
+    screen
+      .getAllByTestId('pool-quota-legend-slot')
+      .find((row) => row.dataset.window === window);
+  return { legend };
+}
+
+function expectStaleLegend(row: HTMLElement | undefined) {
+  expect(row?.dataset.state).toBe('stale');
+  expect(row?.querySelector('[data-slot="pace-marker"]')).toBeNull();
+  expect(
+    row?.querySelector('[data-slot="pool-quota-legend-reset"]')?.textContent,
+  ).toBe('Stale');
+}
+
+describe('Gemini pool card with an account retaining an earlier reading', () => {
+  const freshLots = {
+    gemini_5h: [lot('gemini_5h', 'a', NOW), lot('gemini_5h', 'b', NOW)],
+    gemini_7d: [lot('gemini_7d', 'a', NOW), lot('gemini_7d', 'b', NOW)],
+  };
+
   it('keeps plotting other upstreams after the retained reading while the legend marks it stale', () => {
     // Upstream A's gemini_5h is from t1 (its later poll omitted 5h); upstream B
     // keeps reporting gemini_5h, so the pool history has valid post-t1 points.
-    const aggregate: AggregateResponse = {
-      now_unix_secs: NOW,
-      window_anchor_unix_secs: NOW,
-      max_staleness_secs: 300,
-      upstream_count: 2,
-      caveats: [],
-      windows: [
-        aggregateWindow('gemini_5h', [
-          lot('gemini_5h', 'a', T1),
-          lot('gemini_5h', 'b', NOW),
-        ]),
-        aggregateWindow('gemini_7d', [
-          lot('gemini_7d', 'a', NOW),
-          lot('gemini_7d', 'b', NOW),
-        ]),
-      ],
-    };
     const fiveHour: [number, number][] = [
       [T1, 20],
       [NOW - 3600, 35],
       [NOW - 1800, 40],
     ];
-    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue(
-      successQuery(aggregate),
-    );
-    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue(
-      successQuery({
-        now_unix_secs: NOW,
-        range_secs: 86_400,
-        windows: [
-          historyWindow('gemini_5h', fiveHour),
-          historyWindow('gemini_7d', [
-            [T1, 90],
-            [NOW - 1800, 100],
-          ]),
+    const { legend } = renderCard({
+      lots: freshLots,
+      history: {
+        gemini_5h: fiveHour,
+        gemini_7d: [
+          [T1, 90],
+          [NOW - 1800, 100],
         ],
-      }),
-    );
-
-    render(
-      <ProviderPoolCard provider="gemini" hasSubscription rangeSecs={86_400} />,
-    );
-
+      },
+      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
+    });
     const plotted = screen
       .getByTestId('pool-stroke-gemini_5h')
       .getAttribute('d')
       ?.split('|')
       .map((point) => Number(point.split(':')[0]));
     for (const [unix] of fiveHour) expect(plotted).toContain(unix);
-    expect(plotted?.some((unix) => unix > T1)).toBe(true);
-
-    const [legend] = screen
-      .getAllByTestId('pool-quota-legend-slot')
-      .filter((row) => row.dataset.window === 'gemini_5h');
-    expect(legend?.dataset.state).toBe('stale');
-    expect(legend?.querySelector('[data-slot="pace-marker"]')).toBeNull();
-    expect(
-      legend?.querySelector('[data-slot="pool-quota-legend-reset"]')
-        ?.textContent,
-    ).toBe('Stale');
+    expectStaleLegend(legend('gemini_5h'));
+    expect(legend('gemini_7d')?.dataset.state).toBeUndefined();
     expect(screen.getByText('Stale reading')).toBeDefined();
+  });
+
+  it('marks both windows stale when the later poll returned only raw meters', () => {
+    // t1: 5h 20%, weekly 100%; t2 returned only an unlabeled meter, so both
+    // canonical rows (and their aggregate lots) still carry t1.
+    const { legend } = renderCard({
+      lots: {
+        gemini_5h: [lot('gemini_5h', 'a', T1)],
+        gemini_7d: [lot('gemini_7d', 'a', T1)],
+      },
+      history: {
+        gemini_5h: [[NOW - 1800, 20]],
+        gemini_7d: [[NOW - 1800, 100]],
+      },
+      rows: [upstreamRow('a', [T1, T1], NOW)],
+    });
+    expectStaleLegend(legend('gemini_5h'));
+    expectStaleLegend(legend('gemini_7d'));
+    // No current figure remains for the compact headline.
+    expect(
+      screen.getByLabelText('Current pool usage unavailable').textContent,
+    ).toBe('—');
+  });
+
+  it('ignores an account excluded from the fresh-only figure', () => {
+    // A's 5h is stale (excluded) beside a newer weekly 10%; B is fresh: 5h 90%, weekly 10%.
+    const { legend } = renderCard({
+      lots: {
+        gemini_5h: [
+          lot('gemini_5h', 'a', T1, 'stale'),
+          lot('gemini_5h', 'b', NOW),
+        ],
+        gemini_7d: [lot('gemini_7d', 'a', NOW), lot('gemini_7d', 'b', NOW)],
+      },
+      history: {
+        gemini_5h: [[NOW - 1800, 90]],
+        gemini_7d: [[NOW - 1800, 10]],
+      },
+      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
+    });
+    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
+    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(
+      document.querySelector('[data-slot="provider-pool-headline"]')
+        ?.textContent,
+    ).toBe('90%used');
+  });
+
+  it('healthy control: one poll observed together is current', () => {
+    const { legend } = renderCard({
+      lots: freshLots,
+      history: {
+        gemini_5h: [[NOW - 1800, 40]],
+        gemini_7d: [[NOW - 1800, 60]],
+      },
+      rows: [upstreamRow('a', [NOW, NOW], NOW), upstreamRow('b', [NOW, NOW])],
+    });
+    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
+    expect(legend('gemini_7d')?.dataset.state).toBeUndefined();
+    expect(screen.queryByText('Stale reading')).toBeNull();
   });
 });

@@ -3,8 +3,9 @@ import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
 import {
+  type PoolRetentionRow,
   poolGroupPlaceholders,
-  poolRetainedSince,
+  poolRetainedWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import {
   PoolQuotaLegend,
@@ -75,6 +76,11 @@ export interface ProviderPoolCardProps {
   hasSubscription: boolean;
   rangeSecs: number;
   compact?: boolean;
+  /**
+   * Per-upstream `/latest` rows (the page's Upstreams query): with them, a
+   * current pool figure that includes a retained Gemini reading reads stale.
+   */
+  upstreamRows?: readonly PoolRetentionRow[];
 }
 
 export const ProviderPoolCard = memo(function ProviderPoolCard({
@@ -82,6 +88,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
   hasSubscription,
   rangeSecs,
   compact = false,
+  upstreamRows,
 }: ProviderPoolCardProps) {
   const { effective: timeZone } = useTimezone();
   const providerWindowKeys = PROVIDER_WINDOW_KEYS[provider];
@@ -134,11 +141,14 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       ),
     [placeholders, providerWindowKeys, visibleWindows],
   );
-  // Gemini group windows whose pool figure carries an earlier poll's reading.
-  const retainedSince = useMemo(
-    (): Partial<Record<PoolQuotaWindow, number>> =>
-      loading ? {} : poolRetainedSince(normalizedAggregate),
-    [loading, normalizedAggregate],
+  // Gemini group windows whose current pool figure includes a reading
+  // retained from an earlier poll.
+  const retained = useMemo(
+    (): ReadonlySet<PoolQuotaWindow> =>
+      loading
+        ? new Set()
+        : poolRetainedWindows(normalizedAggregate, upstreamRows),
+    [loading, normalizedAggregate, upstreamRows],
   );
   const latestSnapshotUnixSecs = useMemo(
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
@@ -190,7 +200,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
   );
   const headline = providerMetricHeadline(
     provider === 'anthropic' ? visibleChartData.at(-1) : latest,
-    visibleWindows.filter((window) => retainedSince[window] == null),
+    visibleWindows.filter((window) => !retained.has(window)),
   );
   const resets = poolWindowResets(normalizedAggregate);
   const paces = poolWindowPace(normalizedAggregate);
@@ -212,10 +222,9 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
     return {
       ...current,
       stale:
-        current.stale ||
-        visibleWindows.some((window) => retainedSince[window] != null),
+        current.stale || visibleWindows.some((window) => retained.has(window)),
     };
-  }, [normalizedHistory, provider, retainedSince, visibleWindows]);
+  }, [normalizedHistory, provider, retained, visibleWindows]);
   const observationNow =
     provider === 'anthropic'
       ? nowUnixSecs
@@ -288,7 +297,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 paces={paces}
                 timeZone={timeZone}
                 placeholders={placeholders}
-                retained={retainedSince}
+                retained={retained}
                 windows={legendWindows}
               />
               {weighting === 'equal' ? (

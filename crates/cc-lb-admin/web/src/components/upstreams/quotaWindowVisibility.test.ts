@@ -13,7 +13,7 @@ import {
   geminiRetainedReading,
   hasQuotaCardPace,
   isObservedAtOrAfter,
-  poolRetainedSince,
+  poolRetainedWindows,
   quotaCardPacePct,
   selectQuotaCardSnapshots,
   selectQuotaDetailState,
@@ -691,20 +691,20 @@ describe('Gemini retained reading', () => {
     ).toBe(false);
   });
 
-  it('finds pool windows whose lot predates the same upstream sibling lot', () => {
+  describe('pool retention (poolRetainedWindows)', () => {
     const lot = (
       window: string,
       upstream: string,
-      observedAt: number,
+      state = 'fresh',
     ): AggregateProviderLotResponse => ({
       upstream_id: upstream,
       upstream_name: upstream,
       window,
       source: 'api',
-      state: 'fresh',
+      state,
       provider_start_unix_secs: null,
       provider_reset_unix_secs: null,
-      observed_at_unix_millis: observedAt,
+      observed_at_unix_millis: T2,
       utilization: 0.2,
       capacity_estimate_tokens: null,
       used_before_cc_window_tokens: 0,
@@ -732,27 +732,77 @@ describe('Gemini retained reading', () => {
       provider_lots: lots,
       caveats: [],
     });
-    const aggregate = {
+    const aggregate = (
+      lots: Record<'gemini_5h' | 'gemini_7d', AggregateProviderLotResponse[]>,
+    ) => ({
       now_unix_secs: T2 / 1000,
       window_anchor_unix_secs: 0,
       max_staleness_secs: 300,
       upstream_count: 2,
       caveats: [],
       windows: [
-        entry('gemini_5h', [
-          lot('gemini_5h', 'a', T1),
-          lot('gemini_5h', 'b', T2),
-        ]),
-        entry('gemini_7d', [
-          lot('gemini_7d', 'a', T2),
-          lot('gemini_7d', 'b', T2),
-        ]),
-        entry('third_party_5h', [lot('third_party_5h', 'a', T2)]),
-        entry('third_party_7d', [lot('third_party_7d', 'a', T2)]),
+        entry('gemini_5h', lots.gemini_5h),
+        entry('gemini_7d', lots.gemini_7d),
       ],
-    };
-    expect(poolRetainedSince(aggregate)).toEqual({ gemini_5h: T1 / 1000 });
-    expect(poolRetainedSince(undefined)).toEqual({});
+    });
+    const row = (
+      id: string,
+      [fiveHour, weekly]: readonly [number, number],
+      meters: PeriodUnknownQuotaMeter[] = [],
+    ) => ({
+      upstream: { id },
+      windows: [
+        snap({ window: 'gemini_5h', observed_at_unix_millis: fiveHour }),
+        snap({ window: 'gemini_7d', observed_at_unix_millis: weekly }),
+      ],
+      periodUnknownMeters: meters,
+    });
+    const bothFresh = aggregate({
+      gemini_5h: [lot('gemini_5h', 'a'), lot('gemini_5h', 'b')],
+      gemini_7d: [lot('gemini_7d', 'a'), lot('gemini_7d', 'b')],
+    });
+
+    it('flags a window when a contributing account retains its reading', () => {
+      expect([
+        ...poolRetainedWindows(bothFresh, [
+          row('a', [T1, T2]),
+          row('b', [T2, T2]),
+        ]),
+      ]).toEqual(['gemini_5h']);
+    });
+
+    it('flags both windows when the later poll returned only raw meters', () => {
+      // t1: 5h 20% and weekly 100%; t2: only unlabeled meters, canonical rows stay t1.
+      expect([
+        ...poolRetainedWindows(bothFresh, [
+          row('a', [T1, T1], [meter('gemini', T2)]),
+          row('b', [T2, T2]),
+        ]),
+      ]).toEqual(['gemini_5h', 'gemini_7d']);
+    });
+
+    it('ignores accounts outside the fresh-only current figure', () => {
+      // A's 5h is stale (excluded) beside a newer weekly; B is fresh and current.
+      const cohort = aggregate({
+        gemini_5h: [lot('gemini_5h', 'a', 'stale'), lot('gemini_5h', 'b')],
+        gemini_7d: [lot('gemini_7d', 'a'), lot('gemini_7d', 'b')],
+      });
+      expect(
+        poolRetainedWindows(cohort, [row('a', [T1, T2]), row('b', [T2, T2])])
+          .size,
+      ).toBe(0);
+    });
+
+    it('healthy control and missing rows flag nothing', () => {
+      expect(
+        poolRetainedWindows(bothFresh, [
+          row('a', [T2, T2], [meter('gemini', T2)]),
+          row('b', [T2, T2]),
+        ]).size,
+      ).toBe(0);
+      expect(poolRetainedWindows(bothFresh, undefined).size).toBe(0);
+      expect(poolRetainedWindows(undefined, [row('a', [T1, T2])]).size).toBe(0);
+    });
   });
 });
 

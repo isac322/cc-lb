@@ -233,6 +233,7 @@ export function MultiProviderOverview() {
                 key={provider}
                 provider={provider}
                 rangeSecs={TIME_PRESET_SECONDS[range]}
+                upstreamRows={upstreamUsage.rows}
               />
             ))}
           </div>
