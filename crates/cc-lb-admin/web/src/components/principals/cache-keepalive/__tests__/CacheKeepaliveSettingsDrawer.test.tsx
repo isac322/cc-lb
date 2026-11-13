@@ -275,7 +275,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     );
 
     const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
-    expect(inputs[0].value).toBe('30');
+    expect(inputs[0].value).toBe('10');
     expect(inputs[1].value).toBe('300');
     expect(inputs[2].value).toBe('4');
     expect(inputs[3].value).toBe('14400');
@@ -286,7 +286,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
           'Renewal lead time · 5m / 30m',
         ) as HTMLInputElement
       ).value,
-    ).toBe('30');
+    ).toBe('10');
     expect(
       (
         screen.getByLabelText(
@@ -296,7 +296,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     ).toBe('300');
     expect(
       screen.getByText(
-        'Seconds. Renews 30s before an Anthropic 5m or OpenAI 30m cache expires.',
+        'Seconds. Renews 10s before an Anthropic 5m or OpenAI 30m cache expires.',
       ),
     ).toBeDefined();
     expect(
@@ -378,7 +378,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       revision: 43,
       cache_keepalive: {
         ...mockPrincipal.cache_keepalive!,
-        refresh_lead_time_5m_secs: 30,
+        refresh_lead_time_5m_secs: 10,
       },
     };
     const queryClient = new QueryClient({
@@ -423,14 +423,14 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     const reopenedInputs = screen.getAllByRole(
       'spinbutton',
     ) as HTMLInputElement[];
-    expect(reopenedInputs[0].value).toBe('30');
+    expect(reopenedInputs[0].value).toBe('10');
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     expect(mutateMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         id: 'p-123',
         expected_revision: 43,
         cache_keepalive: expect.objectContaining({
-          refresh_lead_time_5m_secs: 30,
+          refresh_lead_time_5m_secs: 10,
         }),
       }),
       expect.any(Object),
