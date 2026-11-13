@@ -22,6 +22,7 @@ const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
 const PRICING_BACKFILL_UPPER_ID: &str = "pricing_completeness_backfill_upper";
 const PRICING_BACKFILL_CURSOR_ID: &str = "pricing_completeness_backfill_cursor";
+const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
@@ -46,6 +47,21 @@ struct RollupKey {
     upstream_id: Uuid,
     upstream_name: String,
     model: String,
+}
+
+// Display names can change; backfill ordering must follow the physical primary key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PhysicalRollupKey {
+    resolution: UsageRollupResolution,
+    bucket_start: u64,
+    principal: String,
+    upstream_id: Uuid,
+    model: String,
+}
+
+struct BackfillCandidate {
+    cursor: u64,
+    class: PricingClass,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -488,8 +504,8 @@ async fn merge_stale_gemini_rollups(
                      ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
                  effective_cache_write_input_tokens = CASE \
                      WHEN usage_rollups_v2.effective_cache_write_input_tokens IS NULL AND EXCLUDED.effective_cache_write_input_tokens IS NULL THEN NULL \
-                     ELSE COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) \
-                        + COALESCE(EXCLUDED.effective_cache_write_input_tokens, GREATEST(COALESCE(EXCLUDED.cache_write_input_tokens, 0), COALESCE(EXCLUDED.cache_write_input_tokens_30m, 0) + COALESCE(EXCLUDED.cache_write_input_tokens_12h, 0))) END, \
+                     ELSE GREATEST(COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) \
+                        + GREATEST(COALESCE(EXCLUDED.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(EXCLUDED.cache_write_input_tokens, 0), COALESCE(EXCLUDED.cache_write_input_tokens_30m, 0) + COALESCE(EXCLUDED.cache_write_input_tokens_12h, 0))) END, \
                  error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                  latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                  latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
@@ -1061,6 +1077,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         (init_seq, init_xid)
     };
     let pricing_backfill_has_work = pricing_backfill_seq > 0 || pricing_backfill_xid != "0";
+    let (pricing_upper_seq, pricing_upper_xid) =
+        pricing_upper_checkpoint.unwrap_or((previous_seq, previous_xid.clone()));
     // Page by the composite (tx_id, seq) cursor below the snapshot xmin horizon,
     // never by seq alone: a lower seq can COMMIT after a higher seq (BIGSERIAL is
     // assigned at INSERT, visible at COMMIT), so a seq high-water-mark would skip
@@ -1325,7 +1343,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         backfill_cursor_xid = upper_xid.clone();
     }
 
-    let mut pricing_backfill_deltas: BTreeMap<RollupKey, Vec<PricingClass>> = BTreeMap::new();
+    let mut pricing_backfill_deltas: BTreeMap<PhysicalRollupKey, Vec<BackfillCandidate>> =
+        BTreeMap::new();
     let mut pricing_backfill_cursor_seq = pricing_backfill_seq;
     let mut pricing_backfill_cursor_xid = pricing_backfill_xid.clone();
     let pricing_backfill_rows = if pricing_backfill_has_work {
@@ -1405,18 +1424,23 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         };
         let upstream = resolve_upstream_identity(&event, event.upstream_id, &upstreams);
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
-            let key = RollupKey {
+            let key = PhysicalRollupKey {
                 resolution,
                 bucket_start: bucket_start(resolution, event_ts_secs(&event)),
                 principal: normalize_usage_rollup_dimension(event.principal_id.as_deref()),
                 upstream_id: upstream.id,
-                upstream_name: normalize_usage_rollup_dimension(Some(&upstream.name)),
                 model: normalize_usage_rollup_dimension(event.model.as_deref()),
             };
             pricing_backfill_deltas
                 .entry(key)
                 .or_default()
-                .push(PricingClass::from_event(&event));
+                .push(BackfillCandidate {
+                    cursor: i64_to_u64(
+                        row.try_get("seq").map_err(map_sqlx_error)?,
+                        "pricing backfill candidate cursor",
+                    )?,
+                    class: PricingClass::from_event(&event),
+                });
         }
         pricing_backfill_cursor_seq = row.try_get("seq").map_err(map_sqlx_error)?;
         pricing_backfill_cursor_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
@@ -1494,7 +1518,27 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .await
         .map_err(map_sqlx_error)?;
     }
-    for (key, classes) in pricing_backfill_deltas {
+    let raw_prune_cutoff =
+        sqlx::query_scalar::<_, i64>("SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = $1")
+            .bind(RAW_PRUNE_CUTOFF_ID)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    let min_retained_ts_secs = if pricing_backfill_has_work {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MIN(COALESCE(list_ts_ms / 1000, EXTRACT(EPOCH FROM ts)::bigint)) \
+             FROM request_events_v1 WHERE (tx_id, seq) <= ($1::xid8, $2)",
+        )
+        .bind(&pricing_upper_xid)
+        .bind(pricing_upper_seq)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+    } else {
+        None
+    };
+    // Inspect hour membership before this pass consumes child-minute remainders.
+    for (key, candidates) in pricing_backfill_deltas.into_iter().rev() {
         let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
             "SELECT request_count, priced_event_count, unpriced_event_count, unmetered_event_count \
              FROM usage_rollups_v2 \
@@ -1519,12 +1563,98 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         if remaining == 0 {
             continue;
         }
+        if raw_prune_cutoff.is_some_and(|cutoff| (key.bucket_start as i64) < cutoff) {
+            continue;
+        }
+        let selected = &candidates[..candidates
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX))];
+        if min_retained_ts_secs.is_some_and(|min_ts| (key.bucket_start as i64) < min_ts) {
+            let oldest_selected_cursor = u64_to_i64(
+                selected.last().expect("nonempty candidate group").cursor,
+                "oldest selected cursor",
+            )?;
+            let retained_newer = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM request_events_v1 WHERE seq > $1 AND (tx_id, seq) <= ($2::xid8, $3)",
+            )
+            .bind(oldest_selected_cursor)
+            .bind(&pricing_upper_xid)
+            .bind(pricing_upper_seq)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if retained_newer < pricing_upper_seq.saturating_sub(oldest_selected_cursor) {
+                continue;
+            }
+        }
+        if key.resolution == UsageRollupResolution::Hour {
+            let children = sqlx::query_as::<_, (i64, i64)>(
+                "SELECT bucket_start_unix_secs, request_count - \
+                 (priced_event_count + unpriced_event_count + unmetered_event_count) \
+                 FROM usage_rollups_v2 WHERE resolution = 'minute' \
+                 AND bucket_start_unix_secs >= $1 AND bucket_start_unix_secs < $2 \
+                 AND principal_id = $3 AND upstream_id = $4 AND model = $5",
+            )
+            .bind(u64_to_i64(key.bucket_start, "hour bucket start")?)
+            .bind(u64_to_i64(
+                key.bucket_start.saturating_add(HOUR_SECS),
+                "hour bucket end",
+            )?)
+            .bind(&key.principal)
+            .bind(key.upstream_id)
+            .bind(&key.model)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            let child_remaining_sum = children
+                .into_iter()
+                .map(|(_, remainder)| remainder.max(0) as u64)
+                .fold(0_u64, u64::saturating_add);
+            if child_remaining_sum > remaining && (candidates.len() as u64) < child_remaining_sum {
+                // A recreated hour may have fewer requests than its surviving minutes.
+                // Reject only when their source population is no longer retained.
+                let retained_groups = sqlx::query(
+                    "SELECT principal_id, upstream_id, model, COUNT(*) AS retained_count \
+                     FROM request_events_v1 WHERE (tx_id, seq) <= ($1::xid8, $2) \
+                     AND COALESCE(list_ts_ms / 1000, EXTRACT(EPOCH FROM ts)::bigint) >= $3 \
+                     AND COALESCE(list_ts_ms / 1000, EXTRACT(EPOCH FROM ts)::bigint) < $4 \
+                     GROUP BY principal_id, upstream_id, model",
+                )
+                .bind(&pricing_upper_xid)
+                .bind(pricing_upper_seq)
+                .bind(u64_to_i64(key.bucket_start, "hour bucket start")?)
+                .bind(u64_to_i64(
+                    key.bucket_start.saturating_add(HOUR_SECS),
+                    "hour bucket end",
+                )?)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+                let mut retained_count = 0_u64;
+                for group in retained_groups {
+                    let principal: Option<String> =
+                        group.try_get("principal_id").map_err(map_sqlx_error)?;
+                    let model: Option<String> = group.try_get("model").map_err(map_sqlx_error)?;
+                    let upstream_id: Option<Uuid> =
+                        group.try_get("upstream_id").map_err(map_sqlx_error)?;
+                    if normalize_usage_rollup_dimension(principal.as_deref()) == key.principal
+                        && normalize_usage_rollup_dimension(model.as_deref()) == key.model
+                        && upstream_id.unwrap_or_else(Uuid::nil) == key.upstream_id
+                    {
+                        retained_count = retained_count.saturating_add(i64_to_u64(
+                            group.try_get("retained_count").map_err(map_sqlx_error)?,
+                            "retained hour population",
+                        )?);
+                    }
+                }
+                if retained_count < child_remaining_sum {
+                    continue;
+                }
+            }
+        }
         let mut delta = RollupDelta::default();
-        for class in classes
-            .iter()
-            .take(usize::try_from(remaining).unwrap_or(usize::MAX))
-        {
-            match class {
+        for candidate in selected {
+            match candidate.class {
                 PricingClass::Priced => delta.priced_event_count += 1,
                 PricingClass::Unpriced => delta.unpriced_event_count += 1,
                 PricingClass::Unmetered => delta.unmetered_event_count += 1,
@@ -1587,7 +1717,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   cache_write_input_tokens = CASE WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN EXCLUDED.cache_write_input_tokens WHEN EXCLUDED.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens ELSE usage_rollups_v2.cache_write_input_tokens + EXCLUDED.cache_write_input_tokens END, \
                   cache_write_input_tokens_30m = CASE WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN EXCLUDED.cache_write_input_tokens_30m WHEN EXCLUDED.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m ELSE usage_rollups_v2.cache_write_input_tokens_30m + EXCLUDED.cache_write_input_tokens_30m END, \
                   cache_write_input_tokens_12h = CASE WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
-                  effective_cache_write_input_tokens = COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) + EXCLUDED.effective_cache_write_input_tokens, \
+                  effective_cache_write_input_tokens = GREATEST(COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) + EXCLUDED.effective_cache_write_input_tokens, \
                   error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                   latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                   latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \

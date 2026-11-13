@@ -465,13 +465,14 @@ pub struct UsageRollup {
 
 impl UsageRollup {
     pub fn effective_cache_write_tokens(&self) -> u64 {
-        self.effective_cache_write_input_tokens.unwrap_or_else(|| {
-            let ttl_sum = self
-                .cache_write_input_tokens_30m
-                .unwrap_or(0)
-                .saturating_add(self.cache_write_input_tokens_12h.unwrap_or(0));
-            self.cache_write_input_tokens.unwrap_or(0).max(ttl_sum)
-        })
+        let ttl_sum = self
+            .cache_write_input_tokens_30m
+            .unwrap_or(0)
+            .saturating_add(self.cache_write_input_tokens_12h.unwrap_or(0));
+        let raw_floor = self.cache_write_input_tokens.unwrap_or(0).max(ttl_sum);
+        self.effective_cache_write_input_tokens
+            .unwrap_or(0)
+            .max(raw_floor)
     }
 }
 
@@ -506,6 +507,68 @@ pub struct UsageRollupRun {
 mod tests {
     use super::{model_filter_like_patterns, model_filter_matches, verify_applied_migrations};
     use crate::StorageError;
+
+    #[test]
+    fn stale_effective_cache_writes_cannot_hide_native_write_evidence() {
+        for (total, ttl) in [(Some(5), None), (None, Some(5))] {
+            let row = super::UsageRollup {
+                resolution: super::UsageRollupResolution::Minute,
+                bucket_start: 0,
+                principal: String::new(),
+                upstream_id: uuid::Uuid::nil(),
+                upstream_name: String::new(),
+                model: String::new(),
+                request_count: 2,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: total,
+                cache_write_input_tokens_30m: ttl,
+                cache_write_input_tokens_12h: None,
+                effective_cache_write_input_tokens: Some(0),
+                error_count: 0,
+                latency_count: 0,
+                latency_ms_sum: 0,
+                latency_ms_min: None,
+                latency_ms_max: None,
+                proxy_setup_ms_count: 0,
+                proxy_setup_ms_sum: 0,
+                shape_ms_count: 0,
+                shape_ms_sum: 0,
+                sign_ms_count: 0,
+                sign_ms_sum: 0,
+                upstream_ttfb_ms_count: 0,
+                upstream_ttfb_ms_sum: 0,
+                upstream_body_ms_count: 0,
+                upstream_body_ms_sum: 0,
+                virtual_cost_micros: 0,
+                cost_input_micros: 0,
+                cost_output_micros: 0,
+                cost_cache_creation_5m_micros: 0,
+                cost_cache_creation_1h_micros: 0,
+                cost_cache_read_micros: 0,
+                cost_cache_write_30m_micros: 0,
+                cost_cache_write_12h_micros: 0,
+                cost_components_event_count: 0,
+                priced_event_count: 0,
+                unpriced_event_count: 0,
+                unmetered_event_count: 1,
+            };
+            assert_eq!(row.effective_cache_write_tokens(), 5);
+            assert_eq!(
+                super::derive_pricing_completeness(super::PricingCompletenessInput {
+                    request_count: row.request_count,
+                    priced_event_count: 0,
+                    unpriced_event_count: 0,
+                    unmetered_event_count: row.unmetered_event_count,
+                    total_tokens: row.effective_cache_write_tokens(),
+                    virtual_cost_micros: 0,
+                }),
+                Some(super::PricingCompleteness::Unknown)
+            );
+        }
+    }
 
     #[test]
     fn verify_applied_migrations_accepts_exact_and_newer_schema() {

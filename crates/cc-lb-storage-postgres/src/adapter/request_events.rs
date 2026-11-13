@@ -23,6 +23,7 @@ use crate::{
 pub(super) mod row;
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 
 /// Poll interval while waiting for the snapshot xmin horizon to pass the
 /// stable-ceiling snapshot's xmax.
@@ -109,6 +110,8 @@ impl RequestEventStore for PostgresStorage {
         }
 
         let cutoff_ms = cutoff_ms_x_1m / KEY_SEQUENCE_SCALE;
+        let cutoff_secs = cutoff_ms.div_ceil(1_000);
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let result = sqlx::query(
             "DELETE FROM request_events_v1              WHERE seq = ANY(ARRAY(                 SELECT seq FROM request_events_v1                 WHERE ts < $1                 ORDER BY seq ASC                 LIMIT $2             ))",
         )
@@ -120,9 +123,21 @@ impl RequestEventStore for PostgresStorage {
             batch_size as u64,
             "request event prune before batch size",
         )?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, '0'::xid8) \
+                 ON CONFLICT (id) DO UPDATE SET value = GREATEST(usage_rollup_checkpoints_v1.value, EXCLUDED.value)",
+            )
+            .bind(RAW_PRUNE_CUTOFF_ID)
+            .bind(u64_to_i64(cutoff_secs, "raw prune cutoff")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
 
         Ok(result.rows_affected())
     }

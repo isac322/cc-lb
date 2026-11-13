@@ -530,37 +530,102 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
     };
     let _guard = CRASH_RECOVERY_SCENARIO_LOCK.lock().unwrap();
     Runtime::new().unwrap().block_on(async {
-        let fixture = CrashFixture::create(&url,&schema_name("pricing",0),"pricing",0.0).await.unwrap();
+        let fixture = CrashFixture::create(&url, &schema_name("pricing", 0), "pricing", 0.0)
+            .await
+            .unwrap();
         fixture.wait_for_events_eligible().await.unwrap();
         fixture.storage.rollup_usage_once().await.unwrap();
         let checkpoint = fixture.storage.usage_rollup_checkpoint().await.unwrap();
+        let (high_seq, high_xid): (i64, String) = sqlx::query_as(
+            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
-            "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0;
-             DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor');
-             CREATE FUNCTION fail_pricing_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
-             BEGIN RAISE EXCEPTION 'injected crash after pricing UPDATE before checkpoint commit'; END $$;
-             CREATE TRIGGER fail_pricing_checkpoint BEFORE INSERT OR UPDATE ON usage_rollup_checkpoints_v1
-             FOR EACH ROW WHEN (NEW.id='pricing_completeness_backfill_cursor' AND NEW.value>0)
-             EXECUTE FUNCTION fail_pricing_checkpoint();"
-        ).execute(&fixture.pool).await.unwrap();
+            "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0;
+             DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%';",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid)
+             VALUES ('pricing_completeness_backfill_upper', $1, $2::xid8),
+                    ('pricing_completeness_backfill_cursor', $3, $2::xid8)",
+        )
+        .bind(high_seq)
+        .bind(&high_xid)
+        .bind(high_seq + 1)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_pricing_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF (SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)
+                     FROM usage_rollups_v2) = 0 THEN
+                     RAISE EXCEPTION 'cursor updated before classification writes';
+                 END IF;
+                 RAISE EXCEPTION 'injected crash after pricing UPDATE before checkpoint commit';
+             END $$;
+             CREATE TRIGGER fail_pricing_checkpoint BEFORE UPDATE ON usage_rollup_checkpoints_v1
+             FOR EACH ROW WHEN (NEW.id = 'pricing_completeness_backfill_cursor')
+             EXECUTE FUNCTION fail_pricing_checkpoint();",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
         let revision = fixture.storage.usage_rollup_revision().await.unwrap();
-        assert!(fixture.storage.rollup_usage_once().await.is_err());
-        assert_eq!(fixture.storage.usage_rollup_checkpoint().await.unwrap(),checkpoint);
-        assert_eq!(fixture.storage.usage_rollup_revision().await.unwrap(),revision);
-        let counts: (i64,i64) = sqlx::query_as(
-            "SELECT SUM(unpriced_event_count)::BIGINT,
-             (SELECT COUNT(*) FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%')
-             FROM usage_rollups_v2"
-        ).fetch_one(&fixture.pool).await.unwrap();
-        assert_eq!(counts,(0,0),"rollup UPDATE and both pricing cursors must roll back atomically");
-        sqlx::query("DROP TRIGGER fail_pricing_checkpoint ON usage_rollup_checkpoints_v1")
-            .execute(&fixture.pool).await.unwrap();
+        let err = fixture
+            .storage
+            .rollup_usage_once()
+            .await
+            .expect_err("trigger must abort commit");
+        assert!(
+            err.to_string()
+                .contains("injected crash after pricing UPDATE before checkpoint commit"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fixture.storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
+        assert_eq!(fixture.storage.usage_rollup_revision().await.unwrap(), revision);
+        let classified: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)::BIGINT
+             FROM usage_rollups_v2",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(classified, 0, "classification writes must roll back with the cursor");
+        let cursor: (i64, String) = sqlx::query_as(
+            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
+             WHERE id = 'pricing_completeness_backfill_cursor'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(cursor, (high_seq + 1, high_xid));
+        sqlx::raw_sql(
+            "DROP TRIGGER fail_pricing_checkpoint ON usage_rollup_checkpoints_v1;
+             DROP FUNCTION fail_pricing_checkpoint();",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
         let resumed = fixture.reconnect().await.unwrap();
         resumed.storage.rollup_usage_once().await.unwrap();
-        assert!(matches!(resumed.consistency().await.unwrap(),Consistency::AllVisible));
+        assert!(matches!(resumed.consistency().await.unwrap(), Consistency::AllVisible));
+        let cursor: (i64, String) = sqlx::query_as(
+            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
+             WHERE id = 'pricing_completeness_backfill_cursor'",
+        )
+        .fetch_one(&resumed.pool)
+        .await
+        .unwrap();
+        assert_eq!(cursor, (0, "0".to_owned()));
         let revision = resumed.storage.usage_rollup_revision().await.unwrap();
         resumed.storage.rollup_usage_once().await.unwrap();
-        assert_eq!(resumed.storage.usage_rollup_revision().await.unwrap(),revision);
+        assert_eq!(resumed.storage.usage_rollup_revision().await.unwrap(), revision);
         resumed.pool.close().await;
         fixture.drop_database().await.unwrap();
     });

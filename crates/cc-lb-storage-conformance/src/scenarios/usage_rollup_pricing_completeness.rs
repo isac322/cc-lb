@@ -15,6 +15,9 @@ where
 {
     recreated_bucket_backfill(Arc::clone(&backend)).await?;
     pre_upgrade_recreated_bucket_backfill(Arc::clone(&backend)).await?;
+    upstream_rename_recreated_bucket_backfill(Arc::clone(&backend)).await?;
+    partial_retention_interrupted_prune_backfill(Arc::clone(&backend)).await?;
+    mixed_old_and_new_writer_effective_cache_writes(Arc::clone(&backend)).await?;
     let raw = Arc::clone(&backend);
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -320,6 +323,210 @@ where
         teardown?;
     }
     Ok(())
+}
+
+async fn upstream_rename_recreated_bucket_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    for (old_name, new_name) in [("a", "z"), ("z", "a")] {
+        let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+        let result: Result<()> = async {
+            let storage = fixture.storage();
+            let start = 1_800_000_000;
+            // No upstream spec is inserted: event names must drive identity resolution.
+            let upstream_id = uuid::Uuid::new_v4();
+            let mut older = event("rename-older", start);
+            older.model = Some("renamed".to_owned());
+            older.upstream_id = Some(upstream_id);
+            older.upstream_name = Some(old_name.to_owned());
+            older.input_tokens = Some(10);
+            older.cost_usd_micros = Some(0);
+            storage.append_request_event(&older).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            ensure!(storage.prune_usage_rollups_before(start + 60, start, 100).await? == 1);
+
+            let mut newer = event("rename-newer", start);
+            newer.model = older.model.clone();
+            newer.upstream_id = Some(upstream_id);
+            newer.upstream_name = Some(new_name.to_owned());
+            newer.input_tokens = Some(10);
+            storage.append_request_event(&newer).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0").await?;
+            backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%'").await?;
+            storage.rollup_usage_once().await?;
+            for (resolution, expected, completeness) in [
+                (UsageRollupResolution::Minute, (1, 0, 1, 0), PricingCompleteness::Unpriced),
+                (UsageRollupResolution::Hour, (2, 1, 1, 0), PricingCompleteness::Partial),
+            ] {
+                let rows = storage.query_usage_rollups_in_range(resolution, start, start + 3600).await?;
+                ensure!(rows.len() == 1, "{old_name}->{new_name}: missing {resolution:?}: {rows:?}");
+                let row = &rows[0];
+                ensure!(
+                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == expected,
+                    "{old_name}->{new_name}: wrong {resolution:?} population: {row:?}"
+                );
+                ensure!(
+                    derive_pricing_completeness(PricingCompletenessInput {
+                        request_count: row.request_count,
+                        priced_event_count: row.priced_event_count,
+                        unpriced_event_count: row.unpriced_event_count,
+                        unmetered_event_count: row.unmetered_event_count,
+                        total_tokens: row.input_tokens,
+                        virtual_cost_micros: row.virtual_cost_micros,
+                    }) == Some(completeness)
+                );
+            }
+            Ok(())
+        }.await;
+        let teardown = fixture.teardown().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
+}
+
+async fn partial_retention_interrupted_prune_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    for mode in ["checkpoint", "pre-upgrade", "intact", "fully-pruned"] {
+        let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+        let result: Result<()> = async {
+            let storage = fixture.storage();
+            let start = 1_800_000_000;
+            let mut older = event("retained-older", start + 3000);
+            older.model = Some("interrupted-retention".to_owned());
+            older.input_tokens = Some(10);
+            older.cost_usd_micros = Some(0);
+            storage.append_request_event(&older).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            ensure!(storage.prune_request_events_before((start + 300) * 1000 * 1_000_000, 100).await? == 0);
+            ensure!(storage.prune_usage_rollups_before(start + 300, start + 300, 100).await? == 1);
+            let mut newer = event("pruned-newer", start + 600);
+            newer.model = older.model.clone();
+            newer.input_tokens = Some(10);
+            storage.append_request_event(&newer).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            if mode != "intact" {
+                ensure!(
+                    storage.prune_request_events_before((start + 900) * 1000 * 1_000_000, 100).await? == 1,
+                    "{mode}: only the newer-cursor B must be deleted"
+                );
+                if mode == "fully-pruned" {
+                    ensure!(storage.prune_usage_rollups_before(start + 900, start + 900, 100).await? == 2);
+                }
+            }
+            backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0").await?;
+            if mode == "pre-upgrade" {
+                backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id != 'high_water'").await?;
+                backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollups_v2 WHERE resolution = 'minute'").await?;
+            } else {
+                backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%'").await?;
+            }
+            storage.rollup_usage_once().await?;
+            let hours = storage.query_usage_rollups_in_range(UsageRollupResolution::Hour, start, start + 3600).await?;
+            if mode == "fully-pruned" {
+                ensure!(hours.is_empty(), "fully-pruned hour must not be resurrected: {hours:?}");
+            } else {
+                ensure!(hours.len() == 1, "{mode}: recreated hour missing: {hours:?}");
+                let row = &hours[0];
+                let (expected, completeness) = if mode == "intact" {
+                    ((1, 0, 1, 0), PricingCompleteness::Unpriced)
+                } else {
+                    ((1, 0, 0, 0), PricingCompleteness::Unknown)
+                };
+                ensure!(
+                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == expected,
+                    "{mode}: an unproven retained A must never replace B: {row:?}"
+                );
+                ensure!(
+                    derive_pricing_completeness(PricingCompletenessInput {
+                        request_count: row.request_count,
+                        priced_event_count: row.priced_event_count,
+                        unpriced_event_count: row.unpriced_event_count,
+                        unmetered_event_count: row.unmetered_event_count,
+                        total_tokens: row.input_tokens,
+                        virtual_cost_micros: row.virtual_cost_micros,
+                    }) == Some(completeness)
+                );
+            }
+            Ok(())
+        }.await;
+        let teardown = fixture.teardown().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
+}
+
+async fn mixed_old_and_new_writer_effective_cache_writes<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+        let start = 1_800_000_000;
+        let mut auxiliary = event("mixed-writers", start);
+        auxiliary.input_tokens = Some(0);
+        storage.append_request_event(&auxiliary).await?;
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        storage.rollup_usage_once().await?;
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = storage.query_usage_rollups_in_range(resolution, start, start + 3600).await?;
+            ensure!(rows.len() == 1);
+            ensure!(
+                (rows[0].request_count, rows[0].unmetered_event_count, rows[0].effective_cache_write_input_tokens) == (1, 1, Some(0))
+            );
+        }
+        backend.execute_raw_sql(
+            storage.as_ref(),
+            "UPDATE usage_rollups_v2 SET request_count = request_count + 1, cache_write_input_tokens_30m = 5",
+        ).await?;
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = storage.query_usage_rollups_in_range(resolution, start, start + 3600).await?;
+            ensure!(rows.len() == 1);
+            let row = &rows[0];
+            ensure!(row.effective_cache_write_input_tokens == Some(0));
+            ensure!(row.effective_cache_write_tokens() == 5, "raw evidence must override stale Some(0): {row:?}");
+            ensure!(
+                derive_pricing_completeness(PricingCompletenessInput {
+                    request_count: row.request_count,
+                    priced_event_count: row.priced_event_count,
+                    unpriced_event_count: row.unpriced_event_count,
+                    unmetered_event_count: row.unmetered_event_count,
+                    total_tokens: row.effective_cache_write_tokens(),
+                    virtual_cost_micros: row.virtual_cost_micros,
+                }) == Some(PricingCompleteness::Unknown)
+            );
+        }
+        let mut live = event("mixed-writers-live", start);
+        live.model = auxiliary.model.clone();
+        live.cache_write_input_tokens_12h = Some(3);
+        storage.append_request_event(&live).await?;
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        storage.rollup_usage_once().await?;
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = storage.query_usage_rollups_in_range(resolution, start, start + 3600).await?;
+            ensure!(rows.len() == 1);
+            let row = &rows[0];
+            ensure!(row.effective_cache_write_input_tokens == Some(8), "new writer must self-heal stale effective total: {row:?}");
+            ensure!(row.effective_cache_write_tokens() == 8);
+        }
+        Ok(())
+    }.await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
 }
 
 fn event(name: &str, ts: u64) -> RequestEvent {
