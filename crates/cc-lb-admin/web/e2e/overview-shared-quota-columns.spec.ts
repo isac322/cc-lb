@@ -101,7 +101,7 @@ for (const viewport of VIEWPORTS) {
 }
 
 for (const provider of ['gemini', 'anthropic'] as const) {
-  test(`${provider} provider page keeps its own window columns`, async ({ page }) => {
+  test(`${provider} provider page keeps its own window columns`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await installFixtures(page, { theme: 'dark' });
     await page.goto(`/providers/${provider}`);
@@ -112,6 +112,25 @@ for (const provider of ['gemini', 'anthropic'] as const) {
         : ['Upstream', '5h', '7d', '7d (Fable)', 'Coupons'],
     );
     await expect(page.locator('[data-testid="usage-cell-group"]')).toHaveCount(0);
+    if (provider !== 'gemini') return;
+
+    // Weekly exhausted with the 5h withheld: the provider columns show the
+    // same neutral placeholders as the shared Overview, never a blank cell.
+    const weekly = page.getByTestId('upstream-usage-row').filter({ hasText: 'Gemini weekly exhausted' });
+    const notReported = weekly.locator('[data-testid="usage-slot-placeholder"][data-window="gemini_5h"]');
+    await expect(notReported).toBeVisible();
+    await expect(notReported).toHaveAttribute('data-state', 'not-reported');
+    await expect(notReported).toContainText('Not reported');
+    await expect(notReported).not.toContainText('%');
+    const noReading = weekly.locator('[data-testid="usage-slot-placeholder"][data-window="third_party_5h"]');
+    await expect(noReading).toHaveAttribute('data-state', 'no-reading');
+    await expect(noReading).toContainText('No reading');
+    await expect(weekly.locator('[data-testid="usage-absent-cell"], [data-testid="usage-cell-empty"]')).toHaveCount(0);
+    await expect(weekly.getByRole('meter', { name: 'Gemini models · 5-hour limit window used', exact: true })).toHaveCount(0);
+    await expect(weekly.getByRole('meter', { name: 'Gemini models · weekly limit window used', exact: true })).toHaveAttribute('aria-valuenow', '100');
+    await expectNoHorizontalOverflow(page);
+    const table = page.getByRole('list', { name: 'Upstream usage per window' }).locator('..');
+    await table.screenshot({ path: testInfo.outputPath('provider-gemini-placeholders-1440.png') });
   });
 }
 

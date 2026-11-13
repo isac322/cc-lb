@@ -986,6 +986,33 @@ function RowBody({
             );
           }
           const snapshot = row.windows.find((s) => s.window === w);
+          // Rule A on provider pages too: a Gemini window whose group sibling
+          // has a reading stays visible as a neutral placeholder.
+          const placeholder = pending
+            ? null
+            : geminiGroupPlaceholderState(row.windows, w);
+          if (placeholder != null) {
+            return (
+              <div
+                key={w}
+                className={WINDOW_CELL_CLASS}
+                data-state={placeholder}
+                data-testid="usage-slot-placeholder"
+                data-window={w}
+              >
+                {/* Wide rows show the header instead; keep the name for assistive tech. */}
+                <span
+                  className="text-label text-text-muted @4xl:sr-only"
+                  title={windowLabel(w, { long: true })}
+                >
+                  {windowLabel(w)}
+                </span>
+                <span className="text-caption text-text-muted">
+                  {GEMINI_GROUP_PLACEHOLDER_TEXT[placeholder]}
+                </span>
+              </div>
+            );
+          }
           return !USAGE_WINDOWS_BY_PROVIDER[provider].includes(w) ||
             (snapshot?.state !== 'absent' &&
               provider !== 'anthropic' &&
@@ -1186,13 +1213,18 @@ function UpstreamUsageRows({
             ),
           );
   // Shared 5h/7d columns always stay, whatever the fleet reports; other
-  // columns drop once loaded when no row reports them.
+  // columns drop once loaded when no row reports them or holds a Gemini
+  // group placeholder for them.
   const tableWindows = data.quotaPending
     ? candidateWindows
     : candidateWindows.filter(
         (window) =>
           (layout === 'shared' && isSharedUsageColumn(window)) ||
-          sorted.some((row) => hasReportedUsageWindow(row, window)),
+          sorted.some(
+            (row) =>
+              hasReportedUsageWindow(row, window) ||
+              geminiGroupPlaceholderState(row.windows, window) != null,
+          ),
       );
   const rowGrid = ROW_GRID_BY_COUNT[tableWindows.length] ?? ROW_GRID_MANY;
 

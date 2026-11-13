@@ -187,12 +187,15 @@ describe('UpstreamUsageTable', () => {
       ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
       ['gemini', 'gemini_oauth', true, 'active', null, null],
     ]);
-    usageData.rows[1]!.windows = [snap('gemini_5h', 0.3)];
+    usageData.rows[1]!.windows = [
+      snap('gemini_5h', 0.3),
+      snap('gemini_7d', 0.4),
+    ];
     render(<UpstreamUsageTable data={usageData} />);
     const claude = screen.getByRole('link', { name: /claude/ });
     const gemini = screen.getByRole('link', { name: /gemini/ });
-    expect(claude.querySelectorAll('[data-window]')).toHaveLength(3);
-    expect(gemini.querySelectorAll('[data-window]')).toHaveLength(3);
+    expect(claude.querySelectorAll('[data-window]')).toHaveLength(4);
+    expect(gemini.querySelectorAll('[data-window]')).toHaveLength(4);
     expect(
       claude
         .querySelector('[data-window="gemini_5h"]')
@@ -444,10 +447,7 @@ describe('UpstreamUsageTable', () => {
     );
   });
 
-  it.each([
-    ['openai_oauth', '5h', '7d'],
-    ['gemini_oauth', 'gemini_5h', 'gemini_7d'],
-  ] as const)(
+  it.each([['openai_oauth', '5h', '7d']] as const)(
     'omits absent windows across a weekly-only %s fleet and preserves mixed-row alignment',
     (kind, shortWindow, weeklyWindow) => {
       const weekly = {
@@ -486,6 +486,47 @@ describe('UpstreamUsageTable', () => {
       expect(absent.getAttribute('data-window')).toBe(shortWindow);
       expect(absent.className).toBe('hidden @4xl:block');
       expect(absent.textContent).toBe('');
+    },
+  );
+
+  it.each([
+    ['absent', 'not-reported', 'Not reported'],
+    ['unobserved', 'no-reading', 'No reading'],
+  ] as const)(
+    'keeps a %s Gemini 5h beside a weekly reading as a placeholder cell on provider pages',
+    (state, placeholder, text) => {
+      const usageData = data([
+        ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ]);
+      usageData.rows[0]!.windows = [
+        snap('gemini_5h', null, state),
+        snap('gemini_7d', 1),
+        snap('third_party_5h', null, 'absent'),
+        snap('third_party_7d', null, 'absent'),
+      ];
+      const { container } = render(<UpstreamUsageTable data={usageData} />);
+      // Provider columns: the placeholder keeps Gemini 5h; the wholly absent
+      // Claude·OSS group stays hidden.
+      expect(
+        Array.from(
+          container.querySelectorAll('[aria-hidden="true"].border-b > span'),
+          (span) => span.textContent,
+        ),
+      ).toEqual(['Upstream', 'Gemini 5h', 'Gemini 7d', 'Coupons']);
+      const cell = screen.getByTestId('usage-slot-placeholder');
+      expect(cell.getAttribute('data-window')).toBe('gemini_5h');
+      expect(cell.getAttribute('data-state')).toBe(placeholder);
+      expect(cell.getAttribute('aria-hidden')).toBeNull();
+      expect(cell.textContent).toContain(text);
+      expect(cell.textContent).not.toMatch(/%|used|resets|Reset/);
+      expect(within(cell).queryByRole('meter')).toBeNull();
+      expect(screen.queryByTestId('usage-absent-cell')).toBeNull();
+      expect(screen.queryByTestId('usage-cell-empty')).toBeNull();
+      expect(
+        screen.getByRole('meter', {
+          name: 'Gemini models · weekly limit window used',
+        }),
+      ).toBeTruthy();
     },
   );
 
