@@ -2511,7 +2511,7 @@ fn saved_open_cycle_is_not_pending_and_horizon_follows_the_credited_turn() {
             assert_eq!(activity.evidence_status, "observed");
             assert_eq!(
                 activity.turns[0].action,
-                "redundant renewal (an earlier renewal kept the cache warm)"
+                "saved cycle (savings credited to another renewal)"
             );
         }
     }

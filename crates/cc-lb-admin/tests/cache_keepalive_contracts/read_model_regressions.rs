@@ -1116,7 +1116,7 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_credits_earliest_renew
     assert_eq!(turns[0]["turn_number"], 2);
     assert_eq!(
         turns[0]["label"],
-        "redundant renewal (an earlier renewal kept the cache warm)"
+        "saved cycle (savings credited to another renewal)"
     );
     assert_eq!(turns[0]["renewals"], 0);
     assert_eq!(turns[0]["pending"], false);
@@ -1227,7 +1227,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(turns[0]["time_ms"], json!((now_unix_secs() + 1) * 1_000));
     assert_eq!(
         turns[0]["label"],
-        "redundant renewal (an earlier renewal kept the cache warm)"
+        "saved cycle (savings credited to another renewal)"
     );
     assert_eq!(turns[0]["evidence_status"], "observed");
     assert_eq!(turns[0]["pending"], false);
