@@ -2242,7 +2242,7 @@ fn cycle_credits_earliest_matching_renewal_and_caps_followup_tokens_to_kept_toke
 }
 
 #[test]
-fn missing_anchor_is_unknown_unless_legacy_snapshot_resolves_it() {
+fn missing_anchor_is_unknown_until_storage_resolves_it() {
     let cycle_id = Uuid::from_u128(503);
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Terminal);
@@ -2262,8 +2262,10 @@ fn missing_anchor_is_unknown_unless_legacy_snapshot_resolves_it() {
         renewal,
         follow_up_evidence(1_271_000, CacheTtl::Ttl5m, "legacy"),
     ];
-    for with_snapshot in [false, true] {
-        item.config_snapshot = with_snapshot.then_some(CacheKeepaliveConfigSnapshot {
+    for with_resolved_anchor in [false, true] {
+        evidence[0].cycle_anchor_ms = with_resolved_anchor.then_some(1_000_000);
+        // An item snapshot must never substitute for storage-resolved evidence.
+        item.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
             refresh_lead_time_5m_secs: 30,
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 12,
@@ -2282,15 +2284,18 @@ fn missing_anchor_is_unknown_unless_legacy_snapshot_resolves_it() {
             priced_catalog().as_ref(),
         );
         assert_eq!(activity.total_spent_micros, 6_000);
-        assert_eq!(activity.unknown_cycles, u64::from(!with_snapshot));
-        assert_eq!(activity.total_avoided_micros, with_snapshot.then_some(0));
+        assert_eq!(activity.unknown_cycles, u64::from(!with_resolved_anchor));
+        assert_eq!(
+            activity.total_avoided_micros,
+            with_resolved_anchor.then_some(0)
+        );
         assert_eq!(
             activity.gaps[0].natural_expiry_ms,
-            with_snapshot.then_some(1_300_000)
+            with_resolved_anchor.then_some(1_300_000)
         );
         assert_eq!(
             activity.gaps[0].ending_kind,
-            if with_snapshot {
+            if with_resolved_anchor {
                 "followup_before_expiry"
             } else {
                 "followup_unknown"
@@ -2298,11 +2303,10 @@ fn missing_anchor_is_unknown_unless_legacy_snapshot_resolves_it() {
         );
         assert_eq!(
             activity.pnl.map(|pnl| pnl.net_micros),
-            with_snapshot.then_some(-6_000)
+            with_resolved_anchor.then_some(-6_000)
         );
     }
-    // Persisted anchors take precedence over a derivation, including an anchor
-    // carried by a later row; resolving uses the minimum non-null anchor.
+    // Storage-resolved anchors carried by several rows use the minimum value.
     evidence[0].cycle_anchor_ms = Some(900_000);
     let mut later = evidence[0].clone();
     later.evidence_id = "later-anchor".to_owned();
@@ -2531,7 +2535,7 @@ fn saved_open_cycle_is_not_pending_and_horizon_follows_the_credited_turn() {
 }
 
 #[test]
-fn renewal_credit_requires_positive_kept_tokens_and_legacy_delay_is_at_least_one_second() {
+fn renewal_credit_requires_positive_kept_tokens_and_respects_storage_resolved_anchor() {
     let cycle_id = Uuid::from_u128(803);
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Terminal);
@@ -2579,7 +2583,7 @@ fn renewal_credit_requires_positive_kept_tokens_and_legacy_delay_is_at_least_one
         );
     }
     let mut renewal = evidence[0].clone();
-    renewal.cycle_anchor_ms = None;
+    renewal.cycle_anchor_ms = Some(1_269_000);
     item.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
         refresh_lead_time_5m_secs: 300,
         refresh_lead_time_1h_secs: 3_600,
@@ -2600,4 +2604,77 @@ fn renewal_credit_requires_positive_kept_tokens_and_legacy_delay_is_at_least_one
     );
     assert_eq!(activity.gaps[0].pause_at_ms, 1_269_000);
     assert_eq!(activity.gaps[0].natural_expiry_ms, Some(1_569_000));
+}
+
+#[test]
+fn batched_activity_reuses_one_cached_economics_result_per_cycle() {
+    let anchor = 1_000_000;
+    let mut items = Vec::new();
+    let mut turns = Vec::new();
+    let mut evidence = Vec::new();
+    for index in 0..500_u128 {
+        let cycle_id = Uuid::from_u128(10_000 + index);
+        let session_key = format!("batch-session-{index}");
+        let prefix = format!("batch-prefix-{index}");
+        let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+        item.id = session_key.clone();
+        item.session_key_hash = Some(session_key.clone());
+        item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+        item.cycle_id = Some(cycle_id);
+        for (suffix, offset) in [("first", 270_000), ("second", 540_000)] {
+            let source_ref = format!("{session_key}-{suffix}");
+            let mut paid = turn(&source_ref, (anchor + offset) / 1_000);
+            paid.session_key_hash = session_key.clone();
+            paid.cycle_id = Some(cycle_id);
+            paid.cost_micros = Some(6_000);
+            turns.push(paid);
+            let mut renewal = renewal_evidence(
+                &source_ref,
+                cycle_id,
+                anchor + offset,
+                CacheTtl::Ttl5m,
+                "hit",
+                &prefix,
+            );
+            renewal.cycle_anchor_ms = Some(anchor);
+            evidence.push(renewal);
+        }
+        let mut follow_up = follow_up_evidence(anchor + 551_000, CacheTtl::Ttl5m, &prefix);
+        follow_up.evidence_id = format!("{session_key}-followup");
+        evidence.push(follow_up);
+        items.push(item);
+    }
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns, evidence);
+    assert_eq!(batch.cached_cycle_count(), 500);
+    let catalog = priced_catalog();
+    for horizon_start in [None, Some(anchor + 400_000)] {
+        for item in &items {
+            let activity = activity_for_item(
+                catalog.as_ref(),
+                anchor + 560_000,
+                item,
+                None,
+                &batch,
+                horizon_start,
+            )
+            .expect("cached batch activity");
+            assert_eq!(activity.evidence_status, "observed");
+            assert_eq!(
+                activity.total_avoided_micros,
+                Some(if horizon_start.is_none() { 69_000 } else { 0 })
+            );
+            assert_eq!(activity.gaps[0].ending_kind, "followup_hit");
+            assert_eq!(activity.gaps[0].natural_expiry_ms, Some(anchor + 300_000));
+            assert_eq!(
+                activity
+                    .turns
+                    .iter()
+                    .filter(|turn| turn.followed_up)
+                    .count(),
+                usize::from(horizon_start.is_none())
+            );
+            assert!(!activity.is_last_pending);
+        }
+        assert_eq!(batch.cached_cycle_count(), 500);
+    }
 }

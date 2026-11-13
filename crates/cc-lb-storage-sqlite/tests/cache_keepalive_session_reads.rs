@@ -3540,3 +3540,111 @@ async fn legacy_delay_clamps_to_one_second_when_lead_reaches_or_exceeds_ttl() {
         );
     }
 }
+
+#[tokio::test]
+async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
+    for own_decision_snapshot in [false, true] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(92_001);
+        let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage
+            .replace_from_real_request(&replace)
+            .await
+            .expect("original owning cycle");
+        let mut projection =
+            economics_projection("historical-legacy", Some(cycle), 1_270, "hit", 7);
+        projection.evidence[0].cycle_anchor_ms = None;
+        projection.decision.config_snapshot = own_decision_snapshot.then(snapshot);
+        storage
+            .append_request_event_with_projections(&event("historical-legacy", 1_270), &projection)
+            .await
+            .expect("legacy renewal");
+        let followup = follow_up_evidence("historical-legacy", 1_289, "claude-sonnet-4-5");
+        storage
+            .append_request_event_with_evidence(
+                &event("historical-legacy-followup", 1_290),
+                &[followup],
+            )
+            .await
+            .expect("follow-up while original cache remains warm");
+        let before = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("before replacement");
+        assert_eq!(before.not_needed_cycles, 1);
+
+        let mut replacement = request("renewed-session", 2_000, "agent-in-turn");
+        replacement.cycle_id = Uuid::from_u128(92_002);
+        replacement.config_snapshot.refresh_lead_time_5m_secs = 10;
+        storage
+            .replace_from_real_request(&replacement)
+            .await
+            .expect("later cycle with different lead");
+        let after = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("after replacement");
+        assert_eq!(after.not_needed_cycles, u64::from(own_decision_snapshot));
+        assert_eq!(after.unknown_cycles, u64::from(!own_decision_snapshot));
+        assert!(
+            after.groups.is_empty(),
+            "later session snapshot must never create historical savings"
+        );
+        assert_eq!(after.total_spent_micros, before.total_spent_micros);
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 2_000_000)
+            .await
+            .expect("resolved evidence");
+        let renewal = evidence
+            .iter()
+            .find(|row| row.evidence_kind == "renewal")
+            .expect("renewal evidence");
+        assert_eq!(
+            renewal.cycle_anchor_ms,
+            own_decision_snapshot.then_some(1_000_000)
+        );
+        assert!(
+            evidence
+                .iter()
+                .filter(|row| row.evidence_kind == "follow_up")
+                .all(|row| row.cycle_anchor_ms.is_none())
+        );
+    }
+}
+
+#[tokio::test]
+async fn activity_anchor_uses_full_cycle_and_earliest_usable_snapshot_for_source_subset() {
+    for explicit_anchor in [false, true] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(92_003);
+        for (id, start, lead) in [("snapshot-first", 1_270, 10), ("snapshot-later", 1_540, 30)] {
+            let mut projection = economics_projection(id, Some(cycle), start, "hit", 7);
+            projection.evidence[0].cycle_anchor_ms =
+                (explicit_anchor && id == "snapshot-first").then_some(950_000);
+            let mut config = snapshot();
+            config.refresh_lead_time_5m_secs = lead;
+            projection.decision.config_snapshot = Some(config);
+            storage
+                .append_request_event_with_projections(&event(id, start), &projection)
+                .await
+                .expect("cycle renewal with own snapshot");
+        }
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(
+                PRINCIPAL_ID,
+                &[],
+                &["snapshot-later".to_owned()],
+                0,
+                2_000_000,
+            )
+            .await
+            .expect("source-ref subset with full-cycle anchor");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].event_ref.as_deref(), Some("snapshot-later"));
+        assert_eq!(
+            evidence[0].cycle_anchor_ms,
+            Some(if explicit_anchor { 950_000 } else { 980_000 })
+        );
+    }
+}

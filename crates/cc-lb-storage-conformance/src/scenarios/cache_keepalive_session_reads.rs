@@ -1247,7 +1247,7 @@ where
             (
                 "legacy-early",
                 vec![270],
-                Some(271),
+                Some(290),
                 false,
                 true,
                 100,
@@ -1358,6 +1358,23 @@ where
                     .append_request_event_with_projections(&event, &projections)
                     .await?;
             }
+            let selected = storage
+                .list_cache_keepalive_evidence_for_activity(
+                    TARGET_PRINCIPAL,
+                    &[],
+                    &[format!("{session}-{}", offsets.len() - 1)],
+                    0,
+                    (anchor + 1_000) * 1_000,
+                )
+                .await?;
+            ensure!(
+                selected
+                    .iter()
+                    .filter(|row| row.evidence_kind == "renewal")
+                    .all(|row| row.cycle_anchor_ms
+                        == (explicit || snapshot).then_some(anchor * 1_000)),
+                "{name}: activity evidence must carry the canonical resolved anchor"
+            );
             if let Some(offset) = follow_up {
                 for offset in std::iter::once(offset).chain((name == "early").then_some(320)) {
                     storage
@@ -1400,6 +1417,57 @@ where
             let totals = storage
                 .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
                 .await?;
+            if name == "legacy-early" {
+                storage
+                    .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                        session_key_hash: session.clone(),
+                        principal_id: TARGET_PRINCIPAL.to_owned(),
+                        accounting_key_id: None,
+                        upstream_id: Uuid::from_u128(11),
+                        cycle_id: Uuid::from_u128(100_000 + index as u128),
+                        ttl: CacheTtl::Ttl5m,
+                        cache_anchor_at_unix_secs: anchor + 500,
+                        run_at_unix_secs: anchor + 770,
+                        expires_at_unix_secs: anchor + 800,
+                        encrypted_payload: vec![1],
+                        display_reason: "agent-in-turn".to_owned(),
+                        config_snapshot: CacheKeepaliveConfigSnapshot {
+                            refresh_lead_time_5m_secs: 10,
+                            refresh_lead_time_1h_secs: 300,
+                            max_refreshes_per_session: 12,
+                            max_total_duration_secs: 14_400,
+                            snapshot_max_bytes: 524_288,
+                        },
+                        now_unix_secs: anchor + 500,
+                    })
+                    .await?;
+                let replaced = storage
+                    .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                    .await?;
+                ensure!(
+                    replaced.not_needed_cycles == expected_not_needed
+                        && replaced.unknown_cycles == expected_unknown
+                );
+                ensure!(
+                    replaced.groups == totals.groups,
+                    "replacement lead must not change historical savings"
+                );
+                let evidence = storage
+                    .list_cache_keepalive_evidence_for_activity(
+                        TARGET_PRINCIPAL,
+                        &[cycle],
+                        &[],
+                        0,
+                        (anchor + 1_000) * 1_000,
+                    )
+                    .await?;
+                ensure!(
+                    evidence
+                        .iter()
+                        .filter(|row| row.evidence_kind == "renewal")
+                        .all(|row| row.cycle_anchor_ms == Some(anchor * 1_000))
+                );
+            }
             ensure!(totals.total_spent_micros == expected_spend, "{name}: spend");
             if name == "multi" {
                 let repeated = totals

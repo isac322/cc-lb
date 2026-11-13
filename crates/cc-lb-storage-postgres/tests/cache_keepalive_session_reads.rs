@@ -3589,8 +3589,21 @@ fn counterfactual_summary_legacy_anchor_uses_session_snapshot_without_rewriting_
                 let evidence = storage
                     .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
                     .await?;
+                assert_eq!(
+                    evidence[0].cycle_anchor_ms,
+                    snapshot_present.then_some(1_000_000)
+                );
                 assert!(
-                    evidence.iter().all(|row| row.cycle_anchor_ms.is_none()),
+                    evidence
+                        .iter()
+                        .filter(|row| row.evidence_kind == "follow_up")
+                        .all(|row| row.cycle_anchor_ms.is_none())
+                );
+                let persisted_anchors: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE cycle_anchor_ms IS NOT NULL",
+                ).fetch_one(storage.pool()).await?;
+                assert_eq!(
+                    persisted_anchors, 0,
                     "read-time fallback must not rewrite stored evidence"
                 );
                 fixture.drop_schema().await?;
@@ -3956,6 +3969,196 @@ fn counterfactual_summary_zero_kept_renewal_cannot_select_follow_up_or_receive_c
             "the empty earlier renewal cannot be credited"
         );
         assert_eq!(summary.groups[0].renewals, 1);
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn legacy_cycle_anchor_ignores_replacement_session_snapshot() {
+    run_postgres_case(
+        "legacy anchor survives replacement session",
+        |url| async move {
+            for own_snapshot in [true, false] {
+                let (fixture, storage) = initialized_storage(&url).await?;
+                let cycle = Uuid::from_u128(92_001);
+                let mut original = request("replaced-legacy-session", 1_000, "agent-in-turn");
+                original.cycle_id = cycle;
+                storage.replace_from_real_request(&original).await?;
+                let mut projection =
+                    economics_projection("old-cycle-renewal", Some(cycle), 1_270, "hit", 6_000);
+                projection.turn.as_mut().expect("turn").session_key_hash =
+                    original.session_key_hash.clone();
+                projection.evidence[0].cycle_anchor_ms = None;
+                if !own_snapshot {
+                    projection.decision.config_snapshot = None;
+                }
+                let mut follow_up =
+                    follow_up_evidence("old-cycle-follow-up", 1_290, &projection.evidence[0].model);
+                follow_up.request_start_ms = 1_290_000;
+                projection.evidence.push(follow_up);
+                storage
+                    .append_request_event_with_projections(
+                        &event("old-cycle-renewal", 1_270),
+                        &projection,
+                    )
+                    .await?;
+                let before = storage
+                    .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 0)
+                    .await?;
+                assert_eq!(
+                    before[0].cycle_anchor_ms,
+                    Some(1_000_000),
+                    "the owning cycle may use its own session snapshot"
+                );
+                let mut replacement = request(&original.session_key_hash, 1_290, "agent-in-turn");
+                replacement.cycle_id = Uuid::from_u128(92_002);
+                replacement.config_snapshot.refresh_lead_time_5m_secs = 10;
+                storage.replace_from_real_request(&replacement).await?;
+                let summary = storage
+                    .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                    .await?;
+                assert!(
+                    summary.groups.is_empty(),
+                    "replacement lead must not manufacture saved tokens"
+                );
+                assert_eq!(summary.not_needed_cycles, u64::from(own_snapshot));
+                assert_eq!(summary.unknown_cycles, u64::from(!own_snapshot));
+                assert_eq!(summary.total_spent_micros, 6_000);
+                let evidence = storage
+                    .list_cache_keepalive_evidence_for_activity(
+                        PRINCIPAL_ID,
+                        &[],
+                        &["old-cycle-renewal".to_owned()],
+                        0,
+                        0,
+                    )
+                    .await?;
+                let renewal = evidence
+                    .iter()
+                    .find(|row| row.evidence_kind == "renewal")
+                    .expect("renewal");
+                assert_eq!(renewal.cycle_anchor_ms, own_snapshot.then_some(1_000_000));
+                fixture.drop_schema().await?;
+            }
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn activity_evidence_uses_earliest_available_cycle_snapshot_and_full_cycle_anchor() {
+    run_postgres_case("full-cycle canonical evidence anchor", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let cycle = Uuid::from_u128(92_010);
+        for (source, ts, lead) in [
+            ("canonical-first", 1_270, 30),
+            ("canonical-later", 1_280, 120),
+        ] {
+            let mut projection = economics_projection(source, Some(cycle), ts, "hit", 6_000);
+            projection.evidence[0].cycle_anchor_ms = None;
+            projection
+                .decision
+                .config_snapshot
+                .as_mut()
+                .expect("snapshot")
+                .refresh_lead_time_5m_secs = lead;
+            storage
+                .append_request_event_with_projections(&event(source, ts), &projection)
+                .await?;
+        }
+        let mut follow_up = follow_up_evidence("canonical-follow-up", 1_320, "claude-sonnet-4-5");
+        follow_up.request_start_ms = 1_320_000;
+        storage
+            .append_request_event_with_evidence(&event("canonical-follow-up", 1_320), &[follow_up])
+            .await?;
+        let selected = storage
+            .list_cache_keepalive_evidence_for_activity(
+                PRINCIPAL_ID,
+                &[],
+                &["canonical-later".to_owned()],
+                0,
+                0,
+            )
+            .await?;
+        assert_eq!(
+            selected
+                .iter()
+                .find(|row| row.evidence_kind == "renewal")
+                .expect("selected renewal")
+                .cycle_anchor_ms,
+            Some(1_000_000)
+        );
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(summary.not_needed_cycles, 0);
+        assert_eq!(summary.groups[0].avoided_cache_read_tokens, 20_000);
+        sqlx::query("UPDATE cache_keepalive_evidence SET cycle_anchor_ms = 900000 WHERE event_ref = 'canonical-first'")
+            .execute(storage.pool()).await?;
+        let selected = storage
+            .list_cache_keepalive_evidence_for_activity(
+                PRINCIPAL_ID,
+                &[],
+                &["canonical-later".to_owned()],
+                0,
+                0,
+            )
+            .await?;
+        assert_eq!(
+            selected
+                .iter()
+                .find(|row| row.evidence_kind == "renewal")
+                .expect("selected renewal")
+                .cycle_anchor_ms,
+            Some(900_000),
+            "a stored anchor anywhere in the cycle overrides derivation"
+        );
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn activity_evidence_bounds_cycle_and_source_batches_and_deduplicates_union() {
+    run_postgres_case("large indexed activity evidence scope", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence (
+                evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                model, ttl, cache_read_input_tokens, event_ref, created_at_ms, cycle_anchor_ms
+             )
+             SELECT 'bounded-evidence-' || i, LPAD(TO_HEX(92100 + i), 32, '0')::UUID,
+                    'renewal', 1270000, 'bounded-prefix-' || i, 'policy-v1', 'schema-v1',
+                    $1, $2, 'bounded-model', '5m', 100, 'bounded-source-' || i, 1270000, 1000000
+             FROM generate_series(0, 16999) i",
+        )
+        .bind(PRINCIPAL_ID)
+        .bind(UPSTREAM_ID)
+        .execute(storage.pool())
+        .await?;
+        let cycles = (0_u128..17_000)
+            .map(|index| Uuid::from_u128(92_100 + index))
+            .collect::<Vec<_>>();
+        let sources = (0..17_000)
+            .map(|index| format!("bounded-source-{index}"))
+            .collect::<Vec<_>>();
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &cycles, &sources, 0, 0)
+            .await?;
+        assert_eq!(evidence.len(), 17_000);
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|row| &row.evidence_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            17_000
+        );
+        assert!(
+            evidence
+                .iter()
+                .all(|row| row.cycle_anchor_ms == Some(1_000_000))
+        );
         fixture.drop_schema().await
     });
 }
