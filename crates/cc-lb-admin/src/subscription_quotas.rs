@@ -817,6 +817,28 @@ async fn build_latest_response(
                 )
             }));
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
+    let mut durable_latest_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
+    if include_period_unknown_meters {
+        let gemini_ids = upstreams
+            .iter()
+            .filter(|upstream| upstream.kind == UpstreamKind::GeminiOauth)
+            .map(|upstream| upstream.id)
+            .collect::<Vec<_>>();
+        if !gemini_ids.is_empty() {
+            // A peer replica can have a cold cache after another replica publishes
+            // canonical windows. Batch the durable suppression guard across upstreams.
+            for sample in storage
+                .list_latest_subscription_quota_for_upstreams(&gemini_ids)
+                .await
+                .map_err(storage_error)?
+            {
+                durable_latest_by_upstream
+                    .entry(sample.upstream_id)
+                    .or_default()
+                    .push(sample);
+            }
+        }
+    }
     let dynamic_view = state.dynamic_view.load();
     let mut response_upstreams = Vec::with_capacity(upstreams.len());
 
@@ -833,12 +855,6 @@ async fn build_latest_response(
                 .await
                 .map_err(storage_error)?
         {
-            // A peer replica can have a cold cache after another replica publishes
-            // canonical windows, so durable latest rows also fence older raw meters.
-            let durable_latest = storage
-                .list_latest_subscription_quota_for_upstreams(&[upstream.id])
-                .await
-                .map_err(storage_error)?;
             for (group, group_record, canonical_windows) in [
                 (
                     GeminiQuotaGroupKind::Gemini,
@@ -862,8 +878,10 @@ async fn build_latest_response(
                     })
                     .filter_map(|snapshot| snapshot.observed_at_unix_millis)
                     .chain(
-                        durable_latest
-                            .iter()
+                        durable_latest_by_upstream
+                            .get(&upstream.id)
+                            .into_iter()
+                            .flatten()
                             .filter(|sample| canonical_windows.contains(&sample.window.as_str()))
                             .map(|sample| sample.observed_at_unix_millis),
                     )

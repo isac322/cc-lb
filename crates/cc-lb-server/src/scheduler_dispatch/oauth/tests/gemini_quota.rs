@@ -8,6 +8,24 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU16},
 };
+use tracing::instrument::WithSubscriber;
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured logs lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 struct ProviderState {
     summary: Mutex<Value>,
@@ -205,18 +223,40 @@ async fn gemini_poll_fallback_matrix() {
         assert_eq!(raw.third_party.as_ref().unwrap().meters.len(), 2);
 
         // Every failed fallback preserves durable canonical history and raw meters.
-        for (status, body) in [(500, "{}"), (403, "{}"), (429, "{}"), (200, "not JSON")] {
+        for (status, body) in [
+            (500, "{}"),
+            (403, "{}"),
+            (429, "{}"),
+            (
+                200,
+                r#"{"email":"secret-fallback-leak@example.test", invalid}"#,
+            ),
+        ] {
             provider.state.quota_status.store(status, Ordering::SeqCst);
             *provider.state.quota.lock().unwrap() = body.to_owned();
             let before_calls = provider.state.quota_calls.load(Ordering::SeqCst);
+            let logs = CapturedLogs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
             assert!(matches!(
                 fixture
                     .dispatch
                     .poll_usage(upstream.id, None)
+                    .with_subscriber(subscriber)
                     .await
                     .unwrap(),
                 OAuthUsagePollObservation::Success { .. }
             ));
+            let captured = String::from_utf8(logs.0.lock().expect("captured logs lock").clone())
+                .expect("UTF-8 tracing output");
+            assert!(!captured.contains("secret-fallback-leak@example.test"));
+            if status == 200 {
+                assert!(captured.contains("Gemini quota fallback JSON parse failed"));
+            }
             assert_eq!(
                 provider.state.quota_calls.load(Ordering::SeqCst),
                 before_calls + 1

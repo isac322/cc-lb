@@ -1088,7 +1088,7 @@ fn gemini_period_unknown_state_matrix() {
 }
 
 #[test]
-fn gemini_mixed_period_evidence_preserves_only_explicit_summary_windows() {
+fn gemini_mixed_period_evidence_preserves_explicit_summary_and_fallback_windows() {
     let observed_at = 1_793_527_200_000;
     for summary in [serde_json::Value::Null, serde_json::json!({})] {
         let (records, raw) = records_from_gemini_api(
@@ -1109,11 +1109,13 @@ fn gemini_mixed_period_evidence_preserves_only_explicit_summary_windows() {
         ]}}
     });
     let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
-    assert!(records.is_empty());
+    assert_eq!(records.len(), 1);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.2);
     let GeminiGroupPollUpdate::Replace(raw) = raw.gemini else {
         panic!("raw update missing")
     };
     assert_eq!(raw.meters.len(), 1);
+    assert_eq!(raw.meters[0].model_id.as_deref(), Some("gemini-flash"));
     let value = serde_json::json!({
         "summary":{"groups":[{"displayName":"Gemini models","buckets":[
             {"bucketId":"gemini-5h","remainingFraction":0.8,"resetTime":"2026-11-01T13:00:00Z"},

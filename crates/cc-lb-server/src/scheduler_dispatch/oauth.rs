@@ -726,7 +726,7 @@ impl SchedulerDispatch {
                             tracing::warn!(status = %response.status, "Gemini quota fallback was not a JSON object")
                         }
                         Err(error) => {
-                            tracing::warn!(status = %response.status, %error, "Gemini quota fallback JSON parse failed")
+                            tracing::warn!(status = %response.status, line = error.line(), column = error.column(), "Gemini quota fallback JSON parse failed")
                         }
                     }
                 }

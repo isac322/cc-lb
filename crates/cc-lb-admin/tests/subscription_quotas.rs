@@ -2478,6 +2478,29 @@ async fn absence_eligibility_matrix() {
             assert_eq!(windows[0]["window"], present_twin.as_str());
             assert_eq!(windows[0]["eligible_upstreams"], 1);
             assert_close(windows[0]["utilization"].as_f64(), 0.6);
+            if matches!(provider, "openai" | "gemini") {
+                let (status, _, history) = server
+                    .client
+                    .get(&format!(
+                        "/admin/v1/subscription-quotas/pool-history?provider={provider}&windows={}&since_unix_secs={}&until_unix_secs={}",
+                        target.as_str(),
+                        CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+                        CHECKPOINT_TEST_NOW_UNIX_SECS,
+                    ))
+                    .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{provider}, cached={cached}: {history}"
+                );
+                let windows = history["windows"].as_array().unwrap();
+                assert_eq!(windows.len(), 1, "{provider}, cached={cached}: {history}");
+                assert_eq!(windows[0]["window"], target.as_str());
+                assert_eq!(
+                    windows[0]["latest"]["eligible_upstreams"], 0,
+                    "all-absent {provider} pool-history retains the window, cached={cached}: {history}",
+                );
+            }
         }
         let second = absence_create_upstream(&server, provider, "present-member").await;
         let present = absence_sample(

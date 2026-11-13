@@ -629,6 +629,7 @@ fn records_from_gemini_api(
                 .any(|record| record.window == window)
                 .then_some(window)
         });
+        let mut explicit_windows = summary_windows;
         if !present && let Some(quota) = fallback {
             fallback_succeeded = true;
             for bucket in quota
@@ -666,6 +667,11 @@ fn records_from_gemini_api(
                     // Explicit summary evidence (including real Absent) wins.
                     if !summary_windows.contains(&Some(window)) {
                         replace_gemini_record(&mut records, sample);
+                        let index = windows
+                            .iter()
+                            .position(|candidate| *candidate == window)
+                            .expect("fallback window belongs to its group");
+                        explicit_windows[index] = Some(window);
                     }
                 } else if let Some(meter) =
                     gemini_raw_meter(raw_group, bucket, GeminiRawMeterOrigin::RetrieveUserQuota)
@@ -677,7 +683,7 @@ fn records_from_gemini_api(
         let meters = normalize_gemini_period_unknown_meters(raw_group, meters);
         if !meters.is_empty() {
             records.retain(|record| {
-                !windows.contains(&record.window) || summary_windows.contains(&Some(record.window))
+                !windows.contains(&record.window) || explicit_windows.contains(&Some(record.window))
             });
         }
         if meters.is_empty()
