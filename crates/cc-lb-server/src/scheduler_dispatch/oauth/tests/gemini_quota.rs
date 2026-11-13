@@ -223,14 +223,18 @@ async fn gemini_poll_fallback_matrix() {
         assert_eq!(raw.third_party.as_ref().unwrap().meters.len(), 2);
 
         // Every failed fallback preserves durable canonical history and raw meters.
+        let malformed_body = br#"{"k":LEAK99}"#;
+        assert!(
+            sonic_rs::from_slice::<serde_json::Value>(malformed_body)
+                .unwrap_err()
+                .to_string()
+                .contains("LEAK99")
+        );
         for (status, body) in [
             (500, "{}"),
             (403, "{}"),
             (429, "{}"),
-            (
-                200,
-                r#"{"email":"secret-fallback-leak@example.test", invalid}"#,
-            ),
+            (200, std::str::from_utf8(malformed_body).unwrap()),
         ] {
             provider.state.quota_status.store(status, Ordering::SeqCst);
             *provider.state.quota.lock().unwrap() = body.to_owned();
@@ -253,7 +257,7 @@ async fn gemini_poll_fallback_matrix() {
             ));
             let captured = String::from_utf8(logs.0.lock().expect("captured logs lock").clone())
                 .expect("UTF-8 tracing output");
-            assert!(!captured.contains("secret-fallback-leak@example.test"));
+            assert!(!captured.contains("LEAK99"));
             if status == 200 {
                 assert!(captured.contains("Gemini quota fallback JSON parse failed"));
             }
