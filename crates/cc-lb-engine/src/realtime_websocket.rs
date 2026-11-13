@@ -346,6 +346,7 @@ impl RealtimeWebSocketKind {
     }
 }
 
+#[must_use]
 pub struct RealtimeWebSocketObservation {
     pub(crate) observer: Option<LifecycleContext>,
     pub(crate) completion_observer: Arc<CompletionObserver>,
@@ -353,13 +354,64 @@ pub struct RealtimeWebSocketObservation {
 }
 
 impl RealtimeWebSocketObservation {
-    pub fn finish(self, status: StatusCode) {
+    pub fn reject_unsupported_operation(
+        self,
+        provider: Provider,
+        canonical_path: &str,
+    ) -> axum::response::Response<axum::body::Body> {
         if let Some(observer) = &self.observer {
-            if status.is_server_error() {
-                observer.set_upstream_error(status, UpstreamErrorCode::Upstream5xx);
-            } else {
-                observer.set_success_status(status);
-            }
+            observer.terminate_local(
+                crate::terminal_observer::TerminalClassification::OPERATION_NOT_SUPPORTED,
+            );
+        }
+        crate::error_format::provider_scope_error_response(
+            provider,
+            StatusCode::NOT_FOUND,
+            "operation_not_supported",
+            &format!("GET {canonical_path} is not supported by cc-lb yet"),
+        )
+    }
+
+    pub fn reject_no_eligible_upstream(
+        self,
+        provider: Provider,
+    ) -> axum::response::Response<axum::body::Body> {
+        const MESSAGE: &str = "no eligible provider API-key upstream";
+        if let Some(observer) = &self.observer {
+            observer.emit_lifecycle(LifecycleEvent::RouteCompleted {
+                event_id: observer.event_id().to_owned(),
+                result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                routing_trace: None,
+            });
+            observer.terminate_failure(InternalFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error_code: crate::terminal_observer::error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                error: InternalError {
+                    stage: InternalErrorStage::RouterFilter,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some(MESSAGE.to_owned()),
+                },
+            });
+        }
+        crate::error_format::provider_scope_error_response(
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "route_no_upstream_after_filter",
+            MESSAGE,
+        )
+    }
+
+    pub fn finish_draining(self) {
+        if let Some(observer) = &self.observer {
+            observer.set_failure(InternalFailure {
+                status: StatusCode::SWITCHING_PROTOCOLS,
+                error_code: crate::terminal_observer::error_codes::DRAIN_REJECTED,
+                error: InternalError {
+                    stage: InternalErrorStage::Relay,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some("server is draining".to_owned()),
+                },
+            });
             observer.finish();
         }
     }
