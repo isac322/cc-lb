@@ -99,7 +99,7 @@ mod tests {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     Ok(JobOutcome::Retry {
-                        delay: Duration::from_secs(7),
+                        delay: Some(Duration::from_secs(7)),
                     })
                 })
             }),
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(
             outcome,
             JobOutcome::Retry {
-                delay: Duration::from_secs(7),
+                delay: Some(Duration::from_secs(7)),
             }
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);

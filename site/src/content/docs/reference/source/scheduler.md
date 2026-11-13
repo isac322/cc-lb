@@ -53,30 +53,33 @@ The system consists of the following components:
 
 ## 6. Retry Classes
 
-The scheduler defines three distinct retry classes to handle different failure modes. Each class uses an exponential backoff curve with 10% jitter to prevent thundering herds. These curves are defined in `SchedulerConfig::default()` and the scheduler retry policy.
+`RetryClass::policy` in `crates/cc-lb-scheduler/src/retry.rs` defines the retry policies. `RetryPolicy`'s `max_attempts` counts retries after the initial execution. The worker uses the 1-based retry ordinal `attempt + 1`, so a policy with one retry permits two total runs.
 
 - **Probe**: Used for lightweight connectivity checks.
-  - Max attempts: 3
+  - Max attempts: 3 retries (4 total runs)
   - Base delay: 1s
   - Max delay: 5s
-  - Backoff curve: 1s, 2s, 4s (capped at 5s)
-- **Entity**: Used for heavy, external-facing operations like warmup or OAuth refresh.
-  - Max attempts: 5
+  - Backoff curve: 1s, 2s, 4s, each with ±10% jitter
+- **Entity** (`RetryClass::Adaptive`): Used for external operations like warmup or OAuth refresh.
+  - Max attempts: 5 retries (6 total runs)
   - Base delay: 30s
   - Max delay: 600s (10 minutes)
-  - Backoff curve: 30s, 60s, 120s, 240s, 480s
+  - Backoff curve: 30s, 60s, 120s, 240s, 480s, each with ±10% jitter
 - **Maintenance**: Used for internal database cleanup and rollups.
-  - Max attempts: 1
+  - Max attempts: 1 retry (2 total runs)
   - Base delay: 60s
   - Max delay: 60s
-  - Backoff curve: No retries (fails fast)
-- **Cache keepalive override**: `CacheKeepaliveJob` is enqueued with `max_attempts=1` even though it is an entity-shaped Apalis row. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded as terminal/noop state and metrics; they must not rely on Apalis retries.
+  - Backoff curve: one 60s base delay with ±10% jitter (54–66s); explicit positive delays are capped at 60s without jitter
+
+Within the retry budget, a positive `JobOutcome::Retry { delay: Some(d) }` reschedules without jitter at `min(d, max_delay)`. This preserves `PriceCatalogRefreshJob`'s 30s retry under the Maintenance class's 60s cap. `delay: None` uses the class's jittered backoff curve. `Duration::ZERO` returns an error and marks the row `Killed`, even when its retry budget is exhausted.
+
+SQL rows pushed with `max_attempts = 1` disable retries through `RetryPayload::allows_retry()`. This override applies to `CacheKeepaliveJob` and immediate API-key usage polls. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors remain cache keepalive business outcomes recorded as terminal/noop state and metrics.
 
 ## 7. Scheduler Failures and Admin Endpoint
 
-When a job exhausts its retry class, it remains in a terminal `Failed` or `Killed` state in Apalis. The admin endpoint reads those Apalis rows directly and surfaces them to operators.
+A rescheduled `Retry` returns the same row to `Pending` with a future `run_at`; the failure endpoint excludes it. When a job exhausts its retry class, `DeadLetter` marks the row `Killed`. Panics and invalid zero retry delays also produce terminal `Killed` rows. `GET /admin/scheduler/failures` lists `Failed` and `Killed` rows directly from Apalis without filtering by attempt count. Apalis may reclaim a `Failed` row from an ordinary handler error while `attempts < max_attempts`.
 
-- **Ticket Model**: Terminal Apalis rows are the failure tickets. This satisfies the "ticket/metric only, no auto-page" operator promise without a `scheduler_failures` table.
+- **Ticket Model**: Apalis `Failed` and `Killed` rows are the failure tickets, including `Failed` rows that Apalis may retry. This satisfies the "ticket/metric only, no auto-page" operator promise without a `scheduler_failures` table.
 - **Triage Endpoint**: Operators can query `GET /admin/scheduler/failures` to read and triage these failures. The endpoint supports filtering by `job_type` and returns details about the failure, including the last error message and the number of attempts.
 - **Redaction**: Failure summaries are bounded and redact prompt, `Authorization`, `x-api-key`, downstream API key, ciphertext, and payload-shaped material. Cache keepalive rows surface the job type and hashed/idempotency summary, never the prompt snapshot or downstream auth headers.
 - **Resolution**: Once the underlying issue is resolved (for example, fixing invalid upstream credentials), operators can trigger the relevant watchdog or enqueue path to create new work with a new idempotency key.
@@ -88,19 +91,21 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 - `cclb_scheduler_jobs_total` (Counter): Tracks job lifecycle events.
   - Labels: `job_type`, `status` (started, done, retry, skip, panicked, noop)
   - Cardinality: bounded registered job types * 6 statuses; includes `adaptive:cache_keepalive`.
+  - `retry` counts both rescheduled `Retry` outcomes and terminal `DeadLetter` outcomes. A rescheduled row stays `Pending`, not `Done`.
 - `cclb_scheduler_job_duration_seconds` (Histogram): Tracks job handler execution duration.
   - Labels: `job_type`
   - Cardinality: 15 (one per registered job type)
 - `cclb_scheduler_failures_total` (Counter): Tracks terminal job failures.
   - Labels: `job_type`
   - Cardinality: bounded registered job types; includes `adaptive:cache_keepalive`.
+  - Rescheduled retries do not increment this counter; terminal dead letters do.
 
 Cache keepalive-specific operator notes:
 
 - `CacheKeepaliveJob` payloads are lightweight metadata only. Prompt snapshots are AEAD-encrypted in `cache_keepalive_sessions.encrypted_payload` with AAD bound to principal, session hash, upstream id, generation, and job type/version.
 - New keepalive snapshots store the captured body in framed raw/zstd payload codecs. Before upgrading from the JSON payload format, drain and stop all old workers and request-serving replicas before starting a new writer. The new version reads old snapshots and migrates them on their next successful renewal; old versions cannot read the new format. Do not downgrade while active sessions contain new-format payloads.
 - The first schedule uses the response-begin cache anchor (`message_start` for streaming, first upstream response event for non-stream, request dispatch time fallback), not response completion. Run time is `cache_anchor_at + ttl - lead`.
-- Cleanup recovers stale active/running sessions through application storage, then purges stale pending and expired sessions. It kills stale running cache keepalive Apalis jobs in scheduler storage; fresh queued and running work is retained. Retention later removes older pending and terminal Apalis rows. Generation checks make stale rows no-op when they eventually run.
+- Cleanup recovers stale active/running sessions through application storage, then purges stale pending and expired sessions. In scheduler storage, `ApalisHousekeepingJob` reaps `Running` locks older than `APALIS_STALE_LOCK_THRESHOLD_SECS` (120 s). It reaps `Queued` locks older than 120 s only when the owning worker has no fresh heartbeat within that threshold, preserving prefetched batches buffered on a live worker. It moves eligible non-keepalive rows back to `Pending` and increments `attempts` by one; it marks eligible cache keepalive rows `Killed`. Retention later removes older pending and terminal Apalis rows. Generation checks make stale rows no-op when they eventually run.
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
   - Cardinality: 1
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.
@@ -135,8 +140,8 @@ The [Admin consistency contract](https://github.com/isac322/cc-lb/blob/master/do
 ### Scheduler Stuck
 - **Symptom**: Jobs are not executing; queues are growing; `cclb_scheduler_jobs_total` is flat.
 - **Triage**:
-  1. Query `GET /admin/scheduler/status` and confirm `recurring_jobs[].next_run_at` is advancing across ticks.
-  2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern; a stuck row will show `status = 'Running'` with a stale `run_at`.
+  1. Query `GET /admin/scheduler/status` and check `recurring_jobs[].next_run_at`, which includes rescheduled `Pending` retries.
+  2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern. A `Pending` row with a future `run_at` is waiting for its retry delay; check the `retry` status in `cclb_scheduler_jobs_total`. For a `Running` or `Queued` row, inspect `lock_at` for a lease older than 120 s. Housekeeping reaps an old `Queued` lock only when its owning worker has no fresh heartbeat within 120 s, so prefetched batches on live workers remain queued. It returns eligible non-keepalive rows to `Pending` with `attempts + 1` and marks eligible cache keepalive rows `Killed`.
   3. Check the logs for database connection errors or lock contention.
   4. Verify that the worker threads are not blocked by long-running external HTTP calls.
 - **Resolution**: Restart the scheduler workers; the watchdog and enqueue paths create new work with a new idempotency key.

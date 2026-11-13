@@ -120,7 +120,7 @@ where
                 .await
                 .map_err(storage_error)?;
             return Ok(JobOutcome::Retry {
-                delay: COMPAT_REFRESH_RETRY_DELAY,
+                delay: Some(COMPAT_REFRESH_RETRY_DELAY),
             });
         }
     };
