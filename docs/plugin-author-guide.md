@@ -255,9 +255,9 @@ For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
 response hook runs, including `streamGenerateContent` JSON-array responses.
 
 OpenAI audio endpoints also stream non-JSON output without a request `stream`
-flag. They relay chunks immediately when no buffered hook is installed; a
-buffered hook receives the complete body within the request path's body cap.
-JSON audio responses retain the ordinary buffered response behavior.
+flag. They relay chunks immediately without buffering or invoking an installed
+`transform_response` hook. JSON audio responses (`application/json` or `+json`)
+retain the ordinary buffered response behavior and invoke the hook when installed.
 
 ### Legacy compatibility and migration
 
@@ -342,12 +342,18 @@ buffered response transform, and SSE event transform. Provider-qualified
 handlers are independent: implement only the `(hook, provider)` combinations
 your plugin supports, and omit unused request or response hooks.
 
-When a request asks for streaming but the upstream returns a non-SSE body,
-the host buffers the complete body within the configured response cap and
-calls the buffered response-transform hook once. Genuine SSE responses still
-use the SSE event-transform hook, and responses without a buffered hook are
-relayed as streams. A body over the cap becomes a 502 response without
-invoking the hook.
+When a request asks for streaming and the upstream returns a finite non-SSE JSON
+body (`application/json` or `+json`, including chunked JSON without `Content-Length`),
+the host buffers the complete body within the configured response cap and calls
+the installed buffered response-transform hook once. A body over the cap becomes
+a 502 response without invoking the hook. SSE responses (`text/event-stream`) use
+the SSE event-transform hook. Non-SSE binary or non-JSON streaming responses
+(`audio/*`, `application/octet-stream`, etc.) relay chunks immediately without
+buffering or invoking the buffered hook; responses without a buffered hook also
+relay as streams.
+Buffered `transform_response` hooks run only on semantic JSON bodies
+(`application/json` or `+json`) and Gemini OAuth envelopes. Other non-JSON bodies
+skip the buffered hook on both streaming and non-streaming routes.
 
 Prompt-cache identity is computed before shaping. For a deterministic shape plugin,
 the shaped request must preserve the provider-effective cached prefix for the

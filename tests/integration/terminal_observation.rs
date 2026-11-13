@@ -518,9 +518,7 @@ async fn terminal_upstream_stream_error() -> Result<(), Box<dyn std::error::Erro
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .append_header("content-type", "text/event-stream")
-                .set_body_string(mid_stream_error_sse()),
+            ResponseTemplate::new(200).set_body_raw(mid_stream_error_sse(), "text/event-stream"),
         )
         .mount(&upstream)
         .await;

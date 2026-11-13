@@ -44,6 +44,7 @@ use cc_lb_upstream::{
 };
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use url::Url;
 use uuid::Uuid;
 
@@ -2684,6 +2685,7 @@ async fn responses_websocket_terminal_status_matches_success_failure_and_cancell
             TerminationReason::ErrorCode("client_closed_request".to_owned()),
         ),
         ("response.completed", 101, TerminationReason::Success),
+        ("response.incomplete", 101, TerminationReason::Success),
     ] {
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let mut events = bus.subscribe_lifecycle();
@@ -3310,10 +3312,13 @@ async fn responses_websocket_idle_key_expiry_or_revocation_rejects_queued_and_ne
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn responses_websocket_midturn_steering_reserves_one_successor_and_keeps_usage_separate() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
     let bus = Arc::new(cc_lb_control::InMemoryBus::new());
-    let mut events = bus.subscribe_lifecycle();
+    let mut writer_rx = bus.attach_lifecycle_assembler(128);
     let fixture = Fixture::new(vec![TestUpstream::new(
         50_006,
         "openai",
@@ -3396,10 +3401,37 @@ async fn responses_websocket_midturn_steering_reserves_one_successor_and_keeps_u
     let mut starts = Vec::new();
     let mut ends = Vec::new();
     let mut usages = HashMap::new();
-    while let Ok(event) = events.try_recv() {
+    let mut warnings = Vec::new();
+    let mut warning_event_id = None;
+    let mut parent_stream_completed = false;
+    while let Ok(event) = writer_rx.try_recv() {
         match event {
             LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
             LifecycleEvent::RequestTerminated { event_id, .. } => ends.push(event_id),
+            LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+                event_id,
+                diagnostics,
+                ..
+            } => {
+                assert!(
+                    !parent_stream_completed,
+                    "parent diagnostics must precede completion"
+                );
+                warning_event_id = Some(event_id);
+                warnings.push((diagnostics.warning_type, diagnostics.warning_message));
+            }
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Ok(success),
+                ..
+            } if (success.usage.input_tokens, success.usage.output_tokens) == (7, 11) => {
+                assert_eq!(
+                    warning_event_id.as_deref(),
+                    Some(event_id.as_str()),
+                    "the parent warning must precede its StreamCompleted event on the writer channel"
+                );
+                parent_stream_completed = true;
+            }
             LifecycleEvent::UsageObserved {
                 event_id, usage, ..
             } => {
@@ -3427,6 +3459,38 @@ async fn responses_websocket_midturn_steering_reserves_one_successor_and_keeps_u
         vec![(3, 5), (7, 11)],
         "steering never merges parent and successor usage"
     );
+    assert!(
+        parent_stream_completed,
+        "the writer observes the parent's successful completion"
+    );
+    assert_eq!(
+        warnings,
+        vec![(
+            Some("response.incomplete".to_owned()),
+            Some("steered".to_owned())
+        )]
+    );
+    let mut counts = HashMap::new();
+    for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+        if key.key().name() != "cc_lb_stream_terminations_total" {
+            continue;
+        }
+        let labels: HashMap<_, _> = key
+            .key()
+            .labels()
+            .map(|label| (label.key(), label.value()))
+            .collect();
+        assert_eq!(labels["upstream"], "openai", "no unknown upstream series");
+        assert_eq!(labels["cause"], "none");
+        assert_eq!(labels["model"], "gpt-5-codex");
+        let DebugValue::Counter(count) = value else {
+            panic!("termination is a counter")
+        };
+        counts.insert(labels["outcome"].to_owned(), count);
+    }
+    assert_eq!(counts.len(), 2, "no proxy_error series");
+    assert_eq!(counts.get("completed"), Some(&2));
+    assert_eq!(counts.get("client_cancelled"), Some(&1));
 }
 
 #[tokio::test]
@@ -3596,6 +3660,231 @@ async fn responses_websocket_terminal_releases_concurrency_before_background_set
         0,
         "late settlement never releases a slot twice"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_reused_and_pinned_turns_label_assigned_upstream() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_020,
+        "responses-reused-upstream",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    for (id, previous) in [
+        ("resp_reused_first", None),
+        ("resp_reused_second", Some("resp_reused_first")),
+    ] {
+        let turn = websocket_admit(&mut gateway, websocket_create("main", previous))
+            .await
+            .unwrap();
+        if previous.is_some() {
+            assert_eq!(
+                turn.connection_id,
+                Some(1),
+                "continuation pins the established provider connection"
+            );
+            assert_eq!(turn.candidates.len(), 1);
+        }
+        websocket_send(&mut gateway, &turn, 1).await;
+        gateway
+            .provider_message(1, &websocket_created("main", id))
+            .await
+            .unwrap();
+        gateway
+            .provider_message(1, &websocket_completed("main", id))
+            .await
+            .unwrap();
+    }
+    gateway.close();
+    let samples = snapshotter.snapshot().into_vec();
+    let terminal: Vec<_> = samples
+        .iter()
+        .filter(|(key, _, _, _)| key.key().name() == "cc_lb_stream_terminations_total")
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "reused turns must not create unknown series"
+    );
+    let (key, _, _, value) = terminal[0];
+    let labels: HashMap<_, _> = key
+        .key()
+        .labels()
+        .map(|label| (label.key(), label.value()))
+        .collect();
+    assert_eq!(labels["upstream"], "responses-reused-upstream");
+    assert_eq!(labels["outcome"], "completed");
+    assert_eq!(labels["cause"], "none");
+    assert_eq!(labels["model"], "gpt-5-codex");
+    assert_eq!(*value, DebugValue::Counter(2));
+}
+
+#[tokio::test]
+async fn responses_websocket_incomplete_without_usage_refunds_reservation() {
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let reconcile_rx = bus.attach_lifecycle_limit_reconcile(128);
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_021,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 100_000,
+            },
+        ],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle
+            .with_static_limit_subject(
+                engine.clone(),
+                PRINCIPAL.to_owned(),
+                "ws-incomplete-key".to_owned(),
+                StoredApiKeyRecord {
+                    key_hash_b64: "ws-incomplete-key".to_owned(),
+                    status: KeyStatus::Active,
+                    ..Default::default()
+                },
+            )
+            .with_event_bus(bus)
+    });
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let turn = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &turn, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_no_usage"))
+        .await
+        .unwrap();
+    assert_eq!(concurrency.current("ws-incomplete-key"), 1);
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_no_usage","incomplete_details":{"reason":"max_output_tokens"}}}"#
+    );
+    gateway.provider_message(1, &frame).await.unwrap();
+    assert_eq!(concurrency.current("ws-incomplete-key"), 0);
+    gateway.close();
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+    reconcile.shutdown().await;
+    assert_eq!(concurrency.current("ws-incomplete-key"), 0);
+    assert_eq!(
+        remaining(
+            &engine.headers_for("ws-incomplete-key", PRINCIPAL),
+            "anthropic-ratelimit-tokens-remaining",
+        ),
+        100_000,
+        "no usage means zero measured tokens and a full token reservation refund"
+    );
+    let mut completions = 0;
+    while let Ok(event) = events.try_recv() {
+        if let LifecycleEvent::StreamCompleted { result, .. } = event {
+            let success = result.expect("clean incomplete is a successful completed stream");
+            assert!(!success.usage_present);
+            assert_eq!(
+                (success.usage.input_tokens, success.usage.output_tokens),
+                (0, 0)
+            );
+            completions += 1;
+        }
+    }
+    assert_eq!(completions, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_drop_without_close_settles_turns_with_upstream_labels() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_022,
+        "responses-drop-upstream",
+        UpstreamKind::OpenaiApiKey,
+    )])
+    .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let active = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &active, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_drop"))
+        .await
+        .unwrap();
+    assert!(
+        websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .is_none()
+    );
+    drop(gateway);
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    let mut completions = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
+            LifecycleEvent::StreamCompleted { result, .. } => {
+                assert!(result.is_err());
+                completions += 1;
+            }
+            LifecycleEvent::RequestTerminated {
+                event_id, reason, ..
+            } => {
+                assert_eq!(
+                    reason,
+                    cc_lb_lifecycle::TerminationReason::ErrorCode(
+                        "client_closed_request".to_owned()
+                    )
+                );
+                ends.push(event_id);
+            }
+            _ => {}
+        }
+    }
+    starts.sort();
+    ends.sort();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        ends, starts,
+        "active and queued turn settle exactly once on drop"
+    );
+    assert_eq!(completions, 2);
+    let samples = snapshotter.snapshot().into_vec();
+    let terminal: Vec<_> = samples
+        .iter()
+        .filter(|(key, _, _, _)| key.key().name() == "cc_lb_stream_terminations_total")
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "no unknown or proxy_error series on drop"
+    );
+    let (key, _, _, value) = terminal[0];
+    let labels: HashMap<_, _> = key
+        .key()
+        .labels()
+        .map(|label| (label.key(), label.value()))
+        .collect();
+    assert_eq!(labels["upstream"], "responses-drop-upstream");
+    assert_eq!(labels["outcome"], "client_cancelled");
+    assert_eq!(labels["cause"], "none");
+    assert_eq!(labels["model"], "gpt-5-codex");
+    assert_eq!(*value, DebugValue::Counter(2));
 }
 
 #[tokio::test]

@@ -97,7 +97,7 @@ The gzip decoder reports a missing trailer, a CRC mismatch, an ISIZE mismatch, a
 
 ### Diagnostic payload fields
 
-When the upstream body ends abnormally on a streaming response — a transport error, a decode failure in mid-body, or a decode failure detected as the body finishes, including accepted warnings — the request event payload includes these fields. Local failures where cc-lb stopped reading upstream itself (for example a transform, affinity, or framing error), clean streams, and client disconnects do not produce them.
+When an upstream HTTP body ends abnormally on a streaming response (a transport error, a decode failure in mid-body, or a decode failure as the body finishes, including accepted warnings), the request event payload includes these diagnostic fields. Local failures where cc-lb stopped reading upstream itself (for example a transform, affinity, or framing error), clean HTTP streams, and client disconnects do not produce them. WebSocket warning rows also use the fields described below for provider closes and clean Responses `response.incomplete` turns.
 
 | Field | Meaning |
 | --- | --- |
@@ -105,13 +105,13 @@ When the upstream body ends abnormally on a streaming response — a transport e
 | `upstream_request_id` | Anthropic `request-id` response header. |
 | `upstream_content_encoding` | Upstream `Content-Encoding` header. |
 | `upstream_content_length` | Upstream `Content-Length` header, when present. |
-| `upstream_body_bytes` | Raw (still compressed) body bytes received, including the failing chunk. |
+| `upstream_body_bytes` | Raw (still compressed) HTTP body bytes received, including the failing chunk. On Responses WebSocket `response.incomplete` rows, total upstream frame bytes observed on the turn. |
 | `upstream_body_end` | How the body ended: `transport_error`, `decode_error_after_clean_end` (the transport ended cleanly but final decoding failed), or `decode_error_mid_body`. |
 | `upstream_body_error_cause` | Stream termination cause category, such as `unexpected_eof`. |
 | `upstream_body_error_io_kind` | I/O error kind of a transport failure, when available. |
 | `upstream_body_error_h2_reason` | HTTP/2 reset reason of a transport failure, when available. |
-| `upstream_stream_warning_type` | `upstream_response_decode_error` or `upstream_response_body_error` on an accepted stream. |
-| `upstream_stream_warning_message` | Bounded error text the failure would otherwise have recorded. |
+| `upstream_stream_warning_type` | `upstream_response_decode_error` or `upstream_response_body_error` on accepted HTTP streams; `websocket_close` on Realtime/Live WebSocket provider closes; `response.incomplete` on clean Responses WebSocket incomplete turns. |
+| `upstream_stream_warning_message` | Bounded diagnostic text, provider close details, or redacted, bounded `incomplete_details.reason`. |
 
 `stream_message_stop_ms` is also recorded on failed rows when cc-lb parsed `message_stop`. `request_id` is cc-lb's own request identifier; `upstream_request_id` is Anthropic's, for provider support cases. These fields, including warnings, are available in the request event payload returned by the admin API. The admin dashboard does not display them yet, and request list filters do not match them.
 

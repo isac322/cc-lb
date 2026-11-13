@@ -1153,13 +1153,697 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         let outcome = labels.get("outcome").copied().expect("outcome label");
         assert!(expected_outcomes.contains(outcome));
         let upstream = labels.get("upstream").copied().expect("upstream label");
-        assert!(
-            matches!(upstream, "responses-matrix-upstream" | "unknown"),
-            "upstream label must be a bounded valid value, got {upstream}"
+        assert_eq!(
+            upstream, "responses-matrix-upstream",
+            "assigned terminal paths must preserve their routed upstream"
         );
         assert_eq!(labels.get("model"), Some(&"gpt-test"));
         assert!(matches!(value, DebugValue::Counter(1)));
     }
+}
+
+async fn responses_matrix_gateway(test_bus: &TestLifecycleBus) -> ResponsesWebSocketGateway {
+    responses_matrix_gateway_with_signer_secret(test_bus, None).await
+}
+
+async fn responses_matrix_gateway_with_signer_secret(
+    test_bus: &TestLifecycleBus,
+    secret: Option<&'static str>,
+) -> ResponsesWebSocketGateway {
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: Vec::new(),
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let chains = HashMap::from([(
+        "principal-test".to_owned(),
+        (Some(pipeline), DialectCache::Inherit),
+    )]);
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ));
+    let authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
+    let upstreams = [
+        (1131, "responses-matrix-upstream"),
+        (1132, "responses-failover-upstream"),
+    ]
+    .into_iter()
+    .map(|(id, name)| UpstreamRecord {
+        id: Uuid::from_u128(id),
+        name: name.to_owned(),
+        kind: StorageUpstreamKind::OpenaiApiKey,
+        base_url: Some("http://upstream.local/".parse().unwrap()),
+        enabled: true,
+        api_key_ciphertext: Some(Vec::new()),
+        ..UpstreamRecord::default()
+    })
+    .collect();
+    let signer_factory: Arc<dyn cc_lb_upstream::ApiKeyAwareSignerFactory> =
+        if let Some(secret) = secret {
+            Arc::new(ResponsesReasonScrubbingSignerFactory {
+                inner: cc_lb_upstream::ApiKeyAwareSignerFactory::with_router_choice(
+                    &authn,
+                    "responses-matrix-upstream".to_owned(),
+                ),
+                secret,
+            })
+        } else {
+            Arc::new(authn.clone())
+        };
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(signer_factory)
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(upstreams)
+        .build();
+    let lifecycle = Arc::new(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_event_bus(test_bus.bus_arc()),
+    );
+    let headers = messages_request(Bytes::new()).headers().clone();
+    let auth = lifecycle.authenticate(&headers).await.unwrap();
+    ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1 << 20, 8)
+}
+
+struct ResponsesReasonScrubbingSignerFactory {
+    inner: Arc<dyn cc_lb_upstream::SignerFactory>,
+    secret: &'static str,
+}
+
+impl cc_lb_upstream::ApiKeyAwareSignerFactory for ResponsesReasonScrubbingSignerFactory {
+    fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+        Arc::new(Self {
+            inner: Arc::clone(&self.inner),
+            secret: self.secret,
+        })
+    }
+}
+
+#[async_trait]
+impl cc_lb_upstream::SignerFactory for ResponsesReasonScrubbingSignerFactory {
+    async fn build(
+        &self,
+        upstream: &cc_lb_domain::Upstream,
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Ok(Arc::new(ResponsesReasonScrubbingSigner {
+            inner: self.inner.build(upstream).await?,
+            secret: self.secret,
+        }))
+    }
+}
+
+struct ResponsesReasonScrubbingSigner {
+    inner: Arc<dyn cc_lb_upstream::Signer>,
+    secret: &'static str,
+}
+
+#[async_trait]
+impl cc_lb_upstream::Signer for ResponsesReasonScrubbingSigner {
+    async fn sign(
+        &self,
+        shaped: cc_lb_upstream::ShapedRequest,
+        capability: &mut cc_lb_upstream::SigningCapability,
+    ) -> Result<SignedRequest, cc_lb_upstream::SignerError> {
+        self.inner.sign(shaped, capability).await
+    }
+
+    async fn on_unauthorized(
+        &self,
+        error: &cc_lb_upstream::UpstreamError,
+    ) -> cc_lb_upstream::RetryDecision {
+        self.inner.on_unauthorized(error).await
+    }
+
+    fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if text.contains(self.secret) {
+            std::borrow::Cow::Owned(text.replace(self.secret, "[REDACTED]"))
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        }
+    }
+}
+
+async fn responses_matrix_admit(
+    gateway: &mut ResponsesWebSocketGateway,
+) -> Option<cc_lb_engine::responses_websocket::WebSocketDispatch> {
+    let auth = gateway.authenticate().await.unwrap();
+    gateway.client_message(auth, Bytes::from_static(
+        br#"{"type":"response.create","stream_id":"main","model":"gpt-test","store":false,"input":"terminal observation fixture"}"#
+    )).await.unwrap()
+}
+
+async fn responses_matrix_send(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: &cc_lb_engine::responses_websocket::WebSocketDispatch,
+    candidate_index: usize,
+    id: &str,
+) -> String {
+    let candidate = &dispatch.candidates[candidate_index];
+    gateway.assign_connection(
+        dispatch.turn_id,
+        1131,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    gateway.validate_send(dispatch.turn_id).await.unwrap();
+    gateway.sent(dispatch.turn_id);
+    let created = Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "type": "response.created", "stream_id": "main",
+            "response": {"id": id, "store": false},
+        }))
+        .unwrap(),
+    );
+    assert!(
+        gateway
+            .provider_message(1131, &created)
+            .await
+            .unwrap()
+            .forward
+    );
+    candidate.upstream_name.clone()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_upstream_label_covers_unassigned_queued_and_failover()
+-> Result<(), Box<dyn std::error::Error>> {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway(&test_bus).await;
+    let unassigned = responses_matrix_admit(&mut gateway).await.unwrap();
+    gateway
+        .fail_dispatch(
+            unassigned.turn_id,
+            &WebSocketError::new(502, "proxy_relay_error", "before assignment"),
+        )
+        .await;
+    let active = responses_matrix_admit(&mut gateway).await.unwrap();
+    assert_eq!(
+        responses_matrix_send(&mut gateway, &active, 0, "resp_active").await,
+        "responses-matrix-upstream"
+    );
+    assert!(responses_matrix_admit(&mut gateway).await.is_none());
+    gateway.close();
+    let mut gateway = responses_matrix_gateway(&test_bus).await;
+    let failover = responses_matrix_admit(&mut gateway).await.unwrap();
+    let second_name = responses_matrix_send(&mut gateway, &failover, 1, "resp_failover").await;
+    assert_ne!(second_name, failover.candidates[0].upstream_name);
+    let terminal = Bytes::from_static(
+        br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp_failover","usage":{"input_tokens":12,"output_tokens":16}}}"#
+    );
+    gateway.provider_message(1131, &terminal).await?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut finals = 0;
+        while finals < 4 {
+            if matches!(
+                updates.recv().await.unwrap(),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                finals += 1;
+            }
+        }
+    })
+    .await
+    .expect("all four request rows are persisted");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 4);
+    let completed = rows
+        .iter()
+        .find(|row| row.input_tokens == Some(12))
+        .unwrap();
+    assert_eq!(
+        completed.upstream_name.as_deref(),
+        Some(second_name.as_str())
+    );
+    let mut counts = HashMap::new();
+    for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+        if key.key().name() != "cc_lb_stream_terminations_total" {
+            continue;
+        }
+        let labels: HashMap<_, _> = key
+            .key()
+            .labels()
+            .map(|label| (label.key(), label.value()))
+            .collect();
+        assert_eq!(labels["model"], "gpt-test");
+        let DebugValue::Counter(count) = value else {
+            panic!("termination is a counter")
+        };
+        counts.insert(
+            (labels["outcome"].to_owned(), labels["upstream"].to_owned()),
+            count,
+        );
+    }
+    assert_eq!(counts.len(), 3);
+    assert_eq!(
+        counts.get(&("proxy_error".to_owned(), "unknown".to_owned())),
+        Some(&1)
+    );
+    assert_eq!(
+        counts.get(&(
+            "client_cancelled".to_owned(),
+            "responses-matrix-upstream".to_owned()
+        )),
+        Some(&2)
+    );
+    assert_eq!(counts.get(&("completed".to_owned(), second_name)), Some(&1));
+    Ok(())
+}
+
+type ResponsesSpanValues = Arc<Mutex<HashMap<tracing::span::Id, HashMap<String, String>>>>;
+
+#[derive(Clone, Default)]
+struct ResponsesTerminalSpanLayer {
+    values: ResponsesSpanValues,
+}
+
+impl<S: Subscriber> Layer<S> for ResponsesTerminalSpanLayer {
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: Context<'_, S>,
+    ) {
+        struct Fields<'a>(&'a mut HashMap<String, String>);
+        impl tracing::field::Visit for Fields<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+                self.0.insert(field.name().to_owned(), format!("{value:?}"));
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_owned(), value.to_owned());
+            }
+        }
+        let mut recorded = self.values.lock().unwrap();
+        values.record(&mut Fields(recorded.entry(id.clone()).or_default()));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_incomplete_records_completed_metric_and_durable_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let layer = ResponsesTerminalSpanLayer::default();
+    let spans = layer.values.clone();
+    let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = test_bus.bus.subscribe_lifecycle();
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway(&test_bus).await;
+    for (kind, id, expected_order) in [
+        (
+            "response.incomplete",
+            "resp_incomplete",
+            vec!["usage", "stream", "terminated"],
+        ),
+        (
+            "response.completed",
+            "resp_completed",
+            vec!["usage", "stream", "terminated"],
+        ),
+    ] {
+        let turn = responses_matrix_admit(&mut gateway).await.unwrap();
+        responses_matrix_send(&mut gateway, &turn, 0, id).await;
+        let frame = Bytes::from(serde_json::to_vec(&serde_json::json!({
+            "type": kind, "stream_id": "main",
+            "response": {"id": id, "error": null,
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 12, "output_tokens": 16}},
+        }))?);
+        let unchanged = frame.clone();
+        assert!(gateway.provider_message(1131, &frame).await?.forward);
+        assert_eq!(
+            frame, unchanged,
+            "provider frame is relayed without rewriting"
+        );
+        gateway.close();
+        let mut order = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    LifecycleEvent::UsageObserved { usage, .. } => {
+                        assert_eq!((usage.input_tokens, usage.output_tokens), (12, 16));
+                        order.push("usage");
+                    }
+                    LifecycleEvent::StreamCompleted { result, .. } => {
+                        assert!(result.unwrap().usage_present);
+                        order.push("stream");
+                    }
+                    LifecycleEvent::RequestTerminated {
+                        reason,
+                        client_status,
+                        ..
+                    } => {
+                        assert_eq!(reason, TerminationReason::Success);
+                        assert_eq!(client_status, 101);
+                        order.push("terminated");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("terminal lifecycle arrives");
+        assert_eq!(order, expected_order);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    updates.recv().await.unwrap(),
+                    cc_lb_request_log::RequestEventUpdate::Final(_)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("durable terminal row arrives");
+        let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.upstream_stream_warning_type.is_some() == (kind == "response.incomplete")
+            })
+            .unwrap();
+        assert_eq!(row.status, 101);
+        assert_eq!(row.error_code, None);
+        assert_eq!(row.upstream_error_type, None);
+        assert_eq!(row.upstream_error_message, None);
+        assert_eq!(row.input_tokens, Some(12));
+        assert_eq!(row.output_tokens, Some(16));
+        if kind == "response.incomplete" {
+            assert_eq!(
+                row.upstream_stream_warning_type.as_deref(),
+                Some("response.incomplete")
+            );
+            assert_eq!(
+                row.upstream_stream_warning_message.as_deref(),
+                Some("max_output_tokens")
+            );
+            assert!(row.upstream_body_bytes.is_some());
+        } else {
+            assert_eq!(row.upstream_stream_warning_type, None);
+            assert_eq!(row.upstream_body_bytes, None);
+        }
+    }
+    let samples = snapshotter.snapshot().into_vec();
+    let terminal: Vec<_> = samples
+        .iter()
+        .filter(|(key, _, _, _)| key.key().name() == "cc_lb_stream_terminations_total")
+        .collect();
+    assert_eq!(terminal.len(), 1, "no proxy_error or unknown series");
+    let (key, _, _, value) = terminal[0];
+    let labels: HashMap<_, _> = key
+        .key()
+        .labels()
+        .map(|label| (label.key(), label.value()))
+        .collect();
+    assert_eq!(labels["outcome"], "completed");
+    assert_eq!(labels["cause"], "none");
+    assert_eq!(labels["upstream"], "responses-matrix-upstream");
+    assert_eq!(labels["model"], "gpt-test");
+    assert_eq!(*value, DebugValue::Counter(2));
+    let spans = spans.lock().unwrap();
+    let terminal_spans: Vec<_> = spans
+        .values()
+        .filter(|fields| fields.contains_key("stream.outcome"))
+        .collect();
+    assert_eq!(terminal_spans.len(), 2);
+    for fields in terminal_spans {
+        assert_eq!(fields["stream.outcome"], "completed");
+        assert_eq!(fields["error.cause"], "none");
+        assert!(!fields.contains_key("error.type"));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_incomplete_reason_scrubs_assigned_signer_credential_while_preserving_frame()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SECRET: &str = "custom-unprefixed-credential-7f9a2b";
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway_with_signer_secret(&test_bus, Some(SECRET)).await;
+    let turn = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("response.create is admitted");
+    let candidate = &turn.candidates[0];
+    gateway
+        .prepare_connection(&turn, candidate)
+        .await
+        .expect("connection is signed with the credential-scrubbing signer");
+    gateway.assign_connection(
+        turn.turn_id,
+        1131,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    gateway
+        .validate_send(turn.turn_id)
+        .await
+        .expect("assigned turn validates");
+    gateway.sent(turn.turn_id);
+    gateway
+        .provider_message(
+            1131,
+            &Bytes::from_static(
+                br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_scrubbed","store":false}}"#,
+            ),
+        )
+        .await?;
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_scrubbed","error":null,"incomplete_details":{"reason":"stopped: echoed custom-unprefixed-credential-7f9a2b in reason"}}}"#,
+    );
+    let unchanged = frame.clone();
+    let result = gateway.provider_message(1131, &frame).await?;
+    assert!(result.forward);
+    assert!(result.frames.is_none(), "no replacement wire frames");
+    assert_eq!(
+        frame, unchanged,
+        "provider frame is forwarded byte-for-byte"
+    );
+    gateway.close();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                updates.recv().await.expect("request event channel is open"),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("terminal warning is persisted");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.error_code, None);
+    assert_eq!(
+        row.upstream_stream_warning_type.as_deref(),
+        Some("response.incomplete")
+    );
+    let reason = row
+        .upstream_stream_warning_message
+        .as_deref()
+        .expect("incomplete warning has a reason");
+    assert!(!reason.contains(SECRET));
+    assert_eq!(reason, "stopped: echoed [REDACTED] in reason");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_reused_connection_after_credential_rotation_scrubs_handshake_credential()
+-> Result<(), Box<dyn std::error::Error>> {
+    const OLD_SECRET: &str = "rotated-old-credential-alpha-111";
+    const NEW_SECRET: &str = "rotated-new-credential-beta-222";
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let authn = TestAuthn::new(TestState::default());
+    let upstream = UpstreamRecord {
+        id: Uuid::from_u128(1131),
+        name: "responses-matrix-upstream".to_owned(),
+        kind: StorageUpstreamKind::OpenaiApiKey,
+        base_url: Some("http://upstream.local/".parse()?),
+        enabled: true,
+        api_key_ciphertext: Some(Vec::new()),
+        ..UpstreamRecord::default()
+    };
+    let build_view = |generation, secret| {
+        DynamicViewBuilder::new(generation)
+            .signer_factory(Arc::new(ResponsesReasonScrubbingSignerFactory {
+                inner: cc_lb_upstream::ApiKeyAwareSignerFactory::with_router_choice(
+                    &authn,
+                    upstream.name.clone(),
+                ),
+                secret,
+            }))
+            .principal_view(authn.principal_view.clone())
+            .upstream_records(vec![upstream.clone()])
+            .build()
+    };
+    let holder = Arc::new(DynamicViewHolder::new(build_view(0, OLD_SECRET)));
+    let lifecycle = Arc::new(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            holder.clone(),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_event_bus(test_bus.bus_arc()),
+    );
+    let headers = messages_request(Bytes::new()).headers().clone();
+    let auth = lifecycle.authenticate(&headers).await?;
+    let mut gateway = ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1 << 20, 8);
+    let turn1 = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("first response.create is admitted");
+    let candidate = &turn1.candidates[0];
+    gateway.prepare_connection(&turn1, candidate).await?;
+    responses_matrix_send(&mut gateway, &turn1, 0, "resp_before_rotation").await;
+    gateway
+        .provider_message(
+            1131,
+            &Bytes::from_static(
+                br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp_before_rotation","error":null}}"#,
+            ),
+        )
+        .await?;
+
+    holder.store(build_view(holder.load().generation, NEW_SECRET));
+    let turn2 = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("second response.create is admitted after credential rotation");
+    assert_eq!(turn2.candidates[0].upstream_id, candidate.upstream_id);
+    // Reuse the physical socket: assignment must retain its original handshake signer.
+    // Unlike Turn 1, this turn deliberately never calls prepare_connection.
+    responses_matrix_send(&mut gateway, &turn2, 0, "resp_after_rotation").await;
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_after_rotation","error":null,"incomplete_details":{"reason":"stopped: echoed rotated-old-credential-alpha-111 on reused socket"}}}"#,
+    );
+    let unchanged = frame.clone();
+    let result = gateway.provider_message(1131, &frame).await?;
+    assert!(result.forward);
+    assert!(result.frames.is_none(), "no replacement wire frames");
+    assert_eq!(
+        frame, unchanged,
+        "provider frame is forwarded byte-for-byte"
+    );
+    assert!(std::str::from_utf8(&frame)?.contains(OLD_SECRET));
+    gateway.close();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut final_count = 0;
+        while final_count < 2 {
+            if matches!(
+                updates.recv().await.expect("request event channel is open"),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                final_count += 1;
+            }
+        }
+    })
+    .await
+    .expect("both terminal request events are persisted");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 2);
+    let row = rows
+        .iter()
+        .find(|row| row.upstream_stream_warning_type.as_deref() == Some("response.incomplete"))
+        .expect("reused connection's incomplete turn is persisted");
+    assert_eq!(row.error_code, None);
+    assert_eq!(
+        row.upstream_stream_warning_type.as_deref(),
+        Some("response.incomplete")
+    );
+    assert_eq!(
+        row.upstream_stream_warning_message.as_deref(),
+        Some("stopped: echoed [REDACTED] on reused socket")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_incomplete_with_error_records_provider_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway(&test_bus).await;
+    let turn = responses_matrix_admit(&mut gateway).await.unwrap();
+    responses_matrix_send(&mut gateway, &turn, 0, "resp_error").await;
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_error","error":{"message":"provider failed"},"incomplete_details":{"reason":"not a clean completion"}}}"#
+    );
+    assert!(gateway.provider_message(1131, &frame).await?.forward);
+    gateway.close();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                updates.recv().await.unwrap(),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("provider failure persists");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("response.incomplete")
+    );
+    assert_eq!(rows[0].upstream_stream_warning_type, None);
+    let samples = snapshotter.snapshot().into_vec();
+    let terminal: Vec<_> = samples
+        .iter()
+        .filter(|(key, _, _, _)| key.key().name() == "cc_lb_stream_terminations_total")
+        .collect();
+    assert_eq!(terminal.len(), 1);
+    let (key, _, _, value) = terminal[0];
+    let labels: HashMap<_, _> = key
+        .key()
+        .labels()
+        .map(|label| (label.key(), label.value()))
+        .collect();
+    assert_eq!(labels["outcome"], "upstream_error");
+    assert_eq!(labels["cause"], "provider_error");
+    assert_eq!(labels["upstream"], "responses-matrix-upstream");
+    assert_eq!(*value, DebugValue::Counter(1));
+    Ok(())
 }
 
 #[tokio::test]
