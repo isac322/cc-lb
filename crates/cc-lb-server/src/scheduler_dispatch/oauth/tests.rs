@@ -49,6 +49,9 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 #[path = "tests/provider_metadata.rs"]
 mod provider_metadata;
 
+#[path = "tests/gemini_quota.rs"]
+mod gemini_quota;
+
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 

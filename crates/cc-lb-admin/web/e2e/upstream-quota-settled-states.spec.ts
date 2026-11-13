@@ -1,0 +1,195 @@
+import { expect, type Locator, type Page, test } from '@playwright/test';
+import {
+  absentWindows, ID, installQuotaSettledFixtures, latestRow, LONG_MODEL,
+  NAME, NOW, quotaSnapshot, rawMeter,
+} from './quotaSettledStatesFixture';
+
+function quota(page: Page) {
+  return page.getByRole('region', { name: 'Quota', exact: true });
+}
+async function openQuota(page: Page) {
+  await page.goto(`/upstreams?selectedId=${ID}`);
+  await expect(quota(page)).toBeVisible();
+}
+async function expectNoOverflow(page: Page) {
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const section = quota(page);
+  expect(await section.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  for (const row of await section.getByRole('listitem').all()) {
+    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  }
+}
+async function expectNeutralRaw(section: Locator) {
+  const raw = section.locator('[data-period-unknown]');
+  await expect(raw.locator('[data-slot="pace-marker"]')).toHaveCount(0);
+  await expect(raw.locator('[class*="warn"], [class*="danger"]')).toHaveCount(0);
+  for (const meter of await raw.getByRole('meter').all()) {
+    await expect(meter).not.toHaveAttribute('aria-valuetext', /even pace/);
+  }
+}
+async function expectReadableRaw(section: Locator) {
+  const ratios = await section.locator('[data-period-unknown]').evaluateAll((rows) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas color conversion unavailable');
+    function rgba(color: string): number[] {
+      ctx!.clearRect(0, 0, 1, 1);
+      ctx!.fillStyle = color;
+      ctx!.fillRect(0, 0, 1, 1);
+      return [...ctx!.getImageData(0, 0, 1, 1).data].map((v) => v / 255);
+    }
+    function luminance(rgb: number[]) {
+      const linear = rgb.slice(0, 3).map((c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    }
+    return rows.flatMap((row) => [...row.querySelectorAll<HTMLElement>('[title], .text-caption, .text-text')]
+      .filter((el) => el.textContent?.trim() && el.childElementCount === 0)
+      .map((el) => {
+        const ancestors: Element[] = [];
+        for (let node: Element | null = el; node; node = node.parentElement) ancestors.unshift(node);
+        let background = [1, 1, 1];
+        for (const node of ancestors) {
+          const color = rgba(getComputedStyle(node).backgroundColor);
+          background = background.map((v, i) => color[i] * color[3] + v * (1 - color[3]));
+        }
+        const color = rgba(getComputedStyle(el).color);
+        const foreground = background.map((v, i) => color[i] * color[3] + v * (1 - color[3]));
+        const a = luminance(foreground);
+        const b = luminance(background);
+        return { text: el.textContent, ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) };
+      }));
+  });
+  expect(ratios.length).toBeGreaterThan(0);
+  for (const result of ratios) expect(result.ratio, result.text ?? '').toBeGreaterThanOrEqual(4.5);
+}
+
+// QA-22: twelve layout/theme/locale combinations plus five state-transition cases.
+for (const width of [390, 768, 1440]) {
+  for (const theme of ['light', 'dark'] as const) {
+    for (const locale of ['en-US', 'ko-KR'] as const) {
+      test(`mixed canonical and raw quota: ${width}px ${theme} ${locale}`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height: 900 });
+        const fixtures = await installQuotaSettledFixtures(page, {
+          theme, locale,
+          latest: latestRow([quotaSnapshot()], [rawMeter(), rawMeter({
+            group: 'third_party', model_id: null, bucket_id: 'provider-bucket-with-a-long-identifier',
+            origin: 'retrieve_user_quota_summary', remaining_fraction: 0, utilization: 1,
+            reset_time_unix_secs: null,
+          })]),
+        });
+        await openQuota(page);
+        const section = quota(page);
+        await expect(section.getByRole('listitem')).toHaveCount(3);
+        await expect(section.getByTestId('pace-legend')).toHaveCount(1);
+        await expect(section.locator('[data-slot="pace-marker"]')).toHaveCount(1);
+        await expect(section.getByTestId('quota-freshness')).toBeVisible();
+        await expect(section.getByTitle(LONG_MODEL, { exact: true })).toBeVisible();
+        await expect(section.locator('[data-period-unknown="gemini"]').getByRole('meter')).toHaveAttribute('aria-valuetext', '99% used');
+        await expect(section.locator('[data-period-unknown="third_party"]').getByRole('meter')).toHaveAttribute('aria-valuetext', '100% used');
+        await expect(section.locator('[data-period-unknown="gemini"]')).toContainText(locale === 'ko-KR' ? '2시간 후 초기화' : 'Resets in 2h');
+        await expect(section.locator('[data-period-unknown="third_party"]')).not.toContainText('Not started');
+        const resetValue = section.locator('[data-period-unknown="gemini"] [data-slot="window-reset-value"]');
+        await expect(resetValue).toHaveClass(locale === 'ko-KR' ? /text-right/ : /text-left/);
+        await expectNeutralRaw(section);
+        await expectNoOverflow(page);
+        await expectReadableRaw(section);
+        expect(fixtures.requests.some((url) => url.searchParams.get('windows')?.includes('gemini_5h'))).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath('settled-quota.png'), fullPage: true });
+      });
+    }
+  }
+}
+
+test('settled missing, empty, absent and unobserved data have distinct quiet states', async ({ page }) => {
+  const fixtures = await installQuotaSettledFixtures(page, { provider: 'openai' });
+  await openQuota(page);
+  const section = quota(page);
+  await expect(section.getByText(`No subscription quota data for ${NAME}`, { exact: true })).toBeVisible();
+  await fixtures.poll(latestRow([]));
+  await expect(section.getByText(`No subscription quota data for ${NAME}`, { exact: true })).toBeVisible();
+  await fixtures.poll(latestRow(absentWindows('openai')));
+  await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
+  await fixtures.poll(latestRow(absentWindows('openai').map((snap) => ({ ...snap, state: 'unobserved' }))));
+  await expect(section.getByText('No quota reading yet', { exact: true })).toBeVisible();
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await expect(section.getByTestId('quota-freshness')).toHaveCount(0);
+  await expect(section.getByTestId('quota-snapshot-grid')).toHaveCount(0);
+  await expectNoOverflow(page);
+});
+
+test('raw-only rows survive empty and all-absent windows with quiet missing or expired resets', async ({ page }) => {
+  const fixtures = await installQuotaSettledFixtures(page, { latest: latestRow([], [rawMeter({ reset_time_unix_secs: null })]) });
+  await openQuota(page);
+  const section = quota(page);
+  await expect(section.getByRole('listitem')).toHaveCount(1);
+  await expect(section.getByTestId('quota-freshness')).toBeVisible();
+  await fixtures.poll(latestRow(absentWindows('gemini'), [rawMeter({
+    reset_time_unix_secs: NOW - 1, state: 'stale', observed_at_unix_millis: (NOW - 600) * 1000, age_secs: 600,
+  })]));
+  await expect(section.getByRole('listitem')).toHaveCount(1);
+  await expect(section.getByTestId('quota-freshness')).toContainText('Stale:');
+  await expect(section.locator('[data-period-unknown]')).not.toContainText(/Not started|Resets in/);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await expectNeutralRaw(section);
+  await expectNoOverflow(page);
+});
+
+test('live polls transition not-offered to raw to canonical and back without reloading', async ({ page }) => {
+  let navigations = 0;
+  page.on('framenavigated', (frame) => { if (frame === page.mainFrame()) navigations += 1; });
+  const fixtures = await installQuotaSettledFixtures(page, { latest: latestRow(absentWindows('gemini')) });
+  await openQuota(page);
+  const section = quota(page);
+  await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
+  const initialNavigations = navigations;
+  await fixtures.poll(latestRow(absentWindows('gemini'), [rawMeter()]));
+  await expect(section.locator('[data-period-unknown]')).toHaveCount(1);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await fixtures.poll(latestRow([quotaSnapshot()]));
+  await expect(section.locator('[data-period-unknown]')).toHaveCount(0);
+  await expect(section.locator('[data-window="gemini_5h"]')).toBeVisible();
+  await expect(section.getByTestId('pace-legend')).toHaveCount(1);
+  await fixtures.poll(latestRow(absentWindows('gemini')));
+  await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
+  await expect(section.getByTestId('quota-freshness')).toHaveCount(0);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  expect(navigations).toBe(initialNavigations);
+});
+
+test('credits-only and not-started rows never advertise pace', async ({ page }) => {
+  const fixtures = await installQuotaSettledFixtures(page, { provider: 'openai', latest: latestRow([
+    ...absentWindows('openai'), quotaSnapshot({ window: 'overage', utilization: null, credits: {
+      has_credits: true, unlimited: false, limit_reached: false, balance: '20',
+      approx_local_messages: null, approx_cloud_messages: null,
+    } }),
+  ]) });
+  await openQuota(page);
+  const section = quota(page);
+  await expect(section.getByTestId('codex-credit-facts')).toBeVisible();
+  await expect(section.getByRole('meter')).toHaveCount(0);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await fixtures.poll(latestRow([quotaSnapshot({ window: '5h', utilization: 0, resets_at_unix_secs: null })]));
+  await expect(section.getByText('Not started', { exact: true })).toBeVisible();
+  await expect(section.locator('[data-slot="pace-marker"]')).toHaveCount(0);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await fixtures.poll(latestRow([quotaSnapshot({ window: '5h' })]));
+  await expect(section.getByTestId('pace-legend')).toHaveCount(1);
+  await expectNoOverflow(page);
+});
+
+test('Anthropic placeholders remain visible until explicit canonical absence', async ({ page }) => {
+  const fixtures = await installQuotaSettledFixtures(page, { provider: 'anthropic', latest: latestRow(
+    absentWindows('anthropic').map((snap) => ({ ...snap, state: 'unobserved', observed_at_unix_millis: null })),
+  ) });
+  await openQuota(page);
+  const section = quota(page);
+  await expect(section.getByRole('listitem')).toHaveCount(2);
+  await expect(section.getByRole('meter')).toHaveCount(2);
+  await expect(section.getByTestId('quota-freshness')).toHaveCount(0);
+  await expect(section.getByTestId('pace-legend')).toHaveCount(0);
+  await fixtures.poll(latestRow(absentWindows('anthropic')));
+  await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
+  await expect(section.getByTestId('quota-snapshot-grid')).toHaveCount(0);
+  await expectNoOverflow(page);
+});

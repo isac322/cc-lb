@@ -94,14 +94,18 @@ import { EndpointRow } from '../components/upstreams/EndpointRow';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { LimitResetAction } from '../components/upstreams/LimitResetAction';
 import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
+import { selectPeriodUnknownMeters } from '../components/upstreams/periodUnknownMeters';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import {
+  QuotaPeriodUnknownRow,
   QuotaWindowRow,
   QuotaWindowRowSkeleton,
   QuotaWindowRows,
 } from '../components/upstreams/QuotaWindowRows';
 import {
+  hasQuotaCardPace,
   selectQuotaCardSnapshots,
+  selectQuotaDetailState,
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption';
@@ -1260,6 +1264,27 @@ export function DetailView({
       null,
     [quotaLatest.data, upstream.id],
   );
+  const { quotaCards, rawMeters, quotaDetailState, showPaceLegend } =
+    useMemo(() => {
+      const quotaCards = selectQuotaCardSnapshots({
+        latestWindows: selectedLatest?.windows,
+        provider: providerOf(upstream.kind),
+      });
+      const rawMeters = selectPeriodUnknownMeters(selectedLatest);
+      return {
+        quotaCards,
+        rawMeters,
+        quotaDetailState: selectQuotaDetailState({
+          latestWindows: selectedLatest?.windows,
+          cards: quotaCards,
+          rawMeters,
+          provider: providerOf(upstream.kind),
+        }),
+        showPaceLegend: quotaCards.some((snap) =>
+          hasQuotaCardPace(snap, nowUnixSecs),
+        ),
+      };
+    }, [selectedLatest, upstream.kind, nowUnixSecs]);
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
     windows: quotaWindows,
@@ -1560,11 +1585,15 @@ export function DetailView({
       description={
         <span className="flex flex-wrap items-center gap-x-2">
           Used per window and when it resets
-          {selectedLatest ? (
-            <>
-              <QuotaFreshnessCaption snapshots={selectedLatest.windows} />
-              <PaceLegend />
-            </>
+          {!quotaLatestPending && quotaDetailState === 'rows' ? (
+            <QuotaFreshnessCaption
+              snapshots={[...(selectedLatest?.windows ?? []), ...rawMeters]}
+            />
+          ) : null}
+          {!quotaLatestPending &&
+          quotaDetailState === 'rows' &&
+          showPaceLegend ? (
+            <PaceLegend />
           ) : null}
         </span>
       }
@@ -1587,18 +1616,30 @@ export function DetailView({
             <QuotaWindowRowSkeleton key={index} />
           ))}
         </QuotaWindowRows>
-      ) : !selectedLatest ? (
+      ) : quotaDetailState === 'no-data' ? (
         <EmptyState title={`No subscription quota data for ${upstream.name}`} />
+      ) : quotaDetailState === 'not-offered' ? (
+        <EmptyState title="Not offered" />
+      ) : quotaDetailState === 'no-reading' ? (
+        <EmptyState title="No quota reading yet" />
       ) : (
         <QuotaWindowRows>
-          {selectQuotaCardSnapshots({
-            latestWindows: selectedLatest.windows,
-            provider: providerOf(upstream.kind),
-          }).map((snap) => (
+          {quotaCards.map((snap) => (
             <QuotaWindowRow
               key={snap.window}
               snap={snap}
-              creditObservations={selectedLatest.windows}
+              creditObservations={selectedLatest?.windows}
+              nowUnixSecs={nowUnixSecs}
+            />
+          ))}
+          {rawMeters.map((meter) => (
+            <QuotaPeriodUnknownRow
+              key={JSON.stringify([
+                meter.group,
+                meter.model_id,
+                meter.bucket_id,
+              ])}
+              meter={meter}
               nowUnixSecs={nowUnixSecs}
             />
           ))}

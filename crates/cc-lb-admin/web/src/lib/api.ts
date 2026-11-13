@@ -1573,10 +1573,27 @@ export interface QuotaSnapshot {
   age_secs: number | null;
 }
 
+/** Provider quota with a remaining reading but no reported window duration. */
+export interface PeriodUnknownQuotaMeter {
+  group: 'gemini' | 'third_party';
+  model_id?: string | null;
+  bucket_id?: string | null;
+  remaining_fraction: number;
+  utilization: number;
+  reset_time_unix_secs: number | null;
+  remaining_amount?: string | null;
+  origin: 'retrieve_user_quota' | 'retrieve_user_quota_summary';
+  source: 'api';
+  state: 'fresh' | 'stale';
+  observed_at_unix_millis: number;
+  age_secs: number;
+}
+
 export interface UpstreamLatestSnapshots {
   upstream_id: string;
   upstream_name: string;
   windows: QuotaSnapshot[];
+  period_unknown_meters?: PeriodUnknownQuotaMeter[];
 }
 
 export interface LatestResponse {

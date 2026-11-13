@@ -4,20 +4,24 @@
 // Reset parts are content-sized so the meter absorbs the spare width.
 // The label can truncate on narrow viewports; reset values stay on one line.
 import type { ReactNode } from 'react';
-import { type QuotaSnapshot, windowLabel } from '../../lib/api';
+import {
+  type PeriodUnknownQuotaMeter,
+  type QuotaSnapshot,
+  windowLabel,
+} from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { useLocale } from '../../lib/locale';
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
-  quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx, Hint, Skeleton } from '../ui/primitives';
 import { ResetCountdownParts } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
 import { CodexCreditSummary, selectCodexCredits } from './codexCredits';
-import { isOverageActive } from './quotaWindowVisibility';
+import { formatPeriodUnknownUsedPct } from './periodUnknownMeters';
+import { isOverageActive, quotaCardPacePct } from './quotaWindowVisibility';
 
 const ROWS_CLASS =
   'grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content] divide-y divide-border-row';
@@ -90,8 +94,6 @@ export function QuotaWindowRow({
   label?: string;
   creditObservations?: readonly QuotaSnapshot[];
 }) {
-  const { effective: locale } = useLocale();
-  const korean = locale.toLowerCase().startsWith('ko');
   // The unified window is visible only when it carries Codex credit state.
   const windowName: string = snap.window;
   if (
@@ -132,10 +134,7 @@ export function QuotaWindowRow({
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
   const started = !isOverage && !unobserved && !notStarted;
-  // Even pace only for a running timed window (never Extra usage).
-  const pacePct = started
-    ? quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs)
-    : null;
+  const pacePct = quotaCardPacePct(snap, nowUnixSecs);
   const severityClass =
     QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(usedPct, pacePct)];
 
@@ -180,7 +179,114 @@ export function QuotaWindowRow({
       ? snap.resets_at_unix_secs * 1000
       : null;
 
-  const resetParts = (
+  const resetParts = <QuotaResetCells resetTime={resetTime} />;
+
+  const resetStatus =
+    resetTime != null ? (
+      resetParts
+    ) : facts.length > 0 ? (
+      <ResetStatusCells facts={facts} />
+    ) : (
+      <EmptyResetCells />
+    );
+
+  return (
+    <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
+      <WindowName
+        window={snap.window}
+        label={displayLabel}
+        longLabel={longLabel}
+      />
+      <div className={METER_CELL_CLASS}>
+        <UsageMeter
+          className="min-w-0 flex-1"
+          label={longLabel}
+          pacePct={pacePct}
+          usedPct={usedPct}
+        />
+        <span className={USED_CELL_CLASS}>{used}</span>
+      </div>
+      {resetStatus}
+    </div>
+  );
+}
+
+export function QuotaPeriodUnknownRow({
+  meter,
+  nowUnixSecs,
+}: {
+  meter: PeriodUnknownQuotaMeter;
+  nowUnixSecs: number;
+}) {
+  const identifier = meter.model_id ?? meter.bucket_id ?? meter.group;
+  const usedPct = formatPeriodUnknownUsedPct(meter.remaining_fraction);
+  const resetTime =
+    meter.reset_time_unix_secs != null &&
+    meter.reset_time_unix_secs > nowUnixSecs
+      ? meter.reset_time_unix_secs * 1000
+      : null;
+  return (
+    <div
+      role="listitem"
+      data-period-unknown={meter.group}
+      className={ROW_CLASS}
+    >
+      <span className={NAME_CELL_CLASS}>
+        <span
+          aria-hidden="true"
+          data-slot="window-swatch"
+          className="size-2.5 shrink-0 rounded-xs"
+          style={{ backgroundColor: 'var(--color-neutral)' }}
+        />
+        <span className="min-w-0">
+          <span
+            className="block font-mono text-data text-text truncate max-w-[22ch]"
+            title={identifier}
+          >
+            {identifier}
+          </span>
+          <span
+            className="block text-caption text-text-muted"
+            title="The provider reported remaining quota without a window duration."
+          >
+            Period unknown
+          </span>
+        </span>
+      </span>
+      <div className={METER_CELL_CLASS}>
+        <UsageMeter
+          className="min-w-0 flex-1"
+          label={`${identifier} · period unknown`}
+          pacePct={null}
+          usedPct={usedPct}
+        />
+        <span className={USED_CELL_CLASS}>
+          {usedPct != null ? (
+            <span className="text-text">
+              {formatQuotaPercent(usedPct)} used
+            </span>
+          ) : (
+            <span className="text-text-faint">
+              <span aria-hidden="true">—</span>
+              <span className="sr-only">No reading</span>
+            </span>
+          )}
+        </span>
+      </div>
+      {resetTime != null ? (
+        <QuotaResetCells resetTime={resetTime} />
+      ) : (
+        <EmptyResetCells />
+      )}
+    </div>
+  );
+}
+
+/** Canonical and period-unknown rows share reset wording and column alignment. */
+function QuotaResetCells({ resetTime }: { resetTime: number | null }) {
+  const { effective: locale } = useLocale();
+  const korean = locale.toLowerCase().startsWith('ko');
+  return (
     <ResetCountdownParts
       ts={resetTime}
       compact
@@ -218,35 +324,6 @@ export function QuotaWindowRow({
         </>
       )}
     />
-  );
-
-  const resetStatus =
-    resetTime != null ? (
-      resetParts
-    ) : facts.length > 0 ? (
-      <ResetStatusCells facts={facts} />
-    ) : (
-      <EmptyResetCells />
-    );
-
-  return (
-    <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
-      <WindowName
-        window={snap.window}
-        label={displayLabel}
-        longLabel={longLabel}
-      />
-      <div className={METER_CELL_CLASS}>
-        <UsageMeter
-          className="min-w-0 flex-1"
-          label={longLabel}
-          pacePct={pacePct}
-          usedPct={usedPct}
-        />
-        <span className={USED_CELL_CLASS}>{used}</span>
-      </div>
-      {resetStatus}
-    </div>
   );
 }
 

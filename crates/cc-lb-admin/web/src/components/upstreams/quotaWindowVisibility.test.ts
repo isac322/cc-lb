@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import type {
+  PeriodUnknownQuotaMeter,
+  QuotaSnapshot,
+  SeriesResponseItem,
+} from '../../lib/api';
 import { buildQuotaChartData } from './buildQuotaChartData';
 import {
+  hasQuotaCardPace,
   isObservedAtOrAfter,
+  quotaCardPacePct,
   selectQuotaCardSnapshots,
+  selectQuotaDetailState,
   selectVisibleGraphWindows,
   seriesHasInRangeData,
 } from './quotaWindowVisibility';
@@ -504,4 +511,134 @@ describe('quota chart markers', () => {
     );
     expect(result.markers).toEqual([]);
   });
+});
+
+describe('QA-15: settled quota detail state', () => {
+  const canonical = {
+    anthropic: ['5h', '7d'],
+    openai: ['5h', '7d'],
+    gemini: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+  } as const;
+  const raw: PeriodUnknownQuotaMeter = {
+    group: 'gemini',
+    model_id: 'gemini-pro',
+    remaining_fraction: 0.4,
+    utilization: 0.6,
+    reset_time_unix_secs: null,
+    origin: 'retrieve_user_quota',
+    source: 'api',
+    state: 'fresh',
+    observed_at_unix_millis: 1_000_000,
+    age_secs: 0,
+  };
+
+  it.each(['anthropic', 'openai', 'gemini'] as const)(
+    'requires every %s canonical window to prove not offered',
+    (provider) => {
+      const latestWindows = canonical[provider].map((window) =>
+        snap({ window, state: 'absent' }),
+      );
+      const input = { latestWindows, cards: [], rawMeters: [], provider };
+      expect(selectQuotaDetailState(input)).toBe('not-offered');
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: latestWindows.slice(1),
+        }),
+      ).toBe('no-reading');
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: [
+            snap({ ...latestWindows[0], state: 'unobserved' }),
+            ...latestWindows.slice(1),
+          ],
+        }),
+      ).toBe('no-reading');
+      expect(selectQuotaDetailState({ ...input, rawMeters: [raw] })).toBe(
+        'rows',
+      );
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: [],
+          rawMeters: [raw],
+        }),
+      ).toBe('rows');
+      expect(selectQuotaDetailState({ ...input, cards: [snap({})] })).toBe(
+        'rows',
+      );
+      expect(selectQuotaDetailState({ ...input, latestWindows: [] })).toBe(
+        'no-data',
+      );
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: undefined,
+          rawMeters: [raw],
+        }),
+      ).toBe('no-data');
+    },
+  );
+
+  it('preserves Anthropic placeholders but gives OpenAI and Gemini a no-reading state', () => {
+    for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
+      const latestWindows = canonical[provider].map((window) =>
+        snap({ window, state: 'unobserved' }),
+      );
+      const cards = selectQuotaCardSnapshots({ latestWindows, provider });
+      expect(
+        selectQuotaDetailState({
+          latestWindows,
+          cards,
+          rawMeters: [],
+          provider,
+        }),
+      ).toBe(provider === 'anthropic' ? 'rows' : 'no-reading');
+    }
+  });
+});
+
+describe('QA-16: shared quota card pace eligibility', () => {
+  const now = 1_000_000;
+  it.each([
+    { state: 'unobserved' },
+    { state: 'absent' },
+    { window: 'overage' },
+    { utilization: null },
+    { resets_at_unix_secs: null },
+    { resets_at_unix_secs: now },
+    { resets_at_unix_secs: now - 1 },
+    { resets_at_unix_secs: now + 5 * 3600 },
+    { resets_at_unix_secs: now + 6 * 3600 },
+    { resets_at_unix_secs: Infinity },
+    { resets_at_unix_secs: NaN },
+    { window: 'unified' },
+    {
+      credits: {
+        has_credits: true,
+        unlimited: null,
+        limit_reached: null,
+        balance: '1',
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+    },
+  ] satisfies Partial<QuotaSnapshot>[])(
+    'rejects ineligible pace: %j',
+    (overrides) => {
+      const reading = snap({ resets_at_unix_secs: now + 3600, ...overrides });
+      expect(quotaCardPacePct(reading, now)).toBeNull();
+      expect(hasQuotaCardPace(reading, now)).toBe(false);
+    },
+  );
+
+  it.each(['fresh', 'stale'] as const)(
+    'keeps %s running timed windows paced',
+    (state) => {
+      const reading = snap({ state, resets_at_unix_secs: now + 3600 });
+      expect(quotaCardPacePct(reading, now)).toBe(80);
+      expect(hasQuotaCardPace(reading, now)).toBe(true);
+    },
+  );
 });

@@ -691,7 +691,7 @@ fn gemini_summary_response_maps_both_groups_and_windows() {
         ]
     });
     let value = serde_json::json!({ "summary": value });
-    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    let (records, _) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
     assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.25);
     assert_utilization(&records, SubscriptionQuotaWindow::GeminiSevenDay, 0.5);
     assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartyFiveHour, 0.1);
@@ -718,7 +718,7 @@ fn gemini_summary_disabled_bucket_is_absent_not_exhausted() {
         }]
     });
     let value = serde_json::json!({ "summary": value });
-    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    let (records, _) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
     let five_hour = record(&records, SubscriptionQuotaWindow::ThirdPartyFiveHour);
     assert_eq!(five_hour.sample_kind, SubscriptionQuotaSampleKind::Absent);
     assert!(five_hour.utilization.is_none());
@@ -726,7 +726,7 @@ fn gemini_summary_disabled_bucket_is_absent_not_exhausted() {
 }
 
 #[test]
-fn gemini_summary_only_disabled_group_falls_back_to_legacy_quota() {
+fn gemini_summary_only_disabled_group_keeps_real_absent_and_raw_fallback() {
     let value = serde_json::json!({
         "summary": {
             "groups": [{
@@ -750,12 +750,21 @@ fn gemini_summary_only_disabled_group_falls_back_to_legacy_quota() {
             }
         }
     });
-    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
-    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.3);
+    let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::GeminiFiveHour).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
+    let GeminiGroupPollUpdate::Replace(group) = raw.gemini else {
+        panic!("raw update missing")
+    };
+    assert_eq!(group.meters.len(), 1);
+    assert_eq!(group.meters[0].model_id.as_deref(), Some("gemini-2.5-pro"));
 }
 
 #[test]
-fn missing_gemini_summary_group_falls_back_and_classifies_by_reset_distance() {
+fn missing_gemini_summary_group_keeps_fallback_period_unknown() {
     let value = serde_json::json!({
         "summary": {
             "groups": [{
@@ -778,12 +787,16 @@ fn missing_gemini_summary_group_falls_back_and_classifies_by_reset_distance() {
             }
         }
     });
-    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
-    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.3);
-    assert_eq!(
-        record(&records, SubscriptionQuotaWindow::GeminiSevenDay).sample_kind,
-        SubscriptionQuotaSampleKind::Absent
-    );
+    let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    assert_eq!(records.len(), 2);
+    assert!(!records.iter().any(|record| matches!(
+        record.window,
+        SubscriptionQuotaWindow::GeminiFiveHour | SubscriptionQuotaWindow::GeminiSevenDay
+    )));
+    let GeminiGroupPollUpdate::Replace(group) = raw.gemini else {
+        panic!("raw update missing")
+    };
+    assert_eq!(group.meters[0].remaining_fraction, 0.7);
     assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartySevenDay, 0.86);
 }
 
@@ -919,7 +932,7 @@ fn openai_refresh_success_requires_a_published_native_main_window() {
                 "limit_window_seconds":604800,"used_percent":100,"reset_at":1_700_500_000
             }}}]);
         }
-        let (_, main_published) = parse_provider_usage_body(
+        let (_, main_published, _) = parse_provider_usage_body(
             ProviderUsageContext {
                 upstream_id: Uuid::nil(),
                 kind: UpstreamKind::OpenaiOauth,
@@ -932,4 +945,186 @@ fn openai_refresh_success_requires_a_published_native_main_window() {
         .unwrap();
         assert_eq!(main_published, expected_main, "{body}");
     }
+}
+
+#[test]
+fn gemini_period_unknown_state_matrix() {
+    let observed_at = 1_793_527_200_000;
+    for (model, name, group, windows) in [
+        (
+            "gemini-2.5-pro",
+            "gemini",
+            GeminiQuotaGroupKind::Gemini,
+            [
+                SubscriptionQuotaWindow::GeminiFiveHour,
+                SubscriptionQuotaWindow::GeminiSevenDay,
+            ],
+        ),
+        (
+            "claude-sonnet",
+            "third_party",
+            GeminiQuotaGroupKind::ThirdParty,
+            [
+                SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                SubscriptionQuotaWindow::ThirdPartySevenDay,
+            ],
+        ),
+        (
+            "gpt-oss",
+            "third_party",
+            GeminiQuotaGroupKind::ThirdParty,
+            [
+                SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                SubscriptionQuotaWindow::ThirdPartySevenDay,
+            ],
+        ),
+    ] {
+        for offset in [0, 7_200, 18_300, 18_301, 259_200, 518_400] {
+            let reset = chrono::DateTime::from_timestamp((observed_at / 1_000 + offset) as i64, 0)
+                .unwrap()
+                .to_rfc3339();
+            for summary in [
+                serde_json::json!({"groups":[]}),
+                serde_json::Value::Null,
+                serde_json::json!({}),
+            ] {
+                let quota = serde_json::json!({"buckets":[{"modelId":model,"remainingFraction":0.4,"resetTime":reset,"remainingAmount":"123"}]});
+                let value = serde_json::json!({"summary":summary,"fallback":{(name):quota}});
+                let (records, raw) =
+                    records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+                assert!(records.is_empty(), "{value}");
+                let update = if group == GeminiQuotaGroupKind::Gemini {
+                    raw.gemini
+                } else {
+                    raw.third_party
+                };
+                let GeminiGroupPollUpdate::Replace(raw) = update else {
+                    panic!("missing raw {value}")
+                };
+                assert_eq!(raw.observed_at_unix_millis, observed_at);
+                assert_eq!(raw.meters.len(), 1);
+                assert_eq!(raw.meters[0].group, group);
+                assert_eq!(
+                    raw.meters[0].origin,
+                    GeminiRawMeterOrigin::RetrieveUserQuota
+                );
+                assert_eq!(
+                    raw.meters[0].reset_time_unix_secs,
+                    Some(observed_at / 1_000 + offset)
+                );
+                assert_eq!(raw.meters[0].remaining_amount.as_deref(), Some("123"));
+            }
+            // Explicit provider identity, never reset distance, chooses the window.
+            for (label, expected) in [("5h", windows[0]), ("weekly", windows[1])] {
+                let value = serde_json::json!({"summary":{"groups":[]},"fallback":{(name):{"buckets":[{
+                    "modelId":model,"window":label,"remainingFraction":0.4,"resetTime":reset
+                }]}}});
+                let (records, _) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+                assert_utilization(&records, expected, 0.6);
+            }
+        }
+        for reset in [serde_json::Value::Null, serde_json::json!("invalid")] {
+            let value = serde_json::json!({"summary":null,"fallback":{(name):{"buckets":[{
+                "modelId":model,"window":"5h","remainingFraction":1.5,"resetTime":reset
+            }]}}});
+            let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+            assert!(records.is_empty());
+            let update = if group == GeminiQuotaGroupKind::Gemini {
+                raw.gemini
+            } else {
+                raw.third_party
+            };
+            let GeminiGroupPollUpdate::Replace(raw) = update else {
+                panic!("missing raw")
+            };
+            assert_eq!(raw.meters[0].remaining_fraction, 1.0);
+            assert_eq!(raw.meters[0].reset_time_unix_secs, None);
+        }
+        for success in [true, false] {
+            let mut value = serde_json::json!({"summary":{"groups":[]},"fallback":{}});
+            if success {
+                value["fallback"][name] = serde_json::json!({"buckets":[]});
+            }
+            let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+            let update = if group == GeminiQuotaGroupKind::Gemini {
+                raw.gemini
+            } else {
+                raw.third_party
+            };
+            if success {
+                assert_eq!(records.len(), 2);
+                assert!(records.iter().all(|record| windows.contains(&record.window)
+                    && record.sample_kind == SubscriptionQuotaSampleKind::Absent));
+                let GeminiGroupPollUpdate::Replace(raw) = update else {
+                    panic!("missing clear")
+                };
+                assert!(raw.meters.is_empty());
+            } else {
+                assert!(records.is_empty());
+                assert_eq!(update, GeminiGroupPollUpdate::Unchanged);
+            }
+        }
+    }
+    for bucket in [
+        serde_json::json!({"bucketId":"gemini-daily","remainingFraction":0.3}),
+        serde_json::json!({"bucketId":"gemini-5h","window":"weekly","remainingFraction":0.3,"resetTime":"2026-11-01T13:00:00Z"}),
+    ] {
+        let value = serde_json::json!({"summary":{"groups":[{"displayName":"Gemini models","buckets":[bucket]}]}});
+        let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+        assert!(records.is_empty());
+        let GeminiGroupPollUpdate::Replace(raw) = raw.gemini else {
+            panic!("missing summary raw")
+        };
+        assert_eq!(
+            raw.meters[0].origin,
+            GeminiRawMeterOrigin::RetrieveUserQuotaSummary
+        );
+        let body = serde_json::to_vec(&value["summary"]).unwrap();
+        assert_eq!(
+            crate::scheduler_dispatch::http::gemini_summary_groups(&body),
+            Some((true, false))
+        );
+    }
+}
+
+#[test]
+fn gemini_mixed_period_evidence_preserves_only_explicit_summary_windows() {
+    let observed_at = 1_793_527_200_000;
+    for summary in [serde_json::Value::Null, serde_json::json!({})] {
+        let (records, raw) = records_from_gemini_api(
+            Uuid::nil(),
+            None,
+            &serde_json::json!({"summary":summary,"fallback":{}}),
+            observed_at,
+        );
+        assert!(records.is_empty());
+        assert_eq!(raw.gemini, GeminiGroupPollUpdate::Unchanged);
+        assert_eq!(raw.third_party, GeminiGroupPollUpdate::Unchanged);
+    }
+    let value = serde_json::json!({
+        "summary":{"groups":[]},
+        "fallback":{"gemini":{"buckets":[
+            {"modelId":"gemini-pro","window":"5h","remainingFraction":0.8,"resetTime":"2026-11-01T13:00:00Z"},
+            {"modelId":"gemini-flash","remainingFraction":0.4,"resetTime":"2026-11-07T13:00:00Z"}
+        ]}}
+    });
+    let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+    assert!(records.is_empty());
+    let GeminiGroupPollUpdate::Replace(raw) = raw.gemini else {
+        panic!("raw update missing")
+    };
+    assert_eq!(raw.meters.len(), 1);
+    let value = serde_json::json!({
+        "summary":{"groups":[{"displayName":"Gemini models","buckets":[
+            {"bucketId":"gemini-5h","remainingFraction":0.8,"resetTime":"2026-11-01T13:00:00Z"},
+            {"bucketId":"gemini-daily","remainingFraction":0.4}
+        ]}]}
+    });
+    let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
+    assert_eq!(records.len(), 1);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.2);
+    let GeminiGroupPollUpdate::Replace(raw) = raw.gemini else {
+        panic!("raw update missing")
+    };
+    assert_eq!(raw.meters.len(), 1);
 }

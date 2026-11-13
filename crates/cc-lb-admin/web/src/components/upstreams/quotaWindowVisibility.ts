@@ -1,5 +1,10 @@
-import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import type {
+  PeriodUnknownQuotaMeter,
+  QuotaSnapshot,
+  SeriesResponseItem,
+} from '../../lib/api';
 import type { ProviderFamily } from '../../lib/providers';
+import { quotaPacePct } from '../../lib/quotaSeverity';
 import { selectCodexCredits } from './codexCredits';
 
 /**
@@ -166,4 +171,62 @@ export function selectQuotaCardSnapshots({
     if (creditSnapshot) result.push({ ...creditSnapshot, window: 'unified' });
   }
   return result;
+}
+
+/** Keep the legend and the actual row's pace tick on the same eligibility rule. */
+export function quotaCardPacePct(
+  snap: QuotaSnapshot,
+  nowUnixSecs: number,
+): number | null {
+  if (
+    snap.window === 'overage' ||
+    snap.credits != null ||
+    snap.state === 'unobserved' ||
+    snap.state === 'absent' ||
+    snap.utilization == null ||
+    snap.resets_at_unix_secs == null ||
+    snap.resets_at_unix_secs <= nowUnixSecs
+  ) {
+    return null;
+  }
+  return quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs);
+}
+
+export function hasQuotaCardPace(
+  snap: QuotaSnapshot,
+  nowUnixSecs: number,
+): boolean {
+  return quotaCardPacePct(snap, nowUnixSecs) != null;
+}
+
+const CANONICAL_WINDOWS: Record<ProviderFamily, readonly string[]> = {
+  anthropic: ['5h', '7d'],
+  openai: ['5h', '7d'],
+  gemini: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+};
+
+export function selectQuotaDetailState({
+  latestWindows,
+  cards,
+  rawMeters,
+  provider,
+}: {
+  latestWindows: readonly QuotaSnapshot[] | null | undefined;
+  cards: readonly QuotaSnapshot[];
+  rawMeters: readonly PeriodUnknownQuotaMeter[];
+  provider: ProviderFamily;
+}): 'no-data' | 'rows' | 'not-offered' | 'no-reading' {
+  if (!latestWindows) return 'no-data';
+  if (cards.length > 0 || rawMeters.length > 0) return 'rows';
+  if (latestWindows.length === 0) return 'no-data';
+  if (
+    CANONICAL_WINDOWS[provider].every((window) =>
+      latestWindows.some(
+        (snap) => snap.window === window && snap.state === 'absent',
+      ),
+    )
+  ) {
+    return 'not-offered';
+  }
+  return 'no-reading';
 }

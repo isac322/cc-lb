@@ -25,7 +25,7 @@ export function upstreamHealth(
   return { tone: 'neutral', label: 'Status unknown' };
 }
 
-type FreshnessSnapshot = Pick<
+export type FreshnessSnapshot = Pick<
   QuotaSnapshot,
   'state' | 'observed_at_unix_millis'
 >;
@@ -43,9 +43,9 @@ function oldest(snapshots: readonly FreshnessSnapshot[]) {
 }
 
 /**
- * Per-card quota freshness, always visible (no hover): the oldest stale
- * reading wins, otherwise the oldest fresh one. A warn dot marks a stale
- * reading; nothing renders when no window has been observed.
+ * Per-card quota freshness across canonical windows and period-unknown meters:
+ * the oldest stale reading wins, otherwise the oldest fresh one. Callers hide
+ * the caption for settled empty states; unobserved and absent entries do not count.
  */
 export function QuotaFreshnessCaption({
   snapshots,
