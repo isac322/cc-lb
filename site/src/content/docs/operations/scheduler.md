@@ -19,7 +19,7 @@ The [consistency contract source notes](/docs/reference/source/consistency-contr
 
 ## SQLite storage ownership
 
-On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database. Housekeeping recovers stale running sessions and purges stale pending or expired sessions in application storage, kills stale running cache keepalive jobs in scheduler storage, and retains fresh queued/running work. Retention later removes older pending and terminal Apalis rows. No new configuration, schema, or migration is required.
+On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database. Housekeeping recovers stale running sessions and purges stale pending or expired sessions in application storage. In scheduler storage, it moves non-keepalive `Running` or `Queued` rows with leases older than 120s back to `Pending` with `attempts + 1`, marks stale `Running` or `Queued` cache keepalive rows `Killed`, and retains fresh queued/running work. Retention later removes older pending and terminal Apalis rows. No new configuration, schema, or migration is required.
 
 ## Retry classes
 
@@ -35,6 +35,6 @@ Cache keepalive and immediate API-key usage polls use SQL `max_attempts = 1`, wh
 
 ## Failure triage
 
-`GET /admin/scheduler/status` includes rescheduled `Pending` retries in `next_run_at`. These rows wait until `run_at` and stay out of `GET /admin/scheduler/failures`. The failure view lists terminal `Failed` rows whose SQL attempts are exhausted and `Killed` rows, including exhausted retries, panics, and invalid zero retry delays. Inspect the job type, status, bounded reason, and attempt count. Resolve the underlying credential, storage, or configuration problem, then let the relevant watchdog enqueue a new idempotency key.
+`GET /admin/scheduler/status` includes rescheduled `Pending` retries in `next_run_at`. These rows wait until `run_at` and stay out of `GET /admin/scheduler/failures`. The failure view lists `Failed` and `Killed` rows without filtering by attempt count. Apalis may reclaim a `Failed` row from an ordinary handler error while `attempts < max_attempts`. `Killed` rows include exhausted retries, panics, and invalid zero retry delays. Inspect the job type, status, bounded reason, and attempt count. Resolve the underlying credential, storage, or configuration problem, then let the relevant watchdog enqueue a new idempotency key.
 
 Failure summaries redact prompts, authorization headers, API keys, ciphertext, and payload-shaped material.

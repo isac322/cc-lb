@@ -153,7 +153,7 @@ Execution happens later on whichever replica's worker claims the row:
 
 - Each job has a 60 s execution timeout (`ENTITY_TIMEOUT`, `SINGLETON_TIMEOUT`).
 - Retries follow the retry classes in `docs/scheduler.md`. `JobOutcome::Retry` durably reschedules the same row as `Pending` at `now + delay`; exhausting its retry class produces `DeadLetter` and a terminal `Killed` row.
-- `ApalisHousekeepingJob` (hourly by default) moves rows stuck in `Running` past `APALIS_STALE_LOCK_THRESHOLD_SECS` (120 s) back to `Pending` and increments `attempts`, so a job lost to a worker crash runs again after the next housekeeping pass. Stale cache keepalive rows are marked `Killed` instead.
+- `ApalisHousekeepingJob` (hourly by default) checks `lock_at` against `APALIS_STALE_LOCK_THRESHOLD_SECS` (120 s). It moves non-keepalive rows stuck in `Running` or `Queued` past that threshold back to `Pending` and increments `attempts` by one, so a job lost to a worker crash runs again after the next housekeeping pass. It marks stale cache keepalive `Running` or `Queued` rows `Killed`.
 
 Cron ticks are produced by every replica. Duplicate rows for the same tick collide on the unique `(job_type, idempotency_key)` index, so only one job runs per tick.
 
@@ -169,7 +169,7 @@ A valid provider observation without a supported main routing quota is still a s
 
 **Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-engine/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists. Fire-now warms one lane per request (`?lane=`, default `primary`).
 
-`GET /admin/scheduler/status`, `GET /admin/scheduler/failures`, and `GET /admin/v1/upstreams/{id}/warmup` read committed job rows directly. Scheduler status includes rescheduled `Pending` retries in `next_run_at`. The failures endpoint lists terminal `Failed` rows whose SQL attempts are exhausted and `Killed` rows; it excludes `Pending` retries.
+`GET /admin/scheduler/status`, `GET /admin/scheduler/failures`, and `GET /admin/v1/upstreams/{id}/warmup` read committed job rows directly. Scheduler status includes rescheduled `Pending` retries in `next_run_at`. The failures endpoint lists `Failed` and `Killed` rows without filtering by attempt count; it excludes `Pending` retries. Apalis may reclaim a `Failed` row from an ordinary handler error while `attempts < max_attempts`.
 
 ## OAuth token refresh
 

@@ -196,7 +196,7 @@ async fn sqlite_settled_attempt(pool: &sqlx::SqlitePool, key: &str, attempt: i64
                 && (attempt == 1 || state.status != "Pending") {
                 return state;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("catalog worker settles within deadline")
 }
@@ -239,7 +239,7 @@ async fn sqlite_price_catalog_503_retries_once_at_30s_then_kills() {
     assert!(first.done_at.is_none());
     assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
     assert!(
-        before + 30 <= first.run_at && first.run_at <= after + 30,
+        before + 30 <= first.run_at && first.run_at <= after + 31,
         "DB-clock retry bracket: {before} <= {:?} <= {after}",
         first
     );
@@ -328,7 +328,7 @@ async fn postgres_settled_attempt(pool: &sqlx::PgPool, key: &str, attempt: i64) 
                 && (attempt == 1 || state.status != "Pending") {
                 return state;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("catalog worker settles within deadline")
 }

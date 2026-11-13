@@ -197,9 +197,10 @@ mod support {
 #[cfg(feature = "sqlite")]
 mod sqlite {
     use std::collections::HashMap;
+    use std::str::FromStr as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use anyhow::{Context as _, Result};
     use cc_lb_clock::SystemClock;
@@ -215,7 +216,7 @@ mod sqlite {
     use cc_lb_scheduler::scheduler_metrics;
     use cc_lb_scheduler::worker::{
         ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, SchedulerBackend,
-        SqliteSchedulerBackend,
+        SchedulerCtx, SqliteSchedulerBackend, build_adaptive_worker,
     };
     use metrics_exporter_prometheus::PrometheusBuilder;
     use sqlx::Row as _;
@@ -444,31 +445,215 @@ mod sqlite {
     async fn sqlite_subsecond_retry_delay_rounds_up_and_settles_on_second_run() -> Result<()> {
         let (pool, backend) = database().await?;
         let calls = Arc::new(AtomicUsize::new(0));
-        let observed = calls.clone();
+        let timestamps = Arc::new(Mutex::new((None::<Instant>, None::<Instant>)));
         enqueue(&backend, ADAPTIVE_QUEUE, "subsecond", Uuid::new_v4(), None).await?;
         let before = db_now(&pool).await?;
-        let workers = Workers::start(
-            &backend,
-            context(Arc::new(move || {
-                Ok(if observed.fetch_add(1, Ordering::SeqCst) == 0 {
-                    JobOutcome::Retry {
-                        delay: Some(Duration::from_millis(200)),
+        let observed_calls = calls.clone();
+        let observed_timestamps = timestamps.clone();
+        let mut config = SchedulerConfig::default();
+        config.recurring_jobs.clear();
+        let ctx = SchedulerCtx::new(
+            config,
+            Arc::new(move |_| {
+                let calls = observed_calls.clone();
+                let timestamps = observed_timestamps.clone();
+                Box::pin(async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        timeout(Duration::from_secs(2), async {
+                            loop {
+                                let millis = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map_err(|error| SchedulerError::Job(error.to_string()))?
+                                    .subsec_millis();
+                                if (750..=930).contains(&millis) {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                            Ok::<(), SchedulerError>(())
+                        })
+                        .await
+                        .map_err(|error| SchedulerError::Job(error.to_string()))??;
+                        timestamps.lock().expect("retry timestamp mutex").0 = Some(Instant::now());
+                        Ok(JobOutcome::Retry {
+                            delay: Some(Duration::from_millis(250)),
+                        })
+                    } else {
+                        timestamps.lock().expect("retry timestamp mutex").1 = Some(Instant::now());
+                        Ok(JobOutcome::Done)
                     }
-                } else {
-                    JobOutcome::Done
                 })
-            })),
-            ADAPTIVE_QUEUE,
-            1,
-        )
-        .await?;
+            }),
+            Arc::new(|_| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(SystemClock),
+        );
+        let workers = Workers::start(&backend, ctx, ADAPTIVE_QUEUE, 1).await?;
         let row = settled(&pool, "subsecond", "Done", 2).await?;
         assert!(
             row.run_at > before,
             "SQLite must round the delay up: {row:?}"
         );
+        let (attempt1_returned, attempt2_started) =
+            *timestamps.lock().expect("retry timestamp mutex");
+        assert!(
+            attempt2_started
+                .context("attempt 2 timestamp")?
+                .duration_since(attempt1_returned.context("attempt 1 timestamp")?)
+                >= Duration::from_millis(250),
+            "retry ran before its full delay: attempt1={attempt1_returned:?}, attempt2={attempt2_started:?}",
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         workers.stop().await
+    }
+
+    #[tokio::test]
+    async fn sqlite_transient_start_write_failure_recovers_lease_and_unrecoverable_escalates()
+    -> Result<()> {
+        async fn open_pair(
+            dir: &tempfile::TempDir,
+        ) -> Result<(sqlx::SqlitePool, sqlx::SqlitePool, SchedulerBackend)> {
+            let url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+            let worker_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+                .create_if_missing(true)
+                .busy_timeout(Duration::from_millis(5));
+            let worker_pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(1)
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .connect_with(worker_options)
+                .await?;
+            apalis_sqlite::SqliteStorage::setup(&worker_pool).await?;
+            cc_lb_scheduler::migrations::apply_post_setup_migrations(&worker_pool).await?;
+            let fault_options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+                .busy_timeout(Duration::from_secs(1));
+            let fault_pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(1)
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .connect_with(fault_options)
+                .await?;
+            let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+                worker_pool.clone(),
+                Arc::new(SystemClock),
+            ));
+            Ok((worker_pool, fault_pool, backend))
+        }
+
+        let first_dir = tempfile::tempdir()?;
+        let (worker_pool, fault_pool, backend) = open_pair(&first_dir).await?;
+        sqlx::query("CREATE TABLE start_gate (recovered INTEGER)")
+            .execute(&fault_pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_first_start
+             BEFORE UPDATE OF status ON Jobs
+             WHEN NEW.status = 'Running'
+               AND (SELECT COUNT(*) FROM start_gate) = 0
+             BEGIN
+                 SELECT RAISE(ABORT, 'transient start write error');
+             END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER mark_recovered
+             AFTER UPDATE OF status ON Jobs
+             WHEN OLD.status = 'Queued' AND NEW.status = 'Pending'
+             BEGIN
+                 INSERT INTO start_gate VALUES (1);
+             END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        let transient_calls = Arc::new(AtomicUsize::new(0));
+        let observed_transient_calls = transient_calls.clone();
+        enqueue(
+            &backend,
+            ADAPTIVE_QUEUE,
+            "transient-start",
+            Uuid::new_v4(),
+            None,
+        )
+        .await?;
+        let transient_worker = build_adaptive_worker(
+            &backend,
+            context(Arc::new(move || {
+                observed_transient_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(JobOutcome::Done)
+            })),
+        )?;
+        let transient_cancel = tokio_util::sync::CancellationToken::new();
+        let transient_handle =
+            tokio::spawn(transient_worker.run_until_cancelled(transient_cancel.clone()));
+        let transient_row = settled(&worker_pool, "transient-start", "Done", 1).await?;
+        assert!(transient_row.done_at.is_some());
+        assert_eq!(transient_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM start_gate")
+                .fetch_one(&fault_pool)
+                .await?,
+            1
+        );
+        transient_cancel.cancel();
+        let transient_result = timeout(DEADLINE, transient_handle)
+            .await
+            .context("transient worker shutdown")??;
+        assert!(transient_result.is_ok());
+
+        let second_dir = tempfile::tempdir()?;
+        let (_worker_pool, fault_pool, backend) = open_pair(&second_dir).await?;
+        sqlx::query("CREATE TABLE start_gate (recovered INTEGER)")
+            .execute(&fault_pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_every_start
+             BEFORE UPDATE OF status ON Jobs
+             WHEN NEW.status = 'Running'
+             BEGIN
+                 SELECT RAISE(ABORT, 'unrecoverable start write error');
+             END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_every_release
+             BEFORE UPDATE OF status ON Jobs
+             WHEN OLD.status = 'Queued' AND NEW.status = 'Pending'
+             BEGIN
+                 SELECT RAISE(ABORT, 'unrecoverable release write error');
+             END",
+        )
+        .execute(&fault_pool)
+        .await?;
+        let unrecoverable_calls = Arc::new(AtomicUsize::new(0));
+        let observed_unrecoverable_calls = unrecoverable_calls.clone();
+        enqueue(
+            &backend,
+            ADAPTIVE_QUEUE,
+            "unrecoverable-start",
+            Uuid::new_v4(),
+            None,
+        )
+        .await?;
+        let unrecoverable_worker = build_adaptive_worker(
+            &backend,
+            context(Arc::new(move || {
+                observed_unrecoverable_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(JobOutcome::Done)
+            })),
+        )?;
+        let unrecoverable_cancel = tokio_util::sync::CancellationToken::new();
+        let unrecoverable_handle =
+            tokio::spawn(unrecoverable_worker.run_until_cancelled(unrecoverable_cancel));
+        let unrecoverable_result = timeout(DEADLINE, unrecoverable_handle).await??;
+        assert!(
+            unrecoverable_result.is_err(),
+            "unrecoverable start persistence must escalate to worker supervision"
+        );
+        assert_eq!(unrecoverable_calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -28,6 +28,8 @@ pub(crate) struct OutcomePersistLayer {
     cancel: CancellationToken,
     in_flight: Arc<AtomicUsize>,
     idle_notify: Arc<Notify>,
+    fatal_abort: CancellationToken,
+    fatal_error: Arc<Mutex<Option<String>>>,
 }
 
 impl OutcomePersistLayer {
@@ -47,6 +49,8 @@ impl OutcomePersistLayer {
             cancel,
             in_flight: Arc::new(AtomicUsize::new(0)),
             idle_notify: Arc::new(Notify::new()),
+            fatal_abort: CancellationToken::new(),
+            fatal_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -61,6 +65,15 @@ impl OutcomePersistLayer {
             notified.await;
         }
     }
+
+    pub(crate) async fn wait_fatal_abort(&self) -> String {
+        self.fatal_abort.cancelled().await;
+        self.fatal_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "scheduler start lease recovery failed".to_owned())
+    }
 }
 
 impl<S> Layer<S> for OutcomePersistLayer {
@@ -73,6 +86,8 @@ impl<S> Layer<S> for OutcomePersistLayer {
             cancel: self.cancel.clone(),
             in_flight: self.in_flight.clone(),
             idle_notify: self.idle_notify.clone(),
+            fatal_abort: self.fatal_abort.clone(),
+            fatal_error: self.fatal_error.clone(),
         }
     }
 }
@@ -84,6 +99,8 @@ pub(crate) struct OutcomePersistService<S> {
     cancel: CancellationToken,
     in_flight: Arc<AtomicUsize>,
     idle_notify: Arc<Notify>,
+    fatal_abort: CancellationToken,
+    fatal_error: Arc<Mutex<Option<String>>>,
 }
 
 struct InFlightGuard {
@@ -123,6 +140,8 @@ where
         let ctx = task.ctx().clone();
         let pool = self.pool.clone();
         let cancel = self.cancel.clone();
+        let fatal_abort = self.fatal_abort.clone();
+        let fatal_error = self.fatal_error.clone();
         self.in_flight.fetch_add(1, Ordering::SeqCst);
         let guard = InFlightGuard {
             in_flight: self.in_flight.clone(),
@@ -144,7 +163,24 @@ where
             }
             match pool.start(&task_id, &lock_by, pre_attempt).await {
                 Err(db_err) => {
-                    tracing::warn!(task_id = %task_id, error = %db_err, "scheduler start mark failed");
+                    match pool
+                        .recover_queued_lease(&task_id, &lock_by, pre_attempt)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::warn!(task_id = %task_id, error = %db_err, "scheduler start mark failed; released queued lease");
+                        }
+                        Err(recover_err) => {
+                            fatal_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get_or_insert_with(|| format!(
+                                    "scheduler start lease recovery failed for task {task_id}: start error: {db_err}; recovery error: {recover_err}"
+                                ));
+                            fatal_abort.cancel();
+                            tracing::error!(task_id = %task_id, start_error = %db_err, recovery_error = %recover_err, "scheduler start mark and lease recovery failed; escalating to worker supervision");
+                        }
+                    }
                     return Err(Box::new(SchedulerError::Database(db_err)) as BoxDynError);
                 }
                 Ok(0) => {
@@ -208,7 +244,33 @@ where
     }
 }
 
+#[cfg(feature = "sqlite")]
+pub(crate) fn sqlite_retry_run_at_secs(now_since_epoch: Duration, delay: Duration) -> i64 {
+    let deadline = now_since_epoch.saturating_add(delay);
+    let secs = deadline
+        .as_secs()
+        .saturating_add(u64::from(deadline.subsec_nanos() > 0));
+    i64::try_from(secs).unwrap_or(i64::MAX)
+}
+
 impl OutcomePool {
+    async fn recover_queued_lease(
+        &self,
+        task_id: &str,
+        lock_by: &str,
+        pre_attempt: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let mut result = self.release_queued(task_id, lock_by, pre_attempt).await;
+        for delay_ms in [15, 45] {
+            if result.is_ok() {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            result = self.release_queued(task_id, lock_by, pre_attempt).await;
+        }
+        result
+    }
+
     async fn release_queued(
         &self,
         task_id: &str,
@@ -256,15 +318,12 @@ impl OutcomePool {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(pool) => {
                 let result = if let Some(delay) = delay {
-                    let delay_secs = i64::try_from(
-                        delay
-                            .as_secs()
-                            .saturating_add(u64::from(delay.subsec_nanos() > 0))
-                            .max(1),
-                    )
-                    .unwrap_or(i64::MAX);
-                    sqlx::query("UPDATE Jobs SET status = 'Pending', attempts = ?4, last_result = ?5, run_at = strftime('%s', 'now') + ?6, lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
-                        .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(delay_secs).execute(pool).await?
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let run_at = sqlite_retry_run_at_secs(now, delay);
+                    sqlx::query("UPDATE Jobs SET status = 'Pending', attempts = ?4, last_result = ?5, run_at = ?6, lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
+                        .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(run_at).execute(pool).await?
                 } else {
                     sqlx::query("UPDATE Jobs SET status = ?6, attempts = ?4, last_result = ?5, done_at = strftime('%s', 'now') WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(status).execute(pool).await?
@@ -479,6 +538,38 @@ mod sqlite_tests {
     use super::test_support::{Args, task};
     use super::*;
 
+    #[test]
+    fn sqlite_retry_run_at_rounds_fractional_deadline_upward() {
+        for (now, delay, expected) in [
+            (
+                Duration::from_millis(100_850),
+                Duration::from_millis(250),
+                102,
+            ),
+            (Duration::from_millis(100_850), Duration::from_secs(1), 102),
+            (Duration::from_millis(100_850), Duration::from_secs(30), 131),
+            (Duration::from_secs(100), Duration::from_secs(30), 130),
+            (
+                Duration::new(100, 999_999_999),
+                Duration::from_nanos(1),
+                101,
+            ),
+            (
+                Duration::new(100, 999_999_999),
+                Duration::from_nanos(2),
+                102,
+            ),
+            (Duration::MAX, Duration::from_secs(30), i64::MAX),
+            (Duration::from_secs(100), Duration::MAX, i64::MAX),
+        ] {
+            assert_eq!(
+                sqlite_retry_run_at_secs(now, delay),
+                expected,
+                "now={now:?}, delay={delay:?}"
+            );
+        }
+    }
+
     async fn pool() -> sqlx::SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .min_connections(1)
@@ -515,12 +606,11 @@ mod sqlite_tests {
         let pool = pool().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
-        let service = OutcomePersistLayer::sqlite(pool.clone(), CancellationToken::new()).layer(
-            service_fn(move |_task: Task<Args>| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(Ok::<_, BoxDynError>(JobOutcome::Done))
-            }),
-        );
+        let layer = OutcomePersistLayer::sqlite(pool.clone(), CancellationToken::new());
+        let service = layer.layer(service_fn(move |_task: Task<Args>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok::<_, BoxDynError>(JobOutcome::Done))
+        }));
         pool.close().await;
         let error = service
             .oneshot(task())
@@ -531,6 +621,11 @@ mod sqlite_tests {
             Some(SchedulerError::Database(_))
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let reason = tokio::time::timeout(Duration::from_secs(10), layer.wait_fatal_abort())
+            .await
+            .expect("failed lease recovery must reach supervision");
+        assert!(reason.contains("scheduler start lease recovery failed"));
+        layer.wait_idle().await;
 
         let pool = self::pool().await;
         OutcomePool::Sqlite(pool.clone()).reset_row("worker").await;

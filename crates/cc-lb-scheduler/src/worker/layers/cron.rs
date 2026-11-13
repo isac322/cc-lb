@@ -85,9 +85,16 @@ fn build_sqlite_singleton_worker(
                     .build(singleton_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled_owned().await;
-                        persist_drain.wait_idle().await;
-                        Ok::<(), WorkerError>(())
+                        tokio::select! {
+                            () = cancel.cancelled_owned() => {
+                                persist_drain.wait_idle().await;
+                                Ok::<(), WorkerError>(())
+                            }
+                            reason = persist_drain.wait_fatal_abort() => {
+                                persist_drain.wait_idle().await;
+                                Err(WorkerError::BackendError(Box::new(SchedulerError::Job(reason))))
+                            }
+                        }
                     })
                     .await
             })
@@ -120,9 +127,16 @@ fn build_postgres_singleton_worker(
                     .build(singleton_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled_owned().await;
-                        persist_drain.wait_idle().await;
-                        Ok::<(), WorkerError>(())
+                        tokio::select! {
+                            () = cancel.cancelled_owned() => {
+                                persist_drain.wait_idle().await;
+                                Ok::<(), WorkerError>(())
+                            }
+                            reason = persist_drain.wait_fatal_abort() => {
+                                persist_drain.wait_idle().await;
+                                Err(WorkerError::BackendError(Box::new(SchedulerError::Job(reason))))
+                            }
+                        }
                     })
                     .await
             })
