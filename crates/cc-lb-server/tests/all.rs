@@ -97,6 +97,8 @@ mod provider_prefix_routes;
 mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]
 mod proxy_error_fallbacks;
+#[path = "proxy_request_identity_and_gemini_errors.rs"]
+mod proxy_request_identity_and_gemini_errors;
 #[path = "reconcile_subscription_quota_hydration.rs"]
 mod reconcile_subscription_quota_hydration;
 #[path = "reconciliation.rs"]

@@ -181,6 +181,8 @@ pub use pg_notify_fanout::{
     PgNotifier, PgNotifyFanout,
 };
 #[cfg(not(loom))]
+pub use provider_capability::is_unscoped_gemini_http_route;
+#[cfg(not(loom))]
 pub use request_diagnostics_sink::{
     REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_SEND_TIMEOUT,
     RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
