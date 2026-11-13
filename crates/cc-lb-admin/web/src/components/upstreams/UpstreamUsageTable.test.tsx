@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   LatestResponse,
+  PeriodUnknownQuotaMeter,
   QuotaSnapshot,
   SubscriptionQuotaWindow,
 } from '../../lib/api';
@@ -1162,4 +1163,136 @@ describe('UpstreamUsageTable shared layout', () => {
     expect(first!.querySelectorAll('.skeleton')).toHaveLength(1 + 2 * 2);
     expect(container.querySelectorAll('.skeleton')).toHaveLength(3 * 5);
   });
+});
+
+describe('UpstreamUsageTable retained Gemini readings', () => {
+  const T1 = NOW - 3600;
+
+  function observedAt(
+    snapshot: QuotaSnapshot,
+    observedUnixSecs: number,
+  ): QuotaSnapshot {
+    return {
+      ...snapshot,
+      observed_at_unix_millis: observedUnixSecs * 1000,
+      age_secs: NOW - observedUnixSecs,
+    };
+  }
+
+  function rawMeter(
+    group: PeriodUnknownQuotaMeter['group'],
+    observedUnixSecs: number,
+  ): PeriodUnknownQuotaMeter {
+    return {
+      group,
+      model_id: `${group}-unlabeled`,
+      known_period: null,
+      remaining_fraction: 0.5,
+      utilization: 0.5,
+      reset_time_unix_secs: null,
+      origin: 'retrieve_user_quota_summary',
+      source: 'api',
+      state: 'fresh',
+      observed_at_unix_millis: observedUnixSecs * 1000,
+      age_secs: NOW - observedUnixSecs,
+    };
+  }
+
+  /** t1: both 5h at 20%. t2: both weeklies at 100% plus unlabeled raw meters. */
+  function retainedFleet(fiveHourObserved: number) {
+    const usageData = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0] = {
+      ...usageData.rows[0]!,
+      windows: [
+        observedAt(snap('gemini_5h', 0.2), fiveHourObserved),
+        observedAt(snap('gemini_7d', 1), NOW),
+        observedAt(snap('third_party_5h', 0.2), fiveHourObserved),
+        observedAt(snap('third_party_7d', 1), NOW),
+      ],
+      periodUnknownMeters: [
+        rawMeter('gemini', NOW),
+        rawMeter('third_party', NOW),
+      ],
+    };
+    return usageData;
+  }
+
+  const cell = (container: HTMLElement, window: string) =>
+    container.querySelector(
+      `[data-testid="usage-cell"][data-window="${window}"]`,
+    ) as HTMLElement;
+
+  it.each(['provider', 'shared'] as const)(
+    'marks retained 5h readings in both Gemini groups as stale (%s layout)',
+    (layout) => {
+      const { container } = render(
+        <UpstreamUsageTable data={retainedFleet(T1)} layout={layout} />,
+      );
+      for (const [window, name] of [
+        ['gemini_5h', 'Gemini models · 5-hour limit'],
+        ['third_party_5h', 'Claude and GPT-OSS models · 5-hour limit'],
+      ] as const) {
+        const retained = cell(container, window);
+        expect(retained.dataset.state).toBe('stale');
+        expect(retained.textContent).toContain('20%used');
+        expect(within(retained).getByText('Stale · 1h ago')).toBeTruthy();
+        expect(retained.textContent).not.toContain('resets in');
+        const meter = within(retained).getByRole('meter', {
+          name: `${name} window used, stale reading`,
+        });
+        expect(meter.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      }
+      for (const window of ['gemini_7d', 'third_party_7d']) {
+        const current = cell(container, window);
+        expect(current.dataset.state).toBeUndefined();
+        expect(current.textContent).toContain('100%used');
+        expect(current.textContent).toContain('resets in');
+      }
+    },
+  );
+
+  it.each(['provider', 'shared'] as const)(
+    'marks a 5h reading retained behind a newer raw meter alone (%s layout)',
+    (layout) => {
+      const usageData = data([
+        ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ]);
+      usageData.rows[0] = {
+        ...usageData.rows[0]!,
+        windows: [
+          observedAt(snap('gemini_5h', 0.2), T1),
+          observedAt(snap('gemini_7d', 0.4), T1),
+        ],
+        periodUnknownMeters: [rawMeter('gemini', NOW)],
+      };
+      const { container } = render(
+        <UpstreamUsageTable data={usageData} layout={layout} />,
+      );
+      expect(cell(container, 'gemini_5h').dataset.state).toBe('stale');
+      expect(cell(container, 'gemini_7d').dataset.state).toBe('stale');
+    },
+  );
+
+  it.each(['provider', 'shared'] as const)(
+    'keeps same-observation readings current (%s layout)',
+    (layout) => {
+      const { container } = render(
+        <UpstreamUsageTable data={retainedFleet(NOW)} layout={layout} />,
+      );
+      for (const window of [
+        'gemini_5h',
+        'gemini_7d',
+        'third_party_5h',
+        'third_party_7d',
+      ]) {
+        const current = cell(container, window);
+        expect(current.dataset.state).toBeUndefined();
+        expect(current.textContent).not.toContain('Stale');
+        expect(current.textContent).toContain('resets in');
+      }
+      expect(screen.queryByRole('meter', { name: /stale reading/ })).toBeNull();
+    },
+  );
 });

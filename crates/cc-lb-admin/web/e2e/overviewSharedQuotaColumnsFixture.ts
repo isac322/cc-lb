@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { QuotaSnapshot } from '../src/lib/api';
+import type { PeriodUnknownQuotaMeter, QuotaSnapshot } from '../src/lib/api';
 
 // Synthetic mixed fleet for the all-provider Overview's shared 5h / 7d
 // columns. Every response is local; no backend or real account is used.
@@ -121,13 +121,57 @@ export const STALE_AND_ABSENT_FLEET = [
   },
 ];
 
+function observedAgo(snap: QuotaSnapshot, ageSecs: number): QuotaSnapshot {
+  return { ...snap, observed_at_unix_millis: (NOW - ageSecs) * 1000, age_secs: ageSecs };
+}
+
+function rawMeter(group: PeriodUnknownQuotaMeter['group']): PeriodUnknownQuotaMeter {
+  return {
+    group, model_id: `${group}-unlabeled`, known_period: null, remaining_fraction: 0.5,
+    utilization: 0.5, reset_time_unix_secs: null, origin: 'retrieve_user_quota_summary',
+    source: 'api', state: 'fresh', observed_at_unix_millis: NOW * 1000, age_secs: 0,
+  };
+}
+
+interface FleetEntry {
+  upstream: { id: string; name: string; kind: Kind };
+  windows: QuotaSnapshot[];
+  periodUnknownMeters?: PeriodUnknownQuotaMeter[];
+}
+
+/**
+ * t1 (an hour ago): both 5h windows at 20%. t2 (now): both weeklies at 100%
+ * plus unlabeled raw meters; the 5h rows are retained from t1 but `/latest`
+ * still says `fresh`. The control upstream observed everything at t2.
+ */
+export const RETAINED_FLEET: FleetEntry[] = [
+  {
+    upstream: upstream('gemini-retained', 'Gemini retained 5h', 'gemini_oauth'),
+    windows: [
+      observedAgo(snapshot('gemini_5h', 0.2), 3600), snapshot('gemini_7d', 1),
+      observedAgo(snapshot('third_party_5h', 0.2), 3600), snapshot('third_party_7d', 1),
+    ],
+    periodUnknownMeters: [rawMeter('gemini'), rawMeter('third_party')],
+  },
+  {
+    upstream: upstream('gemini-current', 'Gemini current control', 'gemini_oauth'),
+    windows: [
+      snapshot('gemini_5h', 0.2), snapshot('gemini_7d', 1),
+      snapshot('third_party_5h', 0.2), snapshot('third_party_7d', 1),
+    ],
+    periodUnknownMeters: [rawMeter('gemini'), rawMeter('third_party')],
+  },
+  // A second provider makes `/` the all-provider (shared) Overview.
+  FLEET[0]!,
+];
+
 export async function installFixtures(
   page: Page,
   {
     theme,
     fleet = FLEET,
     holdLatest = false,
-  }: { theme: 'dark' | 'light'; fleet?: typeof FLEET; holdLatest?: boolean },
+  }: { theme: 'dark' | 'light'; fleet?: readonly FleetEntry[]; holdLatest?: boolean },
 ) {
   await page.clock.install({ time: new Date(NOW * 1000) });
   await page.addInitScript((selectedTheme) => {
@@ -199,6 +243,7 @@ export async function installFixtures(
             windows: entry.windows.filter(
               (window) => !requestedWindows || requestedWindows.includes(window.window),
             ),
+            period_unknown_meters: entry.periodUnknownMeters ?? [],
           })),
       });
     }

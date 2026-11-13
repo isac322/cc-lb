@@ -406,3 +406,70 @@ describe('Gemini group placeholder in the detail pane and list row', () => {
     expect(facts.querySelector('[data-window="gemini_7d"]')).toBeNull();
   });
 });
+
+describe('Gemini reading retained from an earlier poll', () => {
+  // t1: both 5h windows read 20%. t2: weekly 100% plus an unlabeled bucket per
+  // group, 5h omitted, so the t1 5h rows remain in `latest`.
+  const T1 = (NOW - 7200) * 1000;
+  function t2Latest(fiveHourObservedAt: number) {
+    return latestRow(
+      [
+        quotaSnapshot({
+          window: 'gemini_5h',
+          utilization: 0.2,
+          observed_at_unix_millis: fiveHourObservedAt,
+          age_secs: NOW - fiveHourObservedAt / 1000,
+        }),
+        quotaSnapshot({ window: 'gemini_7d', utilization: 1 }),
+        quotaSnapshot({
+          window: 'third_party_5h',
+          utilization: 0.2,
+          observed_at_unix_millis: fiveHourObservedAt,
+          age_secs: NOW - fiveHourObservedAt / 1000,
+        }),
+        quotaSnapshot({ window: 'third_party_7d', utilization: 1 }),
+      ],
+      [
+        rawMeter({ reset_time_unix_secs: null }),
+        rawMeter({ group: 'third_party', reset_time_unix_secs: null }),
+      ],
+    );
+  }
+
+  it('shows both 5h windows as stale in the pane and list, never as current 20%', () => {
+    setLatest(t2Latest(T1));
+    render(element());
+    const section = quotaSection();
+    for (const window of ['gemini_5h', 'third_party_5h']) {
+      const row = section
+        .getAllByRole('listitem')
+        .find((item) => item.getAttribute('data-window') === window);
+      expect(row?.getAttribute('data-state')).toBe('stale');
+      expect(row?.textContent).toContain('Stale · 2h ago');
+      expect(row?.textContent).not.toContain('Resets');
+      expect(row?.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      const cell = screen
+        .getByTestId('upstream-row-quota')
+        .querySelector<HTMLElement>(`[data-window="${window}"]`);
+      expect(cell?.getAttribute('data-state')).toBe('stale');
+      expect(cell?.querySelector('.sr-only')?.textContent).toBe(
+        'Stale reading, 2h ago: last reading 20%',
+      );
+      expect(cell?.querySelector('[aria-hidden="true"]')?.textContent).toBe(
+        'Stale',
+      );
+      expect(cell?.getAttribute('title')).toContain('last reading 20%');
+    }
+    expect(section.queryByText('even pace', { exact: true })).not.toBeNull();
+  });
+
+  it('healthy control: 5h observed with its group is current', () => {
+    setLatest(t2Latest(NOW * 1000));
+    render(element());
+    expect(document.querySelector('[data-state="stale"]')).toBeNull();
+    const cell = screen
+      .getByTestId('upstream-row-quota')
+      .querySelector('[data-window="gemini_5h"]');
+    expect(cell?.textContent).toBe('Gemini 5h20%');
+  });
+});

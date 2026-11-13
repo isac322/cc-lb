@@ -243,6 +243,14 @@ jobs:
           name: settled-quota-visuals-${{ github.sha }}
           path: |
             ${{ steps.container-setup.outputs.visual-root }}/after/**/settled-quota.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-placeholder.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-pool-placeholder.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-retained.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/provider-gemini-placeholders-1440.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-shared-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-stale-absent-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-weekly-only-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/retained-*.png
             ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
           retention-days: 14
           if-no-files-found: error

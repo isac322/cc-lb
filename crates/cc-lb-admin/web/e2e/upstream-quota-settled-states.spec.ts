@@ -86,6 +86,10 @@ for (const width of [390, 768, 1440]) {
         // Canonical gemini_5h, its unreported weekly sibling placeholder, two raw meters.
         await expect(section.getByRole('listitem')).toHaveCount(4);
         await expect(section.locator('[data-window="gemini_7d"]')).toHaveAttribute('data-placeholder', 'no-reading');
+        // The status is never clipped by a squeezed meter column.
+        const placeholderText = section.locator('[data-slot="window-placeholder"]');
+        await expect(placeholderText).toHaveText('No reading');
+        expect(await placeholderText.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
         await expect(section.getByTestId('pace-legend')).toHaveCount(1);
         await expect(section.locator('[data-slot="pace-marker"]')).toHaveCount(1);
         await expect(section.getByTestId('quota-freshness')).toBeVisible();
@@ -282,3 +286,63 @@ test('QA-1/3/4: placeholders follow absent, disabled, unobserved and whole-group
   await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
   await expectNoOverflow(page);
 });
+
+// A t2 poll with weekly 100% and an unlabeled bucket per group omits 5h; the
+// backend keeps the t1 5h rows, which must read as stale, never current.
+function retainedPoll(fiveHourObservedAt: number) {
+  const fiveHour = (window: 'gemini_5h' | 'third_party_5h') => quotaSnapshot({
+    window, utilization: 0.2, observed_at_unix_millis: fiveHourObservedAt,
+    age_secs: NOW - fiveHourObservedAt / 1000,
+  });
+  return latestRow(
+    [fiveHour('gemini_5h'), weeklyExhausted('gemini_7d'), fiveHour('third_party_5h'), weeklyExhausted('third_party_7d')],
+    [rawMeter({ reset_time_unix_secs: null }), rawMeter({ group: 'third_party', reset_time_unix_secs: null })],
+  );
+}
+
+for (const width of [768, 1440]) {
+  for (const theme of ['light', 'dark'] as const) {
+    test(`retained Gemini 5h after a weekly-100% poll reads stale, never current: ${width}px ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      const fixtures = await installQuotaSettledFixtures(page, {
+        theme,
+        latest: latestRow([
+          quotaSnapshot({ window: 'gemini_5h', utilization: 0.2 }), quotaSnapshot({ window: 'gemini_7d', utilization: 0.6 }),
+          quotaSnapshot({ window: 'third_party_5h', utilization: 0.2 }), quotaSnapshot({ window: 'third_party_7d', utilization: 0.6 }),
+        ]),
+      });
+      await openQuota(page);
+      const section = quota(page);
+      await expect(section.locator('[data-state="stale"]')).toHaveCount(0);
+
+      await fixtures.poll(retainedPoll((NOW - 7200) * 1000));
+      const list = page.getByTestId('upstream-row-quota');
+      for (const window of ['gemini_5h', 'third_party_5h']) {
+        const row = section.locator(`[role="listitem"][data-window="${window}"]`);
+        await expect(row).toHaveAttribute('data-state', 'stale');
+        await expect(row).toContainText('Stale · 2h ago');
+        await expect(row).not.toContainText(/Resets|Not started/);
+        await expect(row.locator('[data-slot="pace-marker"]')).toHaveCount(0);
+        await expect(row.getByRole('meter')).toHaveAccessibleName(/stale reading$/);
+        const cell = list.locator(`[data-window="${window}"]`);
+        await expect(cell).toHaveAttribute('data-state', 'stale');
+        await expect(cell).toBeVisible();
+        await expect(cell.locator('[aria-hidden="true"]')).toHaveText('Stale');
+        await expect(cell).toHaveAttribute('title', /last reading 20% · Stale reading, 2h ago$/);
+      }
+      await expectReadable(section.locator('[data-state="stale"]'), '[data-slot="window-stale"]');
+      await expectReadable(list.locator('[data-state="stale"]'), '[aria-hidden="true"]');
+      for (const cell of await list.locator('[data-window]').all()) {
+        expect(await cell.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      }
+      await expectNoOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath('gemini-retained.png'), fullPage: true });
+
+      // Healthy control: the same poll with 5h observed alongside its group.
+      await fixtures.poll(retainedPoll(NOW * 1000));
+      await expect(section.locator('[data-state="stale"]')).toHaveCount(0);
+      await expect(list.locator('[data-window="gemini_5h"]')).toHaveText('Gemini 5h20%');
+      await expect(section.locator('[role="listitem"][data-window="gemini_5h"]')).toContainText('20% used');
+    });
+  }
+}

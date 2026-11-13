@@ -2,7 +2,10 @@ import { Link } from '@tanstack/react-router';
 import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
-import { poolGroupPlaceholders } from '../components/upstreams/quotaWindowVisibility';
+import {
+  poolGroupPlaceholders,
+  poolRetainedSince,
+} from '../components/upstreams/quotaWindowVisibility';
 import {
   PoolQuotaLegend,
   PoolQuotaThemedChart,
@@ -131,6 +134,12 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       ),
     [placeholders, providerWindowKeys, visibleWindows],
   );
+  // Gemini group windows whose pool figure carries an earlier poll's reading.
+  const retainedSince = useMemo(
+    (): Partial<Record<PoolQuotaWindow, number>> =>
+      loading ? {} : poolRetainedSince(normalizedAggregate),
+    [loading, normalizedAggregate],
+  );
   const latestSnapshotUnixSecs = useMemo(
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
     [normalizedHistory],
@@ -181,7 +190,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
   );
   const headline = providerMetricHeadline(
     provider === 'anthropic' ? visibleChartData.at(-1) : latest,
-    visibleWindows,
+    visibleWindows.filter((window) => retainedSince[window] == null),
   );
   const resets = poolWindowResets(normalizedAggregate);
   const paces = poolWindowPace(normalizedAggregate);
@@ -192,13 +201,21 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       : undefined;
   const nowUnixSecs =
     normalizedAggregate?.now_unix_secs ?? Math.floor(Date.now() / 1000);
-  const observation = useMemo(
-    () =>
-      provider === 'anthropic'
-        ? { observedAtUnixSecs: null, stale: false }
-        : poolQuotaResponseObservation(normalizedHistory, visibleWindows),
-    [normalizedHistory, provider, visibleWindows],
-  );
+  const observation = useMemo(() => {
+    if (provider === 'anthropic') {
+      return { observedAtUnixSecs: null, stale: false };
+    }
+    const current = poolQuotaResponseObservation(
+      normalizedHistory,
+      visibleWindows,
+    );
+    return {
+      ...current,
+      stale:
+        current.stale ||
+        visibleWindows.some((window) => retainedSince[window] != null),
+    };
+  }, [normalizedHistory, provider, retainedSince, visibleWindows]);
   const observationNow =
     provider === 'anthropic'
       ? nowUnixSecs
@@ -271,6 +288,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 paces={paces}
                 timeZone={timeZone}
                 placeholders={placeholders}
+                retained={retainedSince}
                 windows={legendWindows}
               />
               {weighting === 'equal' ? (

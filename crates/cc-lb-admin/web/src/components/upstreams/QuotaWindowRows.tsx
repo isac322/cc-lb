@@ -27,6 +27,7 @@ import {
   isOverageActive,
   quotaCardPacePct,
 } from './quotaWindowVisibility';
+import { formatSpan } from './UpstreamUsageTable';
 
 const ROWS_CLASS =
   'grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content] divide-y divide-border-row';
@@ -36,8 +37,9 @@ const NAME_CELL_CLASS = 'col-start-1 min-w-0 flex items-center gap-2';
 const METER_CELL_CLASS =
   'col-start-2 ml-3 min-w-0 flex items-center gap-3 @[40rem]:ml-6';
 const USED_CELL_CLASS = 'shrink-0 text-right text-body tabular-nums';
+/** Spans meter and reset columns so a squeezed meter track never clips it. */
 const PLACEHOLDER_CELL_CLASS =
-  'col-start-2 ml-3 min-w-0 truncate text-body-sm text-text-muted @[40rem]:ml-6';
+  'col-start-2 col-span-4 ml-3 min-w-0 truncate text-body-sm text-text-muted @[40rem]:ml-6';
 const RESET_PREFIX_CELL_CLASS =
   'col-start-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
 const RESET_VALUE_CELL_CLASS =
@@ -126,7 +128,6 @@ function QuotaPlaceholderRow({
           GEMINI_GROUP_PLACEHOLDER_TEXT[state]
         )}
       </span>
-      <EmptyResetCells />
     </div>
   );
 }
@@ -137,6 +138,7 @@ export function QuotaWindowRow({
   label,
   creditObservations,
   placeholder,
+  retained = false,
 }: {
   snap: QuotaSnapshot;
   nowUnixSecs: number;
@@ -144,6 +146,8 @@ export function QuotaWindowRow({
   creditObservations?: readonly QuotaSnapshot[];
   /** From `geminiGroupPlaceholderState`: render the neutral placeholder. */
   placeholder?: GeminiGroupPlaceholderState | null;
+  /** From `geminiRetainedReading`: an earlier poll's reading, never current. */
+  retained?: boolean;
 }) {
   // The unified window is visible only when it carries Codex credit state.
   const windowName: string = snap.window;
@@ -187,16 +191,20 @@ export function QuotaWindowRow({
       ? null
       : snap.utilization * 100;
 
+  // A Gemini reading retained from an earlier poll than its group's latest
+  // observation reads as stale: neutral figure, no pace, no reset.
+  const stale = retained && !isOverage && usedPct != null;
   const notStarted =
     !isOverage &&
     !unobserved &&
+    !stale &&
     (snap.utilization == null ||
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
-  const started = !isOverage && !unobserved && !notStarted;
-  const pacePct = quotaCardPacePct(snap, nowUnixSecs);
+  const started = !isOverage && !unobserved && !notStarted && !stale;
+  const pacePct = stale ? null : quotaCardPacePct(snap, nowUnixSecs);
   const severityClass =
-    QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(usedPct, pacePct)];
+    QUOTA_SEVERITY_TEXT_CLASS[stale ? 'ok' : quotaSeverity(usedPct, pacePct)];
 
   let used: ReactNode;
   if (isOverage && overageUsed != null) {
@@ -221,6 +229,27 @@ export function QuotaWindowRow({
 
   const facts: ReactNode[] = [];
   if (unobserved) facts.push(<span key="none">No reading</span>);
+  if (stale) {
+    const ageSecs =
+      snap.age_secs ??
+      (snap.observed_at_unix_millis == null
+        ? null
+        : nowUnixSecs - snap.observed_at_unix_millis / 1000);
+    facts.push(
+      <Hint
+        key="stale"
+        label="Stale reading: the provider's latest poll did not report this window, so this is its last reading."
+      >
+        <span
+          tabIndex={0}
+          className={cx(HINT_TRIGGER_CLASS, 'text-warn-text')}
+          data-slot="window-stale"
+        >
+          {ageSecs == null ? 'Stale' : `Stale · ${formatSpan(ageSecs)} ago`}
+        </span>
+      </Hint>,
+    );
+  }
   if (notStarted)
     facts.push(
       <Hint
@@ -251,7 +280,12 @@ export function QuotaWindowRow({
     );
 
   return (
-    <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
+    <div
+      role="listitem"
+      data-window={snap.window}
+      data-state={stale ? 'stale' : undefined}
+      className={ROW_CLASS}
+    >
       <WindowName
         window={snap.window}
         label={displayLabel}
@@ -260,7 +294,7 @@ export function QuotaWindowRow({
       <div className={METER_CELL_CLASS}>
         <UsageMeter
           className="min-w-0 flex-1"
-          label={longLabel}
+          label={stale ? `${longLabel}, stale reading` : longLabel}
           pacePct={pacePct}
           usedPct={usedPct}
         />

@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import {
   installFixtures,
   PENDING_GEMINI_FLEET,
+  RETAINED_FLEET,
   STALE_AND_ABSENT_FLEET,
   WEEKLY_ONLY_FLEET,
 } from './overviewSharedQuotaColumnsFixture';
@@ -222,6 +223,48 @@ for (const viewport of VIEWPORTS) {
       await expectNoHorizontalOverflow(page);
       const table = page.getByRole('list', { name: 'Upstream usage per window' }).locator('..');
       await table.screenshot({ path: testInfo.outputPath(`overview-stale-absent-${viewport.width}-${theme}.png`) });
+    });
+  }
+}
+
+for (const { path, layout } of [
+  { path: '/', layout: 'shared' },
+  { path: '/providers/gemini', layout: 'provider' },
+] as const) {
+  for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
+    test(`retained Gemini 5h readings read as stale in the ${layout} layout at ${viewport.width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await installFixtures(page, { theme: 'dark', fleet: RETAINED_FLEET });
+      await page.goto(path);
+      const rows = page.getByTestId('upstream-usage-row');
+      const retained = rows.filter({ hasText: 'Gemini retained 5h' });
+      const control = rows.filter({ hasText: 'Gemini current control' });
+      for (const [window, name] of [
+        ['gemini_5h', 'Gemini models · 5-hour limit'],
+        ['third_party_5h', 'Claude and GPT-OSS models · 5-hour limit'],
+      ] as const) {
+        const cell = retained.locator(`[data-testid="usage-cell"][data-window="${window}"]`);
+        await expect(cell).toHaveAttribute('data-state', 'stale');
+        await expect(cell.getByText('Stale · 1h ago', { exact: true })).toBeVisible();
+        await expect(cell).not.toContainText('resets in');
+        const meter = cell.getByRole('meter', { name: `${name} window used, stale reading`, exact: true });
+        await expect(meter).toHaveAttribute('aria-valuenow', '20');
+        await expect(meter.locator('[data-slot="pace-marker"]')).toHaveCount(0);
+
+        // Same observation time: an ordinary current reading.
+        const current = control.locator(`[data-testid="usage-cell"][data-window="${window}"]`);
+        await expect(current).not.toHaveAttribute('data-state', 'stale');
+        await expect(current).toContainText('resets in');
+        await expect(current.getByRole('meter', { name: `${name} window used`, exact: true })).toHaveAttribute('aria-valuenow', '20');
+      }
+      for (const window of ['gemini_7d', 'third_party_7d']) {
+        const weekly = retained.locator(`[data-testid="usage-cell"][data-window="${window}"]`);
+        await expect(weekly).not.toHaveAttribute('data-state', 'stale');
+        await expect(weekly).toContainText('100%');
+      }
+      await expectNoHorizontalOverflow(page);
+      const table = page.getByRole('list', { name: 'Upstream usage per window' }).locator('..');
+      await table.screenshot({ path: testInfo.outputPath(`retained-${layout}-${viewport.width}.png`) });
     });
   }
 }

@@ -418,6 +418,47 @@ describe('QuotaWindowRow', () => {
       expect(screen.getAllByRole('meter')).toHaveLength(1);
     },
   );
+
+  it('renders a retained Gemini reading as stale, never current', () => {
+    const s = snap({
+      window: 'gemini_5h',
+      utilization: 0.2,
+      resets_at_unix_secs: NOW + 3600,
+      observed_at_unix_millis: (NOW - 7200) * 1000,
+      age_secs: 7200,
+    });
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow snap={s} nowUnixSecs={NOW} retained />
+      </QuotaWindowRows>,
+    );
+    const row = screen.getByRole('listitem');
+    expect(row.getAttribute('data-state')).toBe('stale');
+    expect(row.querySelector('[data-slot="window-stale"]')?.textContent).toBe(
+      'Stale · 2h ago',
+    );
+    expect(
+      row.querySelector('[data-slot="window-stale"]')?.className,
+    ).toContain('text-warn-text');
+    expect(row.textContent).not.toMatch(/Resets|Not started/);
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    const meter = screen.getByRole('meter');
+    expect(meter.getAttribute('aria-label')).toBe(
+      'Gemini models · 5-hour limit, stale reading',
+    );
+    expect(meter.getAttribute('aria-valuetext')).toBe('20% used');
+    expect(
+      row.querySelector('.text-warn-text, .text-danger-text')?.textContent,
+    ).toBe('Stale · 2h ago');
+    cleanup();
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow snap={s} nowUnixSecs={NOW} />
+      </QuotaWindowRows>,
+    );
+    expect(screen.getByRole('listitem').getAttribute('data-state')).toBeNull();
+    expect(screen.getByRole('listitem').textContent).toContain('Resets');
+  });
 });
 
 describe('QA-18: period-unknown meter row', () => {

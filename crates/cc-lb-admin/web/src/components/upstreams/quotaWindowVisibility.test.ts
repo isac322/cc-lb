@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  AggregateProviderLotResponse,
   PeriodUnknownQuotaMeter,
   QuotaSnapshot,
   SeriesResponseItem,
@@ -9,8 +10,10 @@ import {
   GEMINI_GROUP_PLACEHOLDER_TEXT,
   geminiGroupPlaceholderState,
   geminiGroupSibling,
+  geminiRetainedReading,
   hasQuotaCardPace,
   isObservedAtOrAfter,
+  poolRetainedSince,
   quotaCardPacePct,
   selectQuotaCardSnapshots,
   selectQuotaDetailState,
@@ -574,6 +577,182 @@ describe('Gemini group placeholder (rule A)', () => {
         provider: 'openai',
       }).map((card) => card.window),
     ).toEqual(['7d']);
+  });
+});
+
+describe('Gemini retained reading', () => {
+  const T1 = 1_000_000_000_000;
+  const T2 = T1 + 3_600_000;
+  const meter = (
+    group: PeriodUnknownQuotaMeter['group'],
+    observedAt: number,
+  ): PeriodUnknownQuotaMeter => ({
+    group,
+    model_id: `${group}-unlabeled`,
+    remaining_fraction: 0.5,
+    utilization: 0.5,
+    reset_time_unix_secs: null,
+    origin: 'retrieve_user_quota_summary',
+    source: 'api',
+    state: 'fresh',
+    observed_at_unix_millis: observedAt,
+    age_secs: 0,
+  });
+  // t1: 5h 20%; t2: weekly 100% plus an unlabeled bucket, 5h omitted.
+  const t2Windows = [
+    snap({
+      window: 'gemini_5h',
+      utilization: 0.2,
+      observed_at_unix_millis: T1,
+    }),
+    snap({ window: 'gemini_7d', utilization: 1, observed_at_unix_millis: T2 }),
+    snap({
+      window: 'third_party_5h',
+      utilization: 0.2,
+      observed_at_unix_millis: T1,
+    }),
+    snap({
+      window: 'third_party_7d',
+      utilization: 1,
+      observed_at_unix_millis: T2,
+    }),
+  ];
+  const t2Meters = [meter('gemini', T2), meter('third_party', T2)];
+
+  it('marks the omitted 5h of both groups as retained, never the newer weekly', () => {
+    for (const window of ['gemini_5h', 'third_party_5h']) {
+      expect(geminiRetainedReading(t2Windows, t2Meters, window)).toBe(true);
+    }
+    for (const window of ['gemini_7d', 'third_party_7d']) {
+      expect(geminiRetainedReading(t2Windows, t2Meters, window)).toBe(false);
+    }
+  });
+
+  it('counts a newer same-group period-unknown meter alone', () => {
+    const sameAsSibling = t2Windows.map((s) => ({
+      ...s,
+      observed_at_unix_millis: T1,
+    }));
+    expect(
+      geminiRetainedReading(sameAsSibling, [meter('gemini', T2)], 'gemini_5h'),
+    ).toBe(true);
+    // Another group's meter never ages this group.
+    expect(
+      geminiRetainedReading(
+        sameAsSibling,
+        [meter('third_party', T2)],
+        'gemini_5h',
+      ),
+    ).toBe(false);
+  });
+
+  it('healthy control: one poll observed together is current', () => {
+    const healthy = t2Windows.map((s) => ({
+      ...s,
+      observed_at_unix_millis: T2,
+    }));
+    for (const window of ['gemini_5h', 'gemini_7d', 'third_party_5h']) {
+      expect(geminiRetainedReading(healthy, t2Meters, window)).toBe(false);
+    }
+  });
+
+  it('ignores readingless, non-Gemini and unobserved-time windows', () => {
+    expect(
+      geminiRetainedReading(
+        [
+          snap({
+            window: 'gemini_5h',
+            state: 'absent',
+            utilization: null,
+            observed_at_unix_millis: T1,
+          }),
+          snap({ window: 'gemini_7d', observed_at_unix_millis: T2 }),
+        ],
+        [],
+        'gemini_5h',
+      ),
+    ).toBe(false);
+    expect(
+      geminiRetainedReading(
+        [
+          snap({ window: '5h', observed_at_unix_millis: T1 }),
+          snap({ window: '7d', observed_at_unix_millis: T2 }),
+        ],
+        [],
+        '5h',
+      ),
+    ).toBe(false);
+    expect(
+      geminiRetainedReading(
+        [snap({ window: 'gemini_5h', observed_at_unix_millis: null })],
+        t2Meters,
+        'gemini_5h',
+      ),
+    ).toBe(false);
+  });
+
+  it('finds pool windows whose lot predates the same upstream sibling lot', () => {
+    const lot = (
+      window: string,
+      upstream: string,
+      observedAt: number,
+    ): AggregateProviderLotResponse => ({
+      upstream_id: upstream,
+      upstream_name: upstream,
+      window,
+      source: 'api',
+      state: 'fresh',
+      provider_start_unix_secs: null,
+      provider_reset_unix_secs: null,
+      observed_at_unix_millis: observedAt,
+      utilization: 0.2,
+      capacity_estimate_tokens: null,
+      used_before_cc_window_tokens: 0,
+      capacity_to_now_tokens_estimate: null,
+      projected_capacity_tokens_estimate: null,
+      confidence: 'high',
+      capacity_ratio: 1,
+    });
+    const entry = (window: string, lots: AggregateProviderLotResponse[]) => ({
+      window,
+      cc_window_start_unix_secs: 0,
+      cc_window_reset_unix_secs: 0,
+      pool_pace_fraction: null,
+      next_reset_unix_secs: null,
+      used_tokens: 0,
+      utilization: null,
+      utilization_percent: null,
+      capacity_to_now_tokens_estimate: null,
+      projected_capacity_tokens_estimate: null,
+      remaining_to_now_tokens_estimate: null,
+      confidence: 'high',
+      contributing_upstreams: lots.length,
+      stale_upstreams: 0,
+      missing_capacity_upstreams: 0,
+      provider_lots: lots,
+      caveats: [],
+    });
+    const aggregate = {
+      now_unix_secs: T2 / 1000,
+      window_anchor_unix_secs: 0,
+      max_staleness_secs: 300,
+      upstream_count: 2,
+      caveats: [],
+      windows: [
+        entry('gemini_5h', [
+          lot('gemini_5h', 'a', T1),
+          lot('gemini_5h', 'b', T2),
+        ]),
+        entry('gemini_7d', [
+          lot('gemini_7d', 'a', T2),
+          lot('gemini_7d', 'b', T2),
+        ]),
+        entry('third_party_5h', [lot('third_party_5h', 'a', T2)]),
+        entry('third_party_7d', [lot('third_party_7d', 'a', T2)]),
+      ],
+    };
+    expect(poolRetainedSince(aggregate)).toEqual({ gemini_5h: T1 / 1000 });
+    expect(poolRetainedSince(undefined)).toEqual({});
   });
 });
 

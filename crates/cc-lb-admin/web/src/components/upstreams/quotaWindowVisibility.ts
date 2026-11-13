@@ -183,6 +183,79 @@ export function geminiGroupPlaceholderState(
 }
 
 /**
+ * True for a Gemini group window whose numeric (fresh or stale) reading was
+ * observed before the newest observation of its group: the sibling canonical
+ * window or a same-group period-unknown meter. A poll that omits a window
+ * leaves its earlier reading in place, so that reading is retained, never
+ * current: callers present it as stale and draw no pace.
+ */
+export function geminiRetainedReading(
+  windows: readonly QuotaSnapshot[] | null | undefined,
+  periodUnknownMeters: readonly PeriodUnknownQuotaMeter[] | null | undefined,
+  window: string,
+): boolean {
+  const sibling = geminiGroupSibling(window);
+  if (sibling == null || !windows) return false;
+  const own = windows.find((snap) => snap.window === window);
+  if (
+    own == null ||
+    (own.state !== 'fresh' && own.state !== 'stale') ||
+    own.utilization == null ||
+    !Number.isFinite(own.utilization) ||
+    own.observed_at_unix_millis == null
+  ) {
+    return false;
+  }
+  const group = window.startsWith('gemini_') ? 'gemini' : 'third_party';
+  const newest = Math.max(
+    windows.find((snap) => snap.window === sibling)?.observed_at_unix_millis ??
+      Number.NEGATIVE_INFINITY,
+    ...(periodUnknownMeters ?? [])
+      .filter((meter) => meter.group === group)
+      .map((meter) => meter.observed_at_unix_millis),
+  );
+  return own.observed_at_unix_millis < newest;
+}
+
+/**
+ * Pool counterpart of `geminiRetainedReading`: for each Gemini group window
+ * where an upstream's lot was observed before that upstream's sibling lot,
+ * the earliest such observation (unix seconds). The pool figure then carries
+ * a retained reading: it is stale, and the plot after that time is not a
+ * current reading.
+ */
+export function poolRetainedSince(
+  aggregate: AggregateResponse | undefined,
+): Partial<Record<string, number>> {
+  const retained: Partial<Record<string, number>> = {};
+  for (const entry of aggregate?.windows ?? []) {
+    const sibling = geminiGroupSibling(entry.window);
+    if (sibling == null) continue;
+    const siblingLots =
+      aggregate?.windows.find((candidate) => candidate.window === sibling)
+        ?.provider_lots ?? [];
+    for (const lot of entry.provider_lots) {
+      if (
+        lot.state === 'absent' ||
+        lot.utilization == null ||
+        lot.observed_at_unix_millis == null
+      ) {
+        continue;
+      }
+      const newer = siblingLots.find(
+        (candidate) => candidate.upstream_id === lot.upstream_id,
+      )?.observed_at_unix_millis;
+      if (newer == null || lot.observed_at_unix_millis >= newer) continue;
+      retained[entry.window] = Math.min(
+        retained[entry.window] ?? Number.POSITIVE_INFINITY,
+        lot.observed_at_unix_millis / 1000,
+      );
+    }
+  }
+  return retained;
+}
+
+/**
  * Pool counterpart of `geminiGroupPlaceholderState`: Gemini group windows
  * left out of the pool while their same-group sibling is shown. The legend
  * keeps them as a neutral status, never a chart series or a value inferred

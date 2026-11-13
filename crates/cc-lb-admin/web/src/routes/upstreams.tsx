@@ -105,6 +105,7 @@ import {
 import {
   GEMINI_GROUP_PLACEHOLDER_TEXT,
   geminiGroupPlaceholderState,
+  geminiRetainedReading,
   hasQuotaCardPace,
   selectQuotaCardSnapshots,
   selectQuotaDetailState,
@@ -114,6 +115,7 @@ import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption
 import {
   countReconnectNudges,
   formatQuotaStamp,
+  formatSpan,
   UPSTREAM_LATEST_WINDOWS_BY_PROVIDER,
   type UpstreamUsageRow,
   useUpstreamUsageData,
@@ -324,11 +326,18 @@ const PEAK_WINDOWS: ReadonlySet<string> = new Set([
 
 type RowSnapshot = UpstreamUsageRow['windows'][number];
 
-/** The subscription window with the highest used%; null without a reading. */
+/**
+ * The subscription window with the highest current used%; null without one.
+ * A Gemini reading retained from an earlier poll is not current.
+ */
 function peakSnapshot(row: UpstreamUsageRow): RowSnapshot | null {
   let peak: RowSnapshot | null = null;
   for (const snap of row.windows) {
     if (!PEAK_WINDOWS.has(snap.window) || snap.utilization == null) continue;
+    if (
+      geminiRetainedReading(row.windows, row.periodUnknownMeters, snap.window)
+    )
+      continue;
     if (peak === null || snap.utilization > (peak.utilization ?? -1))
       peak = snap;
   }
@@ -343,8 +352,8 @@ function peakUsedPct(row: UpstreamUsageRow): number | null {
 
 /**
  * The row's quota severity: the worst pace-relative severity across its
- * subscription windows at `nowUnixSecs`, the same rule each figure is
- * inked by. Disabled rows carry no quota severity.
+ * current subscription windows at `nowUnixSecs`, the same rule each figure
+ * is inked by. Disabled rows and retained Gemini readings carry none.
  */
 function rowQuotaSeverity(
   row: UpstreamUsageRow,
@@ -353,7 +362,15 @@ function rowQuotaSeverity(
   if (!row.upstream.enabled) return 'none';
   return worstQuotaSeverity(
     row.windows
-      .filter((snap) => PEAK_WINDOWS.has(snap.window))
+      .filter(
+        (snap) =>
+          PEAK_WINDOWS.has(snap.window) &&
+          !geminiRetainedReading(
+            row.windows,
+            row.periodUnknownMeters,
+            snap.window,
+          ),
+      )
       .map((snap) => snapshotQuotaSeverity(snap, nowUnixSecs)),
   );
 }
@@ -680,24 +697,45 @@ function UpstreamsPage() {
           const facts = oauth
             ? rowWindows.flatMap(([windowName]) => {
                 const snap = row.windows.find((s) => s.window === windowName);
-                return snap?.state === 'absent' ||
+                if (
+                  snap?.state === 'absent' ||
                   snap?.state === 'unobserved' ||
                   snap?.utilization == null ||
                   !Number.isFinite(snap.utilization)
-                  ? []
-                  : [
-                      {
-                        window: windowName,
-                        used: snap.utilization * 100,
-                        severity: snapshotQuotaSeverity(snap, nowUnixSecs),
-                      },
-                    ];
+                ) {
+                  return [];
+                }
+                const retained = geminiRetainedReading(
+                  row.windows,
+                  row.periodUnknownMeters,
+                  windowName,
+                );
+                const ageSecs =
+                  snap.age_secs ??
+                  (snap.observed_at_unix_millis == null
+                    ? null
+                    : nowUnixSecs - snap.observed_at_unix_millis / 1000);
+                return [
+                  {
+                    window: windowName,
+                    used: snap.utilization * 100,
+                    severity: retained
+                      ? ('none' as const)
+                      : snapshotQuotaSeverity(snap, nowUnixSecs),
+                    // An earlier poll's reading: never shown as current.
+                    stale: retained
+                      ? ageSecs == null
+                        ? 'Stale reading'
+                        : `Stale reading, ${formatSpan(ageSecs)} ago`
+                      : null,
+                  },
+                ];
               })
             : [];
           const factsText = facts
             .map(
               (f) =>
-                `${windowLabel(f.window, { long: true })} ${formatQuotaPercent(f.used)}`,
+                `${windowLabel(f.window, { long: true })} ${formatQuotaPercent(f.used)}${f.stale ? ` (${f.stale})` : ''}`,
             )
             .join(' · ');
           return {
@@ -820,6 +858,25 @@ function UpstreamsPage() {
                     );
                   }
                   const fact = facts.find((f) => f.window === windowName);
+                  if (fact?.stale != null) {
+                    return (
+                      <span
+                        key={windowName}
+                        className={ROW_FACT_CLASS}
+                        data-window={windowName}
+                        data-state="stale"
+                        title={`${windowLabel(windowName, { long: true })}: last reading ${formatQuotaPercent(fact.used)} · ${fact.stale}`}
+                      >
+                        <span className="text-text-faint">
+                          {windowLabel(windowName)}
+                        </span>
+                        <span className="text-right text-warn-text">
+                          <span aria-hidden="true">Stale</span>
+                          <span className="sr-only">{`${fact.stale}: last reading ${formatQuotaPercent(fact.used)}`}</span>
+                        </span>
+                      </span>
+                    );
+                  }
                   const severity = fact?.severity ?? 'none';
                   return (
                     <span
@@ -1310,8 +1367,14 @@ export function DetailView({
           rawMeters,
           provider: providerOf(upstream.kind),
         }),
-        showPaceLegend: quotaCards.some((snap) =>
-          hasQuotaCardPace(snap, nowUnixSecs),
+        showPaceLegend: quotaCards.some(
+          (snap) =>
+            hasQuotaCardPace(snap, nowUnixSecs) &&
+            !geminiRetainedReading(
+              selectedLatest?.windows,
+              selectedLatest?.period_unknown_meters,
+              snap.window,
+            ),
         ),
       };
     }, [selectedLatest, upstream.kind, nowUnixSecs]);
@@ -1662,6 +1725,11 @@ export function DetailView({
               nowUnixSecs={nowUnixSecs}
               placeholder={geminiGroupPlaceholderState(
                 selectedLatest?.windows,
+                snap.window,
+              )}
+              retained={geminiRetainedReading(
+                selectedLatest?.windows,
+                selectedLatest?.period_unknown_meters,
                 snap.window,
               )}
             />

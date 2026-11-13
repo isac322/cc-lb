@@ -61,6 +61,7 @@ import {
   GEMINI_GROUP_PLACEHOLDER_TEXT,
   type GeminiGroupPlaceholderState,
   geminiGroupPlaceholderState,
+  geminiRetainedReading,
   QUOTA_WINDOW_ORDER,
   selectQuotaDetailState,
 } from './quotaWindowVisibility';
@@ -395,6 +396,7 @@ function windowReading(
   snap: QuotaSnapshot | undefined,
   nowUnixSecs: number,
   timeZone: string,
+  retained = false,
 ) {
   const longLabel = windowLabel(windowName, { long: true });
   const used =
@@ -404,7 +406,9 @@ function windowReading(
   // A stale reading is never shown as current: its caption says `Stale` with
   // the reading's age (warn ink; observed time and reset in `title`), its
   // meter name says so, and it draws no pace tick or pace-relative severity.
-  const stale = snap?.state === 'stale' && used != null;
+  // A Gemini reading retained from an older poll than its group's latest
+  // observation reads the same way, whatever its `state`.
+  const stale = (snap?.state === 'stale' || retained) && used != null;
   // Even pace only while a current window runs (a reading and a reset ahead).
   const pace =
     used == null || stale
@@ -413,10 +417,17 @@ function windowReading(
   const reset = snap
     ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
     : { text: 'No reading' };
-  const observed =
+  const observedUnixSecs =
     snap?.observed_at_unix_millis == null
       ? null
-      : `Observed ${formatQuotaStamp(Math.floor(snap.observed_at_unix_millis / 1000), timeZone)}`;
+      : Math.floor(snap.observed_at_unix_millis / 1000);
+  const observed =
+    observedUnixSecs == null
+      ? null
+      : `Observed ${formatQuotaStamp(observedUnixSecs, timeZone)}`;
+  const ageSecs =
+    snap?.age_secs ??
+    (observedUnixSecs == null ? null : nowUnixSecs - observedUnixSecs);
   return {
     longLabel,
     used,
@@ -427,9 +438,7 @@ function windowReading(
     caption: stale
       ? {
           text:
-            snap?.age_secs == null
-              ? 'Stale'
-              : `Stale · ${formatSpan(snap.age_secs)} ago`,
+            ageSecs == null ? 'Stale' : `Stale · ${formatSpan(ageSecs)} ago`,
           title: ['Stale reading', observed, reset.title ?? reset.text]
             .filter((part) => part != null)
             .join(' · '),
@@ -479,6 +488,7 @@ function WindowCell({
   nowUnixSecs,
   timeZone,
   creditFacts,
+  retained = false,
 }: {
   windowName: UsageWindow;
   snap: QuotaSnapshot | undefined;
@@ -486,6 +496,8 @@ function WindowCell({
   nowUnixSecs: number;
   timeZone: string;
   creditFacts?: CodexCreditFacts | null;
+  /** A Gemini reading older than its group's latest observation. */
+  retained?: boolean;
 }) {
   if (windowName === 'unified' && creditFacts != null) {
     return (
@@ -511,7 +523,7 @@ function WindowCell({
   }
   const label = windowLabel(windowName);
   const { longLabel, used, pace, stale, severity, meterLabel, caption } =
-    windowReading(windowName, snap, nowUnixSecs, timeZone);
+    windowReading(windowName, snap, nowUnixSecs, timeZone, retained);
   // Narrow containers (phones) read one line per window above its meter:
   //   [label] [N% used]            [resets in …]
   //   [meter ─────────────────────────────────]
@@ -787,11 +799,13 @@ function UsageSlot({
   snap,
   nowUnixSecs,
   timeZone,
+  retained,
 }: {
   slot: SharedUsageSlot;
   snap: QuotaSnapshot | undefined;
   nowUnixSecs: number;
   timeZone: string;
+  retained: boolean;
 }) {
   const longLabel = windowLabel(slot.window, { long: true });
   // The header row is aria-hidden: name the full window for assistive tech.
@@ -829,6 +843,7 @@ function UsageSlot({
     snap,
     nowUnixSecs,
     timeZone,
+    retained,
   );
   return (
     <div
@@ -867,6 +882,8 @@ function SharedColumnCell({
 }) {
   const snapOf = (window: UsageWindow) =>
     row.windows.find((s) => s.window === window);
+  const retainedOf = (window: UsageWindow) =>
+    geminiRetainedReading(row.windows, row.periodUnknownMeters, window);
   if (pending) {
     return (
       <WindowCell
@@ -911,6 +928,7 @@ function SharedColumnCell({
         nowUnixSecs={nowUnixSecs}
         pending={false}
         snap={snapOf(only.window)}
+        retained={retainedOf(only.window)}
         timeZone={timeZone}
         windowName={only.window}
       />
@@ -933,6 +951,7 @@ function SharedColumnCell({
             nowUnixSecs={nowUnixSecs}
             slot={slot}
             snap={snapOf(slot.window)}
+            retained={retainedOf(slot.window)}
             timeZone={timeZone}
           />
         ))}
@@ -1031,6 +1050,11 @@ function RowBody({
               nowUnixSecs={nowUnixSecs}
               pending={pending}
               snap={snapshot}
+              retained={geminiRetainedReading(
+                row.windows,
+                row.periodUnknownMeters,
+                w,
+              )}
               timeZone={timeZone}
               windowName={w}
               creditFacts={
