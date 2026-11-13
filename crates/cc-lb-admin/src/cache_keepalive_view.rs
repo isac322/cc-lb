@@ -1035,7 +1035,7 @@ fn activity_turn(
     }) {
         "follow-up arrived before cache expiry (renewal not needed)"
     } else if !followed_up && cycle.as_ref().is_some_and(|cycle| cycle.credited.is_some()) {
-        "redundant renewal (an earlier renewal kept the cache warm)"
+        "saved cycle (savings credited to another renewal)"
     } else {
         turn_action(followed_up, pending)
     };
