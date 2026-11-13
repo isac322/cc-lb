@@ -338,7 +338,7 @@ async fn gemini_profiles_reuse_proxy_envelope_host_and_headers() {
         if is_antigravity {
             assert!(request.headers.contains_key("user-agent"));
             assert_eq!(request.body["userAgent"], "antigravity");
-            assert_eq!(request.body["requestType"], "agent");
+            assert!(request.body.get("requestType").is_none());
             assert!(
                 request.body["requestId"]
                     .as_str()
@@ -385,7 +385,12 @@ async fn gemini_third_party_lane_uses_third_party_model_through_antigravity_enve
     assert_eq!(request.uri.path(), "/v1internal:generateContent");
     assert_eq!(request.body["model"], "claude-sonnet-5-5-low");
     assert_eq!(request.body["userAgent"], "antigravity");
-    assert_eq!(request.body["requestType"], "agent");
+    assert!(request.body.get("requestType").is_none());
+    assert!(
+        request.body["requestId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("agent-"))
+    );
     assert_eq!(
         request.body["request"]["contents"],
         json!([{"role": "user", "parts": [{"text": "."}]}])

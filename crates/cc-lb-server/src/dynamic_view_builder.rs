@@ -3038,7 +3038,12 @@ mod tests {
                 }
                 cc_lb_aead::GeminiOAuthProfile::Antigravity => {
                     assert_eq!(body["userAgent"], "antigravity");
-                    assert_eq!(body["requestType"], "agent");
+                    assert!(body.get("requestType").is_none());
+                    assert!(
+                        body["requestId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("agent-"))
+                    );
                     assert_eq!(
                         signed.headers().get(http::header::USER_AGENT),
                         Some(&http::HeaderValue::from_static("antigravity/custom-config"))
@@ -3952,7 +3957,12 @@ mod tests {
                 }
                 cc_lb_aead::GeminiOAuthProfile::Antigravity => {
                     assert_eq!(body["userAgent"], "antigravity");
-                    assert_eq!(body["requestType"], "agent");
+                    assert!(body.get("requestType").is_none());
+                    assert!(
+                        body["requestId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("agent-"))
+                    );
                     assert_eq!(
                         signed.headers().get(http::header::USER_AGENT),
                         Some(&http::HeaderValue::from_static("antigravity/test"))
