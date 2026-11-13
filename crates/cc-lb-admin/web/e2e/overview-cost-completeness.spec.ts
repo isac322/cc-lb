@@ -26,8 +26,12 @@ function scenarioBuckets(state: PricingCompleteness): UsageBucket[] {
   });
 }
 
-async function installPricingFixtures(page: Page, state: PricingCompleteness, theme: 'dark' | 'light') {
-  const buckets = scenarioBuckets(state);
+async function installPricingFixtures(
+  page: Page,
+  state: PricingCompleteness,
+  theme: 'dark' | 'light',
+  buckets = scenarioBuckets(state),
+) {
   const amount = buckets.reduce((sum, bucket) => sum + bucket.virtual_cost_micros, 0);
   const counts = {
     pricing_completeness: state,
@@ -66,7 +70,7 @@ async function installPricingFixtures(page: Page, state: PricingCompleteness, th
     if (path === '/admin/v1/status') return json({ version: 'fixture', git_sha: 'fixture', uptime_secs: 1, generation: 1, build: { rust_version: 'fixture', profile: 'debug', target: 'fixture' }, upstreams: [] });
     if (path === '/admin/v1/dashboard/summary') return json({
       range: '24h', step: 'hour', window_start_unix_secs: NOW - 86400, window_end_unix_secs: NOW, observed: true,
-      totals: { ...counts, request_count: 5, input_tokens: state === 'unmetered' ? 0 : 500, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, error_count: 0, error_rate: 0, virtual_cost_micros: amount, avg_latency_ms: 10 },
+      totals: { ...counts, request_count: buckets.reduce((sum, bucket) => sum + bucket.request_count, 0), input_tokens: buckets.reduce((sum, bucket) => sum + bucket.input_tokens, 0), output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, error_count: 0, error_rate: 0, virtual_cost_micros: amount, avg_latency_ms: 10 },
       sparkline: { buckets },
     });
     if (path === '/admin/v1/dashboard/usage') return json({
@@ -211,4 +215,38 @@ for (const width of [390, 768, 1440]) {
       });
     }
   }
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`Large partial list-price cost fits the 390px KPI row in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+    const buckets = scenarioBuckets('partial').slice(1, 3).map((bucket, index) => ({
+      ...bucket,
+      virtual_cost_micros: index === 0 ? 9_000_000_000_000_000 : 0,
+    }));
+    await installPricingFixtures(page, 'partial', theme, buckets);
+    await page.goto('/providers/anthropic?range=24h');
+    const tile = page.getByTestId('overview-kpi-cost');
+    const neighbor = page.getByTestId('overview-kpi-latency');
+    await expect(tile).toBeVisible();
+    await expect(neighbor).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
+    await expect(tile.locator('[data-slot="value"]')).toContainText('$9000000000.00+');
+    await expect(tile.getByTitle('$9000000000.00 (1 unpriced)')).toBeAttached();
+    const suffix = tile.getByText('+', { exact: true });
+    await expect(suffix).toBeVisible();
+    expect(await tile.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+    const tileBox = await tile.boundingBox();
+    const neighborBox = await neighbor.boundingBox();
+    const suffixBox = await suffix.boundingBox();
+    expect(tileBox).not.toBeNull();
+    expect(neighborBox).not.toBeNull();
+    expect(suffixBox).not.toBeNull();
+    expect(tileBox!.y).toBe(neighborBox!.y);
+    expect(tileBox!.x + tileBox!.width).toBeLessThanOrEqual(neighborBox!.x);
+    expect(suffixBox!.x).toBeGreaterThanOrEqual(tileBox!.x);
+    expect(suffixBox!.x + suffixBox!.width).toBeLessThanOrEqual(tileBox!.x + tileBox!.width);
+  });
 }

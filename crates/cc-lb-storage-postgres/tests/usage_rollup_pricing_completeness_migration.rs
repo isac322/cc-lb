@@ -4,7 +4,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cc_lb_storage_api::{MetaStore, UsageRollupResolution, UsageRollupStore};
+use cc_lb_storage_api::{
+    MetaStore, PricingCompleteness, PricingCompletenessInput, RequestEventStore,
+    UsageRollupResolution, UsageRollupStore, derive_pricing_completeness,
+};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, Connection as _, PgPool,
@@ -142,6 +145,175 @@ async fn gemini_normal_and_nested_merges_preserve_pricing_classification() -> Te
     teardown
 }
 
+#[tokio::test]
+async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
+    for intact in [true, false] {
+        let Some(fixture) = Fixture::create(168).await? else {
+            return Ok(());
+        };
+        let result: TestResult = async {
+            const H: u64 = 1_800_003_600;
+            let pool = fixture.storage.pool();
+            sqlx::query(
+                "INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+                 SELECT 'inv-filler-'||i,'inv-filler-'||i,TO_TIMESTAMP(1800003600 - 7200),1799996400000,200,0,'inv-filler',1,1 \
+                 FROM GENERATE_SERIES(1,999) AS i",
+            )
+            .execute(pool)
+            .await?;
+            sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
+                .execute(pool)
+                .await?;
+            let mut conn_a = fixture.connect_standalone().await?;
+            let mut conn_b = fixture.connect_standalone().await?;
+            let mut conn_c = fixture.connect_standalone().await?;
+            sqlx::query("BEGIN").execute(&mut conn_a).await?;
+            let x1: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                .fetch_one(&mut conn_a)
+                .await?;
+            sqlx::query("BEGIN").execute(&mut conn_b).await?;
+            let x2: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                .fetch_one(&mut conn_b)
+                .await?;
+            sqlx::query("BEGIN").execute(&mut conn_c).await?;
+            let x3: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                .fetch_one(&mut conn_c)
+                .await?;
+            assert!(x1.parse::<u64>()? < x2.parse::<u64>()?);
+            assert!(x2.parse::<u64>()? < x3.parse::<u64>()?);
+            // Assign sequence numbers in the opposite order from transaction IDs.
+            let insert = "INSERT INTO request_events_v1 \
+                (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+                VALUES ($1,$1,TO_TIMESTAMP($2::double precision),$3,200,0,$4,10,$5) RETURNING seq";
+            let c_seq: i64 = sqlx::query_scalar(insert)
+                .bind("inv-C")
+                .bind((H + 400) as f64)
+                .bind(((H + 400) * 1000) as i64)
+                .bind("inv-other")
+                .bind(Some(5_i64))
+                .fetch_one(&mut conn_c)
+                .await?;
+            let a_seq: i64 = sqlx::query_scalar(insert)
+                .bind("inv-A")
+                .bind((H + 350) as f64)
+                .bind(((H + 350) * 1000) as i64)
+                .bind("inv-target")
+                .bind(Some(0_i64))
+                .fetch_one(&mut conn_a)
+                .await?;
+            let b_seq: i64 = sqlx::query_scalar(insert)
+                .bind("inv-B")
+                .bind((H + 340) as f64)
+                .bind(((H + 340) * 1000) as i64)
+                .bind("inv-target")
+                .bind(None::<i64>)
+                .fetch_one(&mut conn_b)
+                .await?;
+            assert_eq!((c_seq, a_seq, b_seq), (1000, 1001, 1002));
+            sqlx::query("COMMIT").execute(&mut conn_a).await?;
+            wait_until_xid_below_xmin(pool, &x1).await?;
+            fixture.storage.rollup_usage_once().await?;
+            fixture
+                .storage
+                .prune_usage_rollups_before(H + 360, H + 330, 2000)
+                .await?;
+            sqlx::query("COMMIT").execute(&mut conn_b).await?;
+            sqlx::query("COMMIT").execute(&mut conn_c).await?;
+            conn_a.close().await?;
+            conn_b.close().await?;
+            conn_c.close().await?;
+            wait_until_xid_below_xmin(pool, &x3).await?;
+            fixture.storage.rollup_usage_once().await?;
+            let high_water: (i64, String) = sqlx::query_as(
+                "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
+            )
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(high_water, (1000, x3));
+            if !intact {
+                assert_eq!(
+                    fixture
+                        .storage
+                        .prune_request_events_before((H + 345) * 1000 * 1_000_000, 1000)
+                        .await?,
+                    1000,
+                );
+            }
+            sqlx::raw_sql(
+                "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0; \
+                 DELETE FROM usage_rollup_checkpoints_v1 \
+                 WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
+            )
+            .execute(pool)
+            .await?;
+            fixture.storage.rollup_usage_once().await?;
+            for (resolution, bucket_start) in [
+                (UsageRollupResolution::Hour, H),
+                (UsageRollupResolution::Minute, H + 300),
+            ] {
+                let rows = fixture
+                    .storage
+                    .query_usage_rollups_in_range(resolution, bucket_start, bucket_start + 3600)
+                    .await?;
+                let row = rows
+                    .iter()
+                    .find(|row| row.model == "inv-target")
+                    .expect("recreated target bucket");
+                assert_eq!(
+                    (
+                        row.request_count,
+                        row.priced_event_count,
+                        row.unpriced_event_count,
+                        row.unmetered_event_count,
+                    ),
+                    if intact { (1, 0, 1, 0) } else { (1, 0, 0, 0) },
+                    "intact={intact}, resolution={resolution:?}",
+                );
+                assert_eq!(
+                    derive_pricing_completeness(PricingCompletenessInput {
+                        request_count: row.request_count,
+                        priced_event_count: row.priced_event_count,
+                        unpriced_event_count: row.unpriced_event_count,
+                        unmetered_event_count: row.unmetered_event_count,
+                        total_tokens: row.input_tokens,
+                        virtual_cost_micros: row.virtual_cost_micros,
+                    }),
+                    Some(if intact {
+                        PricingCompleteness::Unpriced
+                    } else {
+                        PricingCompleteness::Unknown
+                    }),
+                );
+            }
+            Ok(())
+        }
+        .await;
+        let teardown = fixture.drop_schema().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
+}
+
+async fn wait_until_xid_below_xmin(pool: &PgPool, xid: &str) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let visible: bool =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8")
+                    .bind(xid)
+                    .fetch_one(pool)
+                    .await?;
+            if visible {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn totals(pool: &PgPool) -> TestResult<(i64, i64, i64)> {
     Ok(sqlx::query_as("SELECT SUM(priced_event_count)::BIGINT,SUM(unpriced_event_count)::BIGINT,SUM(unmetered_event_count)::BIGINT FROM usage_rollups_v2")
         .fetch_one(pool).await?)
@@ -153,8 +325,8 @@ async fn shape(pool: &PgPool) -> TestResult<Vec<(String, String, String, Option<
 }
 
 struct Fixture {
-    url: String,
-    schema: String,
+    database: String,
+    options: PgConnectOptions,
     admin: PgPool,
     storage: PostgresStorage,
 }
@@ -167,25 +339,37 @@ impl Fixture {
             );
             return Ok(None);
         };
+        // Advisory locks and MVCC xmin horizons are database-scoped in PostgreSQL.
+        let database = format!("cc_lb_pricing_{}", Uuid::new_v4().simple());
         let schema = format!("pricing_completeness_{}", Uuid::new_v4().simple());
+        let base_options = PgConnectOptions::from_str(&url)?;
         let admin = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&url)
+            .connect_with(base_options.clone().database("postgres"))
             .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {database}")))
             .execute(&admin)
             .await?;
+        let setup_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(base_options.clone().database(&database))
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&setup_pool)
+            .await?;
+        setup_pool.close().await;
         let search_path = format!("{schema}, public");
+        let options = base_options
+            .database(&database)
+            .options([("search_path", search_path.as_str())]);
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(
-                PgConnectOptions::from_str(&url)?.options([("search_path", search_path.as_str())]),
-            )
+            .connect_with(options.clone())
             .await?;
         let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
         let fixture = Self {
-            url,
-            schema,
+            database,
+            options,
             admin,
             storage,
         };
@@ -211,17 +395,14 @@ impl Fixture {
     }
 
     async fn connect_standalone(&self) -> TestResult<sqlx::PgConnection> {
-        let search_path = format!("{}, public", self.schema);
-        let options =
-            PgConnectOptions::from_str(&self.url)?.options([("search_path", search_path.as_str())]);
-        Ok(sqlx::PgConnection::connect_with(&options).await?)
+        Ok(sqlx::PgConnection::connect_with(&self.options).await?)
     }
 
     async fn drop_schema(self) -> TestResult {
         self.storage.pool().close().await;
         sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA {} CASCADE",
-            self.schema
+            "DROP DATABASE {} WITH (FORCE)",
+            self.database
         )))
         .execute(&self.admin)
         .await?;

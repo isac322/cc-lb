@@ -346,6 +346,7 @@ const KPI_CELL_CLASS = [
 export function ValueTile({
   label,
   value,
+  valueSuffix,
   valueExact,
   legend,
   sub,
@@ -362,6 +363,7 @@ export function ValueTile({
 }: {
   label: string;
   value: React.ReactNode;
+  valueSuffix?: string;
   /**
    * Full-precision rendering of `value`, shown to screen readers and as the
    * hover `title` whenever the visible figure is a compacted form.
@@ -450,10 +452,13 @@ export function ValueTile({
           <Skeleton className="h-8 w-20" />
         ) : (
           <span
-            className="text-display tabular-nums text-text"
+            className="inline-flex min-w-0 max-w-full items-baseline text-display tabular-nums text-text"
             title={valueExact ?? undefined}
           >
-            {value}
+            <span className="min-w-0 truncate">{value}</span>
+            {valueSuffix ? (
+              <span className="shrink-0">{valueSuffix}</span>
+            ) : null}
             {valueExact != null ? (
               <span className="sr-only">{` (${valueExact})`}</span>
             ) : null}
@@ -1808,10 +1813,7 @@ export function ProviderOverviewPage({
   const costIndeterminate = isIndeterminatePricing(costState);
   const costQualifier = totals ? pricingQualifier(totals) : undefined;
   const costPartial = costState === 'partial';
-  const costValue =
-    noTraffic || costIndeterminate
-      ? '—'
-      : `${fmtCostKpi(totalCostMicros)}${costPartial ? '+' : ''}`;
+  const costValue = costIndeterminate ? '—' : fmtCostKpi(totalCostMicros);
   const costExact = costIndeterminate
     ? costQualifier
     : costPartial
@@ -2210,6 +2212,9 @@ export function ProviderOverviewPage({
                         label="Cost at list price"
                         loading={summary.isPending}
                         value={costValue}
+                        valueSuffix={
+                          !costIndeterminate && costPartial ? '+' : undefined
+                        }
                         valueExact={costExact}
                         legend={
                           !noTraffic && (costIndeterminate || costPartial) ? (

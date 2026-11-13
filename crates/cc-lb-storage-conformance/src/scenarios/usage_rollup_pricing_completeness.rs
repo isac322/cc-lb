@@ -16,6 +16,7 @@ where
     recreated_bucket_backfill(Arc::clone(&backend)).await?;
     pre_upgrade_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     pre_upgrade_interior_hole_backfill(Arc::clone(&backend)).await?;
+    frozen_upper_mixed_worker_backfill(Arc::clone(&backend)).await?;
     upstream_rename_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     partial_retention_interrupted_prune_backfill(Arc::clone(&backend)).await?;
     mixed_old_and_new_writer_effective_cache_writes(Arc::clone(&backend)).await?;
@@ -325,6 +326,166 @@ where
     }
     Ok(())
 }
+async fn frozen_upper_mixed_worker_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+        let start = 1_800_000_000;
+        let mut historical = event("mixed-worker-A", start);
+        historical.model = Some("mixed-worker-recreated".to_owned());
+        historical.cost_usd_micros = Some(0);
+        historical.input_tokens = Some(10);
+        ensure!(storage.append_request_event(&historical).await? == 1);
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        let historical_fillers = match backend.kind() {
+            BackendKind::Sqlite => {
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) \
+                 INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,model) \
+                 SELECT 'hist-filler-'||i,'hist-filler-'||i,1800003600,1800003600000,200,0,'hist-filler' FROM n"
+            }
+            BackendKind::Postgres => {
+                "INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model) \
+                 SELECT 'hist-filler-'||i,'hist-filler-'||i,to_timestamp(1800003600),1800003600000,200,0,'hist-filler' \
+                 FROM generate_series(1,10000) AS i"
+            }
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), historical_fillers).await? == 10_000);
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        ensure!(storage.rollup_usage_once().await?.processed_events == 10_000);
+        ensure!(storage.rollup_usage_once().await?.processed_events == 1);
+        ensure!(
+            storage.prune_usage_rollups_before(start + 60, start, 100).await? == 1,
+            "only A's minute must be pruned"
+        );
+        backend.execute_raw_sql(
+            storage.as_ref(),
+            "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0",
+        ).await?;
+        backend.execute_raw_sql(
+            storage.as_ref(),
+            "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_%'",
+        ).await?;
+        ensure!(storage.rollup_usage_once().await?.processed_events == 0);
+
+        // The frozen historical upper is 10001; A remains below its first 10000-row batch.
+        let live_fillers = match backend.kind() {
+            BackendKind::Sqlite => {
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) \
+                 INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,model) \
+                 SELECT 'live-filler-'||i,'live-filler-'||i,1800007200,1800007200000,200,0,'live-filler' FROM n"
+            }
+            BackendKind::Postgres => {
+                "INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model) \
+                 SELECT 'live-filler-'||i,'live-filler-'||i,to_timestamp(1800007200),1800007200000,200,0,'live-filler' \
+                 FROM generate_series(1,10000) AS i"
+            }
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), live_fillers).await? == 10_000);
+        let mut recreated = event("mixed-worker-B", start);
+        recreated.model = historical.model.clone();
+        recreated.cost_usd_micros = None;
+        recreated.input_tokens = Some(10);
+        ensure!(storage.append_request_event(&recreated).await? == 20_002);
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+
+        // An old worker accounts for B, but cannot write the new pricing checkpoints.
+        let recreate_minute = match backend.kind() {
+            BackendKind::Sqlite => {
+                "INSERT INTO usage_rollups_v2 \
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,input_tokens,priced_event_count,unpriced_event_count,unmetered_event_count,updated_at) \
+                 SELECT 'minute',1800000000,principal_id,upstream_id,upstream_name,model,1,10,0,0,0,unixepoch() \
+                 FROM usage_rollups_v2 WHERE resolution='hour' AND bucket_start_unix_secs=1800000000 AND model='mixed-worker-recreated'"
+            }
+            BackendKind::Postgres => {
+                "INSERT INTO usage_rollups_v2 \
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,input_tokens,priced_event_count,unpriced_event_count,unmetered_event_count,updated_at) \
+                 SELECT 'minute',1800000000,principal_id,upstream_id,upstream_name,model,1,10,0,0,0,NOW() \
+                 FROM usage_rollups_v2 WHERE resolution='hour' AND bucket_start_unix_secs=1800000000 AND model='mixed-worker-recreated'"
+            }
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), recreate_minute).await? == 1);
+        ensure!(backend.execute_raw_sql(
+            storage.as_ref(),
+            "UPDATE usage_rollups_v2 SET request_count=request_count+1,input_tokens=input_tokens+10 \
+             WHERE resolution='hour' AND bucket_start_unix_secs=1800000000 AND model='mixed-worker-recreated'",
+        ).await? == 1);
+        let advance_high_water = match backend.kind() {
+            BackendKind::Sqlite => {
+                "UPDATE usage_rollup_checkpoints_v1 SET value=(SELECT MAX(id) FROM request_events_v1) WHERE id='high_water'"
+            }
+            BackendKind::Postgres => {
+                "UPDATE usage_rollup_checkpoints_v1 SET (value,value_xid)= \
+                 (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) WHERE id='high_water'"
+            }
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), advance_high_water).await? == 1);
+        let high_water = storage.usage_rollup_checkpoint().await?;
+        let before = storage.usage_rollup_revision().await?;
+        for pass in 0..4 {
+            ensure!(storage.rollup_usage_once().await?.processed_events == 0);
+            ensure!(storage.usage_rollup_checkpoint().await? == high_water);
+            if pass == 0 {
+                ensure!(
+                    storage.usage_rollup_revision().await? != before,
+                    "catchup-only progress must invalidate dashboard ETags"
+                );
+            }
+        }
+        for (resolution, expected, completeness) in [
+            (
+                UsageRollupResolution::Minute,
+                (1, 0, 1, 0),
+                PricingCompleteness::Unpriced,
+            ),
+            (
+                UsageRollupResolution::Hour,
+                (2, 1, 1, 0),
+                PricingCompleteness::Partial,
+            ),
+        ] {
+            let rows = storage
+                .query_usage_rollups_in_range(resolution, start, start + 3600)
+                .await?;
+            let row = rows
+                .iter()
+                .find(|row| row.model == "mixed-worker-recreated")
+                .ok_or_else(|| anyhow::anyhow!("missing mixed-worker {resolution:?} bucket"))?;
+            ensure!(
+                (
+                    row.request_count,
+                    row.priced_event_count,
+                    row.unpriced_event_count,
+                    row.unmetered_event_count,
+                ) == expected,
+                "old-worker catchup must classify B before the older historical A: {row:?}"
+            );
+            ensure!(
+                derive_pricing_completeness(PricingCompletenessInput {
+                    request_count: row.request_count,
+                    priced_event_count: row.priced_event_count,
+                    unpriced_event_count: row.unpriced_event_count,
+                    unmetered_event_count: row.unmetered_event_count,
+                    total_tokens: row.input_tokens,
+                    virtual_cost_micros: row.virtual_cost_micros,
+                }) == Some(completeness)
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
 async fn pre_upgrade_interior_hole_backfill<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,

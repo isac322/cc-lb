@@ -4011,41 +4011,54 @@ describe('Overview list-price completeness', () => {
     },
   );
 
-  it('qualifies partial totals and cost hover without changing priced copy', () => {
-    mockResolvedKpiQueries();
-    const pricing = {
-      pricing_completeness: 'partial' as const,
-      priced_request_count: 1,
-      unpriced_request_count: 1,
-      unmetered_request_count: 0,
-    };
-    const bucket = usageBucket(KPI_TIMESTAMPS[0], {
-      ...pricing,
-      request_count: 2,
-      virtual_cost_micros: 2_500_000,
-      input_tokens: 100,
-    });
-    vi.mocked(queries.useSummary).mockReturnValue(
-      successQuery<DashboardSummaryResponse>({
-        ...SUMMARY_FIXTURE,
-        totals: { ...SUMMARY_FIXTURE.totals, ...bucket },
-        sparkline: { buckets: [bucket] },
-      }),
-    );
-    render(<OverviewPage />);
-    const tile = screen.getByTestId('overview-kpi-cost');
-    expect(tile.textContent).toContain('$2.50+');
-    expect(within(tile).getByTitle('$2.50 (1 unpriced)')).toBeDefined();
-    expect(within(tile).getByText('1 unpriced').className).toBe(
-      'text-caption text-text-faint',
-    );
-    fireEvent.mouseMove(screen.getByTestId('overview-kpi-chart-cost'), {
-      clientX: 0,
-    });
-    expect(
-      screen.getByTestId('overview-kpi-tooltip-cost').textContent,
-    ).toContain('Cost $2.50 (1 unpriced)');
-  });
+  it.each([2_500_000, 9_000_000_000_000_000])(
+    'qualifies partial totals and cost hover at %d micros without losing the suffix',
+    (amount) => {
+      mockResolvedKpiQueries();
+      const pricing = {
+        pricing_completeness: 'partial' as const,
+        priced_request_count: 1,
+        unpriced_request_count: 1,
+        unmetered_request_count: 0,
+      };
+      const bucket = usageBucket(KPI_TIMESTAMPS[0], {
+        ...pricing,
+        request_count: 2,
+        virtual_cost_micros: amount,
+        input_tokens: 100,
+      });
+      vi.mocked(queries.useSummary).mockReturnValue(
+        successQuery<DashboardSummaryResponse>({
+          ...SUMMARY_FIXTURE,
+          totals: { ...SUMMARY_FIXTURE.totals, ...bucket },
+          sparkline: { buckets: [bucket] },
+        }),
+      );
+      render(<OverviewPage />);
+      const tile = screen.getByTestId('overview-kpi-cost');
+      const value = `$${(amount / 1_000_000).toFixed(2)}`;
+      const exact = `${value} (1 unpriced)`;
+      expect(tile.textContent).toContain(`${value}+`);
+      const figure = within(tile).getByTitle(exact);
+      expect(figure.getAttribute('title')).toBe(exact);
+      expect(within(figure).getByText(value, { exact: true }).className).toBe(
+        'min-w-0 truncate',
+      );
+      expect(within(figure).getByText('+', { exact: true }).className).toBe(
+        'shrink-0',
+      );
+      expect(within(figure).getByText(`(${exact})`).className).toBe('sr-only');
+      expect(within(tile).getByText('1 unpriced').className).toBe(
+        'text-caption text-text-faint',
+      );
+      fireEvent.mouseMove(screen.getByTestId('overview-kpi-chart-cost'), {
+        clientX: 0,
+      });
+      expect(
+        screen.getByTestId('overview-kpi-tooltip-cost').textContent,
+      ).toContain(`Cost ${exact}`);
+    },
+  );
 
   it('keeps known-zero and unmetered totals distinct from no traffic', () => {
     mockResolvedKpiQueries();
