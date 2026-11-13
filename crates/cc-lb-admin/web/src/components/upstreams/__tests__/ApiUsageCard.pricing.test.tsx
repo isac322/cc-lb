@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -9,7 +9,15 @@ import type {
 } from '../../../lib/api';
 import { ApiUsageCard } from '../ApiUsageCard';
 
-const captured = vi.hoisted(() => ({ data: [] as Record<string, number>[] }));
+type TooltipFormatter = (
+  value: unknown,
+  name: unknown,
+  item: { payload: { ts: number } },
+) => [string, string];
+const captured = vi.hoisted(() => ({
+  data: [] as Record<string, number>[],
+  formatter: undefined as TooltipFormatter | undefined,
+}));
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: ReactNode }) => children,
   AreaChart: ({
@@ -26,11 +34,15 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null,
   XAxis: () => null,
   YAxis: () => null,
-  Tooltip: () => null,
+  Tooltip: ({ formatter }: { formatter: TooltipFormatter }) => {
+    captured.formatter = formatter;
+    return null;
+  },
 }));
 afterEach(() => {
   cleanup();
   captured.data = [];
+  captured.formatter = undefined;
 });
 
 const provenance: KeyUsageProvenance = {
@@ -106,6 +118,90 @@ const props = {
 };
 
 describe('ApiUsageCard estimated pricing', () => {
+  it('qualifies each partial estimated point in the legend and chart tooltip', () => {
+    const partial: UsageBucket = {
+      ...bucket,
+      bucket_start_unix_secs: 60,
+      request_count: 2,
+      virtual_cost_micros: 2_500_000,
+      pricing_completeness: 'partial',
+      priced_request_count: 1,
+      unpriced_request_count: 1,
+      unmetered_request_count: 0,
+    };
+    render(
+      <ApiUsageCard
+        {...props}
+        data={{
+          ...data,
+          series: [
+            { key: 'model', buckets: [data.series[0].buckets[0], partial] },
+            {
+              key: 'zero',
+              buckets: [
+                {
+                  ...partial,
+                  pricing_completeness: 'known_zero',
+                  virtual_cost_micros: 0,
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+    const legend = screen.getByTestId('api-usage-legend-slot');
+    expect(within(legend).getByText('$2.5000+')).toBeDefined();
+    const qualified = within(legend).getByTitle('1 unpriced');
+    expect(qualified.getAttribute('aria-label')).toBe('$2.5000+ (1 unpriced)');
+    expect(qualified.textContent).toBe('$2.5000+ (1 unpriced)');
+    expect(within(legend).getByText('$0.0000')).toBeDefined();
+    expect(captured.formatter?.(2.5, 'model', { payload: { ts: 60 } })).toEqual(
+      ['$2.5000+ (1 unpriced)', 'model'],
+    );
+    expect(captured.formatter?.(2.5, 'model', { payload: { ts: 0 } })).toEqual([
+      '$2.5000',
+      'model',
+    ]);
+    expect(captured.formatter?.(0, 'zero', { payload: { ts: 60 } })).toEqual([
+      '$0.0000',
+      'zero',
+    ]);
+  });
+
+  it.each(['reported', 'stale'] as const)(
+    'leaves partial %s legend and tooltip values unchanged',
+    (source) => {
+      render(
+        <ApiUsageCard
+          {...props}
+          provenance={{ ...provenance, source }}
+          data={{
+            ...data,
+            series: [
+              {
+                key: 'model',
+                buckets: [
+                  {
+                    ...bucket,
+                    pricing_completeness: 'partial',
+                    virtual_cost_micros: 2_500_000,
+                  },
+                ],
+              },
+            ],
+          }}
+        />,
+      );
+      const legend = screen.getByTestId('api-usage-legend-slot');
+      expect(within(legend).getByText('$2.5000')).toBeDefined();
+      expect(within(legend).queryByText('$2.5000+')).toBeNull();
+      expect(
+        captured.formatter?.(2.5, 'model', { payload: { ts: 0 } }),
+      ).toEqual(['$2.5000', 'model']);
+    },
+  );
+
   it('omits model keys for unpriced and unknown cost buckets', () => {
     render(
       <ApiUsageCard

@@ -4,6 +4,7 @@ import {
   isIndeterminatePricing,
   type PricingCounts,
   sumBucketPricing,
+  sumCompletenessTokens,
   sumPricingCounts,
 } from '../lib/pricingCompleteness';
 import type { ProviderFamily } from '../lib/providers';
@@ -13,6 +14,7 @@ export interface PrincipalProviderMetric extends PricingCounts {
   readonly cacheHitRatio: number | null;
   readonly requests: number;
   readonly tokens: number;
+  readonly completenessTokens: number;
   readonly promptTokens: number;
 }
 
@@ -41,10 +43,12 @@ function metricsForSeries(
 ): PrincipalProviderMetric | null {
   let costMicros = 0;
   let requests = 0;
+  let completenessTokens = 0;
   const tokens = { ...EMPTY_TOKENS };
   for (const bucket of series.buckets) {
     costMicros += bucket.virtual_cost_micros ?? 0;
     requests += bucket.request_count ?? 0;
+    completenessTokens += sumCompletenessTokens(bucket);
     tokens.input_tokens += bucket.input_tokens ?? 0;
     tokens.output_tokens += bucket.output_tokens ?? 0;
     tokens.cache_creation_input_tokens +=
@@ -62,6 +66,7 @@ function metricsForSeries(
     cacheHitRatio: cacheHitRatio(tokens),
     requests,
     tokens: sumTokens(tokens),
+    completenessTokens,
     promptTokens,
   };
 }
@@ -128,7 +133,7 @@ export function mergePrincipalProviderUsage(
         providerMetrics.map((metric) => ({
           ...metric,
           request_count: metric.requests,
-          total_tokens: metric.tokens,
+          total_tokens: metric.completenessTokens,
           virtual_cost_micros: metric.costMicros,
         })),
       ),

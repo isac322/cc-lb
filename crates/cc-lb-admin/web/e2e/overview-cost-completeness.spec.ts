@@ -127,8 +127,9 @@ async function expectNeutralReadable(element: Locator) {
 for (const width of [390, 768, 1440]) {
   for (const theme of ['dark', 'light'] as const) {
     for (const state of STATES) {
-      test(`List-price ${state} stays honest at ${width}px in ${theme}`, async ({ page }) => {
-        await page.setViewportSize({ width, height: 900 });
+      test(`List-price ${state} stays honest at ${width}px in ${theme}`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+        await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
         const amount = await installPricingFixtures(page, state, theme);
         await page.goto('/providers/anthropic?range=24h');
         const tile = page.getByTestId('overview-kpi-cost');
@@ -156,6 +157,15 @@ for (const width of [390, 768, 1440]) {
         }
         await expectFits(page, tile);
         await expectFits(page, principal);
+        const capture = state === 'unpriced' || state === 'partial' || state === 'known_zero';
+        if (capture) {
+          await page.evaluate(() => document.fonts.ready);
+          await page.screenshot({
+            path: testInfo.outputPath(`overview-${state}-${width}-${theme}.png`),
+            fullPage: true,
+            animations: 'disabled',
+          });
+        }
 
         await page.goto('/?range=24h');
         const multi = page.getByTestId('multi-provider-overview');
@@ -175,7 +185,7 @@ for (const width of [390, 768, 1440]) {
         await expectFits(page, totalCost);
 
         const request = page.getByRole('row', { name: 'View request pricing-event' });
-        await request.click({ position: { x: 24, y: 16 } });
+        await request.getByText('pricing-model', { exact: true }).click();
         const drawer = page.getByRole('dialog', { name: 'Request detail' });
         await expect(drawer).toBeVisible();
         if (indeterminate || state === 'partial') {
@@ -192,6 +202,12 @@ for (const width of [390, 768, 1440]) {
           await expect(drawer.getByText('No cost', { exact: true })).toBeVisible();
         }
         await expectFits(page, drawer);
+        if (capture) {
+          await page.screenshot({
+            path: testInfo.outputPath(`drawer-${state}-${width}-${theme}.png`),
+            animations: 'disabled',
+          });
+        }
       });
     }
   }

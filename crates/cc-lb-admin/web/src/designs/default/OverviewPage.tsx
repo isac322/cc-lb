@@ -91,6 +91,7 @@ import {
   type PricingCounts,
   pricingQualifier,
   sumBucketPricing,
+  sumCompletenessTokens,
 } from '../../lib/pricingCompleteness';
 import {
   PROVIDER_FAMILIES,
@@ -545,6 +546,7 @@ export type TopPrincipal = PricingCounts & {
    */
   cost_components_micros: CostComponentMicros | null;
   tokens: number;
+  completenessTokens: number;
   /**
    * Cache read over every prompt token (cache read + cache create + uncached
    * input), 0-1 (`cacheHitRatio`); null when the principal sent no prompt
@@ -2024,6 +2026,7 @@ export function ProviderOverviewPage({
       if (!s.key) continue;
       let costMicros = 0;
       let requests = 0;
+      let completenessTokens = 0;
       // Window token totals per component: the cache hit is taken over the
       // whole window (cache read over every prompt token), not averaged
       // over buckets.
@@ -2038,6 +2041,7 @@ export function ProviderOverviewPage({
       for (const b of s.buckets) {
         costMicros += b.virtual_cost_micros ?? 0;
         requests += b.request_count ?? 0;
+        completenessTokens += sumCompletenessTokens(b);
         tokenTotals.input_tokens += b.input_tokens ?? 0;
         tokenTotals.output_tokens += b.output_tokens ?? 0;
         tokenTotals.cache_creation_input_tokens +=
@@ -2058,6 +2062,7 @@ export function ProviderOverviewPage({
         cost_micros: costMicros,
         cost_components_micros: recordedComponents ? components : null,
         tokens: sumTokens(tokenTotals),
+        completenessTokens,
         cache_hit_ratio: cacheHitRatio(tokenTotals),
         requests,
       });

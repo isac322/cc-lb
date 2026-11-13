@@ -7,9 +7,17 @@ import {
 } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PricingCompleteness } from '../lib/api';
+import type {
+  DashboardUsageResponse,
+  PricingCompleteness,
+  UsageBucket,
+} from '../lib/api';
+import type { NativeWriteTokenFields } from '../lib/pricingCompleteness';
 import { PrincipalProviderTable } from './PrincipalProviderTable';
-import type { MergedPrincipalUsage } from './principalMerge';
+import {
+  type MergedPrincipalUsage,
+  mergePrincipalProviderUsage,
+} from './principalMerge';
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => (
@@ -50,6 +58,7 @@ function row(
         cacheHitRatio: null,
         requests: pricing.request_count,
         tokens: 100,
+        completenessTokens: 100,
         promptTokens: 100,
       },
     },
@@ -67,6 +76,54 @@ function show(rows: MergedPrincipalUsage[]) {
 }
 
 describe('PrincipalProviderTable pricing truth', () => {
+  it.each([
+    { cache_write_input_tokens: 7 },
+    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
+  ] satisfies NativeWriteTokenFields[])(
+    'keeps native-write-only legacy rows and both footer totals unknown: %j',
+    (nativeWrites) => {
+      const bucket: UsageBucket & NativeWriteTokenFields = {
+        bucket_start_unix_secs: 0,
+        request_count: 1,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        error_count: 0,
+        virtual_cost_micros: 0,
+        latency_ms_sum: 0,
+        latency_count: 0,
+        priced_request_count: 0,
+        unpriced_request_count: 0,
+        unmetered_request_count: 0,
+        ...nativeWrites,
+      };
+      const usage: DashboardUsageResponse = {
+        range: '24h',
+        step: 'hour',
+        group_by: 'principal',
+        window_start_unix_secs: 0,
+        window_end_unix_secs: 3600,
+        observed: true,
+        series: [{ key: 'Legacy principal', buckets: [bucket] }],
+      };
+      const { container } = show(
+        mergePrincipalProviderUsage({ anthropic: usage }, new Map()),
+      );
+      const principal = screen.getByTestId('multi-provider-principal-row');
+      const footer = container.querySelector('tfoot');
+      expect(
+        principal.querySelectorAll('[title="Price unknown"]'),
+      ).toHaveLength(2);
+      expect(footer?.querySelectorAll('[title="Price unknown"]')).toHaveLength(
+        2,
+      );
+      expect(principal.textContent).not.toContain('$0.00');
+      expect(footer?.textContent).not.toContain('$0.00');
+      expect(footer?.textContent).not.toContain('100%');
+    },
+  );
+
   it('puts indeterminate costs last in either sort direction', () => {
     show([
       row('Unpriced', 'unpriced'),

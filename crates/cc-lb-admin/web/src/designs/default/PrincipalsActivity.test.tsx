@@ -1,7 +1,9 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { UsageBucket } from '../../lib/api';
+import type { DashboardUsageResponse, UsageBucket } from '../../lib/api';
+import type { NativeWriteTokenFields } from '../../lib/pricingCompleteness';
 import { useUsage } from '../../lib/queries';
+import { successQuery } from '../../lib/test-utils/hook-results';
 import type * as timePresets from '../../lib/timePresets';
 import { PrincipalsActivity } from './PrincipalsActivity';
 
@@ -32,16 +34,47 @@ const bucket: UsageBucket = {
   latency_ms_sum: 0,
   latency_count: 0,
 };
+function usageResult(buckets: UsageBucket[]): ReturnType<typeof useUsage> {
+  return successQuery<DashboardUsageResponse>({
+    range: '24h',
+    step: 'hour',
+    group_by: 'provider',
+    window_start_unix_secs: 0,
+    window_end_unix_secs: 3600,
+    series: [{ key: 'anthropic', buckets }],
+    observed: true,
+  });
+}
 function usage(buckets: UsageBucket[]) {
-  vi.mocked(useUsage).mockReturnValue({
-    data: { series: [{ key: 'anthropic', buckets }] },
-    isPending: false,
-    isError: false,
-  } as never);
+  vi.mocked(useUsage).mockReturnValue(usageResult(buckets));
   return render(<PrincipalsActivity principalId="principal" />);
 }
 
 describe('PrincipalsActivity cost completeness', () => {
+  it.each([
+    { cache_write_input_tokens: 7 },
+    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
+  ] satisfies NativeWriteTokenFields[])(
+    'keeps legacy native-write-only consumption unknown: %j',
+    (nativeWrites) => {
+      usage([
+        {
+          ...bucket,
+          input_tokens: 0,
+          priced_request_count: 0,
+          unpriced_request_count: 0,
+          unmetered_request_count: 0,
+          ...nativeWrites,
+        },
+      ]);
+      expect(screen.getByText('Price unknown')).toBeDefined();
+      expect(
+        screen.getByText('Est. catalog cost').parentElement?.textContent,
+      ).toContain('—');
+      expect(screen.queryByText('$0.0000')).toBeNull();
+    },
+  );
+
   it.each([
     ['unpriced', 'List price unavailable'],
     ['unknown', 'Price unknown'],

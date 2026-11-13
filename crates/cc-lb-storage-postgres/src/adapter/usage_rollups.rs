@@ -1423,6 +1423,103 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
             })?;
 
+    for (key, delta) in backfill_deltas {
+        if delta.cost_components_event_count == 0 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE usage_rollups_v2 \
+             SET cost_input_micros = cost_input_micros + $1, \
+                 cost_output_micros = cost_output_micros + $2, \
+                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
+                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
+                 cost_cache_read_micros = cost_cache_read_micros + $5, \
+                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
+                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
+                 cost_components_event_count = cost_components_event_count + $8, \
+                 updated_at = NOW() \
+             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
+               AND upstream_id = $12 AND model = $13",
+        )
+        .bind(u64_to_i64(
+            delta.cost_input_micros,
+            "backfill cost_input_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_output_micros,
+            "backfill cost_output_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_5m_micros,
+            "backfill cost_cache_creation_5m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_1h_micros,
+            "backfill cost_cache_creation_1h_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_read_micros,
+            "backfill cost_cache_read_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_30m_micros,
+            "backfill cost_cache_write_30m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_12h_micros,
+            "backfill cost_cache_write_12h_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_components_event_count,
+            "backfill cost_components_event_count",
+        )?)
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(
+            key.bucket_start,
+            "backfill rollup bucket_start",
+        )?)
+        .bind(&key.principal)
+        .bind(key.upstream_id)
+        .bind(&key.model)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    for (key, delta) in pricing_backfill_deltas {
+        if delta.priced_event_count + delta.unpriced_event_count + delta.unmetered_event_count == 0
+        {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET \
+             priced_event_count = priced_event_count + $1, \
+             unpriced_event_count = unpriced_event_count + $2, \
+             unmetered_event_count = unmetered_event_count + $3, updated_at = NOW() \
+             WHERE resolution = $4 AND bucket_start_unix_secs = $5 AND principal_id = $6 \
+               AND upstream_id = $7 AND model = $8 \
+               AND priced_event_count + unpriced_event_count + unmetered_event_count + $1 + $2 + $3 <= request_count",
+        )
+        .bind(u64_to_i64(
+            delta.priced_event_count,
+            "backfill priced_event_count",
+        )?)
+        .bind(u64_to_i64(
+            delta.unpriced_event_count,
+            "backfill unpriced_event_count",
+        )?)
+        .bind(u64_to_i64(
+            delta.unmetered_event_count,
+            "backfill unmetered_event_count",
+        )?)
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(key.bucket_start, "backfill bucket_start")?)
+        .bind(&key.principal)
+        .bind(key.upstream_id)
+        .bind(&key.model)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
     for (key, delta) in deltas {
         sqlx::query(
             "INSERT INTO usage_rollups_v2 \
@@ -1552,102 +1649,6 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .bind(u64_to_i64(delta.priced_event_count, "rollup priced_event_count")?)
         .bind(u64_to_i64(delta.unpriced_event_count, "rollup unpriced_event_count")?)
         .bind(u64_to_i64(delta.unmetered_event_count, "rollup unmetered_event_count")?)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-    for (key, delta) in backfill_deltas {
-        if delta.cost_components_event_count == 0 {
-            continue;
-        }
-        sqlx::query(
-            "UPDATE usage_rollups_v2 \
-             SET cost_input_micros = cost_input_micros + $1, \
-                 cost_output_micros = cost_output_micros + $2, \
-                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
-                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
-                 cost_cache_read_micros = cost_cache_read_micros + $5, \
-                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
-                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
-                 cost_components_event_count = cost_components_event_count + $8, \
-                 updated_at = NOW() \
-             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
-               AND upstream_id = $12 AND model = $13",
-        )
-        .bind(u64_to_i64(
-            delta.cost_input_micros,
-            "backfill cost_input_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_output_micros,
-            "backfill cost_output_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_5m_micros,
-            "backfill cost_cache_creation_5m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_1h_micros,
-            "backfill cost_cache_creation_1h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_read_micros,
-            "backfill cost_cache_read_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_30m_micros,
-            "backfill cost_cache_write_30m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_12h_micros,
-            "backfill cost_cache_write_12h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_components_event_count,
-            "backfill cost_components_event_count",
-        )?)
-        .bind(key.resolution.as_str())
-        .bind(u64_to_i64(
-            key.bucket_start,
-            "backfill rollup bucket_start",
-        )?)
-        .bind(&key.principal)
-        .bind(key.upstream_id)
-        .bind(&key.model)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-    for (key, delta) in pricing_backfill_deltas {
-        if delta.priced_event_count + delta.unpriced_event_count + delta.unmetered_event_count == 0
-        {
-            continue;
-        }
-        sqlx::query(
-            "UPDATE usage_rollups_v2 SET \
-             priced_event_count = priced_event_count + $1, \
-             unpriced_event_count = unpriced_event_count + $2, \
-             unmetered_event_count = unmetered_event_count + $3, updated_at = NOW() \
-             WHERE resolution = $4 AND bucket_start_unix_secs = $5 AND principal_id = $6 \
-               AND upstream_id = $7 AND model = $8",
-        )
-        .bind(u64_to_i64(
-            delta.priced_event_count,
-            "backfill priced_event_count",
-        )?)
-        .bind(u64_to_i64(
-            delta.unpriced_event_count,
-            "backfill unpriced_event_count",
-        )?)
-        .bind(u64_to_i64(
-            delta.unmetered_event_count,
-            "backfill unmetered_event_count",
-        )?)
-        .bind(key.resolution.as_str())
-        .bind(u64_to_i64(key.bucket_start, "backfill bucket_start")?)
-        .bind(&key.principal)
-        .bind(key.upstream_id)
-        .bind(&key.model)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;

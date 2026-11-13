@@ -14,6 +14,7 @@ import {
   isIndeterminatePricing,
   pricingQualifier,
   sumBucketPricing,
+  sumCompletenessTokens,
 } from '../../lib/pricingCompleteness';
 import { PROVIDER_LABELS } from '../../lib/providers';
 import { useUsage } from '../../lib/queries';
@@ -38,8 +39,17 @@ function aggregateBuckets(buckets: readonly UsageBucket[]) {
         bucket.cache_read_input_tokens,
       output: sum.output + bucket.output_tokens,
       cost: sum.cost + bucket.virtual_cost_micros,
+      completenessTokens:
+        sum.completenessTokens + sumCompletenessTokens(bucket),
     }),
-    { requests: 0, errors: 0, input: 0, output: 0, cost: 0 },
+    {
+      requests: 0,
+      errors: 0,
+      input: 0,
+      output: 0,
+      cost: 0,
+      completenessTokens: 0,
+    },
   );
   return { ...totals, ...sumBucketPricing(buckets) };
 }

@@ -1419,6 +1419,85 @@ async fn mixed_and_legacy_pricing_preserve_full_totals_parity_with_filters() {
     }
 }
 
+#[tokio::test]
+async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(0x1280);
+    for (index, (model, aggregate, ttl, principal)) in [
+        ("same-rollup", Some(0), None, "principal-a"),
+        ("same-rollup", None, Some(7), "principal-a"),
+        ("separate-rollups", Some(0), None, "principal-a"),
+        ("separate-rollups", None, Some(7), "principal-b"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = usage_event(
+            TEST_NOW_UNIX_SECS - 60,
+            &format!("legacy-cache-write-{index}"),
+            upstream_id,
+            "legacy-cache-write",
+            0,
+        );
+        event.model = Some(model.to_owned());
+        event.principal_id = Some(principal.to_owned());
+        event.cost_usd_micros = None;
+        event.cache_write_input_tokens = aggregate;
+        event.cache_write_input_tokens_30m = ttl;
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+    sqlx::query(
+        "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
+         unpriced_event_count = 0, unmetered_event_count = 0",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    for group_by in ["none", "model", "upstream"] {
+        let uri = format!("/admin/v1/dashboard/usage?range=1h&step=minute&group_by={group_by}");
+        let (full, totals) = usage_projection_pair(&admin_app, &uri).await;
+        assert_usage_totals_match_full_collapse(&full, &totals);
+        for response in [&full, &totals] {
+            for bucket in response["series"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|series| series["buckets"].as_array().unwrap())
+                .filter(|bucket| bucket["request_count"].as_u64().unwrap() > 0)
+            {
+                assert_eq!(bucket["pricing_completeness"], "unknown", "{uri}");
+                assert_eq!(bucket["input_tokens"], 0);
+                assert_eq!(bucket["output_tokens"], 0);
+                assert_eq!(bucket["cache_creation_input_tokens"], 0);
+                assert_eq!(bucket["cache_read_input_tokens"], 0);
+                assert_eq!(bucket["cache_write_input_tokens"], 0);
+                assert!(bucket["cache_write_input_tokens_30m"].as_u64().unwrap() > 0);
+                assert_eq!(bucket["virtual_cost_micros"], 0);
+                assert_eq!(bucket["priced_request_count"], 0);
+                assert_eq!(bucket["unpriced_request_count"], 0);
+                assert_eq!(bucket["unmetered_request_count"], 0);
+            }
+        }
+    }
+    let (status, _, summary, _) = authed_json(
+        admin_app,
+        "GET",
+        "/admin/v1/dashboard/summary?range=1h",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["totals"]["request_count"], 4);
+    assert_eq!(summary["totals"]["pricing_completeness"], "unknown");
+}
+
 fn test_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
 }
@@ -1533,14 +1612,15 @@ fn assert_usage_totals_match_full_collapse(full: &Value, totals: &Value) {
                 bucket["cache_read_input_tokens"].as_u64().unwrap_or(0),
                 bucket["cache_write_input_tokens"]
                     .as_u64()
-                    .unwrap_or_else(|| {
+                    .unwrap_or(0)
+                    .max(
                         bucket["cache_write_input_tokens_30m"]
                             .as_u64()
                             .unwrap_or(0)
                             .saturating_add(
                                 bucket["cache_write_input_tokens_12h"].as_u64().unwrap_or(0),
-                            )
-                    }),
+                            ),
+                    ),
             ]
             .into_iter()
             .fold(total, u64::saturating_add)

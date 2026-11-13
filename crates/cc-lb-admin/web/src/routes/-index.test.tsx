@@ -34,6 +34,7 @@ import type {
   UsageBucket,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
+import type { NativeWriteTokenFields } from '../lib/pricingCompleteness';
 import * as queries from '../lib/queries';
 import { pendingQuery, successQuery } from '../lib/test-utils/hook-results';
 import type { LiveEventMap } from '../lib/upsertReducer';
@@ -336,6 +337,20 @@ function usageBucket(
     latency_count: 0,
     ...overrides,
   };
+}
+
+function usageResult(
+  series: DashboardUsageResponse['series'],
+): ReturnType<typeof queries.useUsage> {
+  return successQuery<DashboardUsageResponse>({
+    range: '24h',
+    step: 'hour',
+    group_by: 'principal',
+    window_start_unix_secs: KPI_TIMESTAMPS[0],
+    window_end_unix_secs: KPI_TIMESTAMPS[2] + 60,
+    series,
+    observed: true,
+  });
 }
 
 const SUMMARY_BUCKETS = [
@@ -2441,6 +2456,7 @@ describe('Overview loading geometry', () => {
             requests: 12,
             share_pct: 100,
             tokens: 345,
+            completenessTokens: 345,
           },
         ]}
         rangeWords="last 24h"
@@ -3338,6 +3354,7 @@ const COMPLETE_PRINCIPAL: TopPrincipal = {
   requests: 12,
   share_pct: 62.5,
   tokens: 345,
+  completenessTokens: 345,
 };
 
 /** $0.80 recorded, $0.60 of it attributed: the rest is a legacy remainder. */
@@ -3427,6 +3444,7 @@ describe.each(['single-provider', 'multi-provider'] as const)(
                   cacheHitRatio: 0.87,
                   requests: 12,
                   tokens: 345,
+                  completenessTokens: 345,
                   promptTokens: 300,
                 },
               },
@@ -3904,6 +3922,41 @@ describe('Top principal cost breakdown and cache hit', () => {
 
 describe('Overview list-price completeness', () => {
   it.each([
+    { cache_write_input_tokens: 7 },
+    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
+  ] satisfies NativeWriteTokenFields[])(
+    'keeps legacy native-write-only Top Principals unknown: %j',
+    (nativeWrites) => {
+      mockResolvedKpiQueries();
+      const bucket: UsageBucket & NativeWriteTokenFields = usageBucket(
+        KPI_TIMESTAMPS[0],
+        {
+          request_count: 1,
+          priced_request_count: 0,
+          unpriced_request_count: 0,
+          unmetered_request_count: 0,
+          ...nativeWrites,
+        },
+      );
+      vi.mocked(queries.useUsage).mockReturnValue(
+        usageResult([{ key: 'principal-alpha', buckets: [bucket] }]),
+      );
+      render(<OverviewPage />);
+      const row = screen.getByTestId('top-principal-row');
+      expect(costTrigger('Principal Alpha').textContent).toBe('—');
+      expect(
+        costTrigger('Principal Alpha').getAttribute('aria-label'),
+      ).toContain('Price unknown');
+      expect(row.lastElementChild?.textContent).toBe('—');
+      expect(row.textContent).not.toContain('$0.00');
+      fireEvent.click(costTrigger('Principal Alpha'));
+      expect(
+        screen.getByTestId('top-principal-cost-details').textContent,
+      ).toContain('Price unknown for this window');
+    },
+  );
+
+  it.each([
     ['unpriced', 'List price unavailable'],
     ['unknown', 'Price unknown'],
   ] as const)(
@@ -3934,13 +3987,9 @@ describe('Overview list-price completeness', () => {
         },
         isPending: false,
       } as never);
-      vi.mocked(queries.useUsage).mockReturnValue({
-        data: {
-          ...PRINCIPAL_USAGE_FIXTURE,
-          series: [{ key: 'principal-alpha', buckets: [bucket] }],
-        },
-        isPending: false,
-      } as never);
+      vi.mocked(queries.useUsage).mockReturnValue(
+        usageResult([{ key: 'principal-alpha', buckets: [bucket] }]),
+      );
       render(<OverviewPage />);
       const tile = screen.getByTestId('overview-kpi-cost');
       expect(tile.textContent).toContain(caption);
@@ -4116,37 +4165,33 @@ describe('Overview list-price completeness', () => {
 
   it('uses only determinate costs for principal shares', () => {
     mockResolvedKpiQueries();
-    vi.mocked(queries.useUsage).mockReturnValue({
-      data: {
-        ...PRINCIPAL_USAGE_FIXTURE,
-        series: [
-          {
-            key: 'principal-alpha',
-            buckets: [
-              usageBucket(KPI_TIMESTAMPS[0], {
-                request_count: 2,
-                priced_request_count: 1,
-                unpriced_request_count: 1,
-                unmetered_request_count: 0,
-                virtual_cost_micros: 1_000_000,
-              }),
-            ],
-          },
-          {
-            key: 'unpriced',
-            buckets: [
-              usageBucket(KPI_TIMESTAMPS[0], {
-                request_count: 1,
-                priced_request_count: 0,
-                unpriced_request_count: 1,
-                unmetered_request_count: 0,
-              }),
-            ],
-          },
-        ],
-      },
-      isPending: false,
-    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue(
+      usageResult([
+        {
+          key: 'principal-alpha',
+          buckets: [
+            usageBucket(KPI_TIMESTAMPS[0], {
+              request_count: 2,
+              priced_request_count: 1,
+              unpriced_request_count: 1,
+              unmetered_request_count: 0,
+              virtual_cost_micros: 1_000_000,
+            }),
+          ],
+        },
+        {
+          key: 'unpriced',
+          buckets: [
+            usageBucket(KPI_TIMESTAMPS[0], {
+              request_count: 1,
+              priced_request_count: 0,
+              unpriced_request_count: 1,
+              unmetered_request_count: 0,
+            }),
+          ],
+        },
+      ]),
+    );
     render(<OverviewPage />);
     const rows = screen.getAllByTestId('top-principal-row');
     expect(rows[0].textContent).toContain('100.0%');

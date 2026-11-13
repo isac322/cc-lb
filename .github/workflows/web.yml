@@ -42,6 +42,7 @@ jobs:
           # container path used by the capture commands instead.
           echo "visual-root=$RUNNER_TEMP/codex-credit-visuals" >> "$GITHUB_OUTPUT"
           echo "issue-1282-visual-root=$RUNNER_TEMP/issue-1282-visuals" >> "$GITHUB_OUTPUT"
+          echo "issue-1280-visual-root=$RUNNER_TEMP/issue-1280-visuals" >> "$GITHUB_OUTPUT"
       - name: Install bun 1.4.4
         working-directory: .
         run: |
@@ -193,6 +194,11 @@ jobs:
           bun run e2e e2e/issue-1282-keepalive-plugins.spec.ts --retries=0 \
             --output="$RUNNER_TEMP/issue-1282-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/issue-1282-visuals/after-source.txt"
+      - name: Verify and capture pricing completeness views
+        run: |
+          bun run e2e e2e/overview-cost-completeness.spec.ts --retries=0 \
+            --output="$RUNNER_TEMP/issue-1280-visuals/after"
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-1280-visuals/after-source.txt"
       - name: Capture matching base-branch credit views
         if: github.event_name == 'pull_request'
         env:
@@ -213,6 +219,9 @@ jobs:
           bun qa/capture-issue-1282-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
             "$RUNNER_TEMP/issue-1282-visuals/before" "$BASE_SHA"
+          bun qa/capture-issue-1280-baseline.ts \
+            "$base_root/crates/cc-lb-admin/web" \
+            "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA"
       - name: Publish Codex credit visual evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -248,6 +257,15 @@ jobs:
             ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
-      - name: Verify overview pricing completeness views
-        run: |
-          bun run e2e e2e/overview-cost-completeness.spec.ts --retries=0
+      - name: Publish pricing completeness visual evidence
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pricing-completeness-visuals-${{ github.sha }}
+          path: |
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/**/*.png
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after-source.txt
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/*.png
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/capture.json
+          retention-days: 14
+          if-no-files-found: error

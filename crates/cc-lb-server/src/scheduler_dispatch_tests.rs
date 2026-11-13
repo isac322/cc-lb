@@ -1330,7 +1330,7 @@ fn enable_openai_responses_keepalive(fixture: &Fixture) {
 async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
     use cc_lb_request_log::RequestEventUpdate;
 
-    for (present, response_body, writes, expected_cost) in [
+    for (present, response_body, writes, expected_cost, expected_input) in [
         (
             true,
             serde_json::json!({
@@ -1351,6 +1351,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             }),
             (Some(100), Some(60), Some(40)),
             Some(2446),
+            1024,
         ),
         (
             true,
@@ -1368,6 +1369,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             }),
             (Some(0), None, None),
             Some(2096),
+            1024,
         ),
         (
             true,
@@ -1385,6 +1387,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             }),
             (None, None, None),
             None,
+            1024,
         ),
         (
             true,
@@ -1402,12 +1405,28 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             }),
             (None, Some(60), None),
             None,
+            1024,
         ),
         (
             false,
             serde_json::json!({ "id": "resp_missing_usage" }),
             (None, None, None),
             None,
+            0,
+        ),
+        (
+            false,
+            serde_json::json!({ "usage": true }),
+            (None, None, None),
+            None,
+            0,
+        ),
+        (
+            true,
+            serde_json::json!({ "usage": { "input_tokens": 0, "output_tokens": 0 } }),
+            (None, None, None),
+            Some(0),
+            0,
         ),
     ] {
         install_test_pricing();
@@ -1469,7 +1488,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             inline.key_id, None,
             "observe-only renewals never acquire a key"
         );
-        assert_eq!(inline.input_tokens, present.then_some(1024));
+        assert_eq!(inline.input_tokens, present.then_some(expected_input));
         assert_eq!(inline.cost_usd_micros, expected_cost);
         assert_eq!(inline.cache_creation_input_tokens, None);
         assert_eq!(inline.cache_creation_input_tokens_5m, None);
@@ -1495,7 +1514,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
         .fetch_one(fixture.storage.pool())
         .await
         .expect("native renewal turn");
-        assert_eq!(turn, (if present { 1024 } else { 0 }, expected_cost, None));
+        assert_eq!(turn, (expected_input as i64, expected_cost, None));
         pricing.shutdown().await;
         assembler.shutdown().await;
         let priced = std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).find_map(|event| {

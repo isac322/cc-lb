@@ -135,8 +135,15 @@ fn responses_renewal_uses_normalized_usage_and_preserves_native_write_presence()
 }
 
 #[test]
-fn responses_renewal_absent_usage_is_not_a_measured_zero() {
-    for body in [b"{}".as_slice(), b"{\"usage\":null}".as_slice()] {
+fn responses_renewal_absent_or_nonobject_usage_is_not_a_measured_zero() {
+    for body in [
+        b"{}".as_slice(),
+        br#"{"usage":null}"#.as_slice(),
+        br#"{"usage":true}"#.as_slice(),
+        br#"{"usage":"invalid"}"#.as_slice(),
+        br#"{"usage":123}"#.as_slice(),
+        br#"{"usage":[]}"#.as_slice(),
+    ] {
         let outcome = classify_success_body_with_surface(
             body,
             Duration::ZERO,
@@ -171,6 +178,25 @@ fn responses_renewal_absent_usage_is_not_a_measured_zero() {
     assert!(finalization.usage.usage_present);
     assert!(!finalization.usage.is_openai_responses);
     assert!(!finalization.usage.provider_cost_unknown);
+}
+
+#[test]
+fn responses_renewal_explicit_zero_usage_is_measured() {
+    let outcome = classify_success_body_with_surface(
+        br#"{"usage":{"input_tokens":0,"output_tokens":0}}"#,
+        Duration::ZERO,
+        Duration::ZERO,
+        0,
+        accounting_guard(),
+        Some("responses"),
+    );
+    let DispatchOutcome::CacheMiss { finalization } = outcome else {
+        panic!("zero usage must remain a miss");
+    };
+    assert!(finalization.usage.usage_present);
+    assert!(!finalization.usage.provider_cost_unknown);
+    assert_eq!(finalization.usage.input_tokens, 0);
+    assert_eq!(finalization.usage.output_tokens, 0);
 }
 
 #[derive(Clone)]

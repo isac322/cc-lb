@@ -19,7 +19,8 @@ use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
     ApiKeyResolution, ApiKeyType, ApiKeyUsagePollOutcome, ApiKeyWorkspace, ApiKeyWorkspaceMode,
     ApiUsageAttribution, RemediationCode, RequestEvent, RequestEventStore, UpstreamApiKeyStore,
-    UpstreamApiUsageBucketWrite, UpstreamCreate, UpstreamKind, UpstreamStore, UsageRollupStore,
+    UpstreamApiUsageBucketWrite, UpstreamCreate, UpstreamKind, UpstreamStore,
+    UsageRollupResolution, UsageRollupStore,
 };
 use fake_anthropic::{FakeApiKey, FakeWorkspace, IDENTITY_LINKED_MESSAGE, KeyPolicy, Script};
 use http_body_util::BodyExt;
@@ -1476,6 +1477,64 @@ async fn estimated_month_includes_cache_write_tokens_and_mixed_pricing_counts() 
         assert_eq!(month["priced_request_count"], 1, "{query}");
         assert_eq!(month["unpriced_request_count"], 2, "{query}");
         assert_eq!(month["unmetered_request_count"], 1, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn estimated_month_preserves_legacy_cache_write_fallback_before_folding_rollups() {
+    for (aggregate_tokens, ordinary_tokens, separate_rollups) in
+        [(0, 0, false), (0, 0, true), (10, 0, true), (10, 3, true)]
+    {
+        let h = spawn_api_key_harness().await;
+        let target = h
+            .seed_legacy_api_key_upstream("legacy-cache-write", ORG)
+            .await;
+        let mut aggregate = usage_event(target.id, NOW - 600, "legacy-aggregate", ordinary_tokens);
+        aggregate.cost_usd_micros = None;
+        aggregate.cache_write_input_tokens = Some(aggregate_tokens);
+        if ordinary_tokens > 0 {
+            aggregate.output_tokens = Some(2);
+            aggregate.cache_creation_input_tokens = Some(4);
+            aggregate.cache_read_input_tokens = Some(5);
+        }
+        let mut ttl_only = usage_event(
+            target.id,
+            NOW - 600 - if separate_rollups { HOUR } else { 0 },
+            "legacy-ttl-only",
+            0,
+        );
+        ttl_only.cost_usd_micros = None;
+        ttl_only.cache_write_input_tokens_30m = Some(7);
+        append_and_roll_up(&h, &[aggregate, ttl_only]).await;
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
+             unpriced_event_count = 0, unmetered_event_count = 0",
+        )
+        .execute(h.storage.pool())
+        .await
+        .unwrap();
+        let rollups = h
+            .storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Hour, NOW - 2 * HOUR, NOW + HOUR)
+            .await
+            .unwrap();
+        assert_eq!(rollups.len(), if separate_rollups { 2 } else { 1 });
+        let expected_tokens = aggregate_tokens + 7 + if ordinary_tokens > 0 { 14 } else { 0 };
+        for query in [
+            "range=1h&step=minute",
+            "range=24h&step=hour",
+            "range=7d&step=hour",
+        ] {
+            let body = usage(&h, target.id, query).await.body;
+            let month = &body["month"];
+            assert_eq!(body["source"], "estimated", "{query}");
+            assert_eq!(month["tokens"], expected_tokens, "{query}");
+            assert_eq!(month["cost_usd_micros"], 0, "{query}");
+            assert_eq!(month["pricing_completeness"], "unknown", "{query}");
+            assert_eq!(month["priced_request_count"], 0, "{query}");
+            assert_eq!(month["unpriced_request_count"], 0, "{query}");
+            assert_eq!(month["unmetered_request_count"], 0, "{query}");
+        }
     }
 }
 

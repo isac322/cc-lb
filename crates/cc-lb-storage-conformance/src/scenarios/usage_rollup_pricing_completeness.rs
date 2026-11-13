@@ -12,6 +12,7 @@ where
     B: ConformanceBackend,
     B::Storage: cc_lb_storage_api::Storage,
 {
+    recreated_bucket_backfill(Arc::clone(&backend)).await?;
     let raw = Arc::clone(&backend);
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -117,6 +118,100 @@ where
     let teardown = fixture.teardown().await;
     result?;
     teardown
+}
+
+async fn recreated_bucket_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    for backfill_after_recreation in [false, true] {
+        let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+        let result: Result<()> = async {
+            let storage = fixture.storage();
+            let start = 1_800_000_000;
+            let mut historical = event("historical", start);
+            historical.model = Some("recreated".to_owned());
+            historical.input_tokens = Some(1);
+            storage.append_request_event(&historical).await?;
+            backend
+                .wait_for_events_visible_for_rollup(storage.as_ref())
+                .await?;
+            storage.rollup_usage_once().await?;
+
+            let initial = storage
+                .query_usage_rollups_in_range(UsageRollupResolution::Minute, start, start + 60)
+                .await?;
+            ensure!(initial.len() == 1, "historical minute must exist");
+            ensure!(
+                (initial[0].request_count, initial[0].unpriced_event_count) == (1, 1),
+                "historical event must begin unpriced: {initial:?}"
+            );
+            ensure!(
+                storage.prune_usage_rollups_before(start + 60, start, 100).await? == 1,
+                "prune only the minute while retaining the raw event and hour"
+            );
+
+            if !backfill_after_recreation {
+                // Simulate an upgrade with a stalled historical backfill before live work.
+                backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0").await?;
+                backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor')").await?;
+            }
+            let mut live = event("live", start);
+            live.model = historical.model.clone();
+            live.input_tokens = Some(1);
+            live.cost_usd_micros = Some(5);
+            storage.append_request_event(&live).await?;
+            backend
+                .wait_for_events_visible_for_rollup(storage.as_ref())
+                .await?;
+            let run = storage.rollup_usage_once().await?;
+            ensure!(run.processed_events == 1, "only the live event is new");
+
+            if backfill_after_recreation {
+                let recreated = storage
+                    .query_usage_rollups_in_range(UsageRollupResolution::Minute, start, start + 60)
+                    .await?;
+                ensure!(recreated.len() == 1);
+                ensure!(
+                    (recreated[0].request_count, recreated[0].priced_event_count) == (1, 1),
+                    "live work must recreate a fully classified minute: {recreated:?}"
+                );
+                // Leave the recreated minute classified, but expose legacy remainder in the hour.
+                backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0 WHERE resolution='hour'").await?;
+                backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor')").await?;
+                let run = storage.rollup_usage_once().await?;
+                ensure!(run.processed_events == 0, "later work must be backfill-only");
+                ensure!(run.updated_rollups > 0, "historical backfill must run");
+            }
+
+            for (resolution, expected) in [
+                (UsageRollupResolution::Minute, (1, 1, 0, 0)),
+                (UsageRollupResolution::Hour, (2, 1, 1, 0)),
+            ] {
+                let rows = storage
+                    .query_usage_rollups_in_range(resolution, start, start + 3600)
+                    .await?;
+                ensure!(rows.len() == 1, "missing {resolution:?} bucket: {rows:?}");
+                let row = &rows[0];
+                ensure!(
+                    (
+                        row.request_count,
+                        row.priced_event_count,
+                        row.unpriced_event_count,
+                        row.unmetered_event_count,
+                    ) == expected,
+                    "backfill_after_recreation={backfill_after_recreation}, {resolution:?}: {row:?}"
+                );
+            }
+            Ok(())
+        }
+        .await;
+        let teardown = fixture.teardown().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
 }
 
 fn event(name: &str, ts: u64) -> RequestEvent {

@@ -18,6 +18,25 @@ export interface PricingCounts {
   unmetered_request_count?: number;
 }
 
+export interface NativeWriteTokenFields {
+  cache_write_input_tokens?: number | null;
+  cache_write_input_tokens_30m?: number | null;
+  cache_write_input_tokens_12h?: number | null;
+}
+
+export function sumCompletenessTokens(
+  bucket: TokenComponents & NativeWriteTokenFields,
+): number {
+  return (
+    sumTokens(bucket) +
+    Math.max(
+      bucket.cache_write_input_tokens ?? 0,
+      (bucket.cache_write_input_tokens_30m ?? 0) +
+        (bucket.cache_write_input_tokens_12h ?? 0),
+    )
+  );
+}
+
 /** Keep the classification branches in sync with cc-lb-storage-api. */
 export function derivePricingCompleteness(
   input: PricingCompletenessInput,
@@ -60,7 +79,8 @@ export function sumBucketPricing(
 
 export function sumPricingCounts(
   buckets: readonly (PricingCounts &
-    TokenComponents & {
+    TokenComponents &
+    NativeWriteTokenFields & {
       request_count: number;
       total_tokens?: number;
       virtual_cost_micros: number;
@@ -78,7 +98,7 @@ export function sumPricingCounts(
     priced_request_count += bucket.priced_request_count ?? 0;
     unpriced_request_count += bucket.unpriced_request_count ?? 0;
     unmetered_request_count += bucket.unmetered_request_count ?? 0;
-    total_tokens += bucket.total_tokens ?? sumTokens(bucket);
+    total_tokens += bucket.total_tokens ?? sumCompletenessTokens(bucket);
     virtual_cost_micros += bucket.virtual_cost_micros;
     hasPricing ||=
       bucket.pricing_completeness !== undefined ||

@@ -1212,9 +1212,6 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         });
     }
 
-    for (key, delta) in deltas {
-        upsert_rollup_delta(&mut tx, &key, &delta).await?;
-    }
     for (key, delta) in backfill_deltas {
         if delta.cost_components_event_count == 0 {
             continue;
@@ -1275,8 +1272,11 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         .map_err(map_sqlx_error)?;
     }
     for (key, delta) in pricing_backfill_deltas {
-        if delta.priced_event_count + delta.unpriced_event_count + delta.unmetered_event_count == 0
-        {
+        let delta_total = delta
+            .priced_event_count
+            .saturating_add(delta.unpriced_event_count)
+            .saturating_add(delta.unmetered_event_count);
+        if delta_total == 0 {
             continue;
         }
         sqlx::query(
@@ -1285,7 +1285,8 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
              unpriced_event_count = unpriced_event_count + ?, \
              unmetered_event_count = unmetered_event_count + ?, updated_at = unixepoch() \
              WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
-               AND upstream_id = ? AND model = ?",
+               AND upstream_id = ? AND model = ? \
+               AND priced_event_count + unpriced_event_count + unmetered_event_count + ? <= request_count",
         )
         .bind(u64_to_i64(
             delta.priced_event_count,
@@ -1304,9 +1305,13 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         .bind(&key.principal)
         .bind(key.upstream_id.to_string())
         .bind(&key.model)
+        .bind(u64_to_i64(delta_total, "backfill total_event_count")?)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+    }
+    for (key, delta) in deltas {
+        upsert_rollup_delta(&mut tx, &key, &delta).await?;
     }
     for ((resolution, bucket_start), error_count) in overview_excluded_error_deltas {
         sqlx::query(

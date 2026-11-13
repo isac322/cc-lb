@@ -84,7 +84,7 @@ function aggregateProviderMetrics(
       metrics.map((metric) => ({
         ...metric,
         request_count: metric.requests,
-        total_tokens: metric.tokens,
+        total_tokens: metric.completenessTokens,
         virtual_cost_micros: metric.costMicros,
       })),
     ),
@@ -99,6 +99,10 @@ function aggregateProviderMetrics(
         : null,
     requests: metrics.reduce((sum, metric) => sum + metric.requests, 0),
     tokens: metrics.reduce((sum, metric) => sum + metric.tokens, 0),
+    completenessTokens: metrics.reduce(
+      (sum, metric) => sum + metric.completenessTokens,
+      0,
+    ),
     promptTokens,
   };
 }
@@ -157,7 +161,7 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
     activeProviders.map((provider) => ({
       ...providerTotals[provider],
       request_count: providerTotals[provider].requests,
-      total_tokens: providerTotals[provider].tokens,
+      total_tokens: providerTotals[provider].completenessTokens,
       virtual_cost_micros: providerTotals[provider].costMicros,
     })),
   );

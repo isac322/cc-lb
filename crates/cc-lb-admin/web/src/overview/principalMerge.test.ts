@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardUsageResponse, UsageBucket } from '../lib/api';
+import type { NativeWriteTokenFields } from '../lib/pricingCompleteness';
 import { mergePrincipalProviderUsage } from './principalMerge';
 
 function response(
   key: string,
-  overrides: Partial<UsageBucket>,
+  overrides: Partial<UsageBucket> & NativeWriteTokenFields,
 ): DashboardUsageResponse {
   return {
     range: '24h',
@@ -37,6 +38,58 @@ function response(
 }
 
 describe('principal provider pricing merge', () => {
+  it.each([
+    { cache_write_input_tokens: 7 },
+    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
+  ] satisfies NativeWriteTokenFields[])(
+    'keeps legacy native-write-only principals unknown across providers: %j',
+    (nativeWrites) => {
+      const usage = response('legacy', {
+        input_tokens: 0,
+        priced_request_count: 0,
+        unpriced_request_count: 0,
+        unmetered_request_count: 0,
+        ...nativeWrites,
+      });
+      const [row] = mergePrincipalProviderUsage(
+        { openai: usage, gemini: usage },
+        new Map(),
+      );
+      expect(row.pricing_completeness).toBe('unknown');
+      expect(row.sharePct).toBeNull();
+      expect(row.totalTokens).toBe(0);
+      for (const metric of Object.values(row.providers)) {
+        expect(metric).toMatchObject({
+          pricing_completeness: 'unknown',
+          completenessTokens: 7,
+          tokens: 0,
+        });
+      }
+    },
+  );
+
+  it('preserves bucket-local native write reconciliation when merging a window', () => {
+    const usage = response('legacy', {
+      input_tokens: 0,
+      priced_request_count: 0,
+      unpriced_request_count: 0,
+      unmetered_request_count: 0,
+      cache_write_input_tokens: 7,
+    });
+    const ttlUsage = response('legacy', {
+      input_tokens: 0,
+      priced_request_count: 0,
+      unpriced_request_count: 0,
+      unmetered_request_count: 0,
+      cache_write_input_tokens: 0,
+      cache_write_input_tokens_30m: 7,
+    });
+    usage.series[0].buckets.push(...ttlUsage.series[0].buckets);
+    const [row] = mergePrincipalProviderUsage({ openai: usage }, new Map());
+    expect(row.providers.openai?.completenessTokens).toBe(14);
+    expect(row.pricing_completeness).toBe('unknown');
+  });
+
   it('sums classified counters within a principal across providers', () => {
     const [row] = mergePrincipalProviderUsage(
       {

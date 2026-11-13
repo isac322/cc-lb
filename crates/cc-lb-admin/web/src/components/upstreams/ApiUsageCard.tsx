@@ -18,6 +18,7 @@ import { getWindowColor } from '../../lib/colors';
 import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
 import {
   isIndeterminatePricing,
+  type PricingCounts,
   pricingQualifier,
 } from '../../lib/pricingCompleteness';
 import { TIME_PRESET_OPTIONS, type TimePreset } from '../../lib/timePresets';
@@ -123,12 +124,11 @@ export function ApiUsageCard({
   const showLoading = data === undefined && isLoading;
   const chartId = useChartId();
 
-  const chartData = useMemo(() => {
-    if (!data?.series || data.series.length === 0) return [];
-
+  const { chartData, pricingByTimestamp } = useMemo(() => {
     const bucketsByTs = new Map<number, Record<string, number>>();
+    const pricingByTimestamp = new Map<number, Map<string, PricingCounts>>();
 
-    for (const series of data.series) {
+    for (const series of data?.series ?? []) {
       const model = modelLabel(series.key);
       for (const bucket of series.buckets) {
         const ts = bucket.bucket_start_unix_secs;
@@ -136,6 +136,14 @@ export function ApiUsageCard({
           bucketsByTs.set(ts, { ts });
         }
         const row = bucketsByTs.get(ts)!;
+        if (metric === 'cost' && provenance?.source === 'estimated') {
+          let pricing = pricingByTimestamp.get(ts);
+          if (!pricing) {
+            pricing = new Map();
+            pricingByTimestamp.set(ts, pricing);
+          }
+          pricing.set(model, bucket);
+        }
         if (metric === 'tokens') {
           row[model] = sumTokens(bucket);
         } else if (
@@ -149,7 +157,10 @@ export function ApiUsageCard({
       }
     }
 
-    return Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts);
+    return {
+      chartData: Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts),
+      pricingByTimestamp,
+    };
   }, [data, metric, provenance?.source]);
 
   const models = useMemo(() => {
@@ -174,9 +185,12 @@ export function ApiUsageCard({
     return `${value}${unit}`;
   };
 
-  const formatTooltip = (val: number) => {
+  const formatTooltip = (val: number, pricing?: PricingCounts) => {
     if (metric === 'cost') {
-      return fmtUsd(val * 1_000_000);
+      const amount = fmtUsd(val * 1_000_000);
+      if (pricing?.pricing_completeness !== 'partial') return amount;
+      const qualifier = pricingQualifier(pricing);
+      return `${amount}+${qualifier ? ` (${qualifier})` : ''}`;
     }
     return val.toLocaleString();
   };
@@ -405,6 +419,13 @@ export function ApiUsageCard({
                 ? models.map((model, index) => {
                     const lastBucket = chartData[chartData.length - 1];
                     const val = lastBucket ? lastBucket[model] || 0 : 0;
+                    const pricing = lastBucket
+                      ? pricingByTimestamp.get(lastBucket.ts)?.get(model)
+                      : undefined;
+                    const partial = pricing?.pricing_completeness === 'partial';
+                    const qualifier = partial
+                      ? pricingQualifier(pricing)
+                      : undefined;
                     return (
                       <div key={model} className="flex items-center gap-1.5">
                         <span
@@ -415,12 +436,25 @@ export function ApiUsageCard({
                           }}
                         />
                         <span className="text-text-muted">{model}</span>
-                        <span className="tabular-nums text-text">
+                        <span
+                          className="tabular-nums text-text"
+                          title={qualifier}
+                          aria-label={
+                            qualifier
+                              ? `${fmtUsd(val * 1_000_000)}+ (${qualifier})`
+                              : undefined
+                          }
+                        >
                           {metric === 'cost' &&
                           provenance?.source === 'estimated' &&
                           lastBucket?.[model] === undefined
                             ? '—'
-                            : formatTooltip(val)}
+                            : partial
+                              ? `${fmtUsd(val * 1_000_000)}+`
+                              : formatTooltip(val)}
+                          {qualifier ? (
+                            <span className="sr-only">{` (${qualifier})`}</span>
+                          ) : null}
                         </span>
                       </div>
                     );
@@ -455,8 +489,13 @@ export function ApiUsageCard({
                     />
                     <Tooltip
                       labelFormatter={(label) => formatXAxis(label as number)}
-                      formatter={(value: unknown, name: unknown) => [
-                        formatTooltip(Number(value ?? 0)),
+                      formatter={(value: unknown, name: unknown, item) => [
+                        formatTooltip(
+                          Number(value ?? 0),
+                          pricingByTimestamp
+                            .get(Number(item.payload?.ts))
+                            ?.get(String(name)),
+                        ),
                         String(name),
                       ]}
                       cursor={CHART_CURSOR}

@@ -267,6 +267,9 @@ pub struct UsageBucket {
     pub unpriced_request_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unmetered_request_count: Option<u64>,
+    #[serde(skip)]
+    // Preserve each rollup's cache-write fallback before optional token fields are merged.
+    completeness_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -646,6 +649,7 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         priced_request_count: None,
         unpriced_request_count: None,
         unmetered_request_count: None,
+        completeness_tokens: 0,
     }
 }
 
@@ -671,18 +675,36 @@ fn add_rollup_to_buckets(
     add_rollup_to_bucket(bucket, rollup, include_cost_components);
 }
 
-fn bucket_total_tokens(bucket: &UsageBucket) -> u64 {
-    [
+fn bucket_completeness_tokens(bucket: &UsageBucket) -> u64 {
+    let fallback = [
         bucket.input_tokens,
         bucket.output_tokens,
         bucket.cache_creation_input_tokens,
         bucket.cache_read_input_tokens,
-        bucket.cache_write_input_tokens.unwrap_or_else(|| {
+        bucket.cache_write_input_tokens.unwrap_or(0).max(
             bucket
                 .cache_write_input_tokens_30m
                 .unwrap_or(0)
-                .saturating_add(bucket.cache_write_input_tokens_12h.unwrap_or(0))
-        }),
+                .saturating_add(bucket.cache_write_input_tokens_12h.unwrap_or(0)),
+        ),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add);
+    bucket.completeness_tokens.max(fallback)
+}
+
+pub(crate) fn rollup_completeness_tokens(rollup: &UsageRollup) -> u64 {
+    [
+        rollup.input_tokens,
+        rollup.output_tokens,
+        rollup.cache_creation_input_tokens,
+        rollup.cache_read_input_tokens,
+        rollup.cache_write_input_tokens.unwrap_or(0).max(
+            rollup
+                .cache_write_input_tokens_30m
+                .unwrap_or(0)
+                .saturating_add(rollup.cache_write_input_tokens_12h.unwrap_or(0)),
+        ),
     ]
     .into_iter()
     .fold(0, u64::saturating_add)
@@ -693,6 +715,9 @@ fn add_rollup_to_bucket(
     rollup: &UsageRollup,
     include_cost_components: bool,
 ) {
+    bucket.completeness_tokens = bucket
+        .completeness_tokens
+        .saturating_add(rollup_completeness_tokens(rollup));
     bucket.request_count += rollup.request_count;
     bucket.input_tokens += rollup.input_tokens;
     bucket.output_tokens += rollup.output_tokens;
@@ -773,7 +798,7 @@ fn add_rollup_to_bucket(
             priced_event_count: priced,
             unpriced_event_count: unpriced,
             unmetered_event_count: unmetered,
-            total_tokens: bucket_total_tokens(bucket),
+            total_tokens: bucket_completeness_tokens(bucket),
             virtual_cost_micros: bucket.virtual_cost_micros,
         });
     }
@@ -850,7 +875,7 @@ fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
             .saturating_add(bucket.unmetered_request_count.unwrap_or(0));
         pricing.total_tokens = pricing
             .total_tokens
-            .saturating_add(bucket_total_tokens(bucket));
+            .saturating_add(bucket_completeness_tokens(bucket));
     }
 
     pricing.request_count = request_count;
@@ -1509,6 +1534,8 @@ mod tests {
             (None, Some(7), None, 7),
             (None, None, Some(7), 7),
             (Some(7), Some(3), Some(4), 7),
+            (Some(0), Some(7), None, 7),
+            (Some(0), None, Some(7), 7),
         ] {
             let mut rollup = test_rollup("principal-a", 0, 1, 0);
             rollup.input_tokens = 0;
@@ -1517,7 +1544,8 @@ mod tests {
             rollup.cache_write_input_tokens_12h = long;
             let mut bucket = empty_bucket(0);
             add_rollup_to_bucket(&mut bucket, &rollup, false);
-            assert_eq!(bucket_total_tokens(&bucket), expected_tokens);
+            assert_eq!(rollup_completeness_tokens(&rollup), expected_tokens);
+            assert_eq!(bucket_completeness_tokens(&bucket), expected_tokens);
             assert_eq!(
                 bucket.pricing_completeness,
                 Some(PricingCompleteness::Unknown)
@@ -1527,6 +1555,82 @@ mod tests {
                 Some(PricingCompleteness::Unknown)
             );
         }
+    }
+
+    #[test]
+    fn mixed_legacy_cache_write_rollups_preserve_tokens_in_all_projections() {
+        let families = HashMap::from([(Uuid::from_u128(1), ProviderFamily::Anthropic)]);
+        for aggregate_tokens in [0, 10] {
+            for ttl_bucket_start in [0, MINUTE_SECS] {
+                let mut aggregate = test_rollup("principal-a", 0, 1, 0);
+                aggregate.input_tokens = 0;
+                aggregate.cache_write_input_tokens = Some(aggregate_tokens);
+                let mut ttl_only = test_rollup("principal-a", ttl_bucket_start, 1, 0);
+                ttl_only.input_tokens = 0;
+                ttl_only.cache_write_input_tokens_30m = Some(7);
+                let rollups = [aggregate, ttl_only];
+                let expected_tokens = aggregate_tokens + 7;
+
+                assert_eq!(rollup_completeness_tokens(&rollups[0]), aggregate_tokens);
+                assert_eq!(rollup_completeness_tokens(&rollups[1]), 7);
+                for group_by in [
+                    UsageGroupBy::None,
+                    UsageGroupBy::Model,
+                    UsageGroupBy::Principal,
+                    UsageGroupBy::Upstream,
+                    UsageGroupBy::Provider,
+                ] {
+                    let (full, _) = build_usage_series_with_provider(
+                        group_by,
+                        &rollups,
+                        0,
+                        2 * MINUTE_SECS,
+                        UsageRollupResolution::Minute,
+                        &families,
+                    );
+                    assert_eq!(
+                        full[0].buckets.iter().fold(0_u64, |sum, bucket| {
+                            sum.saturating_add(bucket_completeness_tokens(bucket))
+                        }),
+                        expected_tokens
+                    );
+                    assert_eq!(
+                        full[0].buckets[(ttl_bucket_start / MINUTE_SECS) as usize]
+                            .pricing_completeness,
+                        Some(PricingCompleteness::Unknown)
+                    );
+                    let summary = summary_totals(&full[0].buckets);
+                    assert_eq!(
+                        summary.pricing_completeness,
+                        Some(PricingCompleteness::Unknown)
+                    );
+                    let (totals, _) = build_usage_totals_series(group_by, &rollups, 0, &families);
+                    let bucket = &totals[0].buckets[0];
+                    assert_eq!(bucket_completeness_tokens(bucket), expected_tokens);
+                    assert_eq!(
+                        bucket.pricing_completeness,
+                        Some(PricingCompleteness::Unknown)
+                    );
+                    assert_eq!(
+                        summary_totals(&totals[0].buckets).pricing_completeness,
+                        summary.pricing_completeness
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bucket_completeness_uses_ttl_tokens_when_aggregate_is_zero() {
+        let mut bucket = empty_bucket(0);
+        bucket.request_count = 1;
+        bucket.cache_write_input_tokens = Some(0);
+        bucket.cache_write_input_tokens_30m = Some(7);
+        assert_eq!(bucket_completeness_tokens(&bucket), 7);
+        assert_eq!(
+            summary_totals(&[bucket]).pricing_completeness,
+            Some(PricingCompleteness::Unknown)
+        );
     }
 
     #[test]
