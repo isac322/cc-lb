@@ -2,7 +2,7 @@ pub mod economics;
 pub mod status;
 pub(crate) mod trigger;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
@@ -90,6 +90,7 @@ pub struct CacheKeepaliveActivityTurn {
 pub struct CacheKeepaliveIdleGap {
     pub cycle_id: Option<Uuid>,
     pub pause_at_ms: u64,
+    pub natural_expiry_ms: Option<u64>,
     pub cached_tokens: u64,
     pub pulses: Vec<CacheKeepaliveIdlePulse>,
     pub ending_kind: &'static str,
@@ -191,7 +192,7 @@ pub fn derive_activity_view(
                     || pending_source_ref_id == Some(turn.source_ref_id.as_str()))
                 && (pending_source_ref_id.is_none()
                     || (pending_source_ref_id == Some(turn.source_ref_id.as_str())
-                        && !follow_up_proven(turn, source.evidence)))
+                        && cycle_follow_up_for_turn(turn, source.evidence, source.turns).is_none()))
         })
         .map(|turn| turn.source_ref_id.as_str());
     let total_renewals_current_cycle = current_records.iter().fold(0_u32, |total, turn| {
@@ -202,11 +203,12 @@ pub fn derive_activity_view(
         .map(|record| {
             activity_turn(
                 record,
-                0,
                 pending_current_ref == Some(record.source_ref_id.as_str()),
                 catalog,
                 source.item.ttl,
                 source.evidence,
+                source.item.config_snapshot.as_ref(),
+                source.turns,
             )
         })
         .collect::<Vec<_>>();
@@ -239,6 +241,8 @@ pub fn derive_activity_view(
         scoped_turns.iter().copied(),
         source.evidence,
         pending_source_ref_id,
+        source.item.config_snapshot.as_ref(),
+        source.turns,
     );
     let total_spent_micros = scoped_turns
         .iter()
@@ -316,7 +320,7 @@ pub fn derive_activity_view(
 fn lead_window_ms(ttl: CacheTtl, config: Option<&CacheKeepaliveConfigSnapshot>) -> u64 {
     let lead_secs = match ttl {
         CacheTtl::Ttl5m | CacheTtl::Ttl30m => {
-            config.map_or(30, |config| config.refresh_lead_time_5m_secs)
+            config.map_or(10, |config| config.refresh_lead_time_5m_secs)
         }
         CacheTtl::Ttl1h | CacheTtl::Ttl12h => {
             config.map_or(300, |config| config.refresh_lead_time_1h_secs)
@@ -324,6 +328,7 @@ fn lead_window_ms(ttl: CacheTtl, config: Option<&CacheKeepaliveConfigSnapshot>) 
     };
     ttl.as_secs()
         .saturating_sub(u64::from(lead_secs))
+        .max(1)
         .saturating_mul(1_000)
 }
 
@@ -411,7 +416,13 @@ fn idle_gaps(
             || first_turn.ts.saturating_mul(1_000),
             |renewal| renewal.request_start_ms,
         );
-        let pause_at_ms = first_pulse_ms.saturating_sub(lead_window_ms(ttl, config));
+        let cycle = first_evidence
+            .map(|renewal| cycle_economics(renewal, source.evidence, config, source.turns));
+        let natural_expiry_ms = cycle.as_ref().and_then(|cycle| cycle.natural_expiry_ms);
+        let pause_at_ms = cycle
+            .as_ref()
+            .and_then(|cycle| cycle.anchor_ms)
+            .unwrap_or_else(|| first_pulse_ms.saturating_sub(lead_window_ms(ttl, config)));
         let mut previous_time_ms = None;
         let pulses = indices
             .iter()
@@ -438,27 +449,22 @@ fn idle_gaps(
         let last_pulse_ms = previous_time_ms.unwrap_or(first_pulse_ms);
         let last_turn = scoped_turns[*indices.last().expect("nonempty cycle")];
         let cache_expires_at_ms = renewal_expiry_ms(last_turn, ttl, source.evidence);
-        let follow_up = source
-            .evidence
-            .iter()
-            .filter(|candidate| candidate.evidence_kind == "follow_up")
-            .filter(|follow_up| {
-                source.evidence.iter().any(|renewal| {
-                    renewal.evidence_kind == "renewal"
-                        && renewal.cycle_id == cycle_id
-                        && renewal.principal_id == first_turn.principal_id
-                        && renewal.upstream_id == first_turn.upstream_id
-                        && renewal.model == first_turn.model
-                        && follow_up_matches(renewal, follow_up)
-                })
-            })
-            .min_by_key(|follow_up| (follow_up.request_start_ms, &follow_up.evidence_id));
-        let evidence_unknown = indices.iter().any(|&index| {
-            renewal_evidence_for_turn(scoped_turns[index], source.evidence)
-                .is_none_or(|renewal| !renewal_evidence_known(renewal))
-        });
-        let (ending_kind, ending_at_ms) = if let Some(follow_up) = follow_up {
-            ("followup_hit", follow_up.request_start_ms)
+        let follow_up = cycle.as_ref().and_then(|cycle| cycle.follow_up);
+        let evidence_unknown = cycle.as_ref().is_none_or(|cycle| !cycle.known)
+            || indices.iter().any(|&index| {
+                renewal_evidence_for_turn(scoped_turns[index], source.evidence).is_none()
+            });
+        let (ending_kind, ending_at_ms) = if evidence_unknown {
+            ("followup_unknown", last_pulse_ms)
+        } else if let Some(follow_up) = follow_up {
+            (
+                if natural_expiry_ms.is_some_and(|expiry| follow_up.request_start_ms <= expiry) {
+                    "followup_before_expiry"
+                } else {
+                    "followup_hit"
+                },
+                follow_up.request_start_ms,
+            )
         } else if is_active
             && is_current_cycle
             && indices.iter().any(|&index| retained_turns[index].pending)
@@ -478,8 +484,6 @@ fn idle_gaps(
             && indices.iter().any(|&index| retained_turns[index].pending)
         {
             ("followup_pending", source.now_ms.max(last_pulse_ms))
-        } else if evidence_unknown {
-            ("followup_unknown", last_pulse_ms)
         } else if u32::try_from(pulses.len()).unwrap_or(u32::MAX) >= max_attempts
             || matches!(
                 source.item.terminal_reason,
@@ -521,6 +525,7 @@ fn idle_gaps(
         gaps.push(CacheKeepaliveIdleGap {
             cycle_id,
             pause_at_ms,
+            natural_expiry_ms,
             cached_tokens: indices
                 .iter()
                 .map(|&index| scoped_turns[index].cache_read_input_tokens)
@@ -537,10 +542,25 @@ fn idle_gaps(
         });
     }
     if is_active && !has_current_cycle {
-        let pause_at_ms = source
-            .session
-            .map_or(source.item.last_message_at_ms, |session| {
-                session.cache_anchor_at_unix_secs.saturating_mul(1_000)
+        let retained_cycle = source
+            .evidence
+            .iter()
+            .find(|renewal| {
+                renewal.evidence_kind == "renewal"
+                    && current_cycle_id.is_some()
+                    && renewal.cycle_id == current_cycle_id
+                    && renewal.principal_id == source.item.principal_id
+            })
+            .map(|renewal| cycle_economics(renewal, source.evidence, config, source.turns));
+        let pause_at_ms = retained_cycle
+            .as_ref()
+            .and_then(|cycle| cycle.anchor_ms)
+            .unwrap_or_else(|| {
+                source
+                    .session
+                    .map_or(source.item.last_message_at_ms, |session| {
+                        session.first_scheduled_at_unix_secs.saturating_mul(1_000)
+                    })
             });
         let ending_at_ms = source
             .session
@@ -552,9 +572,21 @@ fn idle_gaps(
         gaps.push(CacheKeepaliveIdleGap {
             cycle_id: current_cycle_id,
             pause_at_ms,
+            natural_expiry_ms: retained_cycle.as_ref().map_or_else(
+                || {
+                    Some(
+                        pause_at_ms.saturating_add(source.item.ttl.as_secs().saturating_mul(1_000)),
+                    )
+                },
+                |cycle| cycle.natural_expiry_ms,
+            ),
             cached_tokens: 0,
             pulses: Vec::new(),
-            ending_kind: "scheduled_waiting",
+            ending_kind: if retained_cycle.as_ref().is_some_and(|cycle| !cycle.known) {
+                "followup_unknown"
+            } else {
+                "scheduled_waiting"
+            },
             ending_at_ms,
             total_duration_sec: ending_at_ms.saturating_sub(pause_at_ms) / 1_000,
             since_last_renewal_sec: None,
@@ -570,6 +602,8 @@ fn evidence_status<'a>(
     turns: impl IntoIterator<Item = &'a CacheKeepaliveTurnRecord>,
     evidence: &[CacheKeepaliveEvidenceRecord],
     pending_source_ref_id: Option<&str>,
+    config: Option<&CacheKeepaliveConfigSnapshot>,
+    all_turns: &[CacheKeepaliveTurnRecord],
 ) -> (String, u64) {
     let turns = turns.into_iter().collect::<Vec<_>>();
     if turns.is_empty()
@@ -579,25 +613,36 @@ fn evidence_status<'a>(
     {
         return ("none".to_owned(), 0);
     }
-    let mut unknown_cycles = 0_u64;
+    let mut unknown_cycle_ids = HashSet::new();
+    let mut unknown_legacy_turns = 0_u64;
     let mut observed = false;
     let mut pending = false;
     for turn in turns {
         let Some(renewal) = renewal_evidence_for_turn(turn, evidence) else {
-            unknown_cycles = unknown_cycles.saturating_add(1);
+            if let Some(cycle_id) = turn.cycle_id {
+                unknown_cycle_ids.insert(cycle_id);
+            } else {
+                unknown_legacy_turns = unknown_legacy_turns.saturating_add(1);
+            }
             continue;
         };
-        if !renewal_evidence_known(renewal) {
-            unknown_cycles = unknown_cycles.saturating_add(1);
+        if !cycle_economics(renewal, evidence, config, all_turns).known {
+            if let Some(cycle_id) = renewal.cycle_id {
+                unknown_cycle_ids.insert(cycle_id);
+            } else {
+                unknown_legacy_turns = unknown_legacy_turns.saturating_add(1);
+            }
         } else {
             observed = true;
             if pending_source_ref_id == Some(turn.source_ref_id.as_str())
-                && !follow_up_proven(turn, evidence)
+                && cycle_follow_up_for_turn(turn, evidence, all_turns).is_none()
             {
                 pending = true;
             }
         }
     }
+    let unknown_cycles = unknown_legacy_turns
+        .saturating_add(u64::try_from(unknown_cycle_ids.len()).unwrap_or(u64::MAX));
     if unknown_cycles > 0 {
         ("unknown".to_owned(), unknown_cycles)
     } else if pending {
@@ -667,73 +712,177 @@ fn follow_up_matches(
     prefix_matches || session_matches
 }
 
-fn follow_up_proven(
-    record: &CacheKeepaliveTurnRecord,
-    evidence: &[CacheKeepaliveEvidenceRecord],
-) -> bool {
-    let Some(renewal) = renewal_evidence_for_turn(record, evidence) else {
-        return false;
+struct CycleEconomics<'a> {
+    known: bool,
+    anchor_ms: Option<u64>,
+    natural_expiry_ms: Option<u64>,
+    follow_up: Option<&'a CacheKeepaliveEvidenceRecord>,
+    credited: Option<&'a CacheKeepaliveEvidenceRecord>,
+}
+
+fn cycle_economics<'a>(
+    renewal: &CacheKeepaliveEvidenceRecord,
+    evidence: &'a [CacheKeepaliveEvidenceRecord],
+    config: Option<&CacheKeepaliveConfigSnapshot>,
+    turns: &[CacheKeepaliveTurnRecord],
+) -> CycleEconomics<'a> {
+    let same_cycle = |candidate: &&CacheKeepaliveEvidenceRecord| {
+        candidate.evidence_kind == "renewal"
+            && renewal.cycle_id.is_some()
+            && candidate.cycle_id == renewal.cycle_id
+            && candidate.principal_id == renewal.principal_id
+            && candidate.upstream_id == renewal.upstream_id
+            && candidate.model == renewal.model
     };
-    let Some(cycle_id) = renewal.cycle_id else {
-        return false;
-    };
-    let cycle_renewals = evidence
+    let first = evidence
+        .iter()
+        .filter(same_cycle)
+        .min_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id));
+    let anchor_ms = evidence
+        .iter()
+        .filter(same_cycle)
+        .filter_map(|candidate| candidate.cycle_anchor_ms)
+        .min()
+        .or_else(|| {
+            let first = first?;
+            let config = config?;
+            Some(
+                first
+                    .request_start_ms
+                    .saturating_sub(lead_window_ms(first.ttl, Some(config))),
+            )
+        });
+    let known = anchor_ms.is_some()
+        && first.is_some()
+        && evidence
+            .iter()
+            .filter(same_cycle)
+            .all(renewal_evidence_known);
+    let natural_expiry_ms = first
+        .zip(anchor_ms)
+        .map(|(first, anchor)| anchor.saturating_add(first.ttl.as_secs().saturating_mul(1_000)));
+    let follow_up = evidence
         .iter()
         .filter(|candidate| {
-            candidate.evidence_kind == "renewal"
-                && candidate.cycle_id == Some(cycle_id)
-                && candidate.principal_id == renewal.principal_id
-                && candidate.upstream_id == renewal.upstream_id
-                && candidate.model == renewal.model
+            evidence.iter().filter(same_cycle).any(|renewal| {
+                renewal_kept_tokens(renewal, turns) > 0 && follow_up_matches(renewal, candidate)
+            })
         })
-        .collect::<Vec<_>>();
-    let Some(follow_up) = evidence
-        .iter()
-        .filter(|candidate| {
-            cycle_renewals
+        .min_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id));
+    let credited = follow_up
+        .filter(|follow_up| {
+            known && natural_expiry_ms.is_some_and(|expiry| follow_up.request_start_ms > expiry)
+        })
+        .and_then(|follow_up| {
+            evidence
                 .iter()
-                .any(|candidate_renewal| follow_up_matches(candidate_renewal, candidate))
-        })
-        .min_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id))
-    else {
-        return false;
-    };
-    cycle_renewals
+                .filter(same_cycle)
+                .filter(|candidate| renewal_kept_tokens(candidate, turns) > 0)
+                .filter(|candidate| follow_up_matches(candidate, follow_up))
+                .min_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id))
+        });
+    CycleEconomics {
+        known,
+        anchor_ms,
+        natural_expiry_ms,
+        follow_up,
+        credited,
+    }
+}
+
+fn renewal_kept_tokens(
+    renewal: &CacheKeepaliveEvidenceRecord,
+    turns: &[CacheKeepaliveTurnRecord],
+) -> u64 {
+    turns
         .iter()
-        .filter(|candidate| follow_up_matches(candidate, follow_up))
-        .max_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id))
-        .and_then(|candidate| candidate.event_ref.as_deref())
-        == Some(record.source_ref_id.as_str())
+        .find(|turn| {
+            renewal.event_ref.as_deref() == Some(turn.source_ref_id.as_str())
+                && renewal.principal_id == turn.principal_id
+                && renewal.upstream_id == turn.upstream_id
+                && renewal.model == turn.model
+        })
+        .map_or(renewal.cache_read_input_tokens.unwrap_or(0), |turn| {
+            turn.cache_read_input_tokens
+                .saturating_add(turn.cache_creation_input_tokens)
+        })
+}
+
+fn cycle_follow_up_for_turn<'a>(
+    record: &CacheKeepaliveTurnRecord,
+    evidence: &'a [CacheKeepaliveEvidenceRecord],
+    turns: &[CacheKeepaliveTurnRecord],
+) -> Option<&'a CacheKeepaliveEvidenceRecord> {
+    let renewal = renewal_evidence_for_turn(record, evidence)?;
+    cycle_economics(renewal, evidence, None, turns).follow_up
 }
 
 fn activity_turn(
     record: &CacheKeepaliveTurnRecord,
-    turn_number: u32,
     pending: bool,
     catalog: &PriceCatalog,
     ttl: CacheTtl,
     evidence: &[CacheKeepaliveEvidenceRecord],
+    config: Option<&CacheKeepaliveConfigSnapshot>,
+    all_turns: &[CacheKeepaliveTurnRecord],
 ) -> CacheKeepaliveActivityTurn {
     let renewal_evidence = renewal_evidence_for_turn(record, evidence);
-    let evidence_known = renewal_evidence.is_some_and(renewal_evidence_known);
+    let cycle =
+        renewal_evidence.map(|renewal| cycle_economics(renewal, evidence, config, all_turns));
+    let evidence_known = cycle.as_ref().is_some_and(|cycle| cycle.known);
     let hit = record.hit_miss.eq_ignore_ascii_case("hit");
-    let followed_up = !pending && hit && follow_up_proven(record, evidence) && evidence_known;
+    let followed_up = !pending
+        && cycle
+            .as_ref()
+            .and_then(|cycle| cycle.credited)
+            .and_then(|renewal| renewal.event_ref.as_deref())
+            == Some(record.source_ref_id.as_str());
+    let avoided_tokens = cycle
+        .as_ref()
+        .and_then(|cycle| cycle.follow_up)
+        .and_then(|follow_up| follow_up.cache_read_input_tokens)
+        .unwrap_or(0)
+        .min(
+            record
+                .cache_read_input_tokens
+                .saturating_add(record.cache_creation_input_tokens),
+        );
     let ttl = renewal_evidence.map_or(ttl, |renewal| renewal.ttl);
-    let pnl = record.cost_micros.and_then(|spent_micros| {
-        rates_from_catalog(catalog, &record.model, ttl).map(|rates| {
-            derive_turn_pnl(
-                CacheKeepaliveTurnPnlInput {
-                    renewal_tokens: record.cache_read_input_tokens,
-                    spent_micros,
-                    followed_up,
-                    pending,
-                },
-                rates,
-            )
-        })
-    });
+    let pnl = evidence_known
+        .then_some(record.cost_micros)
+        .flatten()
+        .and_then(|spent_micros| {
+            let rates = if followed_up {
+                rates_from_catalog(catalog, &record.model, ttl)
+            } else {
+                Some(economics::CacheKeepalivePnlRates {
+                    avoided_micros_per_million: 0,
+                })
+            };
+            rates.map(|rates| {
+                derive_turn_pnl(
+                    CacheKeepaliveTurnPnlInput {
+                        renewal_tokens: avoided_tokens,
+                        spent_micros,
+                        followed_up,
+                        pending,
+                    },
+                    rates,
+                )
+            })
+        });
     let action = if !evidence_known {
         "follow-up evidence unavailable"
+    } else if cycle.as_ref().is_some_and(|cycle| {
+        cycle.follow_up.is_some_and(|follow_up| {
+            cycle
+                .natural_expiry_ms
+                .is_some_and(|expiry| follow_up.request_start_ms <= expiry)
+        })
+    }) {
+        "follow-up arrived before cache expiry (renewal not needed)"
+    } else if !followed_up && cycle.as_ref().is_some_and(|cycle| cycle.credited.is_some()) {
+        "redundant renewal (an earlier renewal kept the cache warm)"
     } else {
         turn_action(followed_up, pending)
     };
@@ -743,7 +892,8 @@ fn activity_turn(
         cycle_id: record
             .cycle_id
             .or_else(|| renewal_evidence.and_then(|renewal| renewal.cycle_id)),
-        turn_number,
+        // Assigned after chronological ordering in derive_activity_view.
+        turn_number: 0,
         time_ms: record.ts.saturating_mul(1_000),
         renewal_tokens: record.cache_read_input_tokens,
         renewals: u32::from(hit),

@@ -184,6 +184,7 @@ describe('CacheKeepaliveSummarySchema', () => {
       unlisted_net: 0,
       evidence_status: 'observed',
       unknown_cycles: 0,
+      not_needed_cycles: 0,
       retained_from_ms: 1_699_395_200_000,
     });
   });
@@ -194,6 +195,15 @@ describe('CacheKeepaliveSummarySchema', () => {
       cost_saved: '12.47',
     };
     expect(CacheKeepaliveSummarySchema.safeParse(bad).success).toBe(false);
+  });
+
+  it('preserves the explicit not-needed cycle count', () => {
+    expect(
+      CacheKeepaliveSummarySchema.parse({
+        ...cacheKeepaliveSummaryFixture,
+        not_needed_cycles: 3,
+      }).not_needed_cycles,
+    ).toBe(3);
   });
 });
 
@@ -407,6 +417,7 @@ describe('CacheKeepaliveDetailSchema', () => {
       ],
       ending_kind,
       ending_at_ms: 1_700_000_300_000 + index * 300_000,
+      natural_expiry_ms: null,
       total_duration_sec: 300,
       since_last_renewal_sec: 30,
       spent_usd: 0.001,
@@ -441,6 +452,7 @@ describe('CacheKeepaliveDetailSchema', () => {
       })),
       follow_up_outcomes: {
         observed: 2,
+        not_needed: 0,
         pending: 0,
         no_follow_up: 8,
         unknown: 1,
@@ -448,6 +460,7 @@ describe('CacheKeepaliveDetailSchema', () => {
     });
     expect(parsed.follow_up_outcomes).toEqual({
       observed: 2,
+      not_needed: 0,
       pending: 0,
       no_follow_up: 8,
       unknown: 1,
@@ -466,6 +479,79 @@ describe('CacheKeepaliveDetailSchema', () => {
       CacheKeepaliveDetailSchema.safeParse({
         ...cacheKeepaliveRenewedDetailFixture,
         follow_up_outcomes: undefined,
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each([1_700_000_300_000, null])(
+    'decodes not-needed outcomes and nullable natural expiry (%s)',
+    (naturalExpiry) => {
+      const parsed = CacheKeepaliveDetailSchema.parse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        follow_up_outcomes: {
+          observed: 0,
+          not_needed: 1,
+          pending: 0,
+          no_follow_up: 0,
+          unknown: 0,
+        },
+        gaps: [
+          {
+            cycle_id: 'redundant',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 20_000,
+            pulses: [],
+            ending_kind: 'followup_before_expiry',
+            ending_at_ms: 1_700_000_271_000,
+            natural_expiry_ms: naturalExpiry,
+            total_duration_sec: 271,
+            since_last_renewal_sec: 1,
+            spent_usd: 0.006,
+            avoided_usd: 0,
+            net_pnl_usd: -0.006,
+          },
+        ],
+      });
+      expect(parsed.follow_up_outcomes.not_needed).toBe(1);
+      expect(parsed.gaps?.[0]).toMatchObject({
+        ending_kind: 'followup_before_expiry',
+        natural_expiry_ms: naturalExpiry,
+        avoided_usd: 0,
+        net_pnl_usd: -0.006,
+      });
+    },
+  );
+
+  it('requires not-needed outcome counts and rejects malformed expiry timestamps', () => {
+    expect(
+      CacheKeepaliveDetailSchema.safeParse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        follow_up_outcomes: {
+          ...cacheKeepaliveRenewedDetailFixture.follow_up_outcomes,
+          not_needed: undefined,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      CacheKeepaliveSummarySchema.safeParse({
+        ...cacheKeepaliveSummaryFixture,
+        not_needed_cycles: -1,
+      }).success,
+    ).toBe(false);
+    expect(
+      CacheKeepaliveGapSchema.safeParse({
+        cycle_id: null,
+        pause_at_ms: 1,
+        cached_tokens: 0,
+        pulses: [],
+        ending_kind: 'followup_before_expiry',
+        ending_at_ms: 2,
+        natural_expiry_ms: '3',
+        total_duration_sec: 1,
+        since_last_renewal_sec: null,
+        spent_usd: 0,
+        avoided_usd: 0,
+        net_pnl_usd: 0,
       }).success,
     ).toBe(false);
   });
@@ -767,7 +853,7 @@ describe('cache keepalive wire additions', () => {
     ).toBe('failed');
   });
 
-  it.each(['followup_unknown', 'followup_pending'])(
+  it.each(['followup_unknown', 'followup_pending', 'followup_before_expiry'])(
     'accepts %s gap endings',
     (ending) => {
       const gap = {
@@ -777,6 +863,7 @@ describe('cache keepalive wire additions', () => {
         pulses: [],
         ending_kind: ending,
         ending_at_ms: 2,
+        natural_expiry_ms: null,
         total_duration_sec: 1,
         since_last_renewal_sec: null,
         spent_usd: 0.01,

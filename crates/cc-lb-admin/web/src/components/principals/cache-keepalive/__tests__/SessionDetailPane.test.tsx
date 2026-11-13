@@ -91,6 +91,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 1,
           pending: 0,
           no_follow_up: 0,
@@ -134,6 +135,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'followup_hit',
             ending_at_ms: 1_700_000_323_000,
+            natural_expiry_ms: 1_700_000_300_000,
             total_duration_sec: 323,
             since_last_renewal_sec: 53,
             spent_usd: 0.1209,
@@ -194,6 +196,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 0,
           pending: 0,
           no_follow_up: 1,
@@ -228,6 +231,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             pulses,
             ending_kind: 'capped_no_followup',
             ending_at_ms: 1_700_003_250_000,
+            natural_expiry_ms: null,
             total_duration_sec: 3250,
             since_last_renewal_sec: 0,
             spent_usd: 1.2,
@@ -278,6 +282,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 0,
           pending: 1,
           no_follow_up: 0,
@@ -343,6 +348,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 0,
           pending: 0,
           no_follow_up: 0,
@@ -447,6 +453,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
               pulses: [],
               ending_kind: endingKind,
               ending_at_ms: 1_700_000_300_000,
+              natural_expiry_ms: null,
               total_duration_sec: 300,
               since_last_renewal_sec: null,
               spent_usd: 0,
@@ -496,6 +503,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
                   pulses: [],
                   ending_kind: 'followup_hit',
                   ending_at_ms: 1_700_000_300_000,
+                  natural_expiry_ms: null,
                   total_duration_sec: 300,
                   since_last_renewal_sec: null,
                   spent_usd: 0,
@@ -541,6 +549,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         is_last_pending: true,
         evidence_status: 'pending',
         follow_up_outcomes: {
+          not_needed: 0,
           observed: 0,
           pending: 1,
           no_follow_up: 0,
@@ -563,6 +572,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'followup_pending',
             ending_at_ms: 1_700_000_370_000,
+            natural_expiry_ms: null,
             total_duration_sec: 370,
             since_last_renewal_sec: 100,
             spent_usd: 0.006,
@@ -609,6 +619,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
           is_last_pending: false,
           evidence_status: 'observed',
           follow_up_outcomes: {
+            not_needed: 0,
             observed: 0,
             pending: 0,
             no_follow_up: 1,
@@ -631,6 +642,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
               ],
               ending_kind: 'ttl_expired_no_followup',
               ending_at_ms: 1_700_000_570_000,
+              natural_expiry_ms: null,
               total_duration_sec: 570,
               since_last_renewal_sec: 300,
               spent_usd: 0.006,
@@ -766,6 +778,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
               pulses: [],
               ending_kind: 'ttl_expired_no_followup',
               ending_at_ms: 1_700_000_300_000,
+              natural_expiry_ms: null,
               total_duration_sec: 300,
               since_last_renewal_sec: null,
               spent_usd: 0,
@@ -827,6 +840,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
       ],
       ending_kind: 'followup_hit' as const,
       ending_at_ms: pauseMs + 290_000,
+      natural_expiry_ms: null,
       total_duration_sec: 290,
       since_last_renewal_sec: 20,
       spent_usd: 0.02,
@@ -943,6 +957,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
               pulses: [],
               ending_kind: 'followup_hit',
               ending_at_ms: Date.parse(end),
+              natural_expiry_ms: null,
               total_duration_sec: 240,
               since_last_renewal_sec: null,
               spent_usd: 0,
@@ -999,6 +1014,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             pulses: [],
             ending_kind: 'followup_hit',
             ending_at_ms: Date.parse('2026-11-11T09:04:00Z'),
+            natural_expiry_ms: null,
             total_duration_sec: 240,
             since_last_renewal_sec: null,
             spent_usd: 0,
@@ -1032,6 +1048,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
         ...cacheKeepaliveRenewedDetailFixture,
         evidence_status: 'unknown',
         follow_up_outcomes: {
+          not_needed: 3,
           observed: 0,
           no_follow_up: 10,
           unknown: 1,
@@ -1048,18 +1065,170 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     );
     const outcomes = screen.getByLabelText('Follow-up outcomes');
     expect(outcomes.getAttribute('title')).toBe(
-      '0 observed · 10 no follow-up · 1 unknown · 2 pending',
+      '0 observed · 3 not needed · 10 no follow-up · 1 unknown · 2 pending',
     );
     expect(
       within(outcomes).getByText(
-        'Follow-up: 10 no follow-up · 1 unknown · 2 pending',
+        'Follow-up: 3 not needed · 10 no follow-up · 1 unknown · 2 pending',
       ),
     ).toBeDefined();
     expect(outcomes.querySelector('.sr-only')?.textContent).toBe(
-      '0 observed · 10 no follow-up · 1 unknown · 2 pending',
+      '0 observed · 3 not needed · 10 no follow-up · 1 unknown · 2 pending',
     );
     expect(screen.queryByText('Follow-up unknown ·')).toBeNull();
   });
+
+  it.each([
+    [271, 1_700_000_300_000],
+    [300, 1_700_000_300_000],
+    [271, null],
+  ] as const)(
+    'shows not-needed renewals as a loss (follow-up at %ss, expiry %s)',
+    (followupSec, naturalExpiry) => {
+      vi.spyOn(locale, 'useTimezone').mockReturnValue({
+        timezone: 'UTC',
+        effective: 'UTC',
+        setTimezone: vi.fn(),
+      });
+      const anchor = 1_700_000_000_000;
+      const detail: CacheKeepaliveDetail = {
+        ...cacheKeepaliveRenewedDetailFixture,
+        total_spent: 0.006,
+        total_avoided: 0,
+        net_pnl: -0.006,
+        follow_up_outcomes: {
+          observed: 0,
+          not_needed: 1,
+          no_follow_up: 0,
+          pending: 0,
+          unknown: 0,
+        },
+        turns: [
+          {
+            ...cacheKeepaliveRenewedDetailFixture.turns[0],
+            cycle_id: 'redundant',
+            turn_number: 1,
+            time_ms: anchor + 270_000,
+            followed_up: false,
+            pending: false,
+            pnl: -0.006,
+          },
+        ],
+        gaps: [
+          {
+            cycle_id: 'redundant',
+            pause_at_ms: anchor,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: anchor + 270_000,
+                offset_sec: 270,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.006,
+                hit: true,
+              },
+            ],
+            ending_kind: 'followup_before_expiry',
+            ending_at_ms: anchor + followupSec * 1000,
+            natural_expiry_ms: naturalExpiry,
+            total_duration_sec: followupSec,
+            since_last_renewal_sec: followupSec - 270,
+            spent_usd: 0.006,
+            avoided_usd: 0,
+            net_pnl_usd: -0.006,
+          },
+        ],
+      };
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery(detail),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="redundant"
+          onClose={() => {}}
+        />,
+      );
+      const outcomes = screen.getByLabelText('Follow-up outcomes');
+      expect(
+        within(outcomes).getByText('Follow-up: 1 not needed'),
+      ).toBeDefined();
+      const ending = screen.getByRole('button', { name: /^Not needed:/ });
+      expect(ending.getAttribute('aria-label')).toContain('−$0.006');
+      expect(ending.querySelector('span')?.className).toContain('bg-warn');
+      expect(screen.queryByRole('button', { name: /saved/ })).toBeNull();
+      expect(screen.getByText(/renewals were redundant reads/)).toBeDefined();
+      if (naturalExpiry === null) {
+        expect(
+          screen.queryByText(/Original cache would have expired/),
+        ).toBeNull();
+      } else {
+        const expiryTime = screen
+          .getByText(/Original cache would have expired/)
+          .querySelector('time');
+        expect(expiryTime?.getAttribute('datetime')).toBe(
+          new Date(naturalExpiry).toISOString(),
+        );
+      }
+      fireEvent.click(ending);
+      const endingTip = screen.getByRole('tooltip');
+      expect(within(endingTip).getByText('Not needed')).toBeDefined();
+      expect(
+        within(endingTip).queryByText('Original cache expiry') !== null,
+      ).toBe(naturalExpiry !== null);
+      fireEvent.click(screen.getByRole('button', { name: /Renewal #1:/ }));
+      const pulseTip = screen.getByRole('tooltip');
+      expect(within(pulseTip).getByText('Not needed')).toBeDefined();
+      expect(within(pulseTip).getByText('−$0.006')).toBeDefined();
+      expect(
+        within(pulseTip).getByText(/renewals were redundant reads/),
+      ).toBeDefined();
+    },
+  );
+
+  it.each([
+    [0.02, true],
+    [0, false],
+    [-0.006, false],
+    [null, false],
+  ] as const)(
+    'only badges positive saved-cycle net as saved (%s)',
+    (net, saved) => {
+      vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue(
+        successQuery<CacheKeepaliveDetail>({
+          ...cacheKeepaliveRenewedDetailFixture,
+          turns: [],
+          gaps: [
+            {
+              cycle_id: 'saved',
+              pause_at_ms: 1_700_000_000_000,
+              cached_tokens: 20_000,
+              pulses: [],
+              ending_kind: 'followup_hit',
+              ending_at_ms: 1_700_000_320_000,
+              natural_expiry_ms: 1_700_000_300_000,
+              total_duration_sec: 320,
+              since_last_renewal_sec: null,
+              spent_usd: 0.006,
+              avoided_usd: net === null ? null : net + 0.006,
+              net_pnl_usd: net,
+            },
+          ],
+        }),
+      );
+      renderWithProviders(
+        <SessionDetailPane
+          principalId="p-123"
+          sessionId="saved"
+          onClose={() => {}}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: /saved/ }) !== null).toBe(
+        saved,
+      );
+    },
+  );
 
   it.each([
     [84.9, '+$84.90', '$84.90'],
@@ -1116,6 +1285,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'followup_hit',
             ending_at_ms: pulseMs + 30_000,
+            natural_expiry_ms: null,
             total_duration_sec: 300,
             since_last_renewal_sec: 30,
             spent_usd: 0.0123,
@@ -1234,6 +1404,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'followup_hit',
             ending_at_ms: base + 50_000,
+            natural_expiry_ms: null,
             total_duration_sec: 320,
             since_last_renewal_sec: 30,
             spent_usd: 0.06,
@@ -1359,6 +1530,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'ttl_expired_no_followup',
             ending_at_ms: time + 300_000,
+            natural_expiry_ms: null,
             total_duration_sec: 570,
             since_last_renewal_sec: 300,
             spent_usd: 0.0123,
@@ -1442,6 +1614,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
             ],
             ending_kind: 'ttl_expired_no_followup',
             ending_at_ms: time + 300_000,
+            natural_expiry_ms: null,
             total_duration_sec: 570,
             since_last_renewal_sec: 300,
             spent_usd: 0.0123,
@@ -1501,6 +1674,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
           ],
           ending_kind: 'ttl_expired_no_followup',
           ending_at_ms: pulseMs + 300_000,
+          natural_expiry_ms: null,
           total_duration_sec: 570,
           since_last_renewal_sec: 300,
           spent_usd: 0.0123,

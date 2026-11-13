@@ -304,11 +304,18 @@ function SheetSummaryHeader({
   const effectiveCostSaved = summary?.cost_saved ?? null;
   const effectiveTotalAvoided = summary?.total_avoided ?? null;
   const qualification = summary
-    ? effectiveCostSaved === null
-      ? 'Price unknown'
-      : summary.evidence_status !== 'observed'
-        ? `Follow-up ${summary.evidence_status}`
-        : null
+    ? [
+        effectiveCostSaved === null
+          ? 'Price unknown'
+          : summary.evidence_status !== 'observed'
+            ? `Follow-up ${summary.evidence_status}`
+            : null,
+        summary.not_needed_cycles > 0
+          ? `${summary.not_needed_cycles} not needed`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
     : null;
 
   return (

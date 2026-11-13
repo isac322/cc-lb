@@ -22,6 +22,7 @@ pub struct CacheKeepaliveEvidenceRow {
     pub request_ref: Option<String>,
     pub event_ref: Option<String>,
     pub session_key_hash: Option<String>,
+    pub cycle_anchor_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
