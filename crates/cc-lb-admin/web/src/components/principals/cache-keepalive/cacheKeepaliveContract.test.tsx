@@ -60,7 +60,7 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
     'OpenAI Responses GPT-5.6+ keepalive',
   ]);
   expect(cacheKeepaliveSettingsCopy.helperCopy).toEqual([
-    'Seconds. Renews 30s before an Anthropic 5m or OpenAI 30m cache expires.',
+    'Seconds. Renews 10s before an Anthropic 5m or OpenAI 30m cache expires.',
     'Seconds. Renews 5m before an Anthropic 1h cache expires. OpenAI 12h retention is recorded, not renewed.',
     'Seconds. = 4h',
     '= 8 MiB',
