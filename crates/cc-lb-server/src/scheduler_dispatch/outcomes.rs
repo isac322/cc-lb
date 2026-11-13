@@ -19,7 +19,7 @@ pub(super) fn metadata_outcome(outcome: MetadataRefreshJobOutcome) -> SchedulerR
 pub(super) fn usage_rollup_outcome(result: UsageRollupResult) -> SchedulerResult<JobOutcome> {
     Ok(match result {
         UsageRollupResult::Done { run: _ } => JobOutcome::Done,
-        UsageRollupResult::Retry { delay, error: _ } => JobOutcome::Retry { delay },
+        UsageRollupResult::Retry { delay, error: _ } => JobOutcome::Retry { delay: Some(delay) },
     })
 }
 
@@ -35,7 +35,7 @@ pub(super) fn prompt_cache_purge_outcome(
     Ok(match result {
         PromptCacheObservationPurgeJobResult::Done { .. } => JobOutcome::Done,
         PromptCacheObservationPurgeJobResult::Retry { delay, error: _ } => {
-            JobOutcome::Retry { delay }
+            JobOutcome::Retry { delay: Some(delay) }
         }
     })
 }
@@ -46,7 +46,9 @@ pub(super) fn upstream_affinity_purge_outcome(
     Ok(match result {
         UpstreamAffinityPurgeJobResult::Done { .. } => JobOutcome::Done,
         UpstreamAffinityPurgeJobResult::Cancelled { .. } => JobOutcome::Noop,
-        UpstreamAffinityPurgeJobResult::Retry { delay, .. } => JobOutcome::Retry { delay },
+        UpstreamAffinityPurgeJobResult::Retry { delay, .. } => {
+            JobOutcome::Retry { delay: Some(delay) }
+        }
     })
 }
 
@@ -59,7 +61,7 @@ pub(super) fn price_catalog_outcome(
             if delay.is_zero() {
                 return Err(SchedulerError::Job(error));
             }
-            JobOutcome::Retry { delay }
+            JobOutcome::Retry { delay: Some(delay) }
         }
     })
 }
@@ -69,7 +71,9 @@ pub(super) fn apalis_housekeeping_outcome(
 ) -> SchedulerResult<JobOutcome> {
     Ok(match result {
         ApalisHousekeepingJobResult::Done { .. } => JobOutcome::Done,
-        ApalisHousekeepingJobResult::Retry { delay, error: _ } => JobOutcome::Retry { delay },
+        ApalisHousekeepingJobResult::Retry { delay, error: _ } => {
+            JobOutcome::Retry { delay: Some(delay) }
+        }
     })
 }
 
@@ -79,6 +83,26 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn price_catalog_retry_preserves_positive_delay_and_rejects_zero() {
+        assert!(matches!(
+            price_catalog_outcome(PriceCatalogRefreshJobResult::Retry {
+                delay: Duration::ZERO,
+                error: "catalog unavailable".to_owned(),
+            }),
+            Err(SchedulerError::Job(error)) if error == "catalog unavailable"
+        ));
+        assert_eq!(
+            price_catalog_outcome(PriceCatalogRefreshJobResult::Retry {
+                delay: Duration::from_secs(30),
+                error: "catalog unavailable".to_owned(),
+            })
+            .expect("positive catalog retry delay"),
+            JobOutcome::Retry {
+                delay: Some(Duration::from_secs(30)),
+            }
+        );
+    }
     #[test]
     fn upstream_affinity_purge_maps_completion_and_limit_to_done() {
         for limit_reached in [false, true] {
@@ -105,7 +129,7 @@ mod tests {
             })
             .expect("retry outcome"),
             JobOutcome::Retry {
-                delay: Duration::from_secs(60),
+                delay: Some(Duration::from_secs(60)),
             }
         );
         assert_eq!(

@@ -109,6 +109,308 @@ impl KeepaliveDispatcher for StaticRenewalDispatcher {
     }
 }
 
+#[cfg(all(test, feature = "sqlite"))]
+#[tokio::test]
+async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_advances() {
+    use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::worker::{SchedulerBackend, SchedulerCtx, build_adaptive_worker};
+    use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
+    use cc_lb_storage_api::{StorageResult, UpstreamStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Notify, mpsc};
+
+    use crate::refresh::{
+        ApalisLazyRefreshClaimGuard, LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshTaskState,
+        LazyRefresher, LazyRefresherDeps,
+    };
+
+    struct ObservedClaims {
+        inner: ApalisLazyRefreshClaimGuard,
+        pool: sqlx::SqlitePool,
+        pending_observed: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl LazyRefreshClaimGuard for ObservedClaims {
+        async fn begin_refresh(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            expires_at_unix_secs: u64,
+            now_unix_secs: u64,
+        ) -> StorageResult<LazyRefreshClaim> {
+            self.inner
+                .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                .await
+        }
+
+        async fn complete_and_bump_generation(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            generation: u64,
+        ) -> StorageResult<bool> {
+            self.inner
+                .complete_and_bump_generation(upstream_id, holder, generation)
+                .await
+        }
+
+        async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool> {
+            self.inner.release_if_holder(upstream_id, holder).await
+        }
+
+        async fn task_state(&self, key: &str) -> StorageResult<LazyRefreshTaskState> {
+            let state = self.inner.task_state(key).await?;
+            let pending: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ? AND status = 'Pending' AND attempts = 1",
+            )
+            .bind(key)
+            .fetch_one(&self.pool)
+            .await
+            .expect("observe retried OAuth task");
+            if pending == 1 {
+                assert_eq!(state, LazyRefreshTaskState::Active);
+                let _ = self.pending_observed.send(());
+            }
+            Ok(state)
+        }
+    }
+
+    struct RunningTasks {
+        cancel: CancellationToken,
+        worker: tokio::task::JoinHandle<()>,
+        endpoint: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for RunningTasks {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+            self.worker.abort();
+            self.endpoint.abort();
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release_second = Arc::new(Notify::new());
+    let (second_started_tx, mut second_started_rx) = mpsc::unbounded_channel();
+    let endpoint_calls = calls.clone();
+    let endpoint_release = release_second.clone();
+    let router = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            let ordinal = endpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let release = endpoint_release.clone();
+            let started = second_started_tx.clone();
+            async move {
+                if ordinal == 1 {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error": "temporarily_unavailable"})),
+                    );
+                }
+                assert_eq!(ordinal, 2, "no in-process fallback or duplicate refresh");
+                let _ = started.send(());
+                release.notified().await;
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "access_token": "sk-ant-oat01-refreshed",
+                        "refresh_token": "sk-ant-ort01-refreshed",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind retrying OAuth endpoint");
+    let endpoint_url = format!(
+        "http://{}/oauth/token",
+        listener.local_addr().expect("endpoint address")
+    );
+    let endpoint = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve OAuth endpoint");
+    });
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let mut oauth_cfg = dispatch.oauth_cfg.as_ref().clone();
+    oauth_cfg.token_url = endpoint_url.parse().expect("OAuth endpoint URL");
+    dispatch.oauth_cfg = Arc::new(oauth_cfg);
+    dispatch.replica_id = Some(Uuid::new_v4());
+    let upstream = UpstreamStore::get_by_id(fixture.storage.as_ref(), fixture.upstream_id)
+        .await
+        .expect("load fixture upstream")
+        .expect("fixture upstream exists");
+    let tokens = EncryptedOAuthTokens::encrypt(
+        dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "sk-ant-oat01-expired".to_owned(),
+            refresh_token: "sk-ant-ort01-existing".to_owned(),
+            expires_at_unix_secs: 1,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt expired token bundle");
+    fixture
+        .storage
+        .store_oauth_tokens(upstream.id, upstream.revision, tokens, false)
+        .await
+        .expect("store expired OAuth credential");
+    let starting_generation = fixture
+        .storage
+        .read_oauth_token_generation(upstream.id)
+        .await
+        .expect("read starting generation")
+        .expect("upstream exists");
+    #[allow(clippy::infallible_destructuring_match)]
+    let pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(sqlite) => sqlite.pool().clone(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("expected SQLite scheduler"),
+    };
+    let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
+    let claims = Arc::new(ObservedClaims {
+        inner: ApalisLazyRefreshClaimGuard::new(fixture.backend.backend.clone()),
+        pool: pool.clone(),
+        pending_observed: pending_tx,
+    });
+    let refresher = Arc::new(LazyRefresher::new_with_claim_guard(
+        LazyRefresherDeps {
+            stores: dispatch.stores.clone(),
+            aead: dispatch.aead.clone(),
+            oauth_cfg: dispatch.oauth_cfg.clone(),
+            google_config: dispatch.config.clone(),
+            clock: Arc::new(SystemClock),
+        },
+        Uuid::new_v4(),
+        None,
+        CancellationToken::new(),
+        claims,
+        fixture.backend.backend.clone(),
+    ));
+    let cron_dispatch = dispatch.clone().cron_dispatch();
+    let adaptive_dispatch: cc_lb_scheduler::worker::AdaptiveDispatchFn = Arc::new(move |job| {
+        let dispatch = dispatch.clone();
+        Box::pin(async move {
+            match job {
+                cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(_) => {
+                    dispatch.dispatch_entity(job).await
+                }
+                _ => Ok(JobOutcome::Noop),
+            }
+        })
+    });
+    let worker = build_adaptive_worker(
+        &fixture.backend.backend,
+        SchedulerCtx::new(
+            Default::default(),
+            adaptive_dispatch,
+            cron_dispatch,
+            Arc::new(SystemClock),
+        ),
+    )
+    .expect("build real adaptive worker");
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::spawn(async move {
+        worker
+            .run_until_cancelled(worker_cancel)
+            .await
+            .expect("run adaptive worker");
+    });
+    let mut tasks = RunningTasks {
+        cancel,
+        worker,
+        endpoint,
+    };
+    let upstream_id = upstream.id;
+    let waiter = tokio::spawn(async move { refresher.refresh_one(upstream_id).await });
+    let key = OAuthRefreshJob::new(upstream_id).idempotency_key(1);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let row: Option<(String, i64)> =
+                sqlx::query_as("SELECT status, attempts FROM Jobs WHERE idempotency_key = ?")
+                    .bind(&key)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("read retry state");
+            if let Some((status, attempts)) = row
+                && attempts >= 1
+                && !matches!(status.as_str(), "Queued" | "Running")
+            {
+                assert_eq!(status, "Pending", "transient refresh must stay active");
+                assert_eq!(attempts, 1);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        pending_rx
+            .recv()
+            .await
+            .expect("lazy waiter observed Pending retry as Active");
+    })
+    .await
+    .expect("first refresh retries and waiter observes active task");
+    assert!(
+        !waiter.is_finished(),
+        "waiter must not fail or fall back across Pending retry"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("read unchanged generation"),
+        Some(starting_generation),
+    );
+    sqlx::query("UPDATE Jobs SET run_at = 0 WHERE idempotency_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("fast-forward scheduled retry");
+    tokio::time::timeout(Duration::from_secs(30), second_started_rx.recv())
+        .await
+        .expect("second worker attempt starts")
+        .expect("second token request");
+    assert!(
+        !waiter.is_finished(),
+        "waiter remains pending before generation advances"
+    );
+    release_second.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), waiter)
+        .await
+        .expect("lazy waiter completes after retry")
+        .expect("waiter task")
+        .expect("lazy refresh succeeds");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("read refreshed generation")
+            .expect("upstream exists")
+            > starting_generation,
+    );
+    tasks.cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(30), &mut tasks.worker)
+        .await
+        .expect("worker shuts down")
+        .expect("worker task");
+}
+
 #[tokio::test]
 async fn apalis_housekeeping_maintains_separate_sqlite_application_and_scheduler_files() {
     use cc_lb_clock::TestClock;
@@ -446,7 +748,7 @@ async fn apalis_housekeeping_missing_application_table_retries_and_recovers_qa10
     assert_eq!(
         outcome,
         JobOutcome::Retry {
-            delay: Duration::from_secs(60)
+            delay: Some(Duration::from_secs(60))
         },
         "QA-10: missing application table must retry, not complete"
     );
@@ -507,7 +809,7 @@ async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa
     assert_eq!(
         outcome,
         JobOutcome::Retry {
-            delay: Duration::from_secs(60)
+            delay: Some(Duration::from_secs(60))
         },
         "QA-11: malformed application table must retry, not complete"
     );

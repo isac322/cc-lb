@@ -15,6 +15,9 @@ pub enum SchedulerError {
     #[error("scheduler task conflict: {0}")]
     Conflict(String),
 
+    #[error("retry delay must be non-zero")]
+    InvalidRetryDelay,
+
     /// Handler exceeded the per-job timeout enforced inside the dispatcher.
     ///
     /// This error MUST reach the apalis ack path so the row is marked `Failed`

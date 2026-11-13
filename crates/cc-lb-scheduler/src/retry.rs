@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tower::{Layer, Service};
 
+use crate::error::SchedulerError;
 use crate::middleware::JobOutcomeStatus;
 
 type RetryFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -137,7 +138,7 @@ pub enum JobOutcome {
     Done,
     Skip,
     Noop,
-    Retry { delay: Duration },
+    Retry { delay: Option<Duration> },
     DeadLetter,
 }
 
@@ -161,6 +162,10 @@ impl JobOutcome {
 
 pub trait RetryPayload {
     fn attempt_count(&self) -> u32;
+
+    fn allows_retry(&self) -> bool {
+        true
+    }
 
     fn retry_seed(&self) -> u64 {
         u64::from(self.attempt_count())
@@ -199,6 +204,7 @@ impl<S, P> Service<P> for RetryClassService<S>
 where
     P: RetryPayload + Send + 'static,
     S: Service<P, Response = JobOutcome>,
+    S::Error: From<SchedulerError>,
     S::Future: Send + 'static,
 {
     type Response = JobOutcome;
@@ -211,21 +217,36 @@ where
 
     fn call(&mut self, payload: P) -> Self::Future {
         let attempt_count = payload.attempt_count();
+        let allows_retry = payload.allows_retry();
         let retry_seed = payload.retry_seed();
+        let ordinal = attempt_count.saturating_add(1);
         let class = self.class;
         let future = self.inner.call(payload);
         Box::pin(async move {
             match future.await? {
-                JobOutcome::Retry { delay: _inner } => {
-                    let Some(delay) = class.next_delay_with_seed(attempt_count, retry_seed) else {
-                        return Ok(JobOutcome::DeadLetter);
-                    };
-                    Ok(JobOutcome::Retry { delay })
+                JobOutcome::Retry {
+                    delay: Some(explicit),
+                } if explicit.is_zero() => Err(SchedulerError::InvalidRetryDelay.into()),
+                JobOutcome::Retry { .. }
+                    if !allows_retry || ordinal > class.policy().max_attempts() =>
+                {
+                    Ok(JobOutcome::DeadLetter)
                 }
-                JobOutcome::Done => Ok(JobOutcome::Done),
-                JobOutcome::Skip => Ok(JobOutcome::Skip),
-                JobOutcome::Noop => Ok(JobOutcome::Noop),
-                JobOutcome::DeadLetter => Ok(JobOutcome::DeadLetter),
+                JobOutcome::Retry {
+                    delay: Some(explicit),
+                } => Ok(JobOutcome::Retry {
+                    delay: Some(explicit.min(class.policy().max_delay())),
+                }),
+                JobOutcome::Retry { delay: None } => {
+                    match class.next_delay_with_seed(ordinal, retry_seed) {
+                        Some(delay) => Ok(JobOutcome::Retry { delay: Some(delay) }),
+                        None => Ok(JobOutcome::DeadLetter),
+                    }
+                }
+                outcome @ (JobOutcome::Done
+                | JobOutcome::Skip
+                | JobOutcome::Noop
+                | JobOutcome::DeadLetter) => Ok(outcome),
             }
         })
     }
@@ -239,5 +260,37 @@ fn duration_from_millis(millis: u128) -> Duration {
     match u64::try_from(millis) {
         Ok(value) => Duration::from_millis(value),
         Err(_overflow) => Duration::from_millis(u64::MAX),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::JobOutcome;
+
+    #[test]
+    fn job_outcome_serde_wire_compatibility() {
+        for (outcome, wire) in [
+            (
+                JobOutcome::Retry {
+                    delay: Some(Duration::from_secs(30)),
+                },
+                serde_json::json!({"Retry": {"delay": {"secs": 30, "nanos": 0}}}),
+            ),
+            (
+                JobOutcome::Retry { delay: None },
+                serde_json::json!({"Retry": {"delay": null}}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&outcome).expect("serialize outcome"),
+                wire
+            );
+            assert_eq!(
+                serde_json::from_value::<JobOutcome>(wire).expect("deserialize outcome"),
+                outcome
+            );
+        }
     }
 }
