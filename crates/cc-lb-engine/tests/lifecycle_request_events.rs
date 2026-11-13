@@ -490,7 +490,7 @@ async fn realtime_websocket_observers_classify_attempted_routes() {
     ] {
         lifecycle
             .begin_realtime_websocket(&auth, path)
-            .finish(StatusCode::SWITCHING_PROTOCOLS);
+            .finish_client_closed();
         let mut saw_started = false;
         let mut saw_terminated = false;
         while !saw_terminated {
@@ -510,6 +510,150 @@ async fn realtime_websocket_observers_classify_attempted_routes() {
             }
         }
         assert!(saw_started);
+    }
+}
+
+#[tokio::test]
+async fn realtime_websocket_observation_local_rejections_and_drain() {
+    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, Provider};
+    use cc_lb_lifecycle::{LifecycleEvent, RouteFailure, TerminationReason};
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    for (error_code, expected_status, expected_error) in [
+        ("operation_not_supported", StatusCode::NOT_FOUND, None),
+        (
+            "route_no_upstream_after_filter",
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(InternalError {
+                stage: InternalErrorStage::RouterFilter,
+                kind: InternalErrorKind::Unavailable,
+                message: Some("no eligible provider API-key upstream".to_owned()),
+            }),
+        ),
+        (
+            "drain_rejected",
+            StatusCode::SWITCHING_PROTOCOLS,
+            Some(InternalError {
+                stage: InternalErrorStage::Relay,
+                kind: InternalErrorKind::Unavailable,
+                message: Some("server is draining".to_owned()),
+            }),
+        ),
+    ] {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::new(TestState::default()),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+        )
+        .with_event_bus(test_bus.bus_arc());
+        let auth = lifecycle
+            .authenticate(messages_request(Bytes::new()).headers())
+            .await
+            .expect("test request authenticates");
+        let path = if error_code == "operation_not_supported" {
+            "/ws/unsupported"
+        } else {
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        };
+        let observation = lifecycle.begin_realtime_websocket(&auth, path);
+        let response = match error_code {
+            "operation_not_supported" => {
+                Some(observation.reject_unsupported_operation(Provider::Gemini, path))
+            }
+            "route_no_upstream_after_filter" => {
+                Some(observation.reject_no_eligible_upstream(Provider::Gemini))
+            }
+            "drain_rejected" => {
+                observation.finish_draining();
+                None
+            }
+            _ => unreachable!("matrix covers every local terminal operation"),
+        };
+        if let Some(response) = response {
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(
+                response.headers().get(http::header::CONTENT_TYPE),
+                Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("local rejection body collects")
+                .to_bytes();
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("local rejection is Gemini JSON");
+            assert_eq!(body["error"]["code"], expected_status.as_u16());
+            assert_eq!(body["error"]["type"], error_code);
+            if error_code == "operation_not_supported" {
+                assert_eq!(body["error"]["status"], "NOT_FOUND");
+                assert_eq!(
+                    body["error"]["message"],
+                    "GET /ws/unsupported is not supported by cc-lb yet"
+                );
+            } else {
+                assert_eq!(body["error"]["status"], "UNAVAILABLE");
+                assert_eq!(
+                    body["error"]["message"],
+                    "no eligible provider API-key upstream"
+                );
+            }
+        }
+
+        let mut terminal_count = 0;
+        let mut route_failure_count = 0;
+        let mut started_event_id = None;
+        loop {
+            match lifecycle_events.try_recv() {
+                Ok(LifecycleEvent::RequestStarted { event_id, .. }) => {
+                    assert!(started_event_id.replace(event_id).is_none());
+                }
+                Ok(LifecycleEvent::RouteCompleted {
+                    event_id,
+                    result,
+                    routing_trace,
+                }) => {
+                    assert_eq!(Some(&event_id), started_event_id.as_ref());
+                    assert!(matches!(
+                        result,
+                        Err(RouteFailure::RouteNoUpstreamAfterFilter)
+                    ));
+                    assert!(routing_trace.is_none());
+                    route_failure_count += 1;
+                }
+                Ok(LifecycleEvent::RequestTerminated {
+                    event_id,
+                    reason,
+                    client_status,
+                    internal_errors,
+                    ..
+                }) => {
+                    assert_eq!(Some(&event_id), started_event_id.as_ref());
+                    assert_eq!(client_status, expected_status.as_u16());
+                    assert!(
+                        matches!(reason, TerminationReason::ErrorCode(code) if code == error_code),
+                        "{error_code} must not become terminal_dropped"
+                    );
+                    assert_eq!(
+                        internal_errors,
+                        expected_error.iter().cloned().collect::<Vec<_>>()
+                    );
+                    terminal_count += 1;
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(error) => panic!("local lifecycle events must remain available: {error}"),
+            }
+        }
+        assert!(started_event_id.is_some(), "{error_code} request starts");
+        assert_eq!(terminal_count, 1, "{error_code} request terminates once");
+        assert_eq!(
+            route_failure_count,
+            usize::from(error_code == "route_no_upstream_after_filter"),
+            "{error_code} route failure is emitted exactly when routing fails"
+        );
     }
 }
 

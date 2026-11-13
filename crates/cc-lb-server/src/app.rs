@@ -13,7 +13,6 @@ use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
 use axum::http::header::{
@@ -2491,7 +2490,7 @@ fn admin_router(
         // Reuse the existing request-id seam on the separate admin listener so
         // admin spans and responses carry the same correlation identifier.
         .layer(middleware::from_fn_with_state(
-            RequestIdState::with_prefix("req_admin_"),
+            RequestIdState::counter("req_admin_"),
             request_id_middleware,
         ));
 
@@ -2553,6 +2552,7 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
 }
 
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
+    let request_id_state = RequestIdState::uuid_v7("req_server_");
     let websocket_routes = Router::new()
         .route("/v1/responses", get(responses_websocket_handler))
         .nest(
@@ -2588,11 +2588,18 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         )
         .with_state(state.clone());
     Router::new()
-        .merge(scoped_proxy_routes(state.clone(), timeout_secs, None, true))
+        .merge(scoped_proxy_routes(
+            state.clone(),
+            request_id_state.clone(),
+            timeout_secs,
+            None,
+            true,
+        ))
         .nest(
             "/anthropic",
             scoped_proxy_routes(
                 state.clone(),
+                request_id_state.clone(),
                 timeout_secs,
                 Some(cc_lb_domain::Provider::Anthropic),
                 true,
@@ -2602,6 +2609,7 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             "/openai",
             scoped_proxy_routes(
                 state.clone(),
+                request_id_state.clone(),
                 timeout_secs,
                 Some(cc_lb_domain::Provider::Openai),
                 false,
@@ -2611,6 +2619,7 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             "/gemini",
             scoped_proxy_routes(
                 state,
+                request_id_state,
                 timeout_secs,
                 Some(cc_lb_domain::Provider::Gemini),
                 false,
@@ -2621,14 +2630,11 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
 
 fn scoped_proxy_routes(
     state: ProxyState,
+    request_id_state: RequestIdState,
     timeout_secs: u64,
     provider: Option<cc_lb_domain::Provider>,
     include_oauth_usage: bool,
 ) -> Router {
-    let inner_sb = ServiceBuilder::new()
-        .layer(crate::chaos::ChaosLayer::from_env())
-        .layer(HandleErrorLayer::new(timeout_error))
-        .timeout(Duration::from_secs(timeout_secs.max(1)));
     let mut routes = Router::new()
         .route("/v1/messages", post(lifecycle_handler))
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
@@ -2647,10 +2653,35 @@ fn scoped_proxy_routes(
     if include_oauth_usage {
         routes = routes.route("/api/oauth/usage", get(oauth_usage_handler));
     }
-    let routes = routes.with_state(state.clone()).layer(inner_sb);
+    wrap_scoped_proxy_routes(
+        routes.with_state(state.clone()),
+        state,
+        request_id_state,
+        timeout_secs,
+        provider,
+    )
+}
+
+fn wrap_scoped_proxy_routes(
+    routes: Router,
+    state: ProxyState,
+    request_id_state: RequestIdState,
+    timeout_secs: u64,
+    provider: Option<cc_lb_domain::Provider>,
+) -> Router {
+    let inner_sb = ServiceBuilder::new()
+        .layer(crate::chaos::ChaosLayer::from_env())
+        .layer(middleware::from_fn_with_state(
+            ProxyTimeoutState {
+                timeout: Duration::from_secs(timeout_secs.max(1)),
+                provider,
+            },
+            proxy_timeout_middleware,
+        ));
+    let routes = routes.layer(inner_sb);
     let outer_sb = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(
-            RequestIdState::default(),
+            request_id_state,
             request_id_middleware,
         ))
         .layer(middleware::from_fn_with_state(
@@ -2837,27 +2868,49 @@ fn oauth_credentials_decryptable(aead: &AeadService, upstream: &UpstreamRecord) 
         .is_some_and(|credentials| credentials.decrypt(aead, upstream.id.as_bytes()).is_ok())
 }
 
-async fn timeout_error(error: tower::BoxError) -> Response<Body> {
-    let is_elapsed = error.is::<tower::timeout::error::Elapsed>();
-    let status = if is_elapsed {
-        StatusCode::GATEWAY_TIMEOUT
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
+#[derive(Clone, Copy)]
+struct ProxyTimeoutState {
+    timeout: Duration,
+    provider: Option<cc_lb_domain::Provider>,
+}
+
+async fn proxy_timeout_middleware(
+    State(timeout_state): State<ProxyTimeoutState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let is_gemini_http = match timeout_state.provider {
+        Some(cc_lb_domain::Provider::Gemini) => true,
+        Some(_) => false,
+        None => cc_lb_engine::is_unscoped_gemini_http_route(request.method(), request.uri().path()),
     };
-    let mut response = Response::new(Body::from("request timed out"));
-    *response.status_mut() = status;
-    if is_elapsed {
-        response
-            .extensions_mut()
-            .insert(cc_lb_engine::InternalFailure::tower_timeout(
-                cc_lb_domain::InternalError {
-                    stage: cc_lb_domain::InternalErrorStage::Relay,
-                    kind: cc_lb_domain::InternalErrorKind::Timeout,
-                    message: Some(error.to_string()),
-                },
-            ));
+    match tokio::time::timeout(timeout_state.timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            let mut response = if is_gemini_http {
+                provider_scope_error_response(
+                    cc_lb_domain::Provider::Gemini,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "timeout_error",
+                    "request timed out",
+                )
+            } else {
+                let mut response = Response::new(Body::from("request timed out"));
+                *response.status_mut() = StatusCode::GATEWAY_TIMEOUT;
+                response
+            };
+            response
+                .extensions_mut()
+                .insert(cc_lb_engine::InternalFailure::tower_timeout(
+                    cc_lb_domain::InternalError {
+                        stage: cc_lb_domain::InternalErrorStage::Relay,
+                        kind: cc_lb_domain::InternalErrorKind::Timeout,
+                        message: Some("request timed out".to_owned()),
+                    },
+                ));
+            response
+        }
     }
-    response
 }
 
 #[path = "app_realtime_websocket.rs"]
@@ -3880,22 +3933,47 @@ fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {
 
 #[derive(Clone)]
 struct RequestIdState {
-    counter: Arc<AtomicU64>,
+    generator: RequestIdGenerator,
     prefix: &'static str,
 }
 
+#[derive(Clone)]
+enum RequestIdGenerator {
+    UuidV7,
+    Counter(Arc<AtomicU64>),
+}
+
 impl RequestIdState {
-    fn with_prefix(prefix: &'static str) -> Self {
+    fn uuid_v7(prefix: &'static str) -> Self {
         Self {
-            counter: Arc::new(AtomicU64::new(0)),
+            generator: RequestIdGenerator::UuidV7,
             prefix,
         }
     }
-}
 
-impl Default for RequestIdState {
-    fn default() -> Self {
-        Self::with_prefix("req_server_")
+    fn counter(prefix: &'static str) -> Self {
+        Self {
+            generator: RequestIdGenerator::Counter(Arc::new(AtomicU64::new(0))),
+            prefix,
+        }
+    }
+
+    fn generate(&self) -> String {
+        let mut request_id = String::with_capacity(self.prefix.len() + 36);
+        request_id.push_str(self.prefix);
+        match &self.generator {
+            RequestIdGenerator::UuidV7 => {
+                let _ = write!(&mut request_id, "{}", uuid::Uuid::now_v7());
+            }
+            RequestIdGenerator::Counter(counter) => {
+                let _ = write!(
+                    &mut request_id,
+                    "{}",
+                    counter.fetch_add(1, Ordering::Relaxed)
+                );
+            }
+        }
+        request_id
     }
 }
 
@@ -3904,17 +3982,26 @@ async fn request_id_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    let valid_request_id = |value: &&HeaderValue| {
+        value
+            .to_str()
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
     let request_id = request
         .headers()
         .get("request-id")
+        .filter(valid_request_id)
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-request-id")
+                .filter(valid_request_id)
+        })
         .cloned()
-        .or_else(|| request.headers().get("x-request-id").cloned())
         .unwrap_or_else(|| {
-            let id = state.counter.fetch_add(1, Ordering::Relaxed);
-            match HeaderValue::from_str(&server_request_id(state.prefix, id)) {
-                Ok(value) => value,
-                Err(_) => HeaderValue::from_static("req_server"),
-            }
+            HeaderValue::try_from(state.generate())
+                .expect("generated ASCII request id is valid header value")
         });
     request
         .headers_mut()
@@ -3924,13 +4011,6 @@ async fn request_id_middleware(
         .headers_mut()
         .insert(HeaderName::from_static("request-id"), request_id);
     response
-}
-
-fn server_request_id(prefix: &str, id: u64) -> String {
-    let mut request_id = String::with_capacity(prefix.len() + 20);
-    request_id.push_str(prefix);
-    let _ = write!(&mut request_id, "{id}");
-    request_id
 }
 
 async fn lifecycle_middleware(
@@ -3951,7 +4031,7 @@ async fn lifecycle_middleware(
             .headers()
             .get("request-id")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("req_server_unknown")
+            .expect("request_id_middleware sets valid UTF-8 request-id")
             .to_owned();
         let context = cc_lb_engine::LifecycleContext::new(request_id, bus, &state.clock);
         context.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
@@ -5354,10 +5434,9 @@ mod tests {
         assert_eq!(payload.get("state").and_then(Value::as_str), Some(expected));
     }
 
-    /// QA-CTRL-14: a tower timeout that fires before the handler runs (and
-    /// therefore before `mark_authn_reached`) must produce no request-log row
-    /// and no `RequestTerminated` event — the pre-authentication silent
-    /// invariant. The handler and the request body must never be polled.
+    /// QA-06: timeout responses use the route's provider dialect without
+    /// polling request bodies. Lifecycle events stay silent before authn and
+    /// record a typed timeout once the handler marks authn reached.
     #[tokio::test]
     async fn pre_authn_timeout_emits_no_lifecycle_events() {
         struct PendingSignerFactory;
@@ -5386,6 +5465,13 @@ mod tests {
         async fn pending_handler() -> Response<Body> {
             std::future::pending::<()>().await;
             unreachable!("pre-authn timeout never reaches the handler")
+        }
+
+        async fn authenticated_pending_handler(
+            Extension(observer): Extension<cc_lb_engine::LifecycleContext>,
+        ) -> Response<Body> {
+            observer.mark_authn_reached();
+            std::future::pending::<Response<Body>>().await
         }
 
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
@@ -5445,54 +5531,210 @@ mod tests {
             breaker_registry: Arc::new(BreakerRegistry::new()),
             breaker_config: BreakerRuntimeConfig::default(),
         };
-        // Same middleware order as `proxy_router`: request_id → lifecycle →
-        // drain → (HandleError(timeout_error) → timeout) → routes.
-        let router = Router::new()
-            .route("/v1/messages", post(pending_handler))
-            .with_state(state.clone())
-            .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(timeout_error))
-                    .timeout(Duration::from_secs(1)),
-            )
-            .layer(middleware::from_fn_with_state(
-                state.drain_controller.clone(),
-                cc_lb_engine::proxy_drain_middleware,
-            ))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                lifecycle_middleware,
-            ))
-            .layer(middleware::from_fn_with_state(
-                RequestIdState::default(),
-                request_id_middleware,
-            ));
-
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/messages")
-            .body(Body::from_stream(stream::once(panic_when_polled())))
-            .expect("request builds");
-        // Pause only after all real-clock setup (sqlite open, router build)
-        // completed: the pending handler then lets the 1s tower timeout fire
-        // deterministically without racing external worker threads.
+        // Pause after real-clock setup so sqlite worker threads do not race
+        // the deterministic middleware deadline.
         tokio::time::pause();
-        let response = router.oneshot(request).await.expect("router responds");
-
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("timeout body collects")
-            .to_bytes();
-        assert_eq!(&body[..], b"request timed out");
-        assert!(
-            matches!(
-                events.try_recv(),
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        let cases = [
+            (None, "/v1/messages", false),
+            (
+                None,
+                "/v1beta/models/gemini-2.5-flash:generateContent",
+                true,
             ),
-            "pre-authn timeout must emit no lifecycle events"
+            (
+                None,
+                "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+                true,
+            ),
+            (None, "/v1beta/models/gemini-2.5-flash:countTokens", true),
+            (
+                Some(cc_lb_domain::Provider::Gemini),
+                "/v1beta/models/gemini-2.5-flash:generateContent",
+                true,
+            ),
+            (
+                Some(cc_lb_domain::Provider::Gemini),
+                "/v1beta/cachedContents",
+                true,
+            ),
+            (Some(cc_lb_domain::Provider::Openai), "/v1/responses", false),
+            (
+                Some(cc_lb_domain::Provider::Anthropic),
+                "/v1/messages",
+                false,
+            ),
+        ];
+        for (provider, path, expect_gemini) in cases {
+            let router = wrap_scoped_proxy_routes(
+                Router::new().route(path, post(pending_handler)),
+                state.clone(),
+                RequestIdState::uuid_v7("req_server_"),
+                1,
+                provider,
+            );
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("request-id", "timeout-request")
+                .body(Body::from_stream(stream::once(panic_when_polled())))
+                .expect("request builds");
+            let response = router.oneshot(request).await.expect("router responds");
+
+            assert_eq!(
+                response.status(),
+                StatusCode::GATEWAY_TIMEOUT,
+                "{provider:?} {path}"
+            );
+            assert_eq!(response.headers()["request-id"], "timeout-request");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .map(|value| value.to_str().expect("valid content type")),
+                expect_gemini.then_some("application/json; charset=utf-8"),
+                "{provider:?} {path}",
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("timeout body collects")
+                .to_bytes();
+            if expect_gemini {
+                let json: Value = serde_json::from_slice(&body).expect("Gemini timeout is JSON");
+                assert_eq!(
+                    json,
+                    serde_json::json!({
+                        "error": {
+                            "code": 504,
+                            "message": "request timed out",
+                            "status": "DEADLINE_EXCEEDED",
+                            "type": "timeout_error",
+                        }
+                    })
+                );
+            } else {
+                assert_eq!(&body[..], b"request timed out", "{provider:?} {path}");
+            }
+            assert!(
+                matches!(
+                    events.try_recv(),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                ),
+                "pre-authn timeout must emit no lifecycle events: {provider:?} {path}",
+            );
+        }
+
+        let router = wrap_scoped_proxy_routes(
+            Router::new().route("/v1/messages", post(authenticated_pending_handler)),
+            state.clone(),
+            RequestIdState::uuid_v7("req_server_"),
+            1,
+            None,
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .body(Body::from_stream(stream::once(panic_when_polled())))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(matches!(
+            events
+                .try_recv()
+                .expect("post-authn timeout emits request start"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+        let LifecycleEvent::RequestTerminated {
+            client_status,
+            reason,
+            internal_errors,
+            ..
+        } = events
+            .try_recv()
+            .expect("post-authn timeout emits terminal event")
+        else {
+            panic!("expected RequestTerminated");
+        };
+        assert_eq!(client_status, 504);
+        assert!(matches!(
+            reason,
+            cc_lb_lifecycle::TerminationReason::ErrorCode(code) if code == "tower_timeout"
+        ));
+        assert_eq!(
+            internal_errors,
+            vec![cc_lb_domain::InternalError {
+                stage: cc_lb_domain::InternalErrorStage::Relay,
+                kind: cc_lb_domain::InternalErrorKind::Timeout,
+                message: Some("request timed out".to_owned()),
+            }],
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn proxy_timeout_middleware_does_not_rewrite_started_streaming_response() {
+        async fn streaming_handler() -> Response<Body> {
+            Response::new(Body::from_stream(stream::once(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok::<_, Infallible>(Bytes::from_static(b"after deadline"))
+            })))
+        }
+
+        let router = Router::new()
+            .route("/v1/messages", post(streaming_handler))
+            .layer(middleware::from_fn_with_state(
+                ProxyTimeoutState {
+                    timeout: Duration::from_secs(1),
+                    provider: None,
+                },
+                proxy_timeout_middleware,
+            ));
+        tokio::time::pause();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .extensions()
+                .get::<cc_lb_engine::InternalFailure>()
+                .is_none()
+        );
+
+        let (parts, body) = response.into_parts();
+        let mut stream = body.into_data_stream();
+        let first_chunk = stream.next();
+        tokio::pin!(first_chunk);
+        assert!(futures_util::poll!(&mut first_chunk).is_pending());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            first_chunk
+                .await
+                .expect("stream yields one chunk")
+                .expect("chunk succeeds"),
+            Bytes::from_static(b"after deadline"),
+        );
+        assert_eq!(parts.status, StatusCode::OK);
+        assert!(
+            parts
+                .extensions
+                .get::<cc_lb_engine::InternalFailure>()
+                .is_none()
         );
     }
 

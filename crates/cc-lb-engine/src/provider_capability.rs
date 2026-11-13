@@ -198,6 +198,11 @@ pub(crate) fn classify(
     }
 }
 
+/// Returns whether an HTTP route supports Gemini without an explicit provider scope.
+pub fn is_unscoped_gemini_http_route(method: &Method, path: &str) -> bool {
+    classify(method, path, None).is_some_and(|capability| capability.provider() == Provider::Gemini)
+}
+
 fn model_catalog(path: &str, root: &str, reject_colon: bool) -> bool {
     path == root
         || path
@@ -309,9 +314,48 @@ fn legacy_gemini_action(path: &str, action: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderCapability, body_is_consistency_safe, classify};
+    use super::{
+        ProviderCapability, body_is_consistency_safe, classify, is_unscoped_gemini_http_route,
+    };
     use http::Method;
     use serde_json::json;
+
+    #[test]
+    fn unscoped_gemini_http_route_table() {
+        for (method, path, expected) in [
+            (
+                Method::POST,
+                "/v1beta/models/gemini-2.5-flash:generateContent",
+                true,
+            ),
+            (
+                Method::POST,
+                "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+                true,
+            ),
+            (
+                Method::POST,
+                "/v1beta/models/gemini-2.5-flash:countTokens",
+                true,
+            ),
+            (Method::GET, "/v1beta/models", false),
+            (Method::POST, "/v1beta/cachedContents", false),
+            (
+                Method::POST,
+                "/v1beta/models/text-embedding-004:embedContent",
+                false,
+            ),
+            (Method::POST, "/v1/messages", false),
+            (Method::POST, "/v1/responses", false),
+            (Method::GET, "/v1/responses", false),
+        ] {
+            assert_eq!(
+                is_unscoped_gemini_http_route(&method, path),
+                expected,
+                "{method} {path}"
+            );
+        }
+    }
 
     #[test]
     fn legacy_operations_require_matching_scope_when_present() {
