@@ -1532,6 +1532,120 @@ async fn responses_websocket_incomplete_reason_scrubs_assigned_signer_credential
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_reused_connection_after_credential_rotation_scrubs_handshake_credential()
+-> Result<(), Box<dyn std::error::Error>> {
+    const OLD_SECRET: &str = "rotated-old-credential-alpha-111";
+    const NEW_SECRET: &str = "rotated-new-credential-beta-222";
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let authn = TestAuthn::new(TestState::default());
+    let upstream = UpstreamRecord {
+        id: Uuid::from_u128(1131),
+        name: "responses-matrix-upstream".to_owned(),
+        kind: StorageUpstreamKind::OpenaiApiKey,
+        base_url: Some("http://upstream.local/".parse()?),
+        enabled: true,
+        api_key_ciphertext: Some(Vec::new()),
+        ..UpstreamRecord::default()
+    };
+    let build_view = |generation, secret| {
+        DynamicViewBuilder::new(generation)
+            .signer_factory(Arc::new(ResponsesReasonScrubbingSignerFactory {
+                inner: cc_lb_upstream::ApiKeyAwareSignerFactory::with_router_choice(
+                    &authn,
+                    upstream.name.clone(),
+                ),
+                secret,
+            }))
+            .principal_view(authn.principal_view.clone())
+            .upstream_records(vec![upstream.clone()])
+            .build()
+    };
+    let holder = Arc::new(DynamicViewHolder::new(build_view(0, OLD_SECRET)));
+    let lifecycle = Arc::new(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            holder.clone(),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_event_bus(test_bus.bus_arc()),
+    );
+    let headers = messages_request(Bytes::new()).headers().clone();
+    let auth = lifecycle.authenticate(&headers).await?;
+    let mut gateway = ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1 << 20, 8);
+    let turn1 = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("first response.create is admitted");
+    let candidate = &turn1.candidates[0];
+    gateway.prepare_connection(&turn1, candidate).await?;
+    responses_matrix_send(&mut gateway, &turn1, 0, "resp_before_rotation").await;
+    gateway
+        .provider_message(
+            1131,
+            &Bytes::from_static(
+                br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp_before_rotation","error":null}}"#,
+            ),
+        )
+        .await?;
+
+    holder.store(build_view(holder.load().generation, NEW_SECRET));
+    let turn2 = responses_matrix_admit(&mut gateway)
+        .await
+        .expect("second response.create is admitted after credential rotation");
+    assert_eq!(turn2.candidates[0].upstream_id, candidate.upstream_id);
+    // Reuse the physical socket: assignment must retain its original handshake signer.
+    // Unlike Turn 1, this turn deliberately never calls prepare_connection.
+    responses_matrix_send(&mut gateway, &turn2, 0, "resp_after_rotation").await;
+    let frame = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_after_rotation","error":null,"incomplete_details":{"reason":"stopped: echoed rotated-old-credential-alpha-111 on reused socket"}}}"#,
+    );
+    let unchanged = frame.clone();
+    let result = gateway.provider_message(1131, &frame).await?;
+    assert!(result.forward);
+    assert!(result.frames.is_none(), "no replacement wire frames");
+    assert_eq!(
+        frame, unchanged,
+        "provider frame is forwarded byte-for-byte"
+    );
+    assert!(std::str::from_utf8(&frame)?.contains(OLD_SECRET));
+    gateway.close();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut final_count = 0;
+        while final_count < 2 {
+            if matches!(
+                updates.recv().await.expect("request event channel is open"),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                final_count += 1;
+            }
+        }
+    })
+    .await
+    .expect("both terminal request events are persisted");
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 2);
+    let row = rows
+        .iter()
+        .find(|row| row.upstream_stream_warning_type.as_deref() == Some("response.incomplete"))
+        .expect("reused connection's incomplete turn is persisted");
+    assert_eq!(row.error_code, None);
+    assert_eq!(
+        row.upstream_stream_warning_type.as_deref(),
+        Some("response.incomplete")
+    );
+    assert_eq!(
+        row.upstream_stream_warning_message.as_deref(),
+        Some("stopped: echoed [REDACTED] on reused socket")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn responses_websocket_incomplete_with_error_records_provider_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let recorder = DebuggingRecorder::new();

@@ -4670,30 +4670,8 @@ impl Lifecycle {
                         upstream_name: candidate.name,
                     }),
             );
-            let mut candidate_signers = HashMap::with_capacity(candidates.len());
-            for candidate in &candidates {
-                let Some(record) = view
-                    .upstreams_snapshot()
-                    .iter()
-                    .find(|record| record.id == candidate.upstream_id)
-                else {
-                    continue;
-                };
-                let Ok(upstream) = upstream_for_record(record) else {
-                    continue;
-                };
-                if let Ok(signer) = view
-                    .signer_factory
-                    .with_router_choice(record.name.clone())
-                    .build(&upstream)
-                    .await
-                {
-                    candidate_signers.insert(candidate.upstream_id, signer);
-                }
-            }
             Ok(PreparedWebSocketTurn {
                 candidates,
-                candidate_signers,
                 route_info,
                 observer: observer.clone(),
                 completion_observer: Arc::clone(&self.completion_observer),

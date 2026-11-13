@@ -151,7 +151,6 @@ pub(crate) struct WebSocketIngress<'a> {
 
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
-    pub(crate) candidate_signers: HashMap<Uuid, Arc<dyn Signer>>,
     pub observer: Option<LifecycleContext>,
     pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
     pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
@@ -281,6 +280,7 @@ impl ResponsesStreamMetrics {
 struct Turn {
     auth: Authenticated,
     prepared: PreparedWebSocketTurn,
+    prepared_signers: HashMap<Uuid, Arc<dyn Signer>>,
     body: Arc<Value>,
     frame: Bytes,
     lane: Option<String>,
@@ -565,6 +565,7 @@ impl ResponsesWebSocketGateway {
             Turn {
                 auth,
                 prepared,
+                prepared_signers: HashMap::new(),
                 body,
                 frame,
                 lane: lane.clone(),
@@ -739,6 +740,7 @@ impl ResponsesWebSocketGateway {
             Turn {
                 auth,
                 prepared,
+                prepared_signers: HashMap::new(),
                 body,
                 frame,
                 lane: lane.clone(),
@@ -852,9 +854,7 @@ impl ResponsesWebSocketGateway {
             .sign_websocket_connection_with_signer(&auth, headers, candidate, self.query.as_deref())
             .await?;
         if let Some(turn) = self.turns.get_mut(&dispatch.turn_id) {
-            turn.prepared
-                .candidate_signers
-                .insert(candidate.upstream_id, signer);
+            turn.prepared_signers.insert(candidate.upstream_id, signer);
         }
         Ok((url, headers))
     }
@@ -974,8 +974,10 @@ impl ResponsesWebSocketGateway {
     ) {
         self.connections.entry(connection_id).or_insert(upstream_id);
         if let Some(turn) = self.turns.get_mut(&turn_id) {
-            if let Some(signer) = turn.prepared.candidate_signers.get(&upstream_id).cloned() {
-                self.connection_signers.insert(connection_id, signer);
+            if let Some(signer) = turn.prepared_signers.remove(&upstream_id) {
+                self.connection_signers
+                    .entry(connection_id)
+                    .or_insert(signer);
             }
             turn.connection_id = Some(connection_id);
             turn.upstream_id = Some(upstream_id);
@@ -2537,9 +2539,9 @@ pub(crate) mod tests {
             1,
             Turn {
                 auth: fixture.auth.clone(),
+                prepared_signers: HashMap::new(),
                 prepared: PreparedWebSocketTurn {
                     candidates: Vec::new(),
-                    candidate_signers: HashMap::new(),
                     observer,
                     completion_observer: Arc::new(
                         crate::completion_observer::CompletionObserver::new(),
@@ -2691,11 +2693,22 @@ pub(crate) mod tests {
             .turns
             .get_mut(&1)
             .unwrap()
-            .prepared
-            .candidate_signers
+            .prepared_signers
             .insert(Uuid::nil(), signer.clone());
         gateway.assign_connection(1, 1, Uuid::nil(), "assigned");
         assert!(Arc::ptr_eq(&gateway.connection_signers[&1], &signer));
+        let rotated_signer: Arc<dyn Signer> = Arc::new(
+            ProviderKeySigner::new(ProviderKeyKind::Openai, "rotated_custom_cred_abc123").unwrap(),
+        );
+        gateway
+            .turns
+            .get_mut(&1)
+            .unwrap()
+            .prepared_signers
+            .insert(Uuid::nil(), rotated_signer);
+        gateway.assign_connection(1, 1, Uuid::nil(), "assigned");
+        assert!(Arc::ptr_eq(&gateway.connection_signers[&1], &signer));
+        assert!(gateway.turns[&1].prepared_signers.is_empty());
         let frame = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "type": "response.incomplete",
@@ -3113,9 +3126,9 @@ pub(crate) mod tests {
                 1,
                 Turn {
                     auth: fixture.auth.clone(),
+                    prepared_signers: HashMap::new(),
                     prepared: PreparedWebSocketTurn {
                         candidates: Vec::new(),
-                        candidate_signers: HashMap::new(),
                         observer: None,
                         completion_observer: Arc::new(
                             crate::completion_observer::CompletionObserver::new(),
