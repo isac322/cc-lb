@@ -6,6 +6,9 @@ import type {
 } from '../../lib/api';
 import { buildQuotaChartData } from './buildQuotaChartData';
 import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  geminiGroupPlaceholderState,
+  geminiGroupSibling,
   hasQuotaCardPace,
   isObservedAtOrAfter,
   quotaCardPacePct,
@@ -428,6 +431,149 @@ describe('selectQuotaCardSnapshots', () => {
       'third_party_5h',
       'third_party_7d',
     ]);
+  });
+});
+
+describe('Gemini group placeholder (rule A)', () => {
+  const weeklyExhausted = snap({
+    window: 'gemini_7d',
+    utilization: 1,
+    resets_at_unix_secs: 2_000_000_000,
+  });
+  const absent = (window: QuotaSnapshot['window']) =>
+    snap({ window, state: 'absent', utilization: null });
+  const unobserved = (window: QuotaSnapshot['window']) =>
+    snap({ window, state: 'unobserved', utilization: null });
+
+  it('pairs each Gemini window with its same-group sibling only', () => {
+    expect(geminiGroupSibling('gemini_5h')).toBe('gemini_7d');
+    expect(geminiGroupSibling('gemini_7d')).toBe('gemini_5h');
+    expect(geminiGroupSibling('third_party_5h')).toBe('third_party_7d');
+    expect(geminiGroupSibling('third_party_7d')).toBe('third_party_5h');
+    expect(geminiGroupSibling('5h')).toBeNull();
+    expect(geminiGroupSibling('7d_fable')).toBeNull();
+  });
+
+  it('QA-1: weekly 100% with an absent (missing or disabled) 5h is not reported', () => {
+    const windows = [absent('gemini_5h'), weeklyExhausted];
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBe(
+      'not-reported',
+    );
+    expect(geminiGroupPlaceholderState(windows, 'gemini_7d')).toBeNull();
+    expect(GEMINI_GROUP_PLACEHOLDER_TEXT['not-reported']).toBe('Not reported');
+    const cards = selectQuotaCardSnapshots({
+      latestWindows: windows,
+      provider: 'gemini',
+    });
+    expect(cards.map((card) => [card.window, card.utilization])).toEqual([
+      ['gemini_5h', null],
+      ['gemini_7d', 1],
+    ]);
+    expect(quotaCardPacePct(cards[0], 1_000_000_000)).toBeNull();
+  });
+
+  it('QA-2: both windows with readings render normally', () => {
+    const windows = [snap({ window: 'gemini_5h' }), weeklyExhausted];
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBeNull();
+    expect(geminiGroupPlaceholderState(windows, 'gemini_7d')).toBeNull();
+  });
+
+  it('QA-3: an unobserved or missing sibling has no reading', () => {
+    expect(
+      geminiGroupPlaceholderState(
+        [unobserved('gemini_5h'), weeklyExhausted],
+        'gemini_5h',
+      ),
+    ).toBe('no-reading');
+    expect(geminiGroupPlaceholderState([weeklyExhausted], 'gemini_5h')).toBe(
+      'no-reading',
+    );
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [weeklyExhausted],
+        provider: 'gemini',
+      }).map((card) => [card.window, card.state, card.utilization]),
+    ).toEqual([
+      ['gemini_5h', 'unobserved', null],
+      ['gemini_7d', 'fresh', 1],
+    ]);
+  });
+
+  it('keeps a weekly placeholder beside a stale 5h reading, per group', () => {
+    const windows = [
+      snap({ window: 'third_party_5h', state: 'stale', utilization: 0.9 }),
+      absent('third_party_7d'),
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+    ];
+    expect(geminiGroupPlaceholderState(windows, 'third_party_7d')).toBe(
+      'not-reported',
+    );
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBeNull();
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: windows,
+        provider: 'gemini',
+      }).map((card) => card.window),
+    ).toEqual(['third_party_5h', 'third_party_7d']);
+  });
+
+  it('QA-4: a group without any reading stays hidden; all absent is not offered', () => {
+    const groupAbsent = [
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+      snap({ window: 'third_party_5h', utilization: 0.3 }),
+      snap({ window: 'third_party_7d', utilization: 0.5 }),
+    ];
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: groupAbsent,
+        provider: 'gemini',
+      }).map((card) => card.window),
+    ).toEqual(['third_party_5h', 'third_party_7d']);
+    for (const sibling of [
+      absent('gemini_7d'),
+      unobserved('gemini_7d'),
+      snap({ window: 'gemini_7d', utilization: null }),
+      snap({ window: 'gemini_7d', utilization: Number.NaN }),
+    ]) {
+      expect(
+        geminiGroupPlaceholderState(
+          [absent('gemini_5h'), sibling],
+          'gemini_5h',
+        ),
+      ).toBeNull();
+    }
+    const allAbsent = [
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+      absent('third_party_5h'),
+      absent('third_party_7d'),
+    ];
+    const cards = selectQuotaCardSnapshots({
+      latestWindows: allAbsent,
+      provider: 'gemini',
+    });
+    expect(cards).toEqual([]);
+    expect(
+      selectQuotaDetailState({
+        latestWindows: allAbsent,
+        cards,
+        rawMeters: [],
+        provider: 'gemini',
+      }),
+    ).toBe('not-offered');
+  });
+
+  it('never applies to Anthropic or OpenAI windows', () => {
+    const windows = [absent('5h'), snap({ window: '7d', utilization: 1 })];
+    expect(geminiGroupPlaceholderState(windows, '5h')).toBeNull();
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: windows,
+        provider: 'openai',
+      }).map((card) => card.window),
+    ).toEqual(['7d']);
   });
 });
 

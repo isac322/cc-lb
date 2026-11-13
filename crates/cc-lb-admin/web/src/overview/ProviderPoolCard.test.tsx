@@ -1,5 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
+import { poolGroupPlaceholders } from '../components/upstreams/quotaWindowVisibility';
 import { PoolQuotaLegend } from '../designs/default/OverviewPage';
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
 import { poolWindowPace, poolWindowResets } from '../routes/-overviewPoolQuota';
@@ -262,5 +263,91 @@ describe('provider pool quota legend', () => {
     expect(
       row.querySelector('[data-slot="pool-quota-legend-reset"]')?.textContent,
     ).toBe('—');
+  });
+});
+
+describe('Gemini group placeholder in the provider pool card', () => {
+  const GEMINI = ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'];
+
+  function legendFor(
+    response: AggregateResponse,
+    windows: PoolHistoryWindowResponse[],
+  ) {
+    const visible = presentProviderWindows(GEMINI, response, windows, false);
+    const placeholders = poolGroupPlaceholders(
+      GEMINI,
+      visible,
+      response,
+      false,
+    );
+    return { visible, placeholders };
+  }
+
+  it('QA-1: keeps an all-absent 5h beside a reported 7d as not reported', () => {
+    const { visible, placeholders } = legendFor(
+      aggregate([
+        aggregateWindow('gemini_5h', 'absent', null),
+        aggregateWindow('gemini_7d', 'fresh', 100),
+        aggregateWindow('third_party_5h', 'absent', null),
+        aggregateWindow('third_party_7d', 'absent', null),
+      ]),
+      history(['gemini_5h', 'gemini_7d']),
+    );
+    expect(visible).toEqual(['gemini_7d']);
+    expect(placeholders).toEqual({ gemini_5h: 'not-reported' });
+
+    render(
+      <PoolQuotaLegend
+        latest={{ gemini_7d: 100 }}
+        nowUnixSecs={NOW}
+        placeholders={placeholders}
+        windows={['gemini_5h', 'gemini_7d']}
+      />,
+    );
+    const [fiveHour, weekly] = screen.getAllByTestId('pool-quota-legend-slot');
+    expect(fiveHour.dataset.window).toBe('gemini_5h');
+    expect(fiveHour.dataset.placeholder).toBe('not-reported');
+    expect(fiveHour.textContent).toBe('Gemini 5hNot reported');
+    expect(fiveHour.getAttribute('aria-label')).toBe(
+      'Gemini models · 5-hour limit window, Not reported',
+    );
+    expect(fiveHour.querySelector('[role="meter"]')).toBeNull();
+    expect(
+      fiveHour.querySelector('[data-slot="pool-quota-legend-used"]'),
+    ).toBeNull();
+    expect(
+      fiveHour.querySelector('[data-slot="pool-quota-legend-reset"]'),
+    ).toBeNull();
+    expect(
+      weekly.querySelector('[data-slot="pool-quota-legend-used"]')?.textContent,
+    ).toBe('100%');
+  });
+
+  it('QA-3: a sibling without absent lots has no reading', () => {
+    const { placeholders } = legendFor(
+      aggregate([aggregateWindow('third_party_5h', 'fresh', 30)]),
+      history(['third_party_5h']),
+    );
+    expect(placeholders).toEqual({ third_party_7d: 'no-reading' });
+  });
+
+  it('QA-2/4: no placeholder when both or neither group window is reported, or while loading', () => {
+    expect(
+      legendFor(
+        aggregate([
+          aggregateWindow('gemini_5h', 'fresh', 20),
+          aggregateWindow('gemini_7d', 'fresh', 40),
+          aggregateWindow('third_party_5h', 'absent', null),
+          aggregateWindow('third_party_7d', 'absent', null),
+        ]),
+        history(['gemini_5h', 'gemini_7d']),
+      ).placeholders,
+    ).toEqual({});
+    expect(
+      poolGroupPlaceholders(GEMINI, ['gemini_7d'], undefined, true),
+    ).toEqual({});
+    expect(
+      poolGroupPlaceholders(['5h', '7d'], ['7d'], undefined, false),
+    ).toEqual({});
   });
 });

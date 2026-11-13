@@ -1105,10 +1105,23 @@ describe('/upstreams Gemini list geometry', () => {
     expect(
       Array.from(quota.children, (cell) => cell.getAttribute('data-window')),
     ).toEqual(['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d']);
+    // Unread siblings of reported group windows stay as `No reading` placeholders.
+    for (const window of ['gemini_7d', 'third_party_5h']) {
+      const cell = quota.querySelector<HTMLElement>(
+        `[data-window="${window}"]`,
+      );
+      expect(cell?.className).not.toContain('invisible');
+      expect(cell?.getAttribute('aria-hidden')).toBeNull();
+      expect(cell?.getAttribute('data-placeholder')).toBe('no-reading');
+      expect(cell?.getAttribute('title')).toMatch(/: No reading$/);
+      expect(cell?.textContent).toMatch(/—No reading$/);
+      expect(cell?.querySelector('.sr-only')?.textContent).toBe('No reading');
+      expect(cell?.querySelector('[role="meter"]')).toBeNull();
+      expect(cell?.textContent).not.toContain('%');
+    }
     expect(
-      quota.querySelector('[data-window="gemini_7d"]')?.className,
-    ).toContain('invisible');
-    expect(quota.textContent).not.toContain('—');
+      quota.querySelector('[data-window="gemini_5h"]')?.textContent,
+    ).toContain('25%');
     const apiKeyRow = screen.getByRole('button', { name: /Gemini API/ });
     expect(within(apiKeyRow).queryByTestId('upstream-row-quota')).toBeNull();
     const anthropicRow = screen.getByRole('button', { name: /OAuth Primary/ });

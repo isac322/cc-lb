@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router';
 import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
+import { poolGroupPlaceholders } from '../components/upstreams/quotaWindowVisibility';
 import {
   PoolQuotaLegend,
   PoolQuotaThemedChart,
@@ -112,6 +113,23 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
         loading,
       ),
     [loading, normalizedAggregate, normalizedHistory, providerWindowKeys],
+  );
+  const placeholders = useMemo(
+    () =>
+      poolGroupPlaceholders(
+        providerWindowKeys,
+        visibleWindows,
+        normalizedAggregate,
+        loading,
+      ),
+    [loading, normalizedAggregate, providerWindowKeys, visibleWindows],
+  );
+  const legendWindows = useMemo(
+    () =>
+      providerWindowKeys.filter(
+        (window) => visibleWindows.includes(window) || window in placeholders,
+      ),
+    [placeholders, providerWindowKeys, visibleWindows],
   );
   const latestSnapshotUnixSecs = useMemo(
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
@@ -252,7 +270,8 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 resets={resets}
                 paces={paces}
                 timeZone={timeZone}
-                windows={visibleWindows}
+                placeholders={placeholders}
+                windows={legendWindows}
               />
               {weighting === 'equal' ? (
                 <span className="sr-only">

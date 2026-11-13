@@ -103,6 +103,8 @@ import {
   QuotaWindowRows,
 } from '../components/upstreams/QuotaWindowRows';
 import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  geminiGroupPlaceholderState,
   hasQuotaCardPace,
   selectQuotaCardSnapshots,
   selectQuotaDetailState,
@@ -263,7 +265,10 @@ const ROW_WINDOWS_BY_PROVIDER: Record<
   ],
 };
 
-/** Hide provider windows only when every OAuth row proves them absent. */
+/**
+ * Hide provider windows only when every OAuth row proves them absent and no
+ * row keeps them as a Gemini group placeholder beside a reported sibling.
+ */
 function visibleRowWindowsByProvider(
   rows: readonly UpstreamUsageRow[],
 ): Record<ProviderFamily, readonly (readonly [string, string])[]> {
@@ -288,7 +293,8 @@ function visibleRowWindowsByProvider(
         oauthRows.some(
           (row) =>
             row.windows.find((snapshot) => snapshot.window === windowName)
-              ?.state !== 'absent',
+              ?.state !== 'absent' ||
+            geminiGroupPlaceholderState(row.windows, windowName) != null,
         ),
     );
   }
@@ -775,6 +781,30 @@ function UpstreamsPage() {
                   const snap = row.windows.find(
                     (candidate) => candidate.window === windowName,
                   );
+                  const placeholder = geminiGroupPlaceholderState(
+                    row.windows,
+                    windowName,
+                  );
+                  if (placeholder != null) {
+                    const status = GEMINI_GROUP_PLACEHOLDER_TEXT[placeholder];
+                    return (
+                      <span
+                        key={windowName}
+                        className={ROW_FACT_CLASS}
+                        data-window={windowName}
+                        data-placeholder={placeholder}
+                        title={`${windowLabel(windowName, { long: true })}: ${status}`}
+                      >
+                        <span className="text-text-faint">
+                          {windowLabel(windowName)}
+                        </span>
+                        <span className="text-right text-text-faint">
+                          <span aria-hidden="true">—</span>
+                          <span className="sr-only">{status}</span>
+                        </span>
+                      </span>
+                    );
+                  }
                   if (snap?.state === 'absent') {
                     return (
                       <span
@@ -1630,6 +1660,10 @@ export function DetailView({
               snap={snap}
               creditObservations={selectedLatest?.windows}
               nowUnixSecs={nowUnixSecs}
+              placeholder={geminiGroupPlaceholderState(
+                selectedLatest?.windows,
+                snap.window,
+              )}
             />
           ))}
           {rawMeters.map((meter) => (

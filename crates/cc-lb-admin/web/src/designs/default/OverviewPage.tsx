@@ -67,6 +67,11 @@ import {
   UpstreamApplyFailureSummary,
 } from '../../components/upstreams/OAuthReconnectNotice';
 import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  type GeminiGroupPlaceholderState,
+  poolGroupPlaceholders,
+} from '../../components/upstreams/quotaWindowVisibility';
+import {
   UpstreamUsageTable,
   useUpstreamUsageData,
 } from '../../components/upstreams/UpstreamUsageTable';
@@ -1259,6 +1264,8 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   rangeWords,
   windowLabels,
   windows,
+  legendWindows,
+  placeholders,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
@@ -1267,6 +1274,9 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   rangeWords: string;
   windowLabels?: Partial<Record<PoolQuotaWindow, string>>;
   windows?: readonly PoolQuotaWindow[];
+  /** Legend rows: the plotted windows plus Gemini group placeholders. */
+  legendWindows?: readonly PoolQuotaWindow[];
+  placeholders?: Partial<Record<PoolQuotaWindow, GeminiGroupPlaceholderState>>;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -1300,7 +1310,8 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
           timeZone={timeZone}
           loading={loading}
           windowLabels={windowLabels}
-          windows={scopedWindows}
+          placeholders={placeholders}
+          windows={legendWindows ?? scopedWindows}
         />
         <div
           className="relative h-[200px] w-full min-w-0 md:h-[240px] lg:h-[320px]"
@@ -1530,6 +1541,7 @@ export function PoolQuotaLegend({
   windows,
   loading = false,
   windowLabels,
+  placeholders,
 }: {
   latest?: PoolQuotaLatest;
   resets?: Record<string, number | null>;
@@ -1539,6 +1551,8 @@ export function PoolQuotaLegend({
   loading?: boolean;
   windowLabels?: Partial<Record<string, string>>;
   windows?: readonly PoolQuotaWindow[];
+  /** Gemini group windows shown only as a neutral status beside a reported sibling. */
+  placeholders?: Partial<Record<string, GeminiGroupPlaceholderState>>;
 }) {
   return (
     <div className="min-w-0" data-testid="pool-quota-legend">
@@ -1560,6 +1574,38 @@ export function PoolQuotaLegend({
           <span className="text-right whitespace-nowrap">Resets in</span>
         </div>
         {(windows ?? POOL_QUOTA_WINDOWS).map((window) => {
+          const shortLabel = windowLabels?.[window] ?? windowLabel(window);
+          const longLabel = `${windowLabel(window, { long: true })
+            .replace(/\b5h\b/g, '5-hour')
+            .replace(/\b7d\b/g, '7-day')} window`;
+          const placeholder = loading ? undefined : placeholders?.[window];
+          if (placeholder != null) {
+            const status = GEMINI_GROUP_PLACEHOLDER_TEXT[placeholder];
+            return (
+              <div
+                aria-label={`${longLabel}, ${status}`}
+                className={POOL_QUOTA_LEGEND_ROW_CLASS}
+                key={window}
+                role="group"
+                title={longLabel}
+                data-testid="pool-quota-legend-slot"
+                data-slot="pool-quota-legend-row"
+                data-window={window}
+                data-placeholder={placeholder}
+              >
+                <span className="inline-flex min-w-0 items-center gap-2 text-text-muted">
+                  <WindowChip window={window} />
+                  <span className="whitespace-nowrap">{shortLabel}</span>
+                </span>
+                <span
+                  className="col-span-3 min-w-0 truncate text-text-muted"
+                  data-slot="pool-quota-legend-placeholder"
+                >
+                  {status}
+                </span>
+              </div>
+            );
+          }
           const value = latest?.[window] ?? null;
           const reset = resets?.[window] ?? null;
           const resetText =
@@ -1571,10 +1617,6 @@ export function PoolQuotaLegend({
               ? formatResetIn(reset, nowUnixSecs, { compact: true })
               : null;
           const pace = paces?.[window] ?? null;
-          const shortLabel = windowLabels?.[window] ?? windowLabel(window);
-          const longLabel = `${windowLabel(window, { long: true })
-            .replace(/\b5h\b/g, '5-hour')
-            .replace(/\b7d\b/g, '7-day')} window`;
           const valueText =
             value == null ? 'No reading' : `${formatQuotaPercent(value)} used`;
           const accessibleText = loading
@@ -1847,6 +1889,29 @@ export function ProviderOverviewPage({
       quotaLoading,
     ],
   );
+  const poolPlaceholders = useMemo(
+    () =>
+      poolGroupPlaceholders(
+        poolChartWindows,
+        visiblePoolWindows,
+        normalizedPoolAggregate,
+        quotaLoading,
+      ),
+    [
+      normalizedPoolAggregate,
+      poolChartWindows,
+      quotaLoading,
+      visiblePoolWindows,
+    ],
+  );
+  const poolLegendWindows = useMemo(
+    () =>
+      poolChartWindows.filter(
+        (window) =>
+          visiblePoolWindows.includes(window) || window in poolPlaceholders,
+      ),
+    [poolChartWindows, poolPlaceholders, visiblePoolWindows],
+  );
   const chartData = useMemo(
     () => buildPoolQuotaChartData(normalizedPoolHistoryWindows),
     [normalizedPoolHistoryWindows],
@@ -2067,6 +2132,8 @@ export function ProviderOverviewPage({
                 rangeWords={rangeWords}
                 windowLabels={poolWindowLabels}
                 windows={visiblePoolWindows}
+                legendWindows={poolLegendWindows}
+                placeholders={poolPlaceholders}
               />
 
               <UsageBlock

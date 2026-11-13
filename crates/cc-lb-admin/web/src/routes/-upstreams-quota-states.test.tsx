@@ -283,7 +283,10 @@ describe('QA-20: real upstream detail quota state branches', () => {
     let section = quotaSection();
     const rows = section.getAllByRole('listitem');
     expect(rows[0].getAttribute('data-window')).toBe('gemini_5h');
-    expect(rows[1].getAttribute('data-period-unknown')).toBe('gemini');
+    // The unreported weekly sibling stays as a neutral placeholder (rule A).
+    expect(rows[1].getAttribute('data-window')).toBe('gemini_7d');
+    expect(rows[1].getAttribute('data-placeholder')).toBe('no-reading');
+    expect(rows[2].getAttribute('data-period-unknown')).toBe('gemini');
     expect(section.getByText('even pace', { exact: true })).not.toBeNull();
     setLatest(
       latestRow([quotaSnapshot({ utilization: 0, resets_at_unix_secs: null })]),
@@ -296,5 +299,110 @@ describe('QA-20: real upstream detail quota state branches', () => {
     view.rerender(element());
     expect(quotaSection().getByText('Not offered')).not.toBeNull();
     expect(quotaSection().queryByTestId('quota-freshness')).toBeNull();
+  });
+});
+
+describe('Gemini group placeholder in the detail pane and list row', () => {
+  const weekly = quotaSnapshot({
+    window: 'gemini_7d',
+    utilization: 1,
+    resets_at_unix_secs: NOW + 86_400,
+  });
+  function listFacts() {
+    const facts = screen.getByTestId('upstream-row-quota');
+    return {
+      facts,
+      cell: (window: string) => {
+        const cell = facts.querySelector(`[data-window="${window}"]`);
+        if (!(cell instanceof HTMLElement)) throw new Error(`${window} cell`);
+        return cell;
+      },
+    };
+  }
+
+  it.each([
+    [
+      'weekly 100% with 5h absent (missing or disabled)',
+      quotaSnapshot({
+        window: 'gemini_5h',
+        state: 'absent',
+        utilization: null,
+        resets_at_unix_secs: null,
+      }),
+      'not-reported',
+      'Not reported',
+    ],
+    [
+      'weekly 100% with 5h unobserved',
+      quotaSnapshot({
+        window: 'gemini_5h',
+        state: 'unobserved',
+        utilization: null,
+        resets_at_unix_secs: null,
+        observed_at_unix_millis: null,
+      }),
+      'no-reading',
+      'No reading',
+    ],
+  ] as const)(
+    'QA-1/3: %s keeps a neutral 5h placeholder',
+    (_name, fiveHour, state, text) => {
+      setLatest(
+        latestRow([fiveHour, weekly, ...absentWindows('gemini').slice(2)]),
+      );
+      render(element());
+      const section = quotaSection();
+      const rows = section.getAllByRole('listitem');
+      expect(rows.map((row) => row.getAttribute('data-window'))).toEqual([
+        'gemini_5h',
+        'gemini_7d',
+      ]);
+      expect(rows[0].getAttribute('data-placeholder')).toBe(state);
+      expect(rows[0].textContent).toBe(`Gemini 5h${text}`);
+      expect(rows[0].querySelector('[role="meter"]')).toBeNull();
+      expect(rows[1].textContent).toContain('100% used');
+      expect(section.getAllByRole('meter')).toHaveLength(1);
+      expect(section.queryByText('Not offered')).toBeNull();
+
+      const { cell } = listFacts();
+      expect(cell('gemini_5h').getAttribute('data-placeholder')).toBe(state);
+      expect(cell('gemini_5h').textContent).toBe(`Gemini 5h—${text}`);
+      expect(cell('gemini_5h').getAttribute('aria-hidden')).toBeNull();
+      expect(cell('gemini_7d').textContent).toBe('Gemini 7d100%');
+    },
+  );
+
+  it('QA-2: both windows reported render normal meters without placeholders', () => {
+    setLatest(
+      latestRow([
+        quotaSnapshot({ window: 'gemini_5h', utilization: 0.4 }),
+        weekly,
+      ]),
+    );
+    render(element());
+    const section = quotaSection();
+    expect(section.getAllByRole('meter')).toHaveLength(2);
+    expect(document.querySelector('[data-placeholder]')).toBeNull();
+  });
+
+  it('QA-4: a group without readings stays hidden in the pane and list', () => {
+    setLatest(
+      latestRow([
+        ...absentWindows('gemini').slice(0, 2),
+        quotaSnapshot({ window: 'third_party_5h', utilization: 0.9 }),
+        quotaSnapshot({ window: 'third_party_7d', utilization: 0.3 }),
+      ]),
+    );
+    render(element());
+    const section = quotaSection();
+    expect(
+      section
+        .getAllByRole('listitem')
+        .map((row) => row.getAttribute('data-window')),
+    ).toEqual(['third_party_5h', 'third_party_7d']);
+    expect(document.querySelector('[data-placeholder]')).toBeNull();
+    const { facts } = listFacts();
+    expect(facts.querySelector('[data-window="gemini_5h"]')).toBeNull();
+    expect(facts.querySelector('[data-window="gemini_7d"]')).toBeNull();
   });
 });

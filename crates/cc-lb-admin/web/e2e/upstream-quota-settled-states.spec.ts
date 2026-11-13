@@ -28,7 +28,10 @@ async function expectNeutralRaw(section: Locator) {
   }
 }
 async function expectReadableRaw(section: Locator) {
-  const ratios = await section.locator('[data-period-unknown]').evaluateAll((rows) => {
+  await expectReadable(section.locator('[data-period-unknown]'), '[title], .text-caption, .text-text');
+}
+async function expectReadable(rowsLocator: Locator, leafSelector: string) {
+  const ratios = await rowsLocator.evaluateAll((rows, selector) => {
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 1;
     const ctx = canvas.getContext('2d');
@@ -43,7 +46,7 @@ async function expectReadableRaw(section: Locator) {
       const linear = rgb.slice(0, 3).map((c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
       return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
     }
-    return rows.flatMap((row) => [...row.querySelectorAll<HTMLElement>('[title], .text-caption, .text-text')]
+    return rows.flatMap((row) => [...row.querySelectorAll<HTMLElement>(selector)]
       .filter((el) => el.textContent?.trim() && el.childElementCount === 0)
       .map((el) => {
         const ancestors: Element[] = [];
@@ -59,7 +62,7 @@ async function expectReadableRaw(section: Locator) {
         const b = luminance(background);
         return { text: el.textContent, ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) };
       }));
-  });
+  }, leafSelector);
   expect(ratios.length).toBeGreaterThan(0);
   for (const result of ratios) expect(result.ratio, result.text ?? '').toBeGreaterThanOrEqual(4.5);
 }
@@ -80,7 +83,9 @@ for (const width of [390, 768, 1440]) {
         });
         await openQuota(page);
         const section = quota(page);
-        await expect(section.getByRole('listitem')).toHaveCount(3);
+        // Canonical gemini_5h, its unreported weekly sibling placeholder, two raw meters.
+        await expect(section.getByRole('listitem')).toHaveCount(4);
+        await expect(section.locator('[data-window="gemini_7d"]')).toHaveAttribute('data-placeholder', 'no-reading');
         await expect(section.getByTestId('pace-legend')).toHaveCount(1);
         await expect(section.locator('[data-slot="pace-marker"]')).toHaveCount(1);
         await expect(section.getByTestId('quota-freshness')).toBeVisible();
@@ -191,5 +196,89 @@ test('Anthropic placeholders remain visible until explicit canonical absence', a
   await fixtures.poll(latestRow(absentWindows('anthropic')));
   await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
   await expect(section.getByTestId('quota-snapshot-grid')).toHaveCount(0);
+  await expectNoOverflow(page);
+});
+
+// Rule A: a Gemini group keeps the sibling of a reported window as a neutral
+// placeholder. Never 0%, never inferred from the weekly 100%, never a meter.
+const weeklyExhausted = (window: 'gemini_7d' | 'third_party_7d') =>
+  quotaSnapshot({ window, utilization: 1, resets_at_unix_secs: NOW + 3 * 86400 });
+const absentWindow = (window: 'gemini_5h' | 'third_party_5h' | 'gemini_7d' | 'third_party_7d') =>
+  quotaSnapshot({ window, state: 'absent', utilization: null, resets_at_unix_secs: null });
+
+async function expectPlaceholder(page: Page, window: string, state: 'not-reported' | 'no-reading') {
+  const text = state === 'not-reported' ? 'Not reported' : 'No reading';
+  const row = quota(page).locator(`[role="listitem"][data-window="${window}"]`);
+  await expect(row).toHaveAttribute('data-placeholder', state);
+  await expect(row).toContainText(text);
+  await expect(row).not.toContainText(/%|Resets|Not started/);
+  await expect(row.getByRole('meter')).toHaveCount(0);
+  await expect(row.locator('[data-slot="pace-marker"]')).toHaveCount(0);
+}
+
+for (const width of [390, 768, 1440]) {
+  for (const theme of ['light', 'dark'] as const) {
+    test(`QA-1/9: weekly 100% with 5h absent keeps a neutral placeholder: ${width}px ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await installQuotaSettledFixtures(page, {
+        theme,
+        latest: latestRow([
+          absentWindow('gemini_5h'), weeklyExhausted('gemini_7d'),
+          absentWindow('third_party_5h'), absentWindow('third_party_7d'),
+        ]),
+      });
+      await openQuota(page);
+      const section = quota(page);
+      await expect(section.getByRole('listitem')).toHaveCount(2);
+      await expectPlaceholder(page, 'gemini_5h', 'not-reported');
+      await expect(section.locator('[data-window="gemini_7d"]').getByRole('meter')).toHaveAttribute('aria-valuetext', /^100% used/);
+      await expect(section.getByText('Not offered', { exact: true })).toHaveCount(0);
+      await expectReadable(section.locator('[data-placeholder]'), '[data-slot="window-placeholder"], [data-slot="window-placeholder"] *');
+      if (width >= 768) {
+        const cell = page.getByTestId('upstream-row-quota').locator('[data-window="gemini_5h"]');
+        await expect(cell).toHaveAttribute('data-placeholder', 'not-reported');
+        await expect(cell).toBeVisible();
+        await expect(cell).toHaveText('Gemini 5h—Not reported');
+      }
+      await expectNoOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath('gemini-placeholder.png'), fullPage: true });
+    });
+  }
+}
+
+test('QA-1/3/4: placeholders follow absent, disabled, unobserved and whole-group-absent polls', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const fixtures = await installQuotaSettledFixtures(page, {
+    latest: latestRow([absentWindow('gemini_5h'), weeklyExhausted('gemini_7d')]),
+  });
+  await openQuota(page);
+  const section = quota(page);
+  await expectPlaceholder(page, 'gemini_5h', 'not-reported');
+
+  // A disabled 5h bucket is persisted as `absent`, like an omitted one; per group.
+  await fixtures.poll(latestRow([
+    quotaSnapshot({ window: 'gemini_5h', utilization: 0.3 }), quotaSnapshot({ window: 'gemini_7d', utilization: 0.5 }),
+    absentWindow('third_party_5h'), weeklyExhausted('third_party_7d'),
+  ]));
+  await expect(section.getByRole('listitem')).toHaveCount(4);
+  await expect(section.getByRole('meter')).toHaveCount(3);
+  await expectPlaceholder(page, 'third_party_5h', 'not-reported');
+
+  await fixtures.poll(latestRow([
+    quotaSnapshot({ window: 'gemini_5h', state: 'unobserved', utilization: null, resets_at_unix_secs: null, observed_at_unix_millis: null }),
+    weeklyExhausted('gemini_7d'),
+  ]));
+  await expectPlaceholder(page, 'gemini_5h', 'no-reading');
+
+  await fixtures.poll(latestRow([
+    absentWindow('gemini_5h'), absentWindow('gemini_7d'),
+    quotaSnapshot({ window: 'third_party_5h', utilization: 0.9 }), quotaSnapshot({ window: 'third_party_7d', utilization: 0.3 }),
+  ]));
+  await expect(section.getByRole('listitem')).toHaveCount(2);
+  await expect(section.locator('[data-placeholder]')).toHaveCount(0);
+  await expect(section.locator('[data-window^="gemini_"]')).toHaveCount(0);
+
+  await fixtures.poll(latestRow(absentWindows('gemini')));
+  await expect(section.getByText('Not offered', { exact: true })).toBeVisible();
   await expectNoOverflow(page);
 });

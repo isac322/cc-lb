@@ -1,9 +1,12 @@
-// The Overview's upstream usage table: Upstream plus each provider's
-// subscription windows, each cell reading what is USED ("N% used" + UsageMeter
-// + reset caption), like the utilization Claude reports. Rows sort by their
-// most-used window (problems first, API-key and disabled upstreams last) and
-// link to the upstream. Below the container's wide breakpoint a row stacks:
-// the name line, then one line per window repeating its label.
+// The Overview's upstream usage table: Upstream plus subscription windows,
+// each cell reading what is USED ("N% used" + UsageMeter + reset caption),
+// like the utilization Claude reports. Provider pages show each provider's own
+// windows as columns; the all-provider Overview (`layout="shared"`) shows
+// generic 5h and 7d columns into which each row maps its own windows as
+// separate, sub-labeled slots. Rows sort by their most-used window (problems
+// first, API-key and disabled upstreams last) and link to the upstream. Below
+// the container's wide breakpoint a row stacks: the name line, then one line
+// per window repeating its label.
 import { Link } from '@tanstack/react-router';
 import {
   type CSSProperties,
@@ -16,6 +19,7 @@ import {
 } from 'react';
 import type {
   LatestResponse,
+  PeriodUnknownQuotaMeter,
   QuotaSnapshot,
   SubscriptionQuotaWindow,
 } from '../../lib/api';
@@ -42,6 +46,7 @@ import {
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
+  type QuotaSeverity,
   quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
@@ -52,7 +57,13 @@ import {
   CodexCreditSummary,
   selectCodexCredits,
 } from './codexCredits';
-import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
+import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  type GeminiGroupPlaceholderState,
+  geminiGroupPlaceholderState,
+  QUOTA_WINDOW_ORDER,
+  selectQuotaDetailState,
+} from './quotaWindowVisibility';
 import {
   UpstreamCouponAction,
   UpstreamCouponTrigger,
@@ -118,6 +129,8 @@ export interface UpstreamUsageRow {
   runtimeError: string | null;
   /** Latest quota snapshots for this upstream; `[]` when none. */
   windows: QuotaSnapshot[];
+  /** Provider meters without a known period (Gemini); `[]` when none. */
+  periodUnknownMeters: PeriodUnknownQuotaMeter[];
   /** Spend and tokens over the last 7 days; `null` when unknown. */
   usage7d: UpstreamUsage7d | null;
 }
@@ -159,14 +172,16 @@ export function buildUpstreamUsageRows({
   return upstreams.map((upstream) => {
     const runtime = status?.find((s) => s.id === upstream.id);
     const nudge = nudges.get(upstream.id) ?? null;
+    const latestRow = latest?.upstreams.find(
+      (l) => l.upstream_id === upstream.id,
+    );
     return {
       upstream,
       health: upstreamHealth(upstream.enabled, runtime?.status, nudge),
       nudge,
       runtimeError: runtime?.last_apply_error ?? null,
-      windows:
-        latest?.upstreams.find((l) => l.upstream_id === upstream.id)?.windows ??
-        [],
+      windows: latestRow?.windows ?? [],
+      periodUnknownMeters: latestRow?.period_unknown_meters ?? [],
       usage7d: usageByUpstreamId.get(upstream.id) ?? null,
     };
   });
@@ -374,6 +389,89 @@ function resetCaption(
   };
 }
 
+/** One window's figure, even pace, severity, caption and meter name. */
+function windowReading(
+  windowName: UsageWindow,
+  snap: QuotaSnapshot | undefined,
+  nowUnixSecs: number,
+  timeZone: string,
+) {
+  const longLabel = windowLabel(windowName, { long: true });
+  const used =
+    snap?.utilization == null || !Number.isFinite(snap.utilization)
+      ? null
+      : snap.utilization * 100;
+  // A stale reading is never shown as current: its caption says `Stale` with
+  // the reading's age (warn ink; observed time and reset in `title`), its
+  // meter name says so, and it draws no pace tick or pace-relative severity.
+  const stale = snap?.state === 'stale' && used != null;
+  // Even pace only while a current window runs (a reading and a reset ahead).
+  const pace =
+    used == null || stale
+      ? null
+      : quotaPacePct(windowName, snap?.resets_at_unix_secs, nowUnixSecs);
+  const reset = snap
+    ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
+    : { text: 'No reading' };
+  const observed =
+    snap?.observed_at_unix_millis == null
+      ? null
+      : `Observed ${formatQuotaStamp(Math.floor(snap.observed_at_unix_millis / 1000), timeZone)}`;
+  return {
+    longLabel,
+    used,
+    pace,
+    stale,
+    severity: quotaSeverity(used, pace),
+    meterLabel: `${longLabel} window used${stale ? ', stale reading' : ''}`,
+    caption: stale
+      ? {
+          text:
+            snap?.age_secs == null
+              ? 'Stale'
+              : `Stale · ${formatSpan(snap.age_secs)} ago`,
+          title: ['Stale reading', observed, reset.title ?? reset.text]
+            .filter((part) => part != null)
+            .join(' · '),
+          className: 'text-warn-text',
+        }
+      : {
+          text: reset.text,
+          title: reset.title ?? reset.text,
+          className: 'text-text-muted',
+        },
+  };
+}
+
+/** "42% used", or "–" read as "No reading" without a finite reading. */
+function UsedFigure({
+  used,
+  severity,
+  className,
+}: {
+  used: number | null;
+  severity: QuotaSeverity;
+  className?: string;
+}) {
+  return (
+    <span className={cx('flex items-baseline gap-1 tabular-nums', className)}>
+      <span
+        className={cx(
+          'text-body font-medium',
+          QUOTA_SEVERITY_TEXT_CLASS[severity],
+        )}
+      >
+        {formatQuotaPercent(used)}
+      </span>
+      {used == null ? (
+        <span className="sr-only">No reading</span>
+      ) : (
+        <span className="text-caption text-text-muted">used</span>
+      )}
+    </span>
+  );
+}
+
 function WindowCell({
   windowName,
   snap,
@@ -412,20 +510,8 @@ function WindowCell({
     );
   }
   const label = windowLabel(windowName);
-  const longLabel = windowLabel(windowName, { long: true });
-  const used =
-    snap?.utilization == null || !Number.isFinite(snap.utilization)
-      ? null
-      : snap.utilization * 100;
-  // Even pace only while the window runs (a reading and a reset ahead).
-  const pace =
-    used == null
-      ? null
-      : quotaPacePct(windowName, snap?.resets_at_unix_secs, nowUnixSecs);
-  const severity = quotaSeverity(used, pace);
-  const reset = snap
-    ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
-    : { text: 'No reading' };
+  const { longLabel, used, pace, stale, severity, meterLabel, caption } =
+    windowReading(windowName, snap, nowUnixSecs, timeZone);
   // Narrow containers (phones) read one line per window above its meter:
   //   [label] [N% used]            [resets in …]
   //   [meter ─────────────────────────────────]
@@ -433,6 +519,7 @@ function WindowCell({
   return (
     <div
       className={WINDOW_CELL_CLASS}
+      data-state={stale ? 'stale' : undefined}
       data-testid="usage-cell"
       data-window={windowName}
     >
@@ -451,36 +538,19 @@ function WindowCell({
         </>
       ) : (
         <>
-          <span className="flex items-baseline gap-1 tabular-nums">
-            <span
-              className={cx(
-                'text-body font-medium',
-                QUOTA_SEVERITY_TEXT_CLASS[severity],
-              )}
-            >
-              {formatQuotaPercent(used)}
-            </span>
-            {used == null ? (
-              <span className="sr-only">No reading</span>
-            ) : (
-              <span className="text-caption text-text-muted">used</span>
-            )}
-          </span>
+          <UsedFigure severity={severity} used={used} />
           <span
             className={cx(
               CAPTION_CELL_CLASS,
-              'text-caption tabular-nums text-text-muted',
+              'text-caption tabular-nums',
+              caption.className,
             )}
-            title={reset.title ?? reset.text}
+            title={caption.title}
           >
-            {reset.text}
+            {caption.text}
           </span>
           <div className={METER_CELL_CLASS}>
-            <UsageMeter
-              label={`${longLabel} window used`}
-              pacePct={pace}
-              usedPct={used}
-            />
+            <UsageMeter label={meterLabel} pacePct={pace} usedPct={used} />
           </div>
         </>
       )}
@@ -578,6 +648,299 @@ function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
   );
 }
 
+/**
+ * `provider`: each provider's own window columns (provider pages).
+ * `shared`: the all-provider Overview's generic duration columns.
+ */
+export type UpstreamUsageLayout = 'provider' | 'shared';
+
+/**
+ * The shared layout's duration columns. Each row maps its own windows into
+ * them as separate slots; readings are never merged, summed or averaged.
+ */
+const SHARED_USAGE_COLUMNS = ['5h', '7d'] as const;
+type SharedUsageColumn = (typeof SHARED_USAGE_COLUMNS)[number];
+
+function isSharedUsageColumn(window: UsageWindow): window is SharedUsageColumn {
+  return window === '5h' || window === '7d';
+}
+
+/** Gemini's model groups, in the order both shared columns list them. */
+const GEMINI_GROUP_SLOTS: readonly {
+  label: string;
+  windows: Readonly<Record<SharedUsageColumn, UsageWindow>>;
+}[] = [
+  {
+    label: 'Gemini models',
+    windows: { '5h': 'gemini_5h', '7d': 'gemini_7d' },
+  },
+  {
+    label: 'Claude & GPT-OSS',
+    windows: { '5h': 'third_party_5h', '7d': 'third_party_7d' },
+  },
+];
+
+interface SharedUsageSlot {
+  window: UsageWindow;
+  /** Scope inside the shared column; omitted for a provider's lone window. */
+  subLabel?: string;
+  /** Neutral placeholder in place of a reading; never a number or meter. */
+  placeholder?: GeminiGroupPlaceholderState;
+}
+
+/** What a shared cell says when the row has no slot for its column. */
+type SharedEmptyState = 'no-reading' | 'not-offered';
+
+/** A current figure: observed (fresh or stale) with a finite utilization. */
+function hasUsageReading(row: UpstreamUsageRow, window: UsageWindow) {
+  const snap = row.windows.find((s) => s.window === window);
+  return (
+    snap != null &&
+    (snap.state === 'fresh' || snap.state === 'stale') &&
+    snap.utilization != null &&
+    Number.isFinite(snap.utilization)
+  );
+}
+
+/**
+ * The row's slots in one shared column, in display order. A Gemini group
+ * with a reading in either duration keeps a slot in both columns, so the
+ * columns stay aligned; the unread side is a placeholder, never a number.
+ * `[]` means the cell shows its `sharedEmptyState` instead.
+ */
+function sharedColumnSlots(
+  row: UpstreamUsageRow,
+  column: SharedUsageColumn,
+): SharedUsageSlot[] {
+  if (!row.upstream.kind.endsWith('_oauth')) return [];
+  const provider = providerOf(row.upstream.kind);
+  if (provider === 'gemini') {
+    return GEMINI_GROUP_SLOTS.flatMap(
+      ({ label, windows }): SharedUsageSlot[] => {
+        if (!SHARED_USAGE_COLUMNS.some((c) => hasUsageReading(row, windows[c])))
+          return [];
+        const window = windows[column];
+        return hasUsageReading(row, window)
+          ? [{ window, subLabel: label }]
+          : [
+              {
+                window,
+                subLabel: label,
+                placeholder:
+                  geminiGroupPlaceholderState(row.windows, window) ??
+                  'no-reading',
+              },
+            ];
+      },
+    );
+  }
+  const fable = row.windows.find((s) => s.window === '7d_fable');
+  if (
+    provider !== 'anthropic' ||
+    column !== '7d' ||
+    fable == null ||
+    fable.state === 'absent'
+  ) {
+    return hasUsageReading(row, column) ? [{ window: column }] : [];
+  }
+  // Anthropic 7d with a model-specific Fable window: two separate slots.
+  const allModels: SharedUsageSlot[] = hasUsageReading(row, '7d')
+    ? [{ window: '7d', subLabel: 'All models' }]
+    : row.windows.find((s) => s.window === '7d')?.state === 'absent'
+      ? []
+      : [{ window: '7d', subLabel: 'All models', placeholder: 'no-reading' }];
+  return [
+    ...allModels,
+    hasUsageReading(row, '7d_fable')
+      ? { window: '7d_fable', subLabel: 'Fable' }
+      : { window: '7d_fable', subLabel: 'Fable', placeholder: 'no-reading' },
+  ];
+}
+
+/**
+ * Why a shared cell has no slot. "Not offered" only for proven absence: the
+ * Anthropic/OpenAI window itself, or a Gemini upstream whose four canonical
+ * windows are all absent with no raw meters (the detail pane's rule).
+ */
+function sharedEmptyState(
+  row: UpstreamUsageRow,
+  column: SharedUsageColumn,
+): SharedEmptyState {
+  const provider = providerOf(row.upstream.kind);
+  const absent =
+    provider === 'gemini'
+      ? selectQuotaDetailState({
+          latestWindows: row.windows,
+          cards: [],
+          rawMeters: row.periodUnknownMeters,
+          provider,
+        }) === 'not-offered'
+      : row.windows.find((s) => s.window === column)?.state === 'absent';
+  return absent ? 'not-offered' : 'no-reading';
+}
+
+const SLOT_CLASS = 'flex min-w-0 flex-col gap-1.5 py-2 first:pt-0 last:pb-0';
+
+/** One sub-labeled window inside a shared column cell. */
+function UsageSlot({
+  slot,
+  snap,
+  nowUnixSecs,
+  timeZone,
+}: {
+  slot: SharedUsageSlot;
+  snap: QuotaSnapshot | undefined;
+  nowUnixSecs: number;
+  timeZone: string;
+}) {
+  const longLabel = windowLabel(slot.window, { long: true });
+  // The header row is aria-hidden: name the full window for assistive tech.
+  const head = (status: ReactNode) => (
+    <div className="flex min-w-0 items-baseline justify-between gap-3">
+      <span
+        aria-hidden="true"
+        className="min-w-0 truncate text-caption font-medium text-text-muted"
+        title={longLabel}
+      >
+        {slot.subLabel}
+      </span>
+      <span className="sr-only">{longLabel}</span>
+      {status}
+    </div>
+  );
+  if (slot.placeholder != null) {
+    return (
+      <div
+        className={SLOT_CLASS}
+        data-state={slot.placeholder}
+        data-testid="usage-slot-placeholder"
+        data-window={slot.window}
+      >
+        {head(
+          <span className="shrink-0 text-caption text-text-muted">
+            {GEMINI_GROUP_PLACEHOLDER_TEXT[slot.placeholder]}
+          </span>,
+        )}
+      </div>
+    );
+  }
+  const { used, pace, stale, severity, meterLabel, caption } = windowReading(
+    slot.window,
+    snap,
+    nowUnixSecs,
+    timeZone,
+  );
+  return (
+    <div
+      className={SLOT_CLASS}
+      data-state={stale ? 'stale' : undefined}
+      data-testid="usage-cell"
+      data-window={slot.window}
+    >
+      {head(
+        <UsedFigure className="shrink-0" severity={severity} used={used} />,
+      )}
+      <UsageMeter label={meterLabel} pacePct={pace} usedPct={used} />
+      <span
+        className={cx('truncate text-caption tabular-nums', caption.className)}
+        title={caption.title}
+      >
+        {caption.text}
+      </span>
+    </div>
+  );
+}
+
+/** A row's cell in one shared column: one window, or stacked slots. */
+function SharedColumnCell({
+  row,
+  column,
+  pending,
+  nowUnixSecs,
+  timeZone,
+}: {
+  row: UpstreamUsageRow;
+  column: SharedUsageColumn;
+  pending: boolean;
+  nowUnixSecs: number;
+  timeZone: string;
+}) {
+  const snapOf = (window: UsageWindow) =>
+    row.windows.find((s) => s.window === window);
+  if (pending) {
+    return (
+      <WindowCell
+        nowUnixSecs={nowUnixSecs}
+        pending
+        snap={undefined}
+        timeZone={timeZone}
+        windowName={column}
+      />
+    );
+  }
+  const slots = sharedColumnSlots(row, column);
+  const [only] = slots;
+  if (only == null) {
+    // The shared column always exists: say why there is no figure, neutrally.
+    const state = sharedEmptyState(row, column);
+    return (
+      <div
+        className={WINDOW_CELL_CLASS}
+        data-state={state}
+        data-testid="usage-cell-status"
+        data-window={column}
+      >
+        {/* Wide rows show the header instead; keep the name for assistive tech. */}
+        <span className="text-label text-text-muted @4xl:sr-only">
+          {windowLabel(column)}
+        </span>
+        {state === 'not-offered' ? (
+          <span className="text-body text-text-faint">
+            <span aria-hidden="true">—</span>
+            <span className="sr-only">Not offered</span>
+          </span>
+        ) : (
+          <span className="text-caption text-text-muted">No reading</span>
+        )}
+      </div>
+    );
+  }
+  if (slots.length === 1 && only.subLabel == null) {
+    return (
+      <WindowCell
+        nowUnixSecs={nowUnixSecs}
+        pending={false}
+        snap={snapOf(only.window)}
+        timeZone={timeZone}
+        windowName={only.window}
+      />
+    );
+  }
+  return (
+    <div
+      className="min-w-0"
+      data-column={column}
+      data-testid="usage-cell-group"
+    >
+      {/* Below the wide breakpoint the header row is gone: repeat the label. */}
+      <span className="mb-1.5 block text-label text-text-muted @4xl:hidden">
+        {windowLabel(column)}
+      </span>
+      <div className="flex flex-col divide-y divide-row">
+        {slots.map((slot) => (
+          <UsageSlot
+            key={slot.window}
+            nowUnixSecs={nowUnixSecs}
+            slot={slot}
+            snap={snapOf(slot.window)}
+            timeZone={timeZone}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Stacked rows keep the section's own edge so names align with its heading;
 // the table row insets its cells like other tables.
 const ROW_CLASS =
@@ -590,12 +953,14 @@ function RowBody({
   nowUnixSecs,
   timeZone,
   tableWindows,
+  layout,
 }: {
   row: UpstreamUsageRow;
   pending: boolean;
   nowUnixSecs: number;
   timeZone: string;
   tableWindows?: readonly UsageWindow[];
+  layout: UpstreamUsageLayout;
 }) {
   const provider = providerOf(row.upstream.kind);
   const windows = tableWindows ?? USAGE_WINDOWS_BY_PROVIDER[provider];
@@ -608,6 +973,18 @@ function RowBody({
       </div>
       {row.upstream.kind.endsWith('_oauth') ? (
         windows.map((w) => {
+          if (layout === 'shared' && isSharedUsageColumn(w)) {
+            return (
+              <SharedColumnCell
+                key={w}
+                column={w}
+                nowUnixSecs={nowUnixSecs}
+                pending={pending}
+                row={row}
+                timeZone={timeZone}
+              />
+            );
+          }
           const snapshot = row.windows.find((s) => s.window === w);
           return !USAGE_WINDOWS_BY_PROVIDER[provider].includes(w) ||
             (snapshot?.state !== 'absent' &&
@@ -661,6 +1038,11 @@ export interface UpstreamUsageTableProps {
    * every row shows and there is no toggle.
    */
   collapsedRows?: number;
+  /**
+   * Column model. Only the all-provider Overview passes `shared`; provider
+   * pages keep each provider's own windows.
+   */
+  layout?: UpstreamUsageLayout;
 }
 
 /** The operation owner must outlive the sorted, optionally collapsed rows. */
@@ -724,6 +1106,7 @@ function UpstreamUsageRows({
   className,
   empty = null,
   collapsedRows = 8,
+  layout = 'provider',
   onCouponClick,
 }: UpstreamUsageTableProps & {
   onCouponClick: (
@@ -745,7 +1128,7 @@ function UpstreamUsageRows({
             key={i}
             className={cx(
               ROW_CLASS,
-              ROW_GRID_THREE,
+              layout === 'shared' ? ROW_GRID_TWO : ROW_GRID_THREE,
               'border-t border-row first:border-t-0',
             )}
             data-testid="upstream-list-loading-row"
@@ -753,7 +1136,10 @@ function UpstreamUsageRows({
             <div className="col-span-full flex flex-col gap-1.5 @4xl:col-span-1">
               <Skeleton className="h-5 w-32" />
             </div>
-            {DEFAULT_USAGE_WINDOWS.map((w) => (
+            {(layout === 'shared'
+              ? SHARED_USAGE_COLUMNS
+              : DEFAULT_USAGE_WINDOWS
+            ).map((w) => (
               <div key={w} className="flex flex-col gap-1.5">
                 <Skeleton className="h-5 w-16" />
                 <Skeleton className="h-1 w-full" />
@@ -780,20 +1166,33 @@ function UpstreamUsageRows({
   const sameProvider =
     firstProvider !== undefined &&
     sorted.every((row) => providerOf(row.upstream.kind) === firstProvider);
-  const candidateWindows =
-    sameProvider && firstProvider !== undefined
-      ? USAGE_WINDOWS_BY_PROVIDER[firstProvider]
-      : QUOTA_WINDOW_ORDER.filter((window) =>
-          sorted.some((row) =>
-            USAGE_WINDOWS_BY_PROVIDER[providerOf(row.upstream.kind)].includes(
-              window,
+  // Shared: generic 5h/7d for every provider; the Codex credits column keeps
+  // its own rule (any OpenAI row while pending, a credit reading once loaded).
+  const candidateWindows: readonly UsageWindow[] =
+    layout === 'shared'
+      ? [
+          ...SHARED_USAGE_COLUMNS,
+          ...(sorted.some((row) => providerOf(row.upstream.kind) === 'openai')
+            ? (['unified'] as const)
+            : []),
+        ]
+      : sameProvider && firstProvider !== undefined
+        ? USAGE_WINDOWS_BY_PROVIDER[firstProvider]
+        : QUOTA_WINDOW_ORDER.filter((window) =>
+            sorted.some((row) =>
+              USAGE_WINDOWS_BY_PROVIDER[providerOf(row.upstream.kind)].includes(
+                window,
+              ),
             ),
-          ),
-        );
+          );
+  // Shared 5h/7d columns always stay, whatever the fleet reports; other
+  // columns drop once loaded when no row reports them.
   const tableWindows = data.quotaPending
     ? candidateWindows
-    : candidateWindows.filter((window) =>
-        sorted.some((row) => hasReportedUsageWindow(row, window)),
+    : candidateWindows.filter(
+        (window) =>
+          (layout === 'shared' && isSharedUsageColumn(window)) ||
+          sorted.some((row) => hasReportedUsageWindow(row, window)),
       );
   const rowGrid = ROW_GRID_BY_COUNT[tableWindows.length] ?? ROW_GRID_MANY;
 
@@ -812,6 +1211,7 @@ function UpstreamUsageRows({
           'relative hidden border-b border-row py-2 pl-3 pr-20 text-label text-text-faint @4xl:grid',
           rowGrid,
         )}
+        data-testid="upstream-usage-header"
       >
         <span>Upstream</span>
         {tableWindows.map((w) => (
@@ -844,6 +1244,7 @@ function UpstreamUsageRows({
                 row={row}
                 timeZone={timeZone}
                 tableWindows={tableWindows}
+                layout={layout}
               />
             </Link>
             <div className="absolute right-0 top-1 w-max @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">

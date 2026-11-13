@@ -253,6 +253,7 @@ export function MultiProviderOverview() {
                 No upstreams configured.
               </p>
             }
+            layout="shared"
           />
         </Section>
         <LiveRequestsSection

@@ -185,7 +185,7 @@ jobs:
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
       - name: Verify and capture credit and provider pool views
         run: |
-          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts e2e/upstream-quota-settled-states.spec.ts --retries=0 \
+          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts e2e/upstream-quota-settled-states.spec.ts e2e/overview-shared-quota-columns.spec.ts --retries=0 \
             --output="$RUNNER_TEMP/codex-credit-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
       - name: Run keepalive and plugin catalog Playwright E2E

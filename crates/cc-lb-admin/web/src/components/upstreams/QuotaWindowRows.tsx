@@ -21,7 +21,12 @@ import { ResetCountdownParts } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
 import { CodexCreditSummary, selectCodexCredits } from './codexCredits';
 import { formatPeriodUnknownUsedPct } from './periodUnknownMeters';
-import { isOverageActive, quotaCardPacePct } from './quotaWindowVisibility';
+import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  type GeminiGroupPlaceholderState,
+  isOverageActive,
+  quotaCardPacePct,
+} from './quotaWindowVisibility';
 
 const ROWS_CLASS =
   'grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content] divide-y divide-border-row';
@@ -31,6 +36,8 @@ const NAME_CELL_CLASS = 'col-start-1 min-w-0 flex items-center gap-2';
 const METER_CELL_CLASS =
   'col-start-2 ml-3 min-w-0 flex items-center gap-3 @[40rem]:ml-6';
 const USED_CELL_CLASS = 'shrink-0 text-right text-body tabular-nums';
+const PLACEHOLDER_CELL_CLASS =
+  'col-start-2 ml-3 min-w-0 truncate text-body-sm text-text-muted @[40rem]:ml-6';
 const RESET_PREFIX_CELL_CLASS =
   'col-start-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
 const RESET_VALUE_CELL_CLASS =
@@ -83,19 +90,72 @@ function usd(minorUnits: number): string {
   })}`;
 }
 
+/**
+ * A Gemini group window kept beside its reported sibling: the label and a
+ * neutral status, with no meter, pace, reset or number.
+ */
+function QuotaPlaceholderRow({
+  window,
+  label,
+  state,
+}: {
+  window: string;
+  label?: string;
+  state: GeminiGroupPlaceholderState;
+}) {
+  return (
+    <div
+      role="listitem"
+      data-window={window}
+      data-placeholder={state}
+      className={ROW_CLASS}
+    >
+      <WindowName
+        window={window}
+        label={label ?? windowLabel(window)}
+        longLabel={windowLabel(window, { long: true })}
+      />
+      <span className={PLACEHOLDER_CELL_CLASS} data-slot="window-placeholder">
+        {state === 'not-reported' ? (
+          <Hint label="The provider's latest reading did not report this window. Its usage is not inferred from the other window.">
+            <span tabIndex={0} className={HINT_TRIGGER_CLASS}>
+              {GEMINI_GROUP_PLACEHOLDER_TEXT[state]}
+            </span>
+          </Hint>
+        ) : (
+          GEMINI_GROUP_PLACEHOLDER_TEXT[state]
+        )}
+      </span>
+      <EmptyResetCells />
+    </div>
+  );
+}
+
 export function QuotaWindowRow({
   snap,
   nowUnixSecs,
   label,
   creditObservations,
+  placeholder,
 }: {
   snap: QuotaSnapshot;
   nowUnixSecs: number;
   label?: string;
   creditObservations?: readonly QuotaSnapshot[];
+  /** From `geminiGroupPlaceholderState`: render the neutral placeholder. */
+  placeholder?: GeminiGroupPlaceholderState | null;
 }) {
   // The unified window is visible only when it carries Codex credit state.
   const windowName: string = snap.window;
+  if (placeholder != null) {
+    return (
+      <QuotaPlaceholderRow
+        window={windowName}
+        label={label}
+        state={placeholder}
+      />
+    );
+  }
   if (
     (windowName === 'unified' && snap.credits == null) ||
     snap.state === 'absent'

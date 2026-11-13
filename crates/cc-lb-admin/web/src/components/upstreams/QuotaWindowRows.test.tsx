@@ -379,6 +379,45 @@ describe('QuotaWindowRow', () => {
       'No reading',
     );
   });
+
+  it.each([
+    ['not-reported', 'absent', 'Not reported'],
+    ['no-reading', 'unobserved', 'No reading'],
+  ] as const)(
+    'renders a %s Gemini placeholder with its label and no meter, pace, reset or number',
+    (placeholder, state, text) => {
+      render(
+        <QuotaWindowRows>
+          <QuotaWindowRow
+            snap={snap({
+              window: 'gemini_5h',
+              state,
+              utilization: null,
+              resets_at_unix_secs: null,
+            })}
+            nowUnixSecs={NOW}
+            placeholder={placeholder}
+          />
+          <QuotaWindowRow
+            snap={snap({ window: 'gemini_7d', utilization: 1 })}
+            nowUnixSecs={NOW}
+          />
+        </QuotaWindowRows>,
+      );
+      const [row, weekly] = screen.getAllByRole('listitem');
+      expect(row.getAttribute('data-window')).toBe('gemini_5h');
+      expect(row.getAttribute('data-placeholder')).toBe(placeholder);
+      expect(row.textContent).toBe(`Gemini 5h${text}`);
+      expect(row.textContent).not.toMatch(/%|Resets|Not started|—/);
+      expect(row.querySelector('[role="meter"]')).toBeNull();
+      expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      expect(
+        row.querySelector('[class*="warn"], [class*="danger"]'),
+      ).toBeNull();
+      expect(weekly.textContent).toContain('100% used');
+      expect(screen.getAllByRole('meter')).toHaveLength(1);
+    },
+  );
 });
 
 describe('QA-18: period-unknown meter row', () => {
