@@ -7,7 +7,7 @@ use std::{
 use cc_lb_storage_api::{MetaStore, UsageRollupResolution, UsageRollupStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
-    AssertSqlSafe, PgPool,
+    AssertSqlSafe, Connection as _, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use uuid::Uuid;
@@ -44,19 +44,21 @@ async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() ->
         let migrator = sqlx::migrate!("./migrations");
         let mut blocker = pool.begin().await?;
         sqlx::query("LOCK TABLE usage_rollups_v2 IN ACCESS SHARE MODE").execute(&mut *blocker).await?;
-        let mut connection = pool.acquire().await?;
+        let mut connection = fixture.connect_standalone().await?;
         let started = Instant::now();
-        let blocked = migrator.run_direct(Some(167), &mut *connection, false).await;
+        let blocked = migrator.run_direct(Some(167), &mut connection, false).await;
         assert!(blocked.is_err(),"migration must honor its one-second lock_timeout");
         assert!(started.elapsed() < Duration::from_secs(5));
+        connection.close().await?;
         blocker.rollback().await?;
+        let mut connection = fixture.connect_standalone().await?;
         let started = Instant::now();
-        migrator.run_direct(Some(167), &mut *connection, false).await?;
+        migrator.run_direct(Some(167), &mut connection, false).await?;
         assert!(started.elapsed() < Duration::from_secs(15),"metadata migration exceeded startup lock-hold target");
         let started = Instant::now();
-        migrator.run_direct(Some(167), &mut *connection, false).await?;
+        migrator.run_direct(Some(167), &mut connection, false).await?;
         assert!(started.elapsed() < Duration::from_secs(2),"already-applied migration should be a fast no-op");
-        drop(connection);
+        connection.close().await?;
         assert_eq!(totals(pool).await?,(0,0,0));
         let high_water = fixture.storage.usage_rollup_checkpoint().await?;
         let before = fixture.storage.usage_rollup_revision().await?;
@@ -147,6 +149,7 @@ async fn shape(pool: &PgPool) -> TestResult<Vec<(String, String, String, Option<
 }
 
 struct Fixture {
+    url: String,
     schema: String,
     admin: PgPool,
     storage: PostgresStorage,
@@ -177,6 +180,7 @@ impl Fixture {
             .await?;
         let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
         let fixture = Self {
+            url,
             schema,
             admin,
             storage,
@@ -185,10 +189,12 @@ impl Fixture {
             if version == 167 {
                 fixture.storage.initialize().await?;
             } else {
-                let mut connection = fixture.storage.pool().acquire().await?;
-                sqlx::migrate!("./migrations")
-                    .run_direct(Some(version), &mut *connection, false)
-                    .await?;
+                let mut connection = fixture.connect_standalone().await?;
+                let res = sqlx::migrate!("./migrations")
+                    .run_direct(Some(version), &mut connection, false)
+                    .await;
+                connection.close().await?;
+                res?;
             }
             Ok(())
         }
@@ -198,6 +204,13 @@ impl Fixture {
             return Err(error);
         }
         Ok(Some(fixture))
+    }
+
+    async fn connect_standalone(&self) -> TestResult<sqlx::PgConnection> {
+        let search_path = format!("{}, public", self.schema);
+        let options =
+            PgConnectOptions::from_str(&self.url)?.options([("search_path", search_path.as_str())]);
+        Ok(sqlx::PgConnection::connect_with(&options).await?)
     }
 
     async fn drop_schema(self) -> TestResult {

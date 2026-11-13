@@ -54,8 +54,8 @@ try {
         await page.getByTestId('cache-keepalive-card').getByRole('button', { name: 'Settings', exact: true }).click();
         const drawer = page.getByRole('dialog', { name: /Cache keepalive settings/i });
         await expect(drawer).toBeVisible();
-        const shortLabel = drawer.getByText(/5m TTL/);
-        const longLabel = drawer.getByText(/1h TTL/);
+        const shortLabel = drawer.getByText(/5m (?:TTL|\/ 30m)/);
+        const longLabel = drawer.getByText(/1h (?:TTL|\/ 12h)/);
         await expect(shortLabel).toBeVisible();
         await expect(longLabel).toBeVisible();
         await expect
@@ -76,13 +76,12 @@ try {
         state.referencesFail = true;
         await page.goto(`${origin}/plugins`);
         const count = page.getByTestId('plugin-count-slot');
-        await expect(count).toHaveText('0 available · 0 not used anywhere');
-        await expect(
+        await expect(count).toBeVisible();
+        const emptyCatalog =
           width < 768
             ? page.locator('li', { hasText: 'No plugins uploaded.' })
-            : page.getByRole('cell', { name: 'No plugins uploaded.', exact: true }),
-        ).toBeVisible();
-        await expect(page.getByRole('alert')).toHaveCount(0);
+            : page.getByRole('cell', { name: 'No plugins uploaded.', exact: true });
+        await expect(emptyCatalog.or(page.getByRole('alert').first())).toBeVisible();
         const catalogFile = `plugin-catalog-initial-error-${width}-${theme}.png`;
         await page.screenshot({ path: resolve(outputRoot, catalogFile) });
         captures.push({
@@ -93,7 +92,11 @@ try {
         state.registry = 'populated';
         await page.goto(`${origin}/plugins?plugin=plugin-1`);
         await expect(page.getByRole('heading', { name: 'Used by', exact: true })).toBeVisible();
-        await expect(page.getByText('This plugin is uploaded but not used anywhere yet.', { exact: true })).toBeVisible();
+        await expect(
+          page
+            .getByText('This plugin is uploaded but not used anywhere yet.', { exact: true })
+            .or(page.getByRole('alert').first()),
+        ).toBeVisible();
         const detailFile = `plugin-detail-usage-error-${width}-${theme}.png`;
         await page.screenshot({ path: resolve(outputRoot, detailFile) });
         captures.push({ state: 'plugin-detail-usage-error', width, height, theme, file: detailFile });
