@@ -412,6 +412,8 @@ pub struct UsageRollup {
     pub cache_write_input_tokens_30m: Option<u64>,
     #[serde(default)]
     pub cache_write_input_tokens_12h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_cache_write_input_tokens: Option<u64>,
     pub error_count: u64,
     pub latency_count: u64,
     pub latency_ms_sum: u64,
@@ -460,6 +462,19 @@ pub struct UsageRollup {
     #[serde(default)]
     pub unmetered_event_count: u64,
 }
+
+impl UsageRollup {
+    pub fn effective_cache_write_tokens(&self) -> u64 {
+        self.effective_cache_write_input_tokens.unwrap_or_else(|| {
+            let ttl_sum = self
+                .cache_write_input_tokens_30m
+                .unwrap_or(0)
+                .saturating_add(self.cache_write_input_tokens_12h.unwrap_or(0));
+            self.cache_write_input_tokens.unwrap_or(0).max(ttl_sum)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewExcludedErrorBucket {
     pub bucket_start: u64,

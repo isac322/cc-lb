@@ -2157,6 +2157,7 @@ async fn gemini_normal_and_nested_merges_preserve_pricing_classification() {
         assert_eq!(rows.len(), 1, "{prefix}");
         assert_eq!(rows[0].model, target);
         assert_eq!(rows[0].request_count, 12);
+        assert_eq!(rows[0].effective_cache_write_input_tokens, None);
         assert_eq!(
             (
                 rows[0].priced_event_count,

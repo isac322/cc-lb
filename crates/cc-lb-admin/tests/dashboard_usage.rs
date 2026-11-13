@@ -6,8 +6,9 @@ use axum::http::{StatusCode, header};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    PricingCompletenessInput, RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind,
-    UpstreamStore, UsageRollupStore, derive_pricing_completeness, normalize_usage_rollup_dimension,
+    PricingCompleteness, PricingCompletenessInput, RequestEvent, RequestEventStore, UpstreamCreate,
+    UpstreamKind, UpstreamStore, UsageRollupResolution, UsageRollupStore,
+    derive_pricing_completeness, normalize_usage_rollup_dimension,
 };
 
 use config_admin_common::{
@@ -1429,6 +1430,8 @@ async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
         ("same-rollup", None, Some(7), "principal-a"),
         ("separate-rollups", Some(0), None, "principal-a"),
         ("separate-rollups", None, Some(7), "principal-b"),
+        ("mixed-native", Some(10), None, "principal-a"),
+        ("mixed-native", None, Some(7), "principal-a"),
     ]
     .into_iter()
     .enumerate()
@@ -1448,6 +1451,33 @@ async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
         storage.append_request_event(&event).await.unwrap();
     }
     storage.rollup_usage_once().await.unwrap();
+    let rollups = storage
+        .query_usage_rollups_in_range(
+            UsageRollupResolution::Minute,
+            TEST_NOW_UNIX_SECS - 120,
+            TEST_NOW_UNIX_SECS,
+        )
+        .await
+        .unwrap();
+    let mixed = rollups
+        .iter()
+        .find(|row| row.model == "mixed-native")
+        .unwrap();
+    assert_eq!(mixed.cache_write_input_tokens, Some(10));
+    assert_eq!(mixed.cache_write_input_tokens_30m, Some(7));
+    assert_eq!(mixed.effective_cache_write_tokens(), 17);
+    assert_eq!((mixed.request_count, mixed.unpriced_event_count), (2, 2));
+    assert_eq!(
+        derive_pricing_completeness(PricingCompletenessInput {
+            request_count: mixed.request_count,
+            priced_event_count: mixed.priced_event_count,
+            unpriced_event_count: mixed.unpriced_event_count,
+            unmetered_event_count: mixed.unmetered_event_count,
+            total_tokens: mixed.effective_cache_write_tokens(),
+            virtual_cost_micros: mixed.virtual_cost_micros,
+        }),
+        Some(PricingCompleteness::Unpriced),
+    );
     sqlx::query(
         "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
          unpriced_event_count = 0, unmetered_event_count = 0",
@@ -1477,7 +1507,10 @@ async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
                 assert_eq!(bucket["output_tokens"], 0);
                 assert_eq!(bucket["cache_creation_input_tokens"], 0);
                 assert_eq!(bucket["cache_read_input_tokens"], 0);
-                assert_eq!(bucket["cache_write_input_tokens"], 0);
+                assert!(matches!(
+                    bucket["cache_write_input_tokens"].as_u64(),
+                    Some(0 | 10)
+                ));
                 assert!(bucket["cache_write_input_tokens_30m"].as_u64().unwrap() > 0);
                 assert_eq!(bucket["virtual_cost_micros"], 0);
                 assert_eq!(bucket["priced_request_count"], 0);
@@ -1494,7 +1527,7 @@ async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(summary["totals"]["request_count"], 4);
+    assert_eq!(summary["totals"]["request_count"], 6);
     assert_eq!(summary["totals"]["pricing_completeness"], "unknown");
 }
 

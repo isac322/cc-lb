@@ -3974,8 +3974,8 @@ describe('Overview list-price completeness', () => {
         request_count: 1,
         input_tokens: 100,
       });
-      vi.mocked(queries.useSummary).mockReturnValue({
-        data: {
+      vi.mocked(queries.useSummary).mockReturnValue(
+        successQuery<DashboardSummaryResponse>({
           ...SUMMARY_FIXTURE,
           totals: {
             ...SUMMARY_FIXTURE.totals,
@@ -3984,9 +3984,8 @@ describe('Overview list-price completeness', () => {
             virtual_cost_micros: 0,
           },
           sparkline: { buckets: [bucket] },
-        },
-        isPending: false,
-      } as never);
+        }),
+      );
       vi.mocked(queries.useUsage).mockReturnValue(
         usageResult([{ key: 'principal-alpha', buckets: [bucket] }]),
       );
@@ -4026,14 +4025,13 @@ describe('Overview list-price completeness', () => {
       virtual_cost_micros: 2_500_000,
       input_tokens: 100,
     });
-    vi.mocked(queries.useSummary).mockReturnValue({
-      data: {
+    vi.mocked(queries.useSummary).mockReturnValue(
+      successQuery<DashboardSummaryResponse>({
         ...SUMMARY_FIXTURE,
         totals: { ...SUMMARY_FIXTURE.totals, ...bucket },
         sparkline: { buckets: [bucket] },
-      },
-      isPending: false,
-    } as never);
+      }),
+    );
     render(<OverviewPage />);
     const tile = screen.getByTestId('overview-kpi-cost');
     expect(tile.textContent).toContain('$2.50+');
@@ -4052,8 +4050,8 @@ describe('Overview list-price completeness', () => {
   it('keeps known-zero and unmetered totals distinct from no traffic', () => {
     mockResolvedKpiQueries();
     for (const state of ['known_zero', 'unmetered'] as const) {
-      vi.mocked(queries.useSummary).mockReturnValue({
-        data: {
+      vi.mocked(queries.useSummary).mockReturnValue(
+        successQuery<DashboardSummaryResponse>({
           ...SUMMARY_FIXTURE,
           totals: {
             ...SUMMARY_FIXTURE.totals,
@@ -4061,9 +4059,8 @@ describe('Overview list-price completeness', () => {
             virtual_cost_micros: 0,
             pricing_completeness: state,
           },
-        },
-        isPending: false,
-      } as never);
+        }),
+      );
       const view = render(<OverviewPage />);
       expect(screen.getByTestId('overview-kpi-cost').textContent).toContain(
         '$0.00',
@@ -4073,17 +4070,16 @@ describe('Overview list-price completeness', () => {
       );
       view.unmount();
     }
-    vi.mocked(queries.useSummary).mockReturnValue({
-      data: {
+    vi.mocked(queries.useSummary).mockReturnValue(
+      successQuery<DashboardSummaryResponse>({
         ...SUMMARY_FIXTURE,
         totals: {
           ...SUMMARY_FIXTURE.totals,
           request_count: 0,
           virtual_cost_micros: 0,
         },
-      },
-      isPending: false,
-    } as never);
+      }),
+    );
     render(<OverviewPage />);
     expect(screen.queryByTestId('overview-kpi-cost')).toBeNull();
     expect(screen.getByTestId('overview-kpi-strip').textContent).toBe(

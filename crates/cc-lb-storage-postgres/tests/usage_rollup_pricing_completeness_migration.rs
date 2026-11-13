@@ -66,13 +66,16 @@ async fn migration_166_to_167_is_metadata_only_bounded_and_backfill_resumes() ->
         assert_eq!(first.processed_events,0);
         let cursor: (i64,String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
             .fetch_one(pool).await?;
-        assert_eq!(cursor.0,10000);
+        assert_eq!(cursor.0,2);
         assert_ne!(cursor.1,"0");
-        assert_eq!(totals(pool).await?,(6666,6668,6666));
+        assert_eq!(totals(pool).await?,(6666,6666,6668));
         // A new storage handle resumes from durable checkpoint state instead of repeating the first batch.
         let resumed = PostgresStorage::new(pool.clone(),Arc::new(cc_lb_clock::SystemClock));
         resumed.rollup_usage_once().await?;
         assert_eq!(totals(pool).await?,(6666,6668,6668));
+        let finished: (i64, String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
+            .fetch_one(pool).await?;
+        assert_eq!(finished, (0, "0".to_owned()));
         assert_eq!(resumed.usage_rollup_checkpoint().await?,high_water);
         assert_ne!(resumed.usage_rollup_revision().await?,before);
         let revision = resumed.usage_rollup_revision().await?;
@@ -130,6 +133,7 @@ async fn gemini_normal_and_nested_merges_preserve_pricing_classification() -> Te
             assert_eq!(rows[0].model,target);
             assert_eq!(rows[0].request_count,12);
             assert_eq!((rows[0].priced_event_count,rows[0].unpriced_event_count,rows[0].unmetered_event_count),(2,4,6));
+            assert_eq!(rows[0].effective_cache_write_input_tokens, None);
         }
         Ok(())
     }.await;

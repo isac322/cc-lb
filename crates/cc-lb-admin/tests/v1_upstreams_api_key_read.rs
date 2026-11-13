@@ -1482,9 +1482,14 @@ async fn estimated_month_includes_cache_write_tokens_and_mixed_pricing_counts() 
 
 #[tokio::test]
 async fn estimated_month_preserves_legacy_cache_write_fallback_before_folding_rollups() {
-    for (aggregate_tokens, ordinary_tokens, separate_rollups) in
-        [(0, 0, false), (0, 0, true), (10, 0, true), (10, 3, true)]
-    {
+    for (aggregate_tokens, ordinary_tokens, separate_rollups) in [
+        (0, 0, false),
+        (0, 0, true),
+        (10, 0, false),
+        (10, 0, true),
+        (10, 3, false),
+        (10, 3, true),
+    ] {
         let h = spawn_api_key_harness().await;
         let target = h
             .seed_legacy_api_key_upstream("legacy-cache-write", ORG)
@@ -1513,12 +1518,25 @@ async fn estimated_month_preserves_legacy_cache_write_fallback_before_folding_ro
         .execute(h.storage.pool())
         .await
         .unwrap();
+        if separate_rollups {
+            // Older rows have no per-event effective total and still use their native columns.
+            sqlx::query("UPDATE usage_rollups_v2 SET effective_cache_write_input_tokens = NULL")
+                .execute(h.storage.pool())
+                .await
+                .unwrap();
+        }
         let rollups = h
             .storage
             .query_usage_rollups_in_range(UsageRollupResolution::Hour, NOW - 2 * HOUR, NOW + HOUR)
             .await
             .unwrap();
         assert_eq!(rollups.len(), if separate_rollups { 2 } else { 1 });
+        assert!(rollups.iter().all(|rollup| {
+            rollup.effective_cache_write_input_tokens.is_none() == separate_rollups
+        }));
+        if aggregate_tokens == 10 && ordinary_tokens == 0 && !separate_rollups {
+            assert_eq!(rollups[0].effective_cache_write_tokens(), 17);
+        }
         let expected_tokens = aggregate_tokens + 7 + if ordinary_tokens > 0 { 14 } else { 0 };
         for query in [
             "range=1h&step=minute",

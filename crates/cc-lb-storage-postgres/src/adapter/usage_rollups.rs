@@ -58,6 +58,7 @@ struct RollupDelta {
     cache_write_input_tokens: Option<u64>,
     cache_write_input_tokens_30m: Option<u64>,
     cache_write_input_tokens_12h: Option<u64>,
+    effective_cache_write_input_tokens: u64,
     error_count: u64,
     latency_count: u64,
     latency_ms_sum: u64,
@@ -114,6 +115,17 @@ impl RollupDelta {
             &mut self.cache_write_input_tokens_12h,
             event.cache_write_input_tokens_12h,
         );
+        let event_ttl_writes = event
+            .cache_write_input_tokens_30m
+            .unwrap_or(0)
+            .saturating_add(event.cache_write_input_tokens_12h.unwrap_or(0));
+        let event_effective_writes = event
+            .cache_write_input_tokens
+            .unwrap_or(0)
+            .max(event_ttl_writes);
+        self.effective_cache_write_input_tokens = self
+            .effective_cache_write_input_tokens
+            .saturating_add(event_effective_writes);
         if event.status >= 400 {
             self.error_count = self.error_count.saturating_add(1);
         }
@@ -261,7 +273,8 @@ impl UsageRollupStore for PostgresStorage {
               cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
               cost_cache_creation_1h_micros, cost_cache_read_micros, \
               cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, \
+              rollup.effective_cache_write_input_tokens \
               FROM usage_rollups_v2 AS rollup \
               WHERE rollup.resolution = $1 AND rollup.bucket_start_unix_secs >= $2 AND rollup.bucket_start_unix_secs < $3 \
               ORDER BY bucket_start_unix_secs ASC",
@@ -437,7 +450,7 @@ async fn merge_stale_gemini_rollups(
               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at) \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at) \
              SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, \
                     substring(model FROM 8), request_count, input_tokens, output_tokens, \
                     cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
@@ -449,7 +462,7 @@ async fn merge_stale_gemini_rollups(
                     cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
                     cost_cache_creation_1h_micros, cost_cache_read_micros, \
                     cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-                    cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at \
+                    cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at \
              FROM usage_rollups_v2 \
              WHERE resolution = $1 AND bucket_start_unix_secs = $2 AND principal_id = $3 \
                AND upstream_id = $4 AND model = $5 \
@@ -473,6 +486,10 @@ async fn merge_stale_gemini_rollups(
                      WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h \
                      WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h \
                      ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
+                 effective_cache_write_input_tokens = CASE \
+                     WHEN usage_rollups_v2.effective_cache_write_input_tokens IS NULL AND EXCLUDED.effective_cache_write_input_tokens IS NULL THEN NULL \
+                     ELSE COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) \
+                        + COALESCE(EXCLUDED.effective_cache_write_input_tokens, GREATEST(COALESCE(EXCLUDED.cache_write_input_tokens, 0), COALESCE(EXCLUDED.cache_write_input_tokens_30m, 0) + COALESCE(EXCLUDED.cache_write_input_tokens_12h, 0))) END, \
                  error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                  latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                  latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
@@ -1019,36 +1036,31 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    let (pricing_upper_seq, pricing_upper_xid, pricing_backfill_seq, pricing_backfill_xid) =
-        if let Some((pricing_upper_seq, pricing_upper_xid)) = pricing_upper_checkpoint {
-            let (pricing_backfill_seq, pricing_backfill_xid) =
-                pricing_cursor_checkpoint.unwrap_or((0, "0".to_owned()));
-            (
-                pricing_upper_seq,
-                pricing_upper_xid,
-                pricing_backfill_seq,
-                pricing_backfill_xid,
-            )
+    let (pricing_backfill_seq, pricing_backfill_xid) = if pricing_upper_checkpoint.is_some() {
+        pricing_cursor_checkpoint.unwrap_or((0, "0".to_owned()))
+    } else {
+        let (init_seq, init_xid) = if previous_seq > 0 || previous_xid != "0" {
+            (previous_seq.saturating_add(1), previous_xid.clone())
         } else {
-            sqlx::query(
-                "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
+            (0_i64, "0".to_owned())
+        };
+        sqlx::query(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
                  VALUES ($1, $2, $3::xid8), ($4, $5, $6::xid8) \
                  ON CONFLICT (id) DO NOTHING",
-            )
-            .bind(PRICING_BACKFILL_UPPER_ID)
-            .bind(previous_seq)
-            .bind(&previous_xid)
-            .bind(PRICING_BACKFILL_CURSOR_ID)
-            .bind(0_i64)
-            .bind("0")
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            (previous_seq, previous_xid.clone(), 0, "0".to_owned())
-        };
-    let pricing_backfill_has_work = (pricing_upper_seq > 0 || pricing_upper_xid != "0")
-        && (pricing_backfill_xid.as_str(), pricing_backfill_seq)
-            != (pricing_upper_xid.as_str(), pricing_upper_seq);
+        )
+        .bind(PRICING_BACKFILL_UPPER_ID)
+        .bind(previous_seq)
+        .bind(&previous_xid)
+        .bind(PRICING_BACKFILL_CURSOR_ID)
+        .bind(init_seq)
+        .bind(&init_xid)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        (init_seq, init_xid)
+    };
+    let pricing_backfill_has_work = pricing_backfill_seq > 0 || pricing_backfill_xid != "0";
     // Page by the composite (tx_id, seq) cursor below the snapshot xmin horizon,
     // never by seq alone: a lower seq can COMMIT after a higher seq (BIGSERIAL is
     // assigned at INSERT, visible at COMMIT), so a seq high-water-mark would skip
@@ -1313,7 +1325,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         backfill_cursor_xid = upper_xid.clone();
     }
 
-    let mut pricing_backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
+    let mut pricing_backfill_deltas: BTreeMap<RollupKey, Vec<PricingClass>> = BTreeMap::new();
     let mut pricing_backfill_cursor_seq = pricing_backfill_seq;
     let mut pricing_backfill_cursor_xid = pricing_backfill_xid.clone();
     let pricing_backfill_rows = if pricing_backfill_has_work {
@@ -1324,14 +1336,11 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
              cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, \
              list_cost_usd_micros \
              FROM request_events_v1 \
-             WHERE (tx_id, seq) > ($1::xid8, $2) \
-               AND (tx_id, seq) <= ($3::xid8, $4) \
-             ORDER BY tx_id ASC, seq ASC LIMIT $5",
+             WHERE (tx_id, seq) < ($1::xid8, $2) \
+             ORDER BY tx_id DESC, seq DESC LIMIT $3",
         )
         .bind(&pricing_backfill_xid)
         .bind(pricing_backfill_seq)
-        .bind(&pricing_upper_xid)
-        .bind(pricing_upper_seq)
         .bind(ROLLUP_BATCH_LIMIT)
         .fetch_all(&mut *tx)
         .await
@@ -1407,14 +1416,14 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             pricing_backfill_deltas
                 .entry(key)
                 .or_default()
-                .add_pricing_classification(&event);
+                .push(PricingClass::from_event(&event));
         }
         pricing_backfill_cursor_seq = row.try_get("seq").map_err(map_sqlx_error)?;
         pricing_backfill_cursor_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
     }
     if pricing_backfill_has_work && pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize {
-        pricing_backfill_cursor_seq = pricing_upper_seq;
-        pricing_backfill_cursor_xid = pricing_upper_xid.clone();
+        pricing_backfill_cursor_seq = 0;
+        pricing_backfill_cursor_xid = "0".to_owned();
     }
 
     let updated_rollups =
@@ -1485,10 +1494,41 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .await
         .map_err(map_sqlx_error)?;
     }
-    for (key, delta) in pricing_backfill_deltas {
-        if delta.priced_event_count + delta.unpriced_event_count + delta.unmetered_event_count == 0
-        {
+    for (key, classes) in pricing_backfill_deltas {
+        let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT request_count, priced_event_count, unpriced_event_count, unmetered_event_count \
+             FROM usage_rollups_v2 \
+             WHERE resolution = $1 AND bucket_start_unix_secs = $2 AND principal_id = $3 \
+               AND upstream_id = $4 AND model = $5",
+        )
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(key.bucket_start, "backfill bucket_start")?)
+        .bind(&key.principal)
+        .bind(key.upstream_id)
+        .bind(&key.model)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let Some((requests, priced, unpriced, unmetered)) = counts else {
             continue;
+        };
+        let classified = i64_to_u64(priced, "backfill priced_event_count")?
+            .saturating_add(i64_to_u64(unpriced, "backfill unpriced_event_count")?)
+            .saturating_add(i64_to_u64(unmetered, "backfill unmetered_event_count")?);
+        let remaining = i64_to_u64(requests, "backfill request_count")?.saturating_sub(classified);
+        if remaining == 0 {
+            continue;
+        }
+        let mut delta = RollupDelta::default();
+        for class in classes
+            .iter()
+            .take(usize::try_from(remaining).unwrap_or(usize::MAX))
+        {
+            match class {
+                PricingClass::Priced => delta.priced_event_count += 1,
+                PricingClass::Unpriced => delta.unpriced_event_count += 1,
+                PricingClass::Unmetered => delta.unmetered_event_count += 1,
+            }
         }
         sqlx::query(
             "UPDATE usage_rollups_v2 SET \
@@ -1533,10 +1573,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, \
                cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
                cost_components_event_count, cache_write_input_tokens, cache_write_input_tokens_30m, \
-               cache_write_input_tokens_12h, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at) \
+               cache_write_input_tokens_12h, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at) \
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
                       $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, \
-                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, NOW()) \
+                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, NOW()) \
               ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
               SET upstream_name = EXCLUDED.upstream_name, \
                   request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
@@ -1547,6 +1587,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   cache_write_input_tokens = CASE WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN EXCLUDED.cache_write_input_tokens WHEN EXCLUDED.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens ELSE usage_rollups_v2.cache_write_input_tokens + EXCLUDED.cache_write_input_tokens END, \
                   cache_write_input_tokens_30m = CASE WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN EXCLUDED.cache_write_input_tokens_30m WHEN EXCLUDED.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m ELSE usage_rollups_v2.cache_write_input_tokens_30m + EXCLUDED.cache_write_input_tokens_30m END, \
                   cache_write_input_tokens_12h = CASE WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
+                  effective_cache_write_input_tokens = COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) + EXCLUDED.effective_cache_write_input_tokens, \
                   error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                   latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                   latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
@@ -1649,6 +1690,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .bind(u64_to_i64(delta.priced_event_count, "rollup priced_event_count")?)
         .bind(u64_to_i64(delta.unpriced_event_count, "rollup unpriced_event_count")?)
         .bind(u64_to_i64(delta.unmetered_event_count, "rollup unmetered_event_count")?)
+        .bind(u64_to_i64(
+            delta.effective_cache_write_input_tokens,
+            "rollup effective_cache_write_input_tokens",
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1730,6 +1775,25 @@ fn event_has_positive_tokens(event: &RequestEvent) -> bool {
         || event.cache_write_input_tokens.unwrap_or(0) > 0
         || event.cache_write_input_tokens_30m.unwrap_or(0) > 0
         || event.cache_write_input_tokens_12h.unwrap_or(0) > 0
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PricingClass {
+    Priced,
+    Unpriced,
+    Unmetered,
+}
+
+impl PricingClass {
+    fn from_event(event: &RequestEvent) -> Self {
+        if event.cost_usd_micros.is_some() {
+            Self::Priced
+        } else if event_has_positive_tokens(event) {
+            Self::Unpriced
+        } else {
+            Self::Unmetered
+        }
+    }
 }
 
 fn is_overview_excluded_status(status: u16) -> bool {
@@ -1832,6 +1896,11 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
             .try_get::<Option<i64>, _>("cache_write_input_tokens_12h")
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "rollup cache_write_input_tokens_12h"))
+            .transpose()?,
+        effective_cache_write_input_tokens: row
+            .try_get::<Option<i64>, _>("effective_cache_write_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "rollup effective_cache_write_input_tokens"))
             .transpose()?,
         error_count: i64_to_u64(
             row.try_get("error_count").map_err(map_sqlx_error)?,

@@ -585,12 +585,7 @@ async fn estimated_month(
             rollup.output_tokens,
             rollup.cache_creation_input_tokens,
             rollup.cache_read_input_tokens,
-            rollup.cache_write_input_tokens.unwrap_or(0).max(
-                rollup
-                    .cache_write_input_tokens_30m
-                    .unwrap_or(0)
-                    .saturating_add(rollup.cache_write_input_tokens_12h.unwrap_or(0)),
-            ),
+            rollup.effective_cache_write_tokens(),
         ]
         .into_iter()
         .fold(totals.tokens, u64::saturating_add);

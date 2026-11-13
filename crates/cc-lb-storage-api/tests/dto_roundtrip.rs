@@ -218,6 +218,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         cache_write_input_tokens: Some(0),
         cache_write_input_tokens_30m: None,
         cache_write_input_tokens_12h: None,
+        effective_cache_write_input_tokens: Some(0),
         error_count: 1,
         latency_count: 4,
         latency_ms_sum: 1_000,

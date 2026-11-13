@@ -699,12 +699,7 @@ pub(crate) fn rollup_completeness_tokens(rollup: &UsageRollup) -> u64 {
         rollup.output_tokens,
         rollup.cache_creation_input_tokens,
         rollup.cache_read_input_tokens,
-        rollup.cache_write_input_tokens.unwrap_or(0).max(
-            rollup
-                .cache_write_input_tokens_30m
-                .unwrap_or(0)
-                .saturating_add(rollup.cache_write_input_tokens_12h.unwrap_or(0)),
-        ),
+        rollup.effective_cache_write_tokens(),
     ]
     .into_iter()
     .fold(0, u64::saturating_add)
@@ -1256,6 +1251,7 @@ mod tests {
             cache_write_input_tokens: None,
             cache_write_input_tokens_30m: None,
             cache_write_input_tokens_12h: None,
+            effective_cache_write_input_tokens: None,
             error_count: 0,
             latency_count: request_count,
             latency_ms_sum: request_count * 10,

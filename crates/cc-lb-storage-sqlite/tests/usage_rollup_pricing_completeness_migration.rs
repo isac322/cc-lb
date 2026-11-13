@@ -46,7 +46,10 @@ async fn upgrade_122_retained_events_backfills_idle_database_resumably_and_cas_s
     // Depending on the CAS race, the second worker either loses its snapshot or takes the next batch.
     let cursor: i64 = sqlx::query_scalar("SELECT value FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
         .fetch_one(storage.pool()).await.unwrap();
-    assert!((10000..=10001).contains(&cursor));
+    assert!(
+        cursor == 2 || cursor == 0,
+        "unexpected descending cursor: {cursor}"
+    );
     storage.pool().close().await;
     let storage =
         cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))

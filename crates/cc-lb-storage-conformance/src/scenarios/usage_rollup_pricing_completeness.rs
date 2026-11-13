@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventKind, RequestEventStore, UsageRollupResolution, UsageRollupStore,
+    BackendKind, PricingCompleteness, PricingCompletenessInput, RequestEvent, RequestEventKind,
+    RequestEventStore, UsageRollupResolution, UsageRollupStore, derive_pricing_completeness,
 };
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -13,6 +14,7 @@ where
     B::Storage: cc_lb_storage_api::Storage,
 {
     recreated_bucket_backfill(Arc::clone(&backend)).await?;
+    pre_upgrade_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     let raw = Arc::clone(&backend);
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -204,6 +206,112 @@ where
                     "backfill_after_recreation={backfill_after_recreation}, {resolution:?}: {row:?}"
                 );
             }
+            Ok(())
+        }
+        .await;
+        let teardown = fixture.teardown().await;
+        result?;
+        teardown?;
+    }
+    Ok(())
+}
+
+async fn pre_upgrade_recreated_bucket_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    for cross_batch in [false, true] {
+        let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+        let result: Result<()> = async {
+            let storage = fixture.storage();
+            let start = 1_800_000_000;
+            let mut historical = event("pre-prune", start);
+            historical.model = Some("pre-upgrade-recreated".to_owned());
+            historical.input_tokens = Some(10);
+            historical.cost_usd_micros = Some(0);
+            storage.append_request_event(&historical).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            storage.rollup_usage_once().await?;
+            ensure!(
+                storage.prune_usage_rollups_before(start + 60, start, 100).await? == 1,
+                "only the historical minute must be pruned"
+            );
+            if cross_batch {
+                let sql = match backend.kind() {
+                    BackendKind::Sqlite => {
+                        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) \
+                         INSERT INTO request_events_v1 \
+                         (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,model) \
+                         SELECT 'suffix-filler-'||i,'suffix-filler-'||i,1800003600,1800003600000,200,0,'suffix-filler' FROM n"
+                    }
+                    BackendKind::Postgres => {
+                        "INSERT INTO request_events_v1 \
+                         (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model) \
+                         SELECT 'suffix-filler-'||i,'suffix-filler-'||i,to_timestamp(1800003600),1800003600000,200,0,'suffix-filler' \
+                         FROM generate_series(1,10000) AS i"
+                    }
+                };
+                ensure!(backend.execute_raw_sql(storage.as_ref(), sql).await? == 10_000);
+            }
+            let mut recreated = event("post-prune", start);
+            recreated.model = historical.model.clone();
+            recreated.input_tokens = Some(10);
+            recreated.cost_usd_micros = None;
+            storage.append_request_event(&recreated).await?;
+            backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+            let passes = if cross_batch { 2 } else { 1 };
+            let mut processed = 0;
+            for _ in 0..passes {
+                processed += storage.rollup_usage_once().await?.processed_events;
+            }
+            ensure!(processed == if cross_batch { 10_001 } else { 1 });
+            let high_water = storage.usage_rollup_checkpoint().await?;
+            backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0").await?;
+            backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor')").await?;
+            for batch in 0..passes {
+                ensure!(storage.rollup_usage_once().await?.processed_events == 0);
+                ensure!(storage.usage_rollup_checkpoint().await? == high_water);
+                let rows = storage
+                    .query_usage_rollups_in_range(UsageRollupResolution::Minute, start, start + 60)
+                    .await?;
+                ensure!(rows.len() == 1);
+                let row = &rows[0];
+                ensure!(
+                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == (1, 0, 1, 0),
+                    "cross_batch={cross_batch}, batch={batch}: recreated minute must retain only the post-prune suffix: {row:?}"
+                );
+                ensure!(
+                    derive_pricing_completeness(PricingCompletenessInput {
+                        request_count: row.request_count,
+                        priced_event_count: row.priced_event_count,
+                        unpriced_event_count: row.unpriced_event_count,
+                        unmetered_event_count: row.unmetered_event_count,
+                        total_tokens: row.input_tokens,
+                        virtual_cost_micros: row.virtual_cost_micros,
+                    }) == Some(PricingCompleteness::Unpriced),
+                    "recreated minute must never become known-zero"
+                );
+            }
+            let hours = storage
+                .query_usage_rollups_in_range(UsageRollupResolution::Hour, start, start + 3600)
+                .await?;
+            ensure!(hours.len() == 1);
+            let hour = &hours[0];
+            ensure!(
+                (hour.request_count, hour.priced_event_count, hour.unpriced_event_count, hour.unmetered_event_count) == (2, 1, 1, 0),
+                "the surviving hour represents both populations: {hour:?}"
+            );
+            ensure!(
+                derive_pricing_completeness(PricingCompletenessInput {
+                    request_count: hour.request_count,
+                    priced_event_count: hour.priced_event_count,
+                    unpriced_event_count: hour.unpriced_event_count,
+                    unmetered_event_count: hour.unmetered_event_count,
+                    total_tokens: hour.input_tokens,
+                    virtual_cost_micros: hour.virtual_cost_micros,
+                }) == Some(PricingCompleteness::Partial)
+            );
             Ok(())
         }
         .await;
