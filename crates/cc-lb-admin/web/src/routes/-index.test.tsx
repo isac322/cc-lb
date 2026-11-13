@@ -3901,3 +3901,255 @@ describe('Top principal cost breakdown and cache hit', () => {
     );
   });
 });
+
+describe('Overview list-price completeness', () => {
+  it.each([
+    ['unpriced', 'List price unavailable'],
+    ['unknown', 'Price unknown'],
+  ] as const)(
+    'keeps %s costs unavailable in the KPI, hover and principal ranking',
+    (state, caption) => {
+      mockResolvedKpiQueries();
+      const pricing = {
+        pricing_completeness: state,
+        priced_request_count: 0,
+        unpriced_request_count: state === 'unpriced' ? 1 : 0,
+        unmetered_request_count: 0,
+      };
+      const bucket = usageBucket(KPI_TIMESTAMPS[0], {
+        ...pricing,
+        request_count: 1,
+        input_tokens: 100,
+      });
+      vi.mocked(queries.useSummary).mockReturnValue({
+        data: {
+          ...SUMMARY_FIXTURE,
+          totals: {
+            ...SUMMARY_FIXTURE.totals,
+            ...pricing,
+            request_count: 1,
+            virtual_cost_micros: 0,
+          },
+          sparkline: { buckets: [bucket] },
+        },
+        isPending: false,
+      } as never);
+      vi.mocked(queries.useUsage).mockReturnValue({
+        data: {
+          ...PRINCIPAL_USAGE_FIXTURE,
+          series: [{ key: 'principal-alpha', buckets: [bucket] }],
+        },
+        isPending: false,
+      } as never);
+      render(<OverviewPage />);
+      const tile = screen.getByTestId('overview-kpi-cost');
+      expect(tile.textContent).toContain(caption);
+      expect(within(tile).getByTitle(caption).textContent).toContain('—');
+      expect(tile.textContent).not.toContain('$0.00');
+      fireEvent.mouseMove(screen.getByTestId('overview-kpi-chart-cost'), {
+        clientX: 0,
+      });
+      expect(
+        screen.getByTestId('overview-kpi-tooltip-cost').textContent,
+      ).toContain(caption);
+      const row = screen.getByTestId('top-principal-row');
+      expect(row.textContent).not.toContain('$0.00');
+      expect(row.textContent).not.toContain('0.0%');
+      fireEvent.click(costTrigger('Principal Alpha'));
+      const popover = screen.getByTestId('top-principal-cost-details');
+      expect(popover.textContent).toContain(`${caption} for this window`);
+      expect(popover.textContent).not.toContain('Total');
+      expect(popover.textContent).not.toContain('$0.0000');
+    },
+  );
+
+  it('qualifies partial totals and cost hover without changing priced copy', () => {
+    mockResolvedKpiQueries();
+    const pricing = {
+      pricing_completeness: 'partial' as const,
+      priced_request_count: 1,
+      unpriced_request_count: 1,
+      unmetered_request_count: 0,
+    };
+    const bucket = usageBucket(KPI_TIMESTAMPS[0], {
+      ...pricing,
+      request_count: 2,
+      virtual_cost_micros: 2_500_000,
+      input_tokens: 100,
+    });
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: {
+        ...SUMMARY_FIXTURE,
+        totals: { ...SUMMARY_FIXTURE.totals, ...bucket },
+        sparkline: { buckets: [bucket] },
+      },
+      isPending: false,
+    } as never);
+    render(<OverviewPage />);
+    const tile = screen.getByTestId('overview-kpi-cost');
+    expect(tile.textContent).toContain('$2.50+');
+    expect(within(tile).getByTitle('$2.50 (1 unpriced)')).toBeDefined();
+    expect(within(tile).getByText('1 unpriced').className).toBe(
+      'text-caption text-text-faint',
+    );
+    fireEvent.mouseMove(screen.getByTestId('overview-kpi-chart-cost'), {
+      clientX: 0,
+    });
+    expect(
+      screen.getByTestId('overview-kpi-tooltip-cost').textContent,
+    ).toContain('Cost $2.50 (1 unpriced)');
+  });
+
+  it('keeps known-zero and unmetered totals distinct from no traffic', () => {
+    mockResolvedKpiQueries();
+    for (const state of ['known_zero', 'unmetered'] as const) {
+      vi.mocked(queries.useSummary).mockReturnValue({
+        data: {
+          ...SUMMARY_FIXTURE,
+          totals: {
+            ...SUMMARY_FIXTURE.totals,
+            request_count: 1,
+            virtual_cost_micros: 0,
+            pricing_completeness: state,
+          },
+        },
+        isPending: false,
+      } as never);
+      const view = render(<OverviewPage />);
+      expect(screen.getByTestId('overview-kpi-cost').textContent).toContain(
+        '$0.00',
+      );
+      expect(screen.getByTestId('overview-kpi-cost').textContent).not.toContain(
+        'List price unavailable',
+      );
+      view.unmount();
+    }
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: {
+        ...SUMMARY_FIXTURE,
+        totals: {
+          ...SUMMARY_FIXTURE.totals,
+          request_count: 0,
+          virtual_cost_micros: 0,
+        },
+      },
+      isPending: false,
+    } as never);
+    render(<OverviewPage />);
+    expect(screen.queryByTestId('overview-kpi-cost')).toBeNull();
+    expect(screen.getByTestId('overview-kpi-strip').textContent).toBe(
+      'No requests in the last 24h',
+    );
+  });
+
+  it('sorts unknown principal amounts last both ways and keeps zero labels honest', () => {
+    renderPrincipals([
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'unknown',
+        name: 'Unknown',
+        pricing_completeness: 'unknown',
+        cost_micros: 0,
+        share_pct: null,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'unpriced',
+        name: 'Unpriced',
+        pricing_completeness: 'unpriced',
+        cost_micros: 0,
+        share_pct: null,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'zero',
+        name: 'Zero',
+        pricing_completeness: 'known_zero',
+        cost_micros: 0,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'partial',
+        name: 'Partial',
+        pricing_completeness: 'partial',
+        request_count: 2,
+        priced_request_count: 1,
+        unpriced_request_count: 1,
+        unmetered_request_count: 0,
+        cost_micros: 1_000_000,
+      },
+    ]);
+    const names = () =>
+      screen
+        .getAllByTestId('top-principal-row')
+        .map((row) => within(row).getByRole('link').textContent);
+    expect(names()).toEqual(['Partial', 'Zero', 'Unknown', 'Unpriced']);
+    expect(costTrigger('Zero').getAttribute('aria-label')).toContain('$0.0000');
+    expect(costTrigger('Zero').getAttribute('aria-label')).not.toContain(
+      'No list price',
+    );
+    expect(costTrigger('Partial').textContent).toContain('$1.00+');
+    expect(costTrigger('Partial').getAttribute('aria-label')).toContain(
+      '1 unpriced',
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^Cost$/ }));
+    expect(names()).toEqual(['Zero', 'Partial', 'Unknown', 'Unpriced']);
+  });
+
+  it.each([undefined, 'known_zero', 'unmetered'] as const)(
+    'keeps %s zero principal costs determinate',
+    (pricing_completeness) => {
+      renderPrincipals([
+        {
+          ...COMPLETE_PRINCIPAL,
+          name: 'Zero principal',
+          cost_micros: 0,
+          pricing_completeness,
+        },
+      ]);
+      const trigger = costTrigger('Zero principal');
+      expect(trigger.textContent).toContain('$0.00');
+      expect(trigger.getAttribute('aria-label')).toContain('$0.0000');
+      expect(trigger.getAttribute('aria-label')).not.toContain('No list price');
+    },
+  );
+
+  it('uses only determinate costs for principal shares', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: {
+        ...PRINCIPAL_USAGE_FIXTURE,
+        series: [
+          {
+            key: 'principal-alpha',
+            buckets: [
+              usageBucket(KPI_TIMESTAMPS[0], {
+                request_count: 2,
+                priced_request_count: 1,
+                unpriced_request_count: 1,
+                unmetered_request_count: 0,
+                virtual_cost_micros: 1_000_000,
+              }),
+            ],
+          },
+          {
+            key: 'unpriced',
+            buckets: [
+              usageBucket(KPI_TIMESTAMPS[0], {
+                request_count: 1,
+                priced_request_count: 0,
+                unpriced_request_count: 1,
+                unmetered_request_count: 0,
+              }),
+            ],
+          },
+        ],
+      },
+      isPending: false,
+    } as never);
+    render(<OverviewPage />);
+    const rows = screen.getAllByTestId('top-principal-row');
+    expect(rows[0].textContent).toContain('100.0%');
+    expect(rows[1].lastElementChild?.textContent).toBe('—');
+  });
+});

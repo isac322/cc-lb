@@ -22,10 +22,10 @@ use cc_lb_control::anthropic_api_key::{
     },
 };
 use cc_lb_storage_api::{
-    ApiKeyClass, ApiKeyOrgCapability, ApiUsageAttribution, Provider, ProviderProjectSource,
-    ProviderReportState, RemediationCode, Storage, UpstreamApiKeyDetailsRecord,
-    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord, UpstreamKind, UpstreamRecord,
-    UsageRollupResolution,
+    ApiKeyClass, ApiKeyOrgCapability, ApiUsageAttribution, PricingCompletenessInput, Provider,
+    ProviderProjectSource, ProviderReportState, RemediationCode, Storage,
+    UpstreamApiKeyDetailsRecord, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord,
+    UpstreamKind, UpstreamRecord, UsageRollupResolution, derive_pricing_completeness,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -204,6 +204,7 @@ pub(crate) async fn get_upstream_usage(
         .fold(0_u64, |sum, bucket| {
             sum.saturating_add(bucket.virtual_cost_micros)
         });
+    let local_month = provenance.subject.is_none() && month_totals.pricing.request_count > 0;
     let envelope = KeyUsageEnvelope {
         source: if provenance.subject.is_some() {
             KeyUsageSource::Real
@@ -234,6 +235,14 @@ pub(crate) async fn get_upstream_usage(
             tokens: month_totals.tokens,
             cost_usd_micros: month_totals.cost_usd_micros,
             billing_stop,
+            pricing_completeness: local_month
+                .then(|| derive_pricing_completeness(month_totals.pricing))
+                .flatten(),
+            priced_request_count: local_month.then_some(month_totals.pricing.priced_event_count),
+            unpriced_request_count: local_month
+                .then_some(month_totals.pricing.unpriced_event_count),
+            unmetered_request_count: local_month
+                .then_some(month_totals.pricing.unmetered_event_count),
         },
     };
     Ok(Json(UpstreamKeyUsageResponse {
@@ -503,6 +512,7 @@ struct MonthTotals {
     start_unix_secs: u64,
     tokens: u64,
     cost_usd_micros: u64,
+    pricing: PricingCompletenessInput,
 }
 
 /// Reported month: the subject's `1d` buckets from the 1st.
@@ -526,6 +536,7 @@ async fn reported_month(
         start_unix_secs: month_start_unix_secs,
         tokens: 0,
         cost_usd_micros: 0,
+        pricing: PricingCompletenessInput::default(),
     };
     for bucket in &buckets {
         totals.tokens = [
@@ -563,6 +574,7 @@ async fn estimated_month(
         start_unix_secs,
         tokens: 0,
         cost_usd_micros: 0,
+        pricing: PricingCompletenessInput::default(),
     };
     for rollup in rollups
         .iter()
@@ -573,13 +585,37 @@ async fn estimated_month(
             rollup.output_tokens,
             rollup.cache_creation_input_tokens,
             rollup.cache_read_input_tokens,
+            rollup.cache_write_input_tokens.unwrap_or_else(|| {
+                rollup
+                    .cache_write_input_tokens_30m
+                    .unwrap_or(0)
+                    .saturating_add(rollup.cache_write_input_tokens_12h.unwrap_or(0))
+            }),
         ]
         .into_iter()
         .fold(totals.tokens, u64::saturating_add);
         totals.cost_usd_micros = totals
             .cost_usd_micros
             .saturating_add(rollup.virtual_cost_micros);
+        totals.pricing.request_count = totals
+            .pricing
+            .request_count
+            .saturating_add(rollup.request_count);
+        totals.pricing.priced_event_count = totals
+            .pricing
+            .priced_event_count
+            .saturating_add(rollup.priced_event_count);
+        totals.pricing.unpriced_event_count = totals
+            .pricing
+            .unpriced_event_count
+            .saturating_add(rollup.unpriced_event_count);
+        totals.pricing.unmetered_event_count = totals
+            .pricing
+            .unmetered_event_count
+            .saturating_add(rollup.unmetered_event_count);
     }
+    totals.pricing.total_tokens = totals.tokens;
+    totals.pricing.virtual_cost_micros = totals.cost_usd_micros;
     Ok(totals)
 }
 

@@ -235,6 +235,28 @@ actual cost is unavailable; their monetary PNL stays unknown. An automatic
 storage upgrade records price availability separately from signed cost values
 and preserves existing renewal costs as known.
 
+Dashboard rollups preserve price completeness separately from cost totals.
+The optional `pricing_completeness` field is one of `priced`, `known_zero`,
+`partial`, `unpriced`, `unmetered`, or `unknown`. Nonempty local summaries and
+buckets also include `priced_request_count`, `unpriced_request_count`, and
+`unmetered_request_count`, with explicit zeros for unused categories.
+Empty summaries and buckets omit all four fields. Estimated API-key month
+totals carry these fields; provider-reported organization usage does not.
+
+`known_zero` means a recorded price produced zero cost. `unmetered` means no
+billable usage was recorded. `unpriced` means billable usage lacks a price.
+`partial` retains the known subtotal while some pricing evidence is missing.
+`unknown` preserves a legacy evidence gap instead of inferring a free request.
+The UI displays `unpriced` and `unknown` as a dash with `List price unavailable`
+or `Price unknown`, and partial subtotals with `+`.
+Indeterminate amounts do not contribute a fabricated zero to cost shares.
+
+Storage upgrades classify retained events in bounded batches without
+re-pricing historical amounts. Rows whose evidence has expired remain
+conservative. Dashboard response validators include classification-backfill
+progress, so a pricing correction refreshes the view even during idle periods.
+Gemini model-identity rollup reconciliations preserve those three counters across merged rows, and scheduled OpenAI Responses renewals record canonical uncached `input_tokens` and `Option` native cache-write counters matching foreground requests.
+
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
 `image` block in message content, including images inside `tool_result.content`.

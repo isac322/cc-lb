@@ -97,7 +97,7 @@ pub struct RenewalFinalization {
     pub accounting_guard: ResponseAccountingGuard,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RenewalUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -105,10 +105,43 @@ pub struct RenewalUsage {
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
-    pub reasoning_tokens: u64,
-    /// OpenAI Responses write fields do not map to Anthropic cache buckets;
-    /// keep finalization cost unknown rather than mispricing them.
+    pub thinking_tokens: u64,
+    pub input_image_tokens: Option<u64>,
+    pub output_image_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub cache_write_input_tokens_30m: Option<u64>,
+    pub cache_write_input_tokens_12h: Option<u64>,
+    pub cache_write_evidence: cc_lb_request_log::RequestCacheEvidence,
+    pub cache_read_evidence: cc_lb_request_log::RequestCacheEvidence,
+    pub service_tier: Option<String>,
+    pub usage_present: bool,
+    pub is_openai_responses: bool,
     pub provider_cost_unknown: bool,
+}
+
+impl Default for RenewalUsage {
+    fn default() -> Self {
+        Self {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens_5m: 0,
+            cache_creation_input_tokens_1h: 0,
+            cache_read_input_tokens: 0,
+            thinking_tokens: 0,
+            input_image_tokens: None,
+            output_image_tokens: None,
+            cache_write_input_tokens: None,
+            cache_write_input_tokens_30m: None,
+            cache_write_input_tokens_12h: None,
+            cache_write_evidence: cc_lb_request_log::RequestCacheEvidence::Unreported,
+            cache_read_evidence: cc_lb_request_log::RequestCacheEvidence::Unreported,
+            service_tier: None,
+            usage_present: true,
+            is_openai_responses: false,
+            provider_cost_unknown: false,
+        }
+    }
 }
 
 #[cfg(test)]

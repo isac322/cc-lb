@@ -316,6 +316,39 @@ async fn usage(h: &ApiKeyHarness, id: Uuid, query: &str) -> HarnessResponse {
         )
         .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let real = response.body["source"] == "real";
+    for bucket in response.body["series"]
+        .as_array()
+        .expect("usage series")
+        .iter()
+        .flat_map(|series| series["buckets"].as_array().expect("usage buckets"))
+    {
+        for field in [
+            "pricing_completeness",
+            "priced_request_count",
+            "unpriced_request_count",
+            "unmetered_request_count",
+        ] {
+            if real || bucket["request_count"] == 0 {
+                assert!(bucket.get(field).is_none(), "{query} {field}: {bucket}");
+            } else {
+                assert!(bucket.get(field).is_some(), "{query} {field}: {bucket}");
+            }
+        }
+    }
+    if real {
+        for field in [
+            "pricing_completeness",
+            "priced_request_count",
+            "unpriced_request_count",
+            "unmetered_request_count",
+        ] {
+            assert!(
+                response.body["month"].get(field).is_none(),
+                "{query} {field}"
+            );
+        }
+    }
     response
 }
 
@@ -955,22 +988,41 @@ async fn usg_provider_api_keys_use_local_estimated_request_events() {
             .update_api_key_secret(created.id, Some(ciphertext))
             .await
             .expect("store provider API key");
-        append_and_roll_up(
-            &h,
-            &[usage_event(
-                created.id,
-                NOW - 600,
-                &format!("provider-{index}"),
-                73,
-            )],
-        )
-        .await;
+        let mut event = usage_event(created.id, NOW - 600, &format!("provider-{index}"), 73);
+        event.model = Some(
+            match kind {
+                UpstreamKind::OpenaiApiKey => "unknown-openai-model",
+                UpstreamKind::GeminiApiKey => "unknown-gemini-model",
+                _ => unreachable!(),
+            }
+            .to_owned(),
+        );
+        event.cost_usd_micros = None;
+        append_and_roll_up(&h, &[event]).await;
 
         let body = usage(&h, created.id, "range=24h&step=hour").await.body;
         assert_eq!(body["source"], "estimated", "{kind:?}");
         assert_eq!(body["attribution"], "api_key", "{kind:?}");
         assert_eq!(series_input_tokens(&body), 73, "{kind:?}");
         assert!(body["attribution_workspace_id"].is_null(), "{kind:?}");
+        assert_eq!(
+            body["month"]["pricing_completeness"], "unpriced",
+            "{kind:?}"
+        );
+        assert_eq!(body["month"]["priced_request_count"], 0, "{kind:?}");
+        assert_eq!(body["month"]["unpriced_request_count"], 1, "{kind:?}");
+        assert_eq!(body["month"]["unmetered_request_count"], 0, "{kind:?}");
+        let observed_bucket = body["series"][0]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|bucket| bucket["request_count"] == 1)
+            .unwrap();
+        assert_eq!(
+            observed_bucket["pricing_completeness"], "unpriced",
+            "{kind:?}"
+        );
+        assert_eq!(observed_bucket["unpriced_request_count"], 1, "{kind:?}");
     }
 }
 
@@ -1270,6 +1322,10 @@ async fn usg_08_estimated_series_excludes_other_upstreams() {
     assert_eq!(body["source"], "estimated");
     assert_eq!(series_input_tokens(&body), 11);
     assert_eq!(body["month"]["tokens"], 11);
+    assert_eq!(body["month"]["pricing_completeness"], "known_zero");
+    assert_eq!(body["month"]["priced_request_count"], 1);
+    assert_eq!(body["month"]["unpriced_request_count"], 0);
+    assert_eq!(body["month"]["unmetered_request_count"], 0);
 }
 
 async fn usg_09_month_block_is_the_calendar_month_for_any_range() {
@@ -1287,6 +1343,14 @@ async fn usg_09_month_block_is_the_calendar_month_for_any_range() {
         assert_eq!(body["month"]["tokens"], 0);
         assert_eq!(body["month"]["cost_usd_micros"], 0);
         assert!(body["month"]["billing_stop"].is_null());
+        for field in [
+            "pricing_completeness",
+            "priced_request_count",
+            "unpriced_request_count",
+            "unmetered_request_count",
+        ] {
+            assert!(body["month"].get(field).is_none(), "{query} {field}");
+        }
     }
 }
 
@@ -1362,6 +1426,57 @@ async fn usg_11_month_tokens_sum_the_current_key_only() {
     let workspace = usage(&h, id, "range=24h&step=hour").await.body;
     assert_eq!(workspace["attribution"], "workspace");
     assert_eq!(workspace["month"]["tokens"], 50);
+}
+
+#[tokio::test]
+async fn estimated_month_includes_cache_write_tokens_and_mixed_pricing_counts() {
+    let h = spawn_api_key_harness().await;
+    let target = h.seed_legacy_api_key_upstream("pricing-target", ORG).await;
+    let other = h.seed_legacy_api_key_upstream("pricing-other", ORG_2).await;
+    let mut priced = usage_event(target.id, NOW - 600, "month-priced", 3);
+    priced.cost_usd_micros = Some(7);
+    let mut cache_write = usage_event(target.id, NOW - HOUR - 600, "month-cache-write", 0);
+    cache_write.cost_usd_micros = None;
+    cache_write.cache_write_input_tokens = Some(7);
+    cache_write.cache_write_input_tokens_30m = Some(3);
+    cache_write.cache_write_input_tokens_12h = Some(4);
+    let mut unmetered = usage_event(target.id, NOW - 2 * HOUR - 600, "month-unmetered", 0);
+    unmetered.cost_usd_micros = None;
+    let mut detailed_cache_write = usage_event(
+        target.id,
+        NOW - 3 * HOUR - 600,
+        "month-cache-write-details",
+        0,
+    );
+    detailed_cache_write.cost_usd_micros = None;
+    detailed_cache_write.cache_write_input_tokens_30m = Some(2);
+    detailed_cache_write.cache_write_input_tokens_12h = Some(3);
+    append_and_roll_up(
+        &h,
+        &[
+            priced,
+            cache_write,
+            detailed_cache_write,
+            unmetered,
+            usage_event(other.id, NOW - 600, "other-month", 999),
+        ],
+    )
+    .await;
+    for query in [
+        "range=1h&step=minute",
+        "range=24h&step=hour",
+        "range=7d&step=hour",
+    ] {
+        let body = usage(&h, target.id, query).await.body;
+        let month = &body["month"];
+        assert_eq!(body["source"], "estimated", "{query}");
+        assert_eq!(month["tokens"], 15, "{query}");
+        assert_eq!(month["cost_usd_micros"], 7, "{query}");
+        assert_eq!(month["pricing_completeness"], "partial", "{query}");
+        assert_eq!(month["priced_request_count"], 1, "{query}");
+        assert_eq!(month["unpriced_request_count"], 2, "{query}");
+        assert_eq!(month["unmetered_request_count"], 1, "{query}");
+    }
 }
 
 async fn usg_12_estimated_month_starts_at_the_retention_cut() {

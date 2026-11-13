@@ -46,3 +46,5 @@ mod request_events_tool_use_prompt_tokens;
 mod router_singleton_dropped;
 #[path = "upstream_affinity.rs"]
 mod upstream_affinity;
+#[path = "usage_rollup_pricing_completeness_migration.rs"]
+mod usage_rollup_pricing_completeness_migration;

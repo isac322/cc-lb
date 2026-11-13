@@ -6,8 +6,8 @@ use axum::http::{StatusCode, header};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore, UsageRollupStore,
-    normalize_usage_rollup_dimension,
+    PricingCompletenessInput, RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind,
+    UpstreamStore, UsageRollupStore, derive_pricing_completeness, normalize_usage_rollup_dimension,
 };
 
 use config_admin_common::{
@@ -227,8 +227,32 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         .and_then(|value| value.to_str().ok())
         .expect("summary ETag")
         .to_owned();
-    assert!(usage_etag.starts_with("W/\"dashboard:usage:"));
-    assert!(summary_etag.starts_with("W/\"dashboard:summary:"));
+    assert!(usage_etag.starts_with("W/\"dashboard:usage:v2:"));
+    assert!(summary_etag.starts_with("W/\"dashboard:summary:v2:"));
+    let checkpoint = storage.usage_rollup_checkpoint().await.unwrap().unwrap();
+    let window_end = now.div_ceil(60) * 60;
+    for (uri, old_etag) in [
+        (
+            usage_uri,
+            format!(
+                "W/\"dashboard:usage:1h:minute:model:all:all:all:full:{checkpoint}:{window_end}\""
+            ),
+        ),
+        (
+            summary_uri,
+            format!("W/\"dashboard:summary:1h:all:{checkpoint}:{window_end}\""),
+        ),
+    ] {
+        let (status, _, _) = authed_bytes_with_headers(
+            admin_app.clone(),
+            "GET",
+            uri,
+            None,
+            &[(header::IF_NONE_MATCH.as_str(), old_etag.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "pre-upgrade ETag: {uri}");
+    }
     assert_eq!(
         usage_headers
             .get(header::CACHE_CONTROL)
@@ -929,6 +953,18 @@ async fn usage_principal_totals_returns_all_principals_with_component_costs_beyo
         event.cost_cache_creation_1h_micros = Some(0);
         event.cost_cache_read_micros = Some(0);
         storage.append_request_event(&event).await.unwrap();
+        if index % 2 == 1 {
+            let mut unpriced = usage_event(
+                now.saturating_sub(60),
+                &format!("req-principal-unpriced-{index}"),
+                Uuid::from_u128(0x20),
+                "principal-cost-upstream",
+                1,
+            );
+            unpriced.principal_id = event.principal_id.clone();
+            unpriced.cost_usd_micros = None;
+            storage.append_request_event(&unpriced).await.unwrap();
+        }
     }
     storage.rollup_usage_once().await.unwrap();
 
@@ -954,13 +990,26 @@ async fn usage_principal_totals_returns_all_principals_with_component_costs_beyo
             "{projection}"
         );
         for item in series {
-            assert!(principal_ids.contains(&item["key"].as_str().unwrap().to_owned()));
+            let index = principal_ids
+                .iter()
+                .position(|principal| item["key"] == principal.as_str())
+                .expect("known principal");
+            let unpriced = index as u64 % 2;
             let bucket = item["buckets"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|bucket| bucket["request_count"] == 1)
+                .find(|bucket| bucket["request_count"].as_u64().unwrap() > 0)
                 .expect("principal request bucket");
+            assert_eq!(
+                bucket["pricing_completeness"],
+                if unpriced == 0 { "priced" } else { "partial" },
+                "{projection}"
+            );
+            assert_eq!(bucket["request_count"], 1 + unpriced, "{projection}");
+            assert_eq!(bucket["priced_request_count"], 1, "{projection}");
+            assert_eq!(bucket["unpriced_request_count"], unpriced, "{projection}");
+            assert_eq!(bucket["unmetered_request_count"], 0, "{projection}");
             for field in [
                 "cost_input_micros",
                 "cost_output_micros",
@@ -1137,6 +1186,239 @@ async fn usage_is_unchanged_when_diagnostics_are_taken_before_storage() {
     assert_eq!(stripped_usage, baseline, "taking diagnostics changed usage");
 }
 
+#[tokio::test]
+async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    storage
+        .append_request_event(&usage_event(
+            TEST_NOW_UNIX_SECS - 60,
+            "pricing-backfill",
+            Uuid::from_u128(1),
+            "test",
+            5,
+        ))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    let checkpoint = storage.usage_rollup_checkpoint().await.unwrap();
+    sqlx::query(
+        "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
+         unpriced_event_count = 0, unmetered_event_count = 0",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN \
+         ('pricing_completeness_backfill_upper', 'pricing_completeness_backfill_cursor')",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock,
+    ));
+    let mut validators = Vec::new();
+    for uri in [
+        "/admin/v1/dashboard/summary?range=1h",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model&projection=totals",
+    ] {
+        let (status, headers, body, _) = authed_json(admin_app.clone(), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let completeness = if uri.contains("/summary") {
+            &body["totals"]["pricing_completeness"]
+        } else {
+            &body["series"][0]["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|bucket| bucket["request_count"] == 1)
+                .unwrap()["pricing_completeness"]
+        };
+        assert_eq!(completeness, "unknown", "{uri}");
+        validators.push((uri, headers[header::ETAG].to_str().unwrap().to_owned()));
+    }
+    storage.rollup_usage_once().await.unwrap();
+    assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
+    for (uri, previous_etag) in validators {
+        let (status, headers, bytes) = authed_bytes_with_headers(
+            admin_app.clone(),
+            "GET",
+            uri,
+            None,
+            &[(header::IF_NONE_MATCH.as_str(), previous_etag.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_ne!(headers[header::ETAG].to_str().unwrap(), previous_etag);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let bucket = if uri.contains("/summary") {
+            &body["totals"]
+        } else {
+            body["series"][0]["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|bucket| bucket["request_count"] == 1)
+                .unwrap()
+        };
+        assert_eq!(bucket["pricing_completeness"], "known_zero", "{uri}");
+        assert_eq!(bucket["priced_request_count"], 1, "{uri}");
+        assert_eq!(bucket["unpriced_request_count"], 0, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn mixed_and_legacy_pricing_preserve_full_totals_parity_with_filters() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(0x1280);
+    UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: upstream_id,
+            name: "pricing-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+    for (index, (model, tokens, cost)) in [
+        ("priced", 5, Some(10)),
+        ("known-zero", 5, Some(0)),
+        ("unpriced", 5, None),
+        ("unmetered", 0, None),
+        ("mixed", 5, Some(10)),
+        ("mixed", 5, None),
+        ("legacy-unknown", 5, None),
+        ("legacy-partial", 5, Some(10)),
+        ("legacy-unmetered", 0, None),
+        ("legacy-cache-write", 0, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = usage_event(
+            TEST_NOW_UNIX_SECS - (index as u64 + 1) * 60,
+            &format!("pricing-{index}"),
+            upstream_id,
+            "pricing-upstream",
+            tokens,
+        );
+        event.model = Some(model.to_owned());
+        event.cost_usd_micros = cost;
+        if model == "legacy-cache-write" {
+            event.cache_write_input_tokens = Some(7);
+            event.cache_write_input_tokens_30m = Some(3);
+            event.cache_write_input_tokens_12h = Some(4);
+        }
+        storage.append_request_event(&event).await.unwrap();
+    }
+    // A second upstream/principal must never leak into the filtered counts.
+    let mut excluded = usage_event(
+        TEST_NOW_UNIX_SECS - 60,
+        "pricing-excluded",
+        Uuid::from_u128(0x1281),
+        "excluded",
+        999,
+    );
+    excluded.principal_id = Some("excluded-principal".to_owned());
+    storage.append_request_event(&excluded).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    sqlx::query(
+        "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
+         unpriced_event_count = 0, unmetered_event_count = 0 WHERE model LIKE 'legacy-%'",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    let principal = Uuid::from_u128(0xA1);
+    for group_by in ["none", "model", "principal", "upstream", "provider"] {
+        for filters in [
+            format!("&upstream_id={upstream_id}"),
+            format!("&principal_id={principal}&providers=anthropic"),
+            format!("&upstream_id={upstream_id}&principal_id={principal}&providers=anthropic"),
+        ] {
+            let uri = format!(
+                "/admin/v1/dashboard/usage?range=1h&step=minute&group_by={group_by}{filters}"
+            );
+            let (full, totals) = usage_projection_pair(&admin_app, &uri).await;
+            assert_usage_totals_match_full_collapse(&full, &totals);
+            assert_eq!(totals["observed"], true);
+            let series = totals["series"].as_array().unwrap();
+            assert_eq!(
+                series
+                    .iter()
+                    .map(|item| item["buckets"][0]["request_count"].as_u64().unwrap())
+                    .sum::<u64>(),
+                10,
+                "{uri}"
+            );
+            if group_by == "model" {
+                for (model, expected, priced, unpriced, unmetered) in [
+                    ("priced", "priced", 1, 0, 0),
+                    ("known-zero", "known_zero", 1, 0, 0),
+                    ("unpriced", "unpriced", 0, 1, 0),
+                    ("unmetered", "unmetered", 0, 0, 1),
+                    ("mixed", "partial", 1, 1, 0),
+                    ("legacy-unknown", "unknown", 0, 0, 0),
+                    ("legacy-partial", "partial", 0, 0, 0),
+                    ("legacy-unmetered", "unmetered", 0, 0, 0),
+                    ("legacy-cache-write", "unknown", 0, 0, 0),
+                ] {
+                    let bucket =
+                        &series.iter().find(|item| item["key"] == model).unwrap()["buckets"][0];
+                    assert_eq!(bucket["pricing_completeness"], expected, "{uri} {model}");
+                    assert_eq!(bucket["priced_request_count"], priced, "{uri} {model}");
+                    assert_eq!(bucket["unpriced_request_count"], unpriced, "{uri} {model}");
+                    assert_eq!(
+                        bucket["unmetered_request_count"], unmetered,
+                        "{uri} {model}"
+                    );
+                }
+            } else {
+                let bucket = &series[0]["buckets"][0];
+                assert_eq!(bucket["pricing_completeness"], "partial", "{uri}");
+                assert_eq!(bucket["priced_request_count"], 3, "{uri}");
+                assert_eq!(bucket["unpriced_request_count"], 2, "{uri}");
+                assert_eq!(bucket["unmetered_request_count"], 1, "{uri}");
+            }
+            for bucket in full["series"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|item| item["buckets"].as_array().unwrap())
+                .filter(|bucket| bucket["request_count"] == 0)
+            {
+                for field in [
+                    "pricing_completeness",
+                    "priced_request_count",
+                    "unpriced_request_count",
+                    "unmetered_request_count",
+                ] {
+                    assert!(bucket.get(field).is_none(), "{uri} {field}");
+                }
+            }
+        }
+    }
+}
+
 fn test_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
 }
@@ -1214,6 +1496,12 @@ fn assert_usage_totals_match_full_collapse(full: &Value, totals: &Value) {
             "cost_cache_creation_5m_micros",
             "cost_cache_creation_1h_micros",
             "cost_cache_read_micros",
+            "cache_write_input_tokens",
+            "cache_write_input_tokens_30m",
+            "cache_write_input_tokens_12h",
+            "priced_request_count",
+            "unpriced_request_count",
+            "unmetered_request_count",
         ] {
             let expected = full_buckets
                 .iter()
@@ -1230,6 +1518,48 @@ fn assert_usage_totals_match_full_collapse(full: &Value, totals: &Value) {
                 full_item["key"]
             );
         }
+
+        let sum = |field: &str| {
+            full_buckets
+                .iter()
+                .filter_map(|bucket| bucket[field].as_u64())
+                .sum::<u64>()
+        };
+        let total_tokens = full_buckets.iter().fold(0_u64, |total, bucket| {
+            [
+                bucket["input_tokens"].as_u64().unwrap_or(0),
+                bucket["output_tokens"].as_u64().unwrap_or(0),
+                bucket["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                bucket["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                bucket["cache_write_input_tokens"]
+                    .as_u64()
+                    .unwrap_or_else(|| {
+                        bucket["cache_write_input_tokens_30m"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .saturating_add(
+                                bucket["cache_write_input_tokens_12h"].as_u64().unwrap_or(0),
+                            )
+                    }),
+            ]
+            .into_iter()
+            .fold(total, u64::saturating_add)
+        });
+        let expected_completeness = derive_pricing_completeness(PricingCompletenessInput {
+            request_count: sum("request_count"),
+            priced_event_count: sum("priced_request_count"),
+            unpriced_event_count: sum("unpriced_request_count"),
+            unmetered_event_count: sum("unmetered_request_count"),
+            total_tokens,
+            virtual_cost_micros: sum("virtual_cost_micros"),
+        })
+        .map(|value| serde_json::to_value(value).unwrap());
+        assert_eq!(
+            totals_bucket.get("pricing_completeness"),
+            expected_completeness.as_ref(),
+            "collapsed pricing completeness for {}",
+            full_item["key"]
+        );
 
         let expected_latency_min = full_buckets
             .iter()

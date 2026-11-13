@@ -14,6 +14,8 @@ use crate::{SqliteStorage, map_sqlx_error};
 const CHECKPOINT_ID: &str = "high_water";
 const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
+const PRICING_BACKFILL_UPPER_ID: &str = "pricing_completeness_backfill_upper";
+const PRICING_BACKFILL_CURSOR_ID: &str = "pricing_completeness_backfill_cursor";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
@@ -74,6 +76,9 @@ struct RollupDelta {
     cost_cache_write_30m_micros: u64,
     cost_cache_write_12h_micros: u64,
     cost_components_event_count: u64,
+    priced_event_count: u64,
+    unpriced_event_count: u64,
+    unmetered_event_count: u64,
 }
 
 impl RollupDelta {
@@ -134,6 +139,17 @@ impl RollupDelta {
             .virtual_cost_micros
             .saturating_add(event.cost_usd_micros.unwrap_or(0).max(0) as u64);
         self.add_cost_components(event);
+        self.add_pricing_classification(event);
+    }
+
+    fn add_pricing_classification(&mut self, event: &RequestEvent) {
+        if event.cost_usd_micros.is_some() {
+            self.priced_event_count += 1;
+        } else if event_has_positive_tokens(event) {
+            self.unpriced_event_count += 1;
+        } else {
+            self.unmetered_event_count += 1;
+        }
     }
 
     fn add_cost_components(&mut self, event: &RequestEvent) {
@@ -254,7 +270,7 @@ impl UsageRollupStore for SqliteStorage {
               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count \
               FROM usage_rollups_v2 AS rollup \
               WHERE rollup.resolution = ? AND rollup.bucket_start_unix_secs >= ? AND rollup.bucket_start_unix_secs < ? \
               ORDER BY bucket_start_unix_secs ASC",
@@ -305,6 +321,33 @@ impl UsageRollupStore for SqliteStorage {
                 })
             })
             .collect()
+    }
+
+    async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, CAST(value AS TEXT) FROM usage_rollup_checkpoints_v1 WHERE id IN (?, ?, ?)",
+        )
+        .bind(CHECKPOINT_ID)
+        .bind(COST_BACKFILL_CURSOR_ID)
+        .bind(PRICING_BACKFILL_CURSOR_ID)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut high_water = String::new();
+        let mut cost_cursor = String::new();
+        let mut pricing_cursor = String::new();
+        for (id, value) in rows {
+            match id.as_str() {
+                CHECKPOINT_ID => high_water = value,
+                COST_BACKFILL_CURSOR_ID => cost_cursor = value,
+                PRICING_BACKFILL_CURSOR_ID => pricing_cursor = value,
+                _ => unreachable!(),
+            }
+        }
+        Ok(Some(format!("{high_water}:{cost_cursor}:{pricing_cursor}")))
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
@@ -463,7 +506,7 @@ async fn merge_stale_gemini_rollups(
               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count, updated_at) \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at) \
              SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, \
                     substr(model, 8), request_count, input_tokens, output_tokens, \
                     cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
@@ -475,7 +518,7 @@ async fn merge_stale_gemini_rollups(
                     cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
                     cost_cache_creation_1h_micros, cost_cache_read_micros, \
                     cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-                    cost_components_event_count, updated_at \
+                    cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at \
              FROM usage_rollups_v2 \
              WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
                AND upstream_id = ? AND model = ? \
@@ -529,6 +572,9 @@ async fn merge_stale_gemini_rollups(
                  cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + excluded.cost_cache_write_30m_micros, \
                  cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + excluded.cost_cache_write_12h_micros, \
                  cost_components_event_count = usage_rollups_v2.cost_components_event_count + excluded.cost_components_event_count, \
+                 priced_event_count = usage_rollups_v2.priced_event_count + excluded.priced_event_count, \
+                 unpriced_event_count = usage_rollups_v2.unpriced_event_count + excluded.unpriced_event_count, \
+                 unmetered_event_count = usage_rollups_v2.unmetered_event_count + excluded.unmetered_event_count, \
                  updated_at = MAX(usage_rollups_v2.updated_at, excluded.updated_at)",
         )
         .bind(&resolution)
@@ -937,6 +983,13 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     let current_backfill_cursor = backfill_cursor.unwrap_or(0);
     let needs_backfill_init = backfill_upper.is_none();
     let needs_backfill_batch = current_backfill_cursor < target_backfill_upper;
+    let pricing_backfill_upper = read_named_checkpoint(pool, PRICING_BACKFILL_UPPER_ID).await?;
+    let pricing_backfill_cursor = read_named_checkpoint(pool, PRICING_BACKFILL_CURSOR_ID).await?;
+    let target_pricing_backfill_upper = pricing_backfill_upper.unwrap_or(previous_checkpoint);
+    let current_pricing_backfill_cursor = pricing_backfill_cursor.unwrap_or(0);
+    let needs_pricing_backfill_init = pricing_backfill_upper.is_none();
+    let needs_pricing_backfill_batch =
+        current_pricing_backfill_cursor < target_pricing_backfill_upper;
 
     let rows = sqlx::query(
         "SELECT id, ts, list_ts_ms, source_kind, event_kind, principal_id, upstream_id, \
@@ -979,7 +1032,41 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         Vec::new()
     };
 
-    if rows.is_empty() && !needs_backfill_init && !needs_backfill_batch {
+    let pricing_backfill_rows = if needs_pricing_backfill_batch {
+        sqlx::query(
+            "SELECT id, ts, list_ts_ms, source_kind, event_kind, principal_id, upstream_id, \
+             upstream_name, model, list_status, error_code, input_tokens, output_tokens, \
+             cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
+             cache_write_input_tokens_30m, cache_write_input_tokens_12h, list_cost_usd_micros, \
+             list_cost_input_micros, list_cost_output_micros, \
+             list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+             list_cost_cache_read_micros, list_cost_cache_write_30m_micros, \
+             list_cost_cache_write_12h_micros, list_duration_ms, list_proxy_setup_ms, \
+             list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms \
+             FROM request_events_v1 WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?",
+        )
+        .bind(u64_to_i64(
+            current_pricing_backfill_cursor,
+            "cost pricing_backfill cursor",
+        )?)
+        .bind(u64_to_i64(
+            target_pricing_backfill_upper,
+            "cost pricing_backfill upper",
+        )?)
+        .bind(ROLLUP_BATCH_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx_error)?
+    } else {
+        Vec::new()
+    };
+
+    if rows.is_empty()
+        && !needs_backfill_init
+        && !needs_backfill_batch
+        && !needs_pricing_backfill_init
+        && !needs_pricing_backfill_batch
+    {
         return Ok(UsageRollupRun {
             processed_events: 0,
             updated_rollups: 0,
@@ -993,6 +1080,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     let mut overview_excluded_error_deltas: BTreeMap<(UsageRollupResolution, u64), u64> =
         BTreeMap::new();
     let mut backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
+    let mut pricing_backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
 
     for row in &rows {
         let id = i64_to_u64(
@@ -1056,18 +1144,66 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         }
     }
 
-    let updated_rollups = u64::try_from(deltas.len().saturating_add(backfill_deltas.len()))
-        .map_err(|_| StorageError::Fatal {
-            message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
-        })?;
+    let mut next_pricing_backfill_cursor = current_pricing_backfill_cursor;
+    if needs_pricing_backfill_batch {
+        next_pricing_backfill_cursor = if pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize
+        {
+            target_pricing_backfill_upper
+        } else {
+            i64_to_u64(
+                pricing_backfill_rows
+                    .last()
+                    .ok_or_else(|| StorageError::Corrupted {
+                        message: "empty cost pricing_backfill batch reached full batch limit"
+                            .to_owned(),
+                    })?
+                    .try_get("id")
+                    .map_err(map_sqlx_error)?,
+                "cost pricing_backfill cursor",
+            )?
+        };
+        for row in &pricing_backfill_rows {
+            let table_upstream_id = row
+                .try_get::<Option<String>, _>("upstream_id")
+                .map_err(map_sqlx_error)?
+                .as_deref()
+                .map(|value| parse_uuid(value, "request event upstream_id"))
+                .transpose()?;
+            let event = rollup_event_from_row(row, table_upstream_id)?;
+            let upstream = resolve_upstream_identity(&event, &upstreams);
+            for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+                let key = rollup_key(&event, &upstream, resolution);
+                pricing_backfill_deltas
+                    .entry(key)
+                    .or_default()
+                    .add_pricing_classification(&event);
+            }
+        }
+    }
+
+    let updated_rollups = u64::try_from(
+        deltas
+            .len()
+            .saturating_add(backfill_deltas.len())
+            .saturating_add(pricing_backfill_deltas.len()),
+    )
+    .map_err(|_| StorageError::Fatal {
+        message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
+    })?;
 
     let mut tx = storage.begin_immediate().await?;
     let current_checkpoint = read_checkpoint(&mut *tx).await?.unwrap_or(0);
     let current_backfill_upper = read_named_checkpoint(&mut *tx, COST_BACKFILL_UPPER_ID).await?;
     let current_backfill_cursor = read_named_checkpoint(&mut *tx, COST_BACKFILL_CURSOR_ID).await?;
+    let current_pricing_backfill_upper =
+        read_named_checkpoint(&mut *tx, PRICING_BACKFILL_UPPER_ID).await?;
+    let current_pricing_backfill_cursor =
+        read_named_checkpoint(&mut *tx, PRICING_BACKFILL_CURSOR_ID).await?;
     if current_checkpoint != previous_checkpoint
         || current_backfill_upper != backfill_upper
         || current_backfill_cursor != backfill_cursor
+        || current_pricing_backfill_upper != pricing_backfill_upper
+        || current_pricing_backfill_cursor != pricing_backfill_cursor
     {
         return Ok(UsageRollupRun {
             processed_events: 0,
@@ -1138,6 +1274,40 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         .await
         .map_err(map_sqlx_error)?;
     }
+    for (key, delta) in pricing_backfill_deltas {
+        if delta.priced_event_count + delta.unpriced_event_count + delta.unmetered_event_count == 0
+        {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET \
+             priced_event_count = priced_event_count + ?, \
+             unpriced_event_count = unpriced_event_count + ?, \
+             unmetered_event_count = unmetered_event_count + ?, updated_at = unixepoch() \
+             WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
+               AND upstream_id = ? AND model = ?",
+        )
+        .bind(u64_to_i64(
+            delta.priced_event_count,
+            "backfill priced_event_count",
+        )?)
+        .bind(u64_to_i64(
+            delta.unpriced_event_count,
+            "backfill unpriced_event_count",
+        )?)
+        .bind(u64_to_i64(
+            delta.unmetered_event_count,
+            "backfill unmetered_event_count",
+        )?)
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(key.bucket_start, "backfill bucket_start")?)
+        .bind(&key.principal)
+        .bind(key.upstream_id.to_string())
+        .bind(&key.model)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
     for ((resolution, bucket_start), error_count) in overview_excluded_error_deltas {
         sqlx::query(
             "INSERT INTO overview_excluded_error_rollups_v1 \
@@ -1177,6 +1347,31 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     } else if needs_backfill_batch {
         persist_named_checkpoint_in_tx(&mut tx, COST_BACKFILL_CURSOR_ID, next_backfill_cursor)
             .await?;
+    }
+    if needs_pricing_backfill_init {
+        persist_named_checkpoint_in_tx(
+            &mut tx,
+            PRICING_BACKFILL_UPPER_ID,
+            target_pricing_backfill_upper,
+        )
+        .await?;
+        persist_named_checkpoint_in_tx(
+            &mut tx,
+            PRICING_BACKFILL_CURSOR_ID,
+            if needs_pricing_backfill_batch {
+                next_pricing_backfill_cursor
+            } else {
+                0
+            },
+        )
+        .await?;
+    } else if needs_pricing_backfill_batch {
+        persist_named_checkpoint_in_tx(
+            &mut tx,
+            PRICING_BACKFILL_CURSOR_ID,
+            next_pricing_backfill_cursor,
+        )
+        .await?;
     }
     if !rows.is_empty() {
         persist_checkpoint_in_tx(&mut tx, max_id).await?;
@@ -1220,8 +1415,8 @@ async fn upsert_rollup_delta(
            upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
            cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
            cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-           cost_components_event_count, updated_at) \
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
+           cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, updated_at) \
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
           ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
           SET upstream_name = excluded.upstream_name, \
               request_count = usage_rollups_v2.request_count + excluded.request_count, \
@@ -1276,6 +1471,9 @@ async fn upsert_rollup_delta(
               cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + excluded.cost_cache_write_30m_micros, \
               cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + excluded.cost_cache_write_12h_micros, \
               cost_components_event_count = usage_rollups_v2.cost_components_event_count + excluded.cost_components_event_count, \
+              priced_event_count = usage_rollups_v2.priced_event_count + excluded.priced_event_count, \
+              unpriced_event_count = usage_rollups_v2.unpriced_event_count + excluded.unpriced_event_count, \
+              unmetered_event_count = usage_rollups_v2.unmetered_event_count + excluded.unmetered_event_count, \
               updated_at = unixepoch()",
     )
     .bind(key.resolution.as_str())
@@ -1343,6 +1541,9 @@ async fn upsert_rollup_delta(
         delta.cost_components_event_count,
         "rollup cost_components_event_count",
     )?)
+    .bind(u64_to_i64(delta.priced_event_count, "rollup priced_event_count")?)
+    .bind(u64_to_i64(delta.unpriced_event_count, "rollup unpriced_event_count")?)
+    .bind(u64_to_i64(delta.unmetered_event_count, "rollup unmetered_event_count")?)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -1426,6 +1627,16 @@ fn rollup_event_from_row(
         upstream_body_ms: optional_u64("list_upstream_body_ms")?,
         ..RequestEvent::default()
     })
+}
+
+fn event_has_positive_tokens(event: &RequestEvent) -> bool {
+    event.input_tokens.unwrap_or(0) > 0
+        || event.output_tokens.unwrap_or(0) > 0
+        || event.cache_creation_input_tokens.unwrap_or(0) > 0
+        || event.cache_read_input_tokens.unwrap_or(0) > 0
+        || event.cache_write_input_tokens.unwrap_or(0) > 0
+        || event.cache_write_input_tokens_30m.unwrap_or(0) > 0
+        || event.cache_write_input_tokens_12h.unwrap_or(0) > 0
 }
 
 fn is_overview_excluded_status(status: u16) -> bool {
@@ -1691,6 +1902,20 @@ fn row_to_usage_rollup(row: SqliteRow) -> StorageResult<UsageRollup> {
             row.try_get("cost_components_event_count")
                 .map_err(map_sqlx_error)?,
             "rollup cost_components_event_count",
+        )?,
+        priced_event_count: i64_to_u64(
+            row.try_get("priced_event_count").map_err(map_sqlx_error)?,
+            "rollup priced_event_count",
+        )?,
+        unpriced_event_count: i64_to_u64(
+            row.try_get("unpriced_event_count")
+                .map_err(map_sqlx_error)?,
+            "rollup unpriced_event_count",
+        )?,
+        unmetered_event_count: i64_to_u64(
+            row.try_get("unmetered_event_count")
+                .map_err(map_sqlx_error)?,
+            "rollup unmetered_event_count",
         )?,
     })
 }

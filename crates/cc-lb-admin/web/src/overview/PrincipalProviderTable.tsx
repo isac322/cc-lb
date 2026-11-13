@@ -10,6 +10,12 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
+import {
+  isIndeterminatePricing,
+  type PricingCounts,
+  pricingQualifier,
+  sumPricingCounts,
+} from '../lib/pricingCompleteness';
 import type { ProviderFamily } from '../lib/providers';
 import { PrincipalUsageRow } from './PrincipalUsageRow';
 import type {
@@ -34,20 +40,33 @@ const PRINCIPAL_BODY_CELL_CLASS = 'bg-inherit';
 function fmtCost(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(2)}`;
 }
+function CostValue({
+  micros,
+  pricing,
+}: {
+  micros: number;
+  pricing: PricingCounts;
+}) {
+  const indeterminate = isIndeterminatePricing(pricing.pricing_completeness);
+  const qualifier = pricingQualifier(pricing);
+  const text = indeterminate
+    ? '—'
+    : `${fmtCost(micros)}${pricing.pricing_completeness === 'partial' ? '+' : ''}`;
+  return (
+    <span
+      className={
+        indeterminate ? 'tabular-nums text-text-faint' : 'tabular-nums'
+      }
+      title={qualifier}
+      aria-label={qualifier ? `${text} (${qualifier})` : undefined}
+    >
+      {text}
+      {qualifier ? <span className="sr-only">{` (${qualifier})`}</span> : null}
+    </span>
+  );
+}
 function fmtCache(value: number | null): string {
   return value == null ? '—' : `${Math.floor(value * 100)}%`;
-}
-function metricValue(
-  metric: PrincipalProviderMetric | undefined,
-  metricKey: 'cost' | 'cache',
-): string {
-  if (!metric) return '—';
-  return metricKey === 'cost'
-    ? fmtCost(metric.costMicros)
-    : fmtCache(metric.cacheHitRatio);
-}
-function sortValue(row: MergedPrincipalUsage): number {
-  return row.totalCostMicros;
 }
 function aggregateProviderMetrics(
   rows: readonly MergedPrincipalUsage[],
@@ -61,6 +80,14 @@ function aggregateProviderMetrics(
     0,
   );
   return {
+    ...sumPricingCounts(
+      metrics.map((metric) => ({
+        ...metric,
+        request_count: metric.requests,
+        total_tokens: metric.tokens,
+        virtual_cost_micros: metric.costMicros,
+      })),
+    ),
     costMicros: metrics.reduce((sum, metric) => sum + metric.costMicros, 0),
     cacheHitRatio:
       promptTokens > 0
@@ -98,7 +125,14 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
     return [...rows]
       .filter((row) => !needle || row.name.toLowerCase().includes(needle))
       .sort((left, right) => {
-        const difference = sortValue(left) - sortValue(right);
+        const leftUnknown = isIndeterminatePricing(left.pricing_completeness);
+        const rightUnknown = isIndeterminatePricing(right.pricing_completeness);
+        if (leftUnknown || rightUnknown)
+          return (
+            Number(leftUnknown) - Number(rightUnknown) ||
+            left.name.localeCompare(right.name)
+          );
+        const difference = left.totalCostMicros - right.totalCostMicros;
         return (
           (descending ? -1 : 1) * difference ||
           left.name.localeCompare(right.name)
@@ -118,6 +152,17 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
   const totalCostMicros = activeProviders.reduce(
     (sum, provider) => sum + providerTotals[provider].costMicros,
     0,
+  );
+  const totalPricing = sumPricingCounts(
+    activeProviders.map((provider) => ({
+      ...providerTotals[provider],
+      request_count: providerTotals[provider].requests,
+      total_tokens: providerTotals[provider].tokens,
+      virtual_cost_micros: providerTotals[provider].costMicros,
+    })),
+  );
+  const hasDeterminateCost = rows.some(
+    (row) => !isIndeterminatePricing(row.pricing_completeness),
   );
   const sort = () => setDescending((value) => !value);
   const header = (label: string, className?: string) => {
@@ -216,33 +261,45 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                       </Link>
                     </TableCell>
                     <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
-                      {fmtCost(row.totalCostMicros)}
+                      <CostValue micros={row.totalCostMicros} pricing={row} />
                     </TableCell>
                     <TableCell className={PRINCIPAL_BODY_CELL_CLASS}>
-                      <div className="flex min-w-24 items-center gap-2">
-                        <span className="h-1.5 min-w-0 flex-1 bg-progress-track">
-                          <span
-                            className="block h-full bg-text-muted"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, row.sharePct))}%`,
-                            }}
-                          />
-                        </span>
-                        <span className="text-caption tabular-nums text-text-muted">
-                          {row.sharePct.toFixed(0)}%
-                        </span>
-                      </div>
+                      {row.sharePct == null ? (
+                        <span className="text-text-faint">—</span>
+                      ) : (
+                        <div className="flex min-w-24 items-center gap-2">
+                          <span className="h-1.5 min-w-0 flex-1 bg-progress-track">
+                            <span
+                              className="block h-full bg-text-muted"
+                              style={{
+                                width: `${Math.min(100, Math.max(0, row.sharePct))}%`,
+                              }}
+                            />
+                          </span>
+                          <span className="text-caption tabular-nums text-text-muted">
+                            {row.sharePct.toFixed(0)}%
+                          </span>
+                        </div>
+                      )}
                     </TableCell>
                     {activeProviders.map((provider) => (
                       <TableCell
                         className={`${PRINCIPAL_BODY_CELL_CLASS} whitespace-nowrap`}
                         key={provider}
                       >
-                        <span className="tabular-nums">
-                          {metricValue(row.providers[provider], 'cost')}
-                        </span>
+                        <CostValue
+                          micros={row.providers[provider]?.costMicros ?? 0}
+                          pricing={
+                            row.providers[provider] ?? {
+                              pricing_completeness: 'unknown',
+                            }
+                          }
+                        />
                         <span className="ml-1 text-caption text-text-muted">
-                          / {metricValue(row.providers[provider], 'cache')}
+                          /{' '}
+                          {fmtCache(
+                            row.providers[provider]?.cacheHitRatio ?? null,
+                          )}
                         </span>
                       </TableCell>
                     ))}
@@ -259,18 +316,21 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                 Total
               </TableCell>
               <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
-                {fmtCost(totalCostMicros)}
+                <CostValue micros={totalCostMicros} pricing={totalPricing} />
               </TableCell>
               <TableCell className={PRINCIPAL_BODY_CELL_CLASS} numeric>
-                100%
+                {hasDeterminateCost ? '100%' : '—'}
               </TableCell>
               {activeProviders.map((provider) => (
                 <TableCell
                   className={`${PRINCIPAL_BODY_CELL_CLASS} whitespace-nowrap`}
                   key={provider}
                 >
-                  {fmtCost(providerTotals[provider].costMicros)} /{' '}
-                  {fmtCache(providerTotals[provider].cacheHitRatio)}
+                  <CostValue
+                    micros={providerTotals[provider].costMicros}
+                    pricing={providerTotals[provider]}
+                  />{' '}
+                  / {fmtCache(providerTotals[provider].cacheHitRatio)}
                 </TableCell>
               ))}
             </TableRow>

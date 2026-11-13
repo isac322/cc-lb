@@ -304,6 +304,28 @@ bucket; it does not imply a 1-hour write.
 Request events and keep-alive turns retain that split for local cost accounting.
 The change applies to future renewals and does not rewrite historical rows.
 These are cc-lb usage records and cost estimates; the provider determines its invoice.
+
+Scheduled OpenAI Responses renewals normalize `input_tokens` to uncached net
+tokens (`gross - cached_read - cache_write`), preserve reported versus absent
+native cache-write `Option` counters (`None`, `Some(0)`, or positive splits),
+and share snapshot pricing with foreground responses. Renewal event rows
+preserve missing actual prices as null cost fields, while a published zero rate
+remains a known zero. A positive billable token count without an applicable
+catalog rate or complete write split is unpriced, even if the observed tokens
+were all cache reads.
+
+Dashboard rollups count priced, unpriced and unmetered renewal events
+separately. These counts do not alter retained tokens, known spend or renewal
+history. A price backfill uses retained event evidence only; it does not
+recalculate old costs at today's rates. When retention has removed the
+evidence, the missing classification remains unknown.
+
+Overview and estimated API-key usage show `List price unavailable` or
+`Price unknown` with a dash instead of a zero. A partial amount carries `+`
+and an unpriced-request count or `Partly priced`. The request drawer keeps a
+positive recorded total when its category split is missing, with the note
+`Per-category cost not recorded`.
+
 ## Read model, retained history, and economics
 
 The admin read model separates current live sessions from retained history.

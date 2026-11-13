@@ -257,6 +257,14 @@ fn usage_rollup_principal_cost_components_sqlite() {
 }
 
 #[test]
+fn usage_rollup_pricing_completeness_sqlite() {
+    run_sqlite_scenario(
+        "usage_rollup_pricing_completeness",
+        cc_lb_storage_conformance::scenarios::usage_rollup_pricing_completeness::run_all,
+    );
+}
+
+#[test]
 fn cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
     run_sqlite_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",

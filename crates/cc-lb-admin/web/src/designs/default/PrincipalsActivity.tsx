@@ -10,6 +10,11 @@ import {
   usePreviewInstallation,
   useProviderScope,
 } from '../../lib/previewControls';
+import {
+  isIndeterminatePricing,
+  pricingQualifier,
+  sumBucketPricing,
+} from '../../lib/pricingCompleteness';
 import { PROVIDER_LABELS } from '../../lib/providers';
 import { useUsage } from '../../lib/queries';
 import {
@@ -22,7 +27,7 @@ const stepFor = (range: TimePreset): 'hour' | 'minute' =>
   range === '7d' || range === '24h' ? 'hour' : 'minute';
 
 function aggregateBuckets(buckets: readonly UsageBucket[]) {
-  return buckets.reduce(
+  const totals = buckets.reduce(
     (sum, bucket) => ({
       requests: sum.requests + bucket.request_count,
       errors: sum.errors + bucket.error_count,
@@ -36,6 +41,7 @@ function aggregateBuckets(buckets: readonly UsageBucket[]) {
     }),
     { requests: 0, errors: 0, input: 0, output: 0, cost: 0 },
   );
+  return { ...totals, ...sumBucketPricing(buckets) };
 }
 
 function RangeControl({
@@ -125,7 +131,12 @@ export function PrincipalsActivity({ principalId }: { principalId: string }) {
                         'Errors',
                         `${formatCount(totals.errors)}${totals.requests > 0 ? ` · ${((totals.errors / totals.requests) * 100).toFixed(1)}%` : ''}`,
                       ],
-                      ['Est. catalog cost', formatCostMicros(totals.cost)],
+                      [
+                        'Est. catalog cost',
+                        isIndeterminatePricing(totals.pricing_completeness)
+                          ? '—'
+                          : `${formatCostMicros(totals.cost)}${totals.pricing_completeness === 'partial' ? '+' : ''}`,
+                      ],
                     ].map(([label, value]) => (
                       <div key={label}>
                         <dt className="text-caption text-text-faint">
@@ -134,6 +145,13 @@ export function PrincipalsActivity({ principalId }: { principalId: string }) {
                         <dd className="mt-1 text-body tabular-nums text-text">
                           {value}
                         </dd>
+                        {label === 'Est. catalog cost' &&
+                        (isIndeterminatePricing(totals.pricing_completeness) ||
+                          totals.pricing_completeness === 'partial') ? (
+                          <p className="text-caption text-text-faint">
+                            {pricingQualifier(totals)}
+                          </p>
+                        ) : null}
                       </div>
                     ))}
                   </dl>

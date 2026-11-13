@@ -458,6 +458,34 @@ The Overview leads with how usage moved, then who is using it. Top to bottom (`r
    - Closing coupon confirmation or History returns keyboard focus to the button that opened the workflow. Switching between confirmation and History keeps focus inside the active overlay instead of restoring it to the page.
 3. **Latest requests (any time)**: a shared `RequestEventsFeed` presents newest message requests with their failure and retry state. The section shows the feed's tail status as a `FeedLiveStatus` badge (`Live`, `Paused`, `Offline`, `Reconnecting…`) at the start of its subtitle. Overview runs the feed's bounded `infinite` history in a fixed-height scroll slot (`h-96`, capped at `60vh`, at least `min-h-48`, scrolling inside): it retains at most 500 rows, reveals them 50 at a time as the slot scrolls to its end, and fetches an older cursor page only when the retained rows run out; live arrivals take the head and drop the oldest rows past the cap. Overview keeps both Principal and Upstream columns; entity-scoped panes omit only their own entity column. A card from `md`; on phones the rows run to the screen edges.
 
+### List-price completeness
+
+Unavailable pricing is a neutral instrument state. Use `text-text-faint` or
+`text-text-muted`, never warning or danger colors. Keep the same facts at 390px,
+768px and 1440px in both themes. Values and qualification captions wrap without
+truncation; essential state stays visible without hover.
+
+- A range with no requests has no cost reading. `unpriced` shows `—` with
+  `List price unavailable`; `unknown` shows `—` with `Price unknown`. A null
+  request cost is unavailable, never a zero.
+- `partial` shows the known subtotal followed by `+`. When all requests are
+  classified, the caption counts missing prices, such as `1 unpriced`.
+  Otherwise it says `Partly priced`. Exact values and breakdowns retain the
+  qualification.
+- `known_zero` and `unmetered` retain a zero amount. The latter means
+  `No billable usage`. Neither state says a model has no list price.
+- Cost plots leave gaps for `unpriced` and `unknown`; empty, known-zero and
+  unmetered buckets plot zero. Gaps never connect to adjacent priced intervals.
+- Indeterminate principals sort last in either cost-sort direction and have
+  no cost share. Shares use determinate subtotals only, including partial
+  amounts. A table with no determinate amounts has no share total.
+- Apply this contract to Overview, principal provider consumption and estimated
+  API-key usage. Provider-reported organization figures keep their existing
+  behavior and do not inherit local-rollup pricing classifications.
+- In the request drawer, an explicit zero without category rows says `No cost`.
+  A positive recorded total without categories keeps its Total row and says
+  `Per-category cost not recorded`.
+
 ### Charts (Recharts)
 
 `charts.tsx` exports the shared chrome; spread it into Recharts parts rather than restyling per chart.
@@ -470,7 +498,7 @@ The Overview leads with how usage moved, then who is using it. Top to bottom (`r
 - Quota charts draw no threshold or severity lines; severity lives in the pace-relative ink of figures and fills, never on the plot. The upstream detail's Quota history marks window starts and resets instead: a `ReferenceLine` at each mark in that window's color at 50% opacity — a `4 6` dash for a start, `2 4` for a reset — labeled `5h reset` / `5h start` (windows share one label when their marks coincide); a coincident start and reset draw as the reset alone, and crowded labels alternate between above the plot and inside its top edge.
 - Quota charts draw each window in its `getWindowColor` series with a 1.5px stroke. The live windows (5h, 7d, 7d (Fable)) are filled with `SeriesFillGradient`: the series color at 2× `--chart-fill-opacity` along the line fading to nothing at the baseline, so overlapping areas stay legible under each other's strokes. Legacy (Sonnet, Opus) and Anthropic overage are strokes only — the unified restriction envelope and Codex credits never draw — so five-plus windows never stack into a tinted wash; with more than three windows visible and none isolated, the gradients drop to 1× strength. The Overview pool chart paints back to front — 7d, 7d (Fable), then 5h (the fastest mover) on top — fills first and every stroke in a second pass, so no fill covers another window's line; its tooltip shows one row per window in legend order (`poolTooltipRows` drops the fill pass's entry, which Recharts also hands custom tooltip content).
 - Legend: in the chart header row: a square window chip, a `text-muted` label and a tabular value, one entry per series; a series entry toggles isolating its window. Quota window legends are categorical — there is no threshold swatch.
-- `Sparkline`: a 1.25px line over a flat fill at `--chart-fill-opacity` (neutral `text-muted` by default); an optional `secondary` series draws as a 1.5px dashed line without fill on its own scale (`SPARKLINE_SECONDARY_DASH` 3 2), always named by a caller legend; a null secondary value is a gap, not a zero. Renders nothing when every value is zero. Chart animation is off.
+- `Sparkline`: a 1.25px line over a flat fill at `--chart-fill-opacity` (neutral `text-muted` by default); an optional `secondary` series draws as a 1.5px dashed line without fill on its own scale (`SPARKLINE_SECONDARY_DASH` 3 2), always named by a caller legend. Null values in either series remain gaps. Renders nothing when every primary value is zero or null. Chart animation is off.
 
 - Histograms: neutral bars with errors stacked in `danger`. No donuts: use a `StackedBar` plus a value table.
 - A chart is one static image to assistive tech: pass an `ariaLabel` summary, or hide it when the surrounding element already names it.

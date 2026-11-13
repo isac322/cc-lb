@@ -16,6 +16,10 @@ import type {
 } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
+import {
+  isIndeterminatePricing,
+  pricingQualifier,
+} from '../../lib/pricingCompleteness';
 import { TIME_PRESET_OPTIONS, type TimePreset } from '../../lib/timePresets';
 import {
   CHART_AXIS,
@@ -134,14 +138,19 @@ export function ApiUsageCard({
         const row = bucketsByTs.get(ts)!;
         if (metric === 'tokens') {
           row[model] = sumTokens(bucket);
-        } else {
+        } else if (
+          !(
+            provenance?.source === 'estimated' &&
+            isIndeterminatePricing(bucket.pricing_completeness)
+          )
+        ) {
           row[model] = bucket.virtual_cost_micros / 1_000_000;
         }
       }
     }
 
     return Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts);
-  }, [data, metric]);
+  }, [data, metric, provenance?.source]);
 
   const models = useMemo(() => {
     if (!data?.series) return [];
@@ -204,6 +213,12 @@ export function ApiUsageCard({
   // A background refetch failed while the previous answer stays on screen.
   const notRefreshed = month !== undefined && monthError !== null;
   const nativeBillingStop = nativeProvider && month?.billing_stop != null;
+  const monthState =
+    provenance?.source === 'estimated'
+      ? month?.pricing_completeness
+      : undefined;
+  const monthQualifier =
+    monthState && month ? pricingQualifier(month) : undefined;
 
   // The header holds only the provenance badge; chart controls sit in the
   // toolbar row above the chart. While the first report is on its way the
@@ -327,8 +342,18 @@ export function ApiUsageCard({
                     Cost at list price
                   </dt>
                   <dd className="text-body font-medium tabular-nums">
-                    {month ? fmtUsd(month.cost_usd_micros) : 'No reading'}
+                    {month
+                      ? isIndeterminatePricing(monthState)
+                        ? '—'
+                        : `${fmtUsd(month.cost_usd_micros)}${monthState === 'partial' ? '+' : ''}`
+                      : 'No reading'}
                   </dd>
+                  {isIndeterminatePricing(monthState) ||
+                  monthState === 'partial' ? (
+                    <dd className="text-caption text-text-faint">
+                      {monthQualifier}
+                    </dd>
+                  ) : null}
                 </div>
               </dl>
             )}
@@ -391,7 +416,11 @@ export function ApiUsageCard({
                         />
                         <span className="text-text-muted">{model}</span>
                         <span className="tabular-nums text-text">
-                          {formatTooltip(val)}
+                          {metric === 'cost' &&
+                          provenance?.source === 'estimated' &&
+                          lastBucket?.[model] === undefined
+                            ? '—'
+                            : formatTooltip(val)}
                         </span>
                       </div>
                     );
@@ -451,6 +480,7 @@ export function ApiUsageCard({
                         fill={`url(#${chartId}-${index})`}
                         fillOpacity={1}
                         strokeWidth={1.5}
+                        connectNulls={false}
                         isAnimationActive={false}
                       />
                     ))}

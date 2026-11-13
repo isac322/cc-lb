@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cc_lb_storage_api::{
-    Provider, Storage, StorageError, UpstreamStore, UsageRollup, UsageRollupResolution,
+    PricingCompleteness, PricingCompletenessInput, Provider, Storage, StorageError, UpstreamStore,
+    UsageRollup, UsageRollupResolution, derive_pricing_completeness,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -199,6 +200,14 @@ pub struct SummaryTotals {
     pub avg_sign_ms: f64,
     pub avg_upstream_ttfb_ms: f64,
     pub avg_upstream_body_ms: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_completeness: Option<PricingCompleteness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpriced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmetered_request_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +259,14 @@ pub struct UsageBucket {
     pub upstream_ttfb_ms_count: u64,
     pub upstream_body_ms_sum: u64,
     pub upstream_body_ms_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_completeness: Option<PricingCompleteness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpriced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmetered_request_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -625,6 +642,10 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         upstream_ttfb_ms_count: 0,
         upstream_body_ms_sum: 0,
         upstream_body_ms_count: 0,
+        pricing_completeness: None,
+        priced_request_count: None,
+        unpriced_request_count: None,
+        unmetered_request_count: None,
     }
 }
 
@@ -648,6 +669,23 @@ fn add_rollup_to_buckets(
     }
 
     add_rollup_to_bucket(bucket, rollup, include_cost_components);
+}
+
+fn bucket_total_tokens(bucket: &UsageBucket) -> u64 {
+    [
+        bucket.input_tokens,
+        bucket.output_tokens,
+        bucket.cache_creation_input_tokens,
+        bucket.cache_read_input_tokens,
+        bucket.cache_write_input_tokens.unwrap_or_else(|| {
+            bucket
+                .cache_write_input_tokens_30m
+                .unwrap_or(0)
+                .saturating_add(bucket.cache_write_input_tokens_12h.unwrap_or(0))
+        }),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add)
 }
 
 fn add_rollup_to_bucket(
@@ -714,6 +752,31 @@ fn add_rollup_to_bucket(
     bucket.upstream_ttfb_ms_count += rollup.upstream_ttfb_ms_count;
     bucket.upstream_body_ms_sum += rollup.upstream_body_ms_sum;
     bucket.upstream_body_ms_count += rollup.upstream_body_ms_count;
+    if bucket.request_count > 0 {
+        let priced = bucket
+            .priced_request_count
+            .unwrap_or(0)
+            .saturating_add(rollup.priced_event_count);
+        let unpriced = bucket
+            .unpriced_request_count
+            .unwrap_or(0)
+            .saturating_add(rollup.unpriced_event_count);
+        let unmetered = bucket
+            .unmetered_request_count
+            .unwrap_or(0)
+            .saturating_add(rollup.unmetered_event_count);
+        bucket.priced_request_count = Some(priced);
+        bucket.unpriced_request_count = Some(unpriced);
+        bucket.unmetered_request_count = Some(unmetered);
+        bucket.pricing_completeness = derive_pricing_completeness(PricingCompletenessInput {
+            request_count: bucket.request_count,
+            priced_event_count: priced,
+            unpriced_event_count: unpriced,
+            unmetered_event_count: unmetered,
+            total_tokens: bucket_total_tokens(bucket),
+            virtual_cost_micros: bucket.virtual_cost_micros,
+        });
+    }
 }
 
 fn min_option(current: Option<u64>, next: Option<u64>) -> Option<u64> {
@@ -754,6 +817,7 @@ fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
     let mut upstream_ttfb_ms_count = 0;
     let mut upstream_body_ms_sum = 0;
     let mut upstream_body_ms_count = 0;
+    let mut pricing = PricingCompletenessInput::default();
 
     for bucket in buckets {
         request_count += bucket.request_count;
@@ -775,8 +839,22 @@ fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
         upstream_ttfb_ms_count += bucket.upstream_ttfb_ms_count;
         upstream_body_ms_sum += bucket.upstream_body_ms_sum;
         upstream_body_ms_count += bucket.upstream_body_ms_count;
+        pricing.priced_event_count = pricing
+            .priced_event_count
+            .saturating_add(bucket.priced_request_count.unwrap_or(0));
+        pricing.unpriced_event_count = pricing
+            .unpriced_event_count
+            .saturating_add(bucket.unpriced_request_count.unwrap_or(0));
+        pricing.unmetered_event_count = pricing
+            .unmetered_event_count
+            .saturating_add(bucket.unmetered_request_count.unwrap_or(0));
+        pricing.total_tokens = pricing
+            .total_tokens
+            .saturating_add(bucket_total_tokens(bucket));
     }
 
+    pricing.request_count = request_count;
+    pricing.virtual_cost_micros = virtual_cost_micros;
     SummaryTotals {
         request_count,
         input_tokens,
@@ -796,6 +874,10 @@ fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
         avg_sign_ms: safe_avg(sign_ms_sum, sign_ms_count),
         avg_upstream_ttfb_ms: safe_avg(upstream_ttfb_ms_sum, upstream_ttfb_ms_count),
         avg_upstream_body_ms: safe_avg(upstream_body_ms_sum, upstream_body_ms_count),
+        pricing_completeness: derive_pricing_completeness(pricing),
+        priced_request_count: (request_count > 0).then_some(pricing.priced_event_count),
+        unpriced_request_count: (request_count > 0).then_some(pricing.unpriced_event_count),
+        unmetered_request_count: (request_count > 0).then_some(pricing.unmetered_event_count),
     }
 }
 
@@ -1173,6 +1255,13 @@ mod tests {
             cost_cache_write_30m_micros: 0,
             cost_cache_write_12h_micros: 0,
             cost_components_event_count: 0,
+            priced_event_count: if virtual_cost_micros > 0 {
+                request_count
+            } else {
+                0
+            },
+            unpriced_event_count: 0,
+            unmetered_event_count: 0,
         }
     }
 
@@ -1347,5 +1436,164 @@ mod tests {
         assert_eq!(bucket.cost_cache_creation_5m_micros, Some(0));
         assert_eq!(bucket.cost_cache_creation_1h_micros, Some(0));
         assert_eq!(bucket.cost_cache_read_micros, Some(0));
+    }
+
+    #[test]
+    fn pricing_completeness_truth_table_matches_bucket_and_summary_aggregation() {
+        use PricingCompleteness::{KnownZero, Partial, Priced, Unknown, Unmetered, Unpriced};
+
+        // requests, priced, unpriced, unmetered, tokens, cost, expected
+        let cases = [
+            (0, 0, 0, 0, 0, 0, None),
+            (1, 1, 0, 0, 10, 5, Some(Priced)),
+            (1, 1, 0, 0, 10, 0, Some(KnownZero)),
+            (1, 0, 1, 0, 10, 0, Some(Unpriced)),
+            (1, 0, 0, 1, 0, 0, Some(Unmetered)),
+            (2, 1, 1, 0, 10, 5, Some(Partial)),
+            (2, 1, 1, 0, 10, 0, Some(Partial)),
+            (2, 1, 0, 1, 10, 5, Some(Priced)),
+            (2, 1, 0, 1, 10, 0, Some(KnownZero)),
+            (2, 0, 1, 1, 10, 0, Some(Unpriced)),
+            (1, 0, 0, 0, 10, 0, Some(Unknown)),
+            (1, 0, 0, 0, 0, 0, Some(Unmetered)),
+            (1, 0, 0, 0, 10, 5, Some(Partial)),
+            (2, 1, 0, 0, 10, 5, Some(Partial)),
+            (2, 1, 0, 0, 10, 0, Some(Partial)),
+            (2, 0, 1, 0, 10, 0, Some(Partial)),
+            (2, 0, 0, 1, 10, 0, Some(Unknown)),
+            (2, 0, 0, 1, 0, 0, Some(Unmetered)),
+        ];
+        for (requests, priced, unpriced, unmetered, tokens, cost, expected) in cases {
+            let mut rollup = test_rollup("principal-a", 0, requests, cost);
+            rollup.input_tokens = tokens;
+            rollup.priced_event_count = priced;
+            rollup.unpriced_event_count = unpriced;
+            rollup.unmetered_event_count = unmetered;
+            let mut bucket = empty_bucket(0);
+            add_rollup_to_bucket(&mut bucket, &rollup, false);
+            assert_eq!(bucket.pricing_completeness, expected, "{rollup:?}");
+            assert_eq!(
+                bucket.priced_request_count,
+                (requests > 0).then_some(priced)
+            );
+            assert_eq!(
+                bucket.unpriced_request_count,
+                (requests > 0).then_some(unpriced)
+            );
+            assert_eq!(
+                bucket.unmetered_request_count,
+                (requests > 0).then_some(unmetered)
+            );
+            let totals = summary_totals(&[empty_bucket(60), bucket]);
+            assert_eq!(totals.pricing_completeness, expected, "{rollup:?}");
+            assert_eq!(
+                totals.priced_request_count,
+                (requests > 0).then_some(priced)
+            );
+            assert_eq!(
+                totals.unpriced_request_count,
+                (requests > 0).then_some(unpriced)
+            );
+            assert_eq!(
+                totals.unmetered_request_count,
+                (requests > 0).then_some(unmetered)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_cache_write_only_usage_is_unknown_and_cache_totals_are_not_double_counted() {
+        for (aggregate, short, long, expected_tokens) in [
+            (Some(7), None, None, 7),
+            (None, Some(3), Some(4), 7),
+            (None, Some(7), None, 7),
+            (None, None, Some(7), 7),
+            (Some(7), Some(3), Some(4), 7),
+        ] {
+            let mut rollup = test_rollup("principal-a", 0, 1, 0);
+            rollup.input_tokens = 0;
+            rollup.cache_write_input_tokens = aggregate;
+            rollup.cache_write_input_tokens_30m = short;
+            rollup.cache_write_input_tokens_12h = long;
+            let mut bucket = empty_bucket(0);
+            add_rollup_to_bucket(&mut bucket, &rollup, false);
+            assert_eq!(bucket_total_tokens(&bucket), expected_tokens);
+            assert_eq!(
+                bucket.pricing_completeness,
+                Some(PricingCompleteness::Unknown)
+            );
+            assert_eq!(
+                summary_totals(&[bucket]).pricing_completeness,
+                Some(PricingCompleteness::Unknown)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_buckets_and_summary_omit_all_pricing_fields() {
+        let bucket = empty_bucket(0);
+        let totals = summary_totals(std::slice::from_ref(&bucket));
+        for value in [
+            serde_json::to_value(&bucket).unwrap(),
+            serde_json::to_value(&totals).unwrap(),
+        ] {
+            for field in [
+                "pricing_completeness",
+                "priced_request_count",
+                "unpriced_request_count",
+                "unmetered_request_count",
+            ] {
+                assert!(value.get(field).is_none(), "{field}: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_pricing_counts_collapse_identically_for_every_grouping() {
+        let mut priced = test_rollup("principal-a", 0, 2, 10);
+        priced.priced_event_count = 2;
+        let mut unpriced = test_rollup("principal-a", MINUTE_SECS, 3, 0);
+        unpriced.unpriced_event_count = 3;
+        let mut unmetered = test_rollup("principal-a", 2 * MINUTE_SECS, 1, 0);
+        unmetered.input_tokens = 0;
+        unmetered.unmetered_event_count = 1;
+        let rollups = [priced, unpriced, unmetered];
+        let families = HashMap::from([(Uuid::from_u128(1), ProviderFamily::Anthropic)]);
+        for group_by in [
+            UsageGroupBy::None,
+            UsageGroupBy::Model,
+            UsageGroupBy::Principal,
+            UsageGroupBy::Upstream,
+            UsageGroupBy::Provider,
+        ] {
+            let (full, _) = build_usage_series_with_provider(
+                group_by,
+                &rollups,
+                0,
+                3 * MINUTE_SECS,
+                UsageRollupResolution::Minute,
+                &families,
+            );
+            let (totals, _) = build_usage_totals_series(group_by, &rollups, 0, &families);
+            let collapsed = summary_totals(&full[0].buckets);
+            let total = &totals[0].buckets[0];
+            assert_eq!(
+                total.pricing_completeness,
+                Some(PricingCompleteness::Partial)
+            );
+            assert_eq!(total.pricing_completeness, collapsed.pricing_completeness);
+            assert_eq!(total.priced_request_count, Some(2));
+            assert_eq!(total.unpriced_request_count, Some(3));
+            assert_eq!(total.unmetered_request_count, Some(1));
+            assert_eq!(total.priced_request_count, collapsed.priced_request_count);
+            assert_eq!(
+                total.unpriced_request_count,
+                collapsed.unpriced_request_count
+            );
+            assert_eq!(
+                total.unmetered_request_count,
+                collapsed.unmetered_request_count
+            );
+        }
     }
 }

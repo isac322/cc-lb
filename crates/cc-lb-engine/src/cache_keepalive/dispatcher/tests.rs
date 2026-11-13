@@ -24,6 +24,155 @@ fn accounting_guard() -> ResponseAccountingGuard {
         .into_response_accounting_guard()
 }
 
+#[test]
+fn responses_renewal_uses_normalized_usage_and_preserves_native_write_presence() {
+    use cc_lb_request_log::RequestCacheEvidence;
+
+    for (details, input, writes, evidence) in [
+        (
+            serde_json::json!({"cached_tokens": 1024}),
+            1024,
+            (None, None, None),
+            RequestCacheEvidence::Unreported,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 1024, "cache_write_tokens": null}),
+            1024,
+            (None, None, None),
+            RequestCacheEvidence::Unreported,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 1024, "cache_write_tokens": 0}),
+            1024,
+            (Some(0), None, None),
+            RequestCacheEvidence::Zero,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 1024, "cache_write_tokens": 100, "cache_write_tokens_details": {"ttl_30m_tokens": 60, "ttl_12h_tokens": 40}}),
+            924,
+            (Some(100), Some(60), Some(40)),
+            RequestCacheEvidence::Positive,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 1024, "cache_write_tokens": 100}),
+            924,
+            (Some(100), None, None),
+            RequestCacheEvidence::Positive,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 1024, "cache_write_tokens": "invalid"}),
+            1024,
+            (None, None, None),
+            RequestCacheEvidence::Invalid,
+        ),
+        (
+            serde_json::json!({"cached_tokens": 0}),
+            2048,
+            (None, None, None),
+            RequestCacheEvidence::Unreported,
+        ),
+    ] {
+        let mut details = details;
+        details["image_tokens"] = serde_json::json!(12);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "service_tier": "priority",
+            "usage": {
+                "input_tokens": 2048,
+                "output_tokens": 20,
+                "input_tokens_details": details,
+                "output_tokens_details": {"reasoning_tokens": 7, "image_tokens": 3}
+            }
+        }))
+        .expect("Responses JSON");
+        let outcome = classify_success_body_with_surface(
+            &body,
+            Duration::ZERO,
+            Duration::from_millis(7),
+            42,
+            accounting_guard(),
+            Some("responses"),
+        );
+        let (hit, finalization) = match outcome {
+            DispatchOutcome::CacheHit { finalization, .. } => (true, finalization),
+            DispatchOutcome::CacheMiss { finalization } => (false, finalization),
+            _ => panic!("expected successful Responses renewal"),
+        };
+        let usage = finalization.usage;
+        assert_eq!(hit, usage.cache_read_input_tokens > 0);
+        assert_eq!(usage.input_tokens, input);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(
+            usage.cache_read_evidence,
+            if hit {
+                RequestCacheEvidence::Positive
+            } else {
+                RequestCacheEvidence::Zero
+            }
+        );
+        assert_eq!(usage.input_image_tokens, Some(12));
+        assert_eq!(usage.output_image_tokens, Some(3));
+        assert_eq!(usage.thinking_tokens, 7);
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+        assert_eq!(
+            (
+                usage.cache_write_input_tokens,
+                usage.cache_write_input_tokens_30m,
+                usage.cache_write_input_tokens_12h
+            ),
+            writes
+        );
+        assert_eq!(usage.cache_write_evidence, evidence);
+        assert_eq!(
+            usage.provider_cost_unknown,
+            evidence == RequestCacheEvidence::Invalid
+        );
+        assert!(usage.usage_present);
+        assert!(usage.is_openai_responses);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_creation_input_tokens_5m, 0);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 0);
+    }
+}
+
+#[test]
+fn responses_renewal_absent_usage_is_not_a_measured_zero() {
+    for body in [b"{}".as_slice(), b"{\"usage\":null}".as_slice()] {
+        let outcome = classify_success_body_with_surface(
+            body,
+            Duration::ZERO,
+            Duration::ZERO,
+            0,
+            accounting_guard(),
+            Some("responses"),
+        );
+        let DispatchOutcome::CacheMiss { finalization } = outcome else {
+            panic!("absent usage must remain a miss");
+        };
+        assert!(!finalization.usage.usage_present);
+        assert!(finalization.usage.provider_cost_unknown);
+        assert_eq!(finalization.usage.cache_write_input_tokens, None);
+    }
+    assert!(matches!(
+        classify_success_body_with_surface(
+            b"{", Duration::ZERO, Duration::ZERO, 0, accounting_guard(), Some("responses"),
+        ),
+        DispatchOutcome::Error(message) if message == "invalid OpenAI Responses JSON"
+    ));
+    let DispatchOutcome::CacheHit { finalization, .. } = classify_success_body(
+        br#"{"usage":{"input_tokens":100,"output_tokens":3,"cache_read_input_tokens":42}}"#,
+        Duration::ZERO,
+        Duration::ZERO,
+        0,
+        accounting_guard(),
+    ) else {
+        panic!("Anthropic cache reads remain hits");
+    };
+    assert_eq!(finalization.usage.input_tokens, 100);
+    assert!(finalization.usage.usage_present);
+    assert!(!finalization.usage.is_openai_responses);
+    assert!(!finalization.usage.provider_cost_unknown);
+}
+
 #[derive(Clone)]
 struct TestUpstreamStore {
     record: UpstreamRecord,

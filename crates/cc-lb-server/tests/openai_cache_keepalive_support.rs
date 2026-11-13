@@ -26,6 +26,7 @@ pub struct RecordedResponseRequest {
 struct MockState {
     requests: Arc<Mutex<Vec<RecordedResponseRequest>>>,
     cached_tokens: Arc<Mutex<VecDeque<Option<u64>>>>,
+    usage_payloads: Arc<Mutex<VecDeque<Value>>>,
     responses: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
@@ -79,6 +80,14 @@ impl StrictOpenAiMock {
             .lock()
             .expect("mock response queue")
             .push_back(tokens);
+    }
+
+    pub fn reply_with_usage(&self, usage: Value) {
+        self.state
+            .usage_payloads
+            .lock()
+            .expect("mock usage queue")
+            .push_back(usage);
     }
 
     pub fn response_wire(&self, index: usize) -> Vec<u8> {
@@ -210,6 +219,14 @@ async fn openai_handler(State(state): State<MockState>, request: Request) -> Res
             .as_object_mut()
             .expect("mock usage")
             .remove("input_tokens_details");
+    }
+    if let Some(usage) = state
+        .usage_payloads
+        .lock()
+        .expect("mock usage queue")
+        .pop_front()
+    {
+        response["usage"] = usage;
     }
     if stream {
         let body = format!(

@@ -58,6 +58,8 @@ async fn test_auth_required() {
         ("/admin/v1/principals/alice/keys", "POST"),
         ("/admin/v1/principals/alice/keys/key-1/revoke", "POST"),
         ("/admin/v1/audit", "GET"),
+        ("/admin/v1/dashboard/summary?range=1h", "GET"),
+        ("/admin/v1/dashboard/usage?range=1h&group_by=model", "GET"),
         ("/admin/v1/config/editor", "GET"),
         ("/admin/v1/config/draft", "GET"),
         ("/admin/v1/config/draft", "PUT"),
@@ -108,14 +110,17 @@ async fn test_auth_required() {
     let mut set = tokio::task::JoinSet::new();
     for (path, method) in endpoints {
         let app = app.clone();
-        set.spawn(async move {
-            let req = Request::builder()
-                .method(method)
-                .uri(path)
-                .body(Body::empty())
-                .unwrap();
-            (path, app.oneshot(req).await.unwrap())
-        });
+        for token in [None, Some("Bearer wrong-token")] {
+            let app = app.clone();
+            set.spawn(async move {
+                let mut req = Request::builder().method(method).uri(path);
+                if let Some(token) = token {
+                    req = req.header("Authorization", token);
+                }
+                let req = req.body(Body::empty()).unwrap();
+                (path, app.oneshot(req).await.unwrap())
+            });
+        }
     }
     while let Some(res) = set.join_next().await {
         let (path, response) = res.unwrap();

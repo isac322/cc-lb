@@ -331,6 +331,66 @@ impl UsageRollupResolution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingCompleteness {
+    Priced,
+    KnownZero,
+    Partial,
+    Unpriced,
+    Unmetered,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PricingCompletenessInput {
+    pub request_count: u64,
+    pub priced_event_count: u64,
+    pub unpriced_event_count: u64,
+    pub unmetered_event_count: u64,
+    pub total_tokens: u64,
+    pub virtual_cost_micros: u64,
+}
+
+pub fn derive_pricing_completeness(input: PricingCompletenessInput) -> Option<PricingCompleteness> {
+    if input.request_count == 0 {
+        return None;
+    }
+    let classified = input
+        .priced_event_count
+        .saturating_add(input.unpriced_event_count)
+        .saturating_add(input.unmetered_event_count);
+    let legacy = input.request_count.saturating_sub(classified);
+    if legacy == 0 {
+        if input.unpriced_event_count > 0 && input.priced_event_count > 0 {
+            Some(PricingCompleteness::Partial)
+        } else if input.unpriced_event_count > 0 {
+            Some(PricingCompleteness::Unpriced)
+        } else if input.priced_event_count > 0 {
+            if input.virtual_cost_micros > 0 {
+                Some(PricingCompleteness::Priced)
+            } else {
+                Some(PricingCompleteness::KnownZero)
+            }
+        } else {
+            Some(PricingCompleteness::Unmetered)
+        }
+    } else if input.total_tokens == 0
+        && input.priced_event_count == 0
+        && input.unpriced_event_count == 0
+        && input.virtual_cost_micros == 0
+    {
+        Some(PricingCompleteness::Unmetered)
+    } else if input.priced_event_count == 0
+        && input.unpriced_event_count == 0
+        && input.virtual_cost_micros == 0
+    {
+        Some(PricingCompleteness::Unknown)
+    } else {
+        Some(PricingCompleteness::Partial)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRollup {
     pub resolution: UsageRollupResolution,
@@ -393,6 +453,12 @@ pub struct UsageRollup {
     #[serde(default)]
     pub cost_cache_write_12h_micros: u64,
     pub cost_components_event_count: u64,
+    #[serde(default)]
+    pub priced_event_count: u64,
+    #[serde(default)]
+    pub unpriced_event_count: u64,
+    #[serde(default)]
+    pub unmetered_event_count: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewExcludedErrorBucket {

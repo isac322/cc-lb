@@ -223,6 +223,40 @@ Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on 
 
 `GET /admin/v1/dashboard/usage` reads the same rollups. Per-principal category costs come directly from `usage_rollups_v2`; principal totals use a 2 s in-process coalescing cache (`PRINCIPAL_TOTALS_CACHE_TTL`).
 
+### Rollup pricing completeness
+
+Local rollups retain three additive event counters: `priced_event_count`,
+`unpriced_event_count`, and `unmetered_event_count`. The dashboard wire names
+are `priced_request_count`, `unpriced_request_count`, and
+`unmetered_request_count`. Request counts, tokens and known costs retain their
+existing totals; an unavailable price never becomes a measured zero.
+
+`pricing_completeness` distinguishes `priced`, `known_zero`, `partial`,
+`unpriced`, `unmetered`, and `unknown`. Fully classified requests with a price
+have `priced` or `known_zero`; requests without billable usage are `unmetered`.
+A mix of priced and unpriced requests is `partial`. Retained legacy gaps with
+tokens but no price evidence remain `unknown`; legacy gaps mixed with pricing
+evidence are `partial`. A legacy window with neither tokens nor cost is
+`unmetered`. Classification uses counters and recorded amounts, without
+re-pricing events against the current catalog.
+
+Nonempty rollup-backed summaries and buckets return the state and all three
+counters, including explicit zeros. Empty totals and zero-filled buckets omit
+all four fields. Estimated API-key months use the same classification;
+provider-reported organization buckets and months omit these local counters.
+
+SQLite and Postgres upgrade existing rollups in bounded, restart-safe batches
+using retained request-event evidence. Events already removed by retention
+cannot establish missing prices. Reads continue while the backfill advances.
+Dashboard validators include the rollup revision, which covers the ingestion
+checkpoint and cost and pricing backfill cursors. Backfill progress can
+invalidate a cached response even without new traffic.
+
+The UI shows unavailable prices as a neutral dash and a reason. Partial
+amounts are known subtotals with a plus sign. Unknown prices never appear as
+free usage in charts, cost shares or request details.
+
+
 ## Subscription quota observations
 
 Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycle_subscription_quota_subscriber.rs`, `crates/cc-lb-engine/src/subscription_quota_events.rs`, `crates/cc-lb-storage-postgres/src/adapter/upstream_subscription_quota.rs`, `crates/cc-lb-server/src/notify_listener.rs`, `crates/cc-lb-admin/src/subscription_quotas.rs`.
