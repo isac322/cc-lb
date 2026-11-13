@@ -425,6 +425,128 @@ fn now_secs(clock: &dyn Clock) -> u64 {
 }
 
 #[tokio::test]
+async fn antigravity_dispatch_qualifies_tiered_model_and_omits_request_type() {
+    for profile in [
+        cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+        cc_lb_aead::GeminiOAuthProfile::Antigravity,
+    ] {
+        let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+        let journal = ProviderJournal::spawn([StatusCode::OK]).await;
+        let upstream_id = create_subscription_upstream(
+            &fixture,
+            &journal,
+            UpstreamKind::GeminiOauth,
+            subscription_bundle(
+                profile,
+                "live-tiered-model-token",
+                now_secs(fixture.clock.as_ref()) + 3600,
+                false,
+            ),
+        )
+        .await;
+        cc_lb_storage_api::PrincipalStore::create(
+            fixture.storage.as_ref(),
+            PrincipalCreate {
+                name: "tiered-model-principal".to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: vec!["gemini-3.8-flash".to_owned()],
+                allowed_upstreams: vec![upstream_id],
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            now_secs(fixture.clock.as_ref()),
+        )
+        .await
+        .expect("principal created");
+        let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+        let (_, key) = key_store
+            .create(
+                "tiered-model-principal",
+                CreateParams {
+                    label: "tiered-model-dispatch".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("managed key created");
+        let handle = Arc::new(StatefulRefreshHandle {
+            storage: fixture.storage.clone(),
+            aead: fixture.aead.clone(),
+            replacement_access_token: "must-not-be-used".to_owned(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            clock: fixture.clock.clone(),
+            terminal: false,
+        });
+        let lifecycle = make_lifecycle(&fixture, key_store, handle).await;
+        let input = json!({
+            "contents": [{"role": "user", "parts": [{"text": "Look up the weather."}]}],
+            "tools": [{
+                "functionDeclarations": [{
+                    "name": "get_weather",
+                    "description": "Get the weather for a city.",
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": {"city": {"type": "STRING"}},
+                        "required": ["city"]
+                    }
+                }]
+            }],
+            "generationConfig": {"thinkingConfig": {"thinkingLevel": "XHIGH"}}
+        });
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1beta/models/gemini-3.8-flash:generateContent")
+            .header("x-api-key", key.expose())
+            .header("content-type", "application/json")
+            .body(Bytes::from(
+                serde_json::to_vec(&input).expect("request JSON"),
+            ))
+            .expect("request builds");
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::request_context::ProviderScope(
+                cc_lb_domain::Provider::Gemini,
+            ));
+        let (status, response_body) = dispatch(&lifecycle, request).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&response_body)
+        );
+        let requests = journal.requests();
+        assert_eq!(requests.len(), 1);
+        let body: Value =
+            serde_json::from_slice(&requests[0].body).expect("Gemini request envelope");
+        assert_eq!(body["request"]["tools"], input["tools"]);
+        assert_eq!(
+            body["request"]["generationConfig"]["thinkingConfig"],
+            input["generationConfig"]["thinkingConfig"]
+        );
+        match profile {
+            cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                assert_eq!(body["model"], "gemini-3.8-flash-xhigh");
+                assert!(body.get("requestType").is_none());
+                assert_eq!(body["userAgent"], "antigravity");
+                assert!(
+                    body["requestId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("agent-"))
+                );
+            }
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                assert_eq!(body["model"], "gemini-3.8-flash");
+                assert!(body.get("userAgent").is_none());
+                assert!(body.get("requestType").is_none());
+                assert!(body.get("requestId").is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn expired_openai_gemini_cli_and_antigravity_dispatch_refreshes_without_old_bearer() {
     for (kind, profile) in [
         (

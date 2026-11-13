@@ -575,6 +575,36 @@ fn ensure_gemini_stream_alt_sse(shaped: &mut ShapedRequest) {
     }
 }
 
+fn antigravity_thinking_tier(request: &Value) -> Option<&'static str> {
+    let thinking = request.get("generationConfig")?.get("thinkingConfig")?;
+    let level = thinking
+        .get("thinkingLevel")
+        .or_else(|| thinking.get("thinking_level"))?
+        .as_str()?;
+    ["low", "medium", "high", "xhigh"]
+        .into_iter()
+        .find(|tier| level.eq_ignore_ascii_case(tier))
+}
+
+fn qualify_antigravity_tiered_model(raw_model: &str, request: &Value) -> Option<String> {
+    let candidate = raw_model.strip_prefix("models/").unwrap_or(raw_model);
+    if !ANTIGRAVITY_TIERED_FAMILIES.contains(&candidate) {
+        return None;
+    }
+    let tier = antigravity_thinking_tier(request)?;
+    Some(format!("{candidate}-{tier}"))
+}
+
+const ANTIGRAVITY_TIERED_FAMILIES: [&str; 7] = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-pro",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+];
+
 fn wrap_gemini_code_assist_request(
     shaped: &mut ShapedRequest,
     project_id: Option<&str>,
@@ -673,15 +703,26 @@ fn wrap_gemini_code_assist_request(
         && !is_count
         && let Some(envelope) = envelope.as_object_mut()
     {
+        if let Some(model) = envelope.get("model").and_then(Value::as_str)
+            && let Some(request) = envelope.get("request")
+            && let Some(qualified_model) = qualify_antigravity_tiered_model(model, request)
+        {
+            envelope.insert("model".to_owned(), Value::String(qualified_model));
+        }
         envelope.insert(
             "userAgent".to_owned(),
             Value::String("antigravity".to_owned()),
         );
-        envelope.insert("requestType".to_owned(), Value::String("agent".to_owned()));
-        envelope.insert(
-            "requestId".to_owned(),
-            Value::String(format!("agent-{}", Uuid::new_v4())),
-        );
+        let has_request_id = envelope
+            .get("requestId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        if !has_request_id {
+            envelope.insert(
+                "requestId".to_owned(),
+                Value::String(format!("agent-{}", Uuid::new_v4())),
+            );
+        }
     }
     let body = serde_json::to_vec(&envelope).map_err(|_| SignerError::SigningFailed {
         reason: "Gemini Code Assist request could not be serialized".to_owned(),
@@ -1258,7 +1299,15 @@ mod tests {
                 );
                 let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
                 assert_eq!(body["userAgent"], "antigravity");
-                assert_eq!(body["requestType"], "agent");
+                assert!(
+                    !body
+                        .as_object()
+                        .expect("envelope object")
+                        .contains_key("requestType")
+                );
+                let request_id = body["requestId"].as_str().expect("request ID");
+                let uuid = request_id.strip_prefix("agent-").expect("agent prefix");
+                assert_eq!(Uuid::parse_str(uuid).expect("UUID").get_version_num(), 4);
             }
         }
     }
@@ -1590,7 +1639,16 @@ mod tests {
                     .parse()
                     .expect("request URL"),
             );
-            shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+            let original = json!({
+                "contents": [],
+                "tools": [{"functionDeclarations": [{
+                    "name": "read_file",
+                    "parameters": {"type": "OBJECT"}
+                }]}]
+            });
+            shaped.set_body(Bytes::from(
+                serde_json::to_vec(&original).expect("request body"),
+            ));
             for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
                 shaped
                     .headers_mut()
@@ -1650,15 +1708,465 @@ mod tests {
             let body: Value = serde_json::from_slice(signed.body()).expect("JSON envelope");
             assert_eq!(body["model"], "gemini-3-pro");
             assert_eq!(body["project"], "project-123");
-            assert_eq!(body["request"], json!({"contents": []}));
+            assert_eq!(body["request"], original);
             assert_eq!(body["userAgent"], "antigravity");
-            assert_eq!(body["requestType"], "agent");
+            assert!(
+                !body
+                    .as_object()
+                    .expect("envelope object")
+                    .contains_key("requestType")
+            );
             let request_id = body["requestId"].as_str().expect("request ID");
             let uuid = request_id.strip_prefix("agent-").expect("agent prefix");
             assert_eq!(Uuid::parse_str(uuid).expect("UUID").get_version_num(), 4);
             request_ids.push(request_id.to_owned());
         }
         assert_ne!(request_ids.first(), request_ids.last());
+    }
+
+    fn antigravity_test_signer() -> GeminiSubscriptionSigner {
+        GeminiSubscriptionSigner::new_antigravity(
+            "antigravity-access-token",
+            Some("project-123"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+            "https://daily-cloudcode-pa.googleapis.com",
+            "antigravity/test",
+        )
+        .expect("Antigravity signer")
+    }
+
+    fn gemini_generation_request(path: &str, body: &Value) -> ShapedRequest {
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            format!("https://cloudcode-pa.googleapis.com{path}")
+                .parse()
+                .expect("generation URL"),
+        );
+        shaped.set_body(Bytes::from(serde_json::to_vec(body).expect("request body")));
+        shaped
+    }
+
+    #[tokio::test]
+    async fn antigravity_already_wrapped_preserves_caller_request_id_and_omits_request_type() {
+        let signer = antigravity_test_signer();
+        for path in [
+            "/v1beta/models/gemini-3-pro:generateContent",
+            "/v1internal:generateContent",
+        ] {
+            for caller_id in ["caller-req-123", "   "] {
+                let original = json!({
+                    "model": "gemini-3-pro",
+                    "request": {"contents": []},
+                    "requestId": caller_id,
+                    "userAgent": "other"
+                });
+                let mut current = original;
+                for pass in 1..=2 {
+                    let signed = sign_request(&signer, gemini_generation_request(path, &current))
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{path}, {caller_id:?}, pass {pass}: {error:?}")
+                        });
+                    let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+                    assert_eq!(body["requestId"], caller_id, "{path}, pass {pass}");
+                    assert_eq!(body["userAgent"], "antigravity", "{path}, pass {pass}");
+                    assert!(
+                        !body
+                            .as_object()
+                            .expect("envelope object")
+                            .contains_key("requestType"),
+                        "{path}, pass {pass}: {body}"
+                    );
+                    current = body;
+                }
+            }
+
+            let original = json!({
+                "model": "gemini-3-pro",
+                "request": {"contents": []},
+                "requestId": "caller-req-123",
+                "requestType": "custom",
+                "userAgent": "other"
+            });
+            let signed = sign_request(&signer, gemini_generation_request(path, &original))
+                .await
+                .unwrap_or_else(|error| panic!("{path}, explicit requestType: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["requestType"], "custom", "{path}");
+            assert_eq!(body["requestId"], "caller-req-123", "{path}");
+            assert_eq!(body["userAgent"], "antigravity", "{path}");
+
+            let mut generated_ids = std::collections::HashSet::new();
+            for (case, request_id) in [
+                ("absent", None),
+                ("empty", Some(json!(""))),
+                ("null", Some(Value::Null)),
+                ("number", Some(json!(123))),
+            ] {
+                let mut original = json!({
+                    "model": "gemini-3-pro",
+                    "request": {"contents": []},
+                    "userAgent": "other"
+                });
+                if let Some(request_id) = request_id {
+                    original["requestId"] = request_id;
+                }
+                for attempt in 1..=2 {
+                    let signed = sign_request(&signer, gemini_generation_request(path, &original))
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{path}, {case}, attempt {attempt}: {error:?}")
+                        });
+                    let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+                    let request_id = body["requestId"].as_str().expect("generated request ID");
+                    let uuid = request_id.strip_prefix("agent-").expect("agent prefix");
+                    assert_eq!(
+                        Uuid::parse_str(uuid).expect("UUID").get_version_num(),
+                        4,
+                        "{path}, {case}, attempt {attempt}"
+                    );
+                    assert!(
+                        generated_ids.insert(request_id.to_owned()),
+                        "{path}, {case}: repeated generated ID"
+                    );
+                    assert_eq!(body["userAgent"], "antigravity", "{path}, {case}");
+                    assert!(
+                        !body
+                            .as_object()
+                            .expect("envelope object")
+                            .contains_key("requestType"),
+                        "{path}, {case}: {body}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_qualifies_bare_tiered_models_from_thinking_level() {
+        let signer = antigravity_test_signer();
+        for (family, level, expected) in [
+            ("gemini-3.8-flash", "LOW", "gemini-3.8-flash-low"),
+            ("gemini-3.8-flash", "MEDIUM", "gemini-3.8-flash-medium"),
+            ("gemini-3.8-flash", "HIGH", "gemini-3.8-flash-high"),
+            ("gemini-3.8-flash", "XHIGH", "gemini-3.8-flash-xhigh"),
+            ("gemini-3.7-flash", "low", "gemini-3.7-flash-low"),
+            ("gemini-3.7-flash", "mEdIuM", "gemini-3.7-flash-medium"),
+            ("gemini-3.7-flash", "high", "gemini-3.7-flash-high"),
+            ("gemini-3.7-flash", "xHiGh", "gemini-3.7-flash-xhigh"),
+            ("gemini-3.6-flash", "Low", "gemini-3.6-flash-low"),
+            ("gemini-3.6-flash", "MEDIUM", "gemini-3.6-flash-medium"),
+            ("gemini-3.6-flash", "HIGH", "gemini-3.6-flash-high"),
+            ("gemini-3.6-flash", "XHIGH", "gemini-3.6-flash-xhigh"),
+            ("gemini-3.1-pro", "LOW", "gemini-3.1-pro-low"),
+            ("gemini-3.1-pro", "mEdIuM", "gemini-3.1-pro-medium"),
+            ("gemini-3.1-pro", "high", "gemini-3.1-pro-high"),
+            ("gemini-3.1-pro", "xHiGh", "gemini-3.1-pro-xhigh"),
+            ("gemini-4-carbon", "Low", "gemini-4-carbon-low"),
+            ("gemini-4-carbon", "MEDIUM", "gemini-4-carbon-medium"),
+            ("gemini-4-carbon", "HIGH", "gemini-4-carbon-high"),
+            ("gemini-4-carbon", "xHiGh", "gemini-4-carbon-xhigh"),
+            ("gemini-4-argon", "low", "gemini-4-argon-low"),
+            ("gemini-4-argon", "mEdIuM", "gemini-4-argon-medium"),
+            ("gemini-4-argon", "high", "gemini-4-argon-high"),
+            ("gemini-4-argon", "XHIGH", "gemini-4-argon-xhigh"),
+            ("gemini-4-hydrogen", "LOW", "gemini-4-hydrogen-low"),
+            ("gemini-4-hydrogen", "MEDIUM", "gemini-4-hydrogen-medium"),
+            ("gemini-4-hydrogen", "HIGH", "gemini-4-hydrogen-high"),
+            ("gemini-4-hydrogen", "xHiGh", "gemini-4-hydrogen-xhigh"),
+        ] {
+            let original = json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": level}}
+            });
+            let path = format!("/v1beta/models/{family}:generateContent");
+            let signed = sign_request(&signer, gemini_generation_request(&path, &original))
+                .await
+                .unwrap_or_else(|error| panic!("{family}, {level}: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["model"], expected, "{family}, {level}");
+            assert_eq!(body["request"], original, "{family}, {level}");
+            assert!(
+                !body
+                    .as_object()
+                    .expect("envelope object")
+                    .contains_key("requestType"),
+                "{family}, {level}: {body}"
+            );
+        }
+
+        for (case, path, envelope_model, thinking, expected) in [
+            (
+                "stream",
+                "/v1beta/models/gemini-3.8-flash:streamGenerateContent",
+                None,
+                json!({"thinkingLevel": "HIGH"}),
+                "gemini-3.8-flash-high",
+            ),
+            (
+                "internal unwrapped",
+                "/v1internal:generateContent",
+                None,
+                json!({"thinkingLevel": "HIGH"}),
+                "gemini-3.8-flash-high",
+            ),
+            (
+                "already wrapped bare",
+                "/v1internal:generateContent",
+                Some("gemini-3.8-flash"),
+                json!({"thinkingLevel": "HIGH"}),
+                "gemini-3.8-flash-high",
+            ),
+            (
+                "already wrapped prefixed",
+                "/v1beta/models/gemini-3.8-flash:generateContent",
+                Some("models/gemini-3.8-flash"),
+                json!({"thinkingLevel": "HIGH"}),
+                "gemini-3.8-flash-high",
+            ),
+            (
+                "snake case",
+                "/v1beta/models/gemini-3.8-flash:generateContent",
+                None,
+                json!({"thinking_level": "XHIGH"}),
+                "gemini-3.8-flash-xhigh",
+            ),
+            (
+                "camel case precedence",
+                "/v1beta/models/gemini-3.8-flash:generateContent",
+                None,
+                json!({"thinkingLevel": "HIGH", "thinking_level": "LOW"}),
+                "gemini-3.8-flash-high",
+            ),
+        ] {
+            let mut original = json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": thinking}
+            });
+            let expected_request = if let Some(model) = envelope_model {
+                let request = original.clone();
+                original = json!({"model": model, "request": request});
+                request
+            } else {
+                if path == "/v1internal:generateContent" {
+                    original["model"] = json!("gemini-3.8-flash");
+                }
+                original.clone()
+            };
+            let mut shaped = gemini_generation_request(path, &original);
+            shaped
+                .headers_mut()
+                .insert(CONTENT_LENGTH, HeaderValue::from_static("5"));
+            let signed = sign_request(&signer, shaped)
+                .await
+                .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["model"], expected, "{case}");
+            assert_eq!(body["request"], expected_request, "{case}");
+            assert!(
+                !body
+                    .as_object()
+                    .expect("envelope object")
+                    .contains_key("requestType"),
+                "{case}: {body}"
+            );
+            assert!(!signed.headers().contains_key(CONTENT_LENGTH), "{case}");
+            if case == "stream" {
+                assert_eq!(signed.url().query(), Some("alt=sse"), "{case}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_leaves_suffixed_nontiered_and_unrecognized_thinking_models_unchanged() {
+        let signer = antigravity_test_signer();
+        for (model, thinking_level) in [
+            ("gemini-3.8-flash-low", json!("HIGH")),
+            ("gemini-4-hydrogen-xhigh", json!("LOW")),
+            ("gemini-3.1-pro-high", json!("LOW")),
+            ("gemini-3.1-pro-preview", json!("HIGH")),
+            ("gemini-3.8-flash-lite", json!("HIGH")),
+            ("GEMINI-3.8-FLASH", json!("HIGH")),
+            ("gemini-2.5-flash", json!("HIGH")),
+            ("gemini-2.5-flash-lite", json!("HIGH")),
+            ("gemini-3-flash", json!("HIGH")),
+            ("gemini-3-pro", json!("HIGH")),
+            ("gemini-3.1-flash-lite", json!("HIGH")),
+            ("gemini-3.5-flash-lite", json!("HIGH")),
+            ("claude-sonnet-5-5-low", json!("HIGH")),
+            ("gpt-oss-120b-medium", json!("HIGH")),
+        ] {
+            let original = json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": thinking_level}}
+            });
+            let path = format!("/v1beta/models/{model}:generateContent");
+            let signed = sign_request(&signer, gemini_generation_request(&path, &original))
+                .await
+                .unwrap_or_else(|error| panic!("{model}, {thinking_level}: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["model"], model, "{model}, {thinking_level}");
+            assert_eq!(body["request"], original, "{model}, {thinking_level}");
+        }
+
+        for (case, original) in [
+            ("no generationConfig", json!({"contents": []})),
+            (
+                "no thinkingConfig",
+                json!({"contents": [], "generationConfig": {}}),
+            ),
+            (
+                "thinkingBudget only",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingBudget": 1024}}}),
+            ),
+            (
+                "null shadows snake case",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": null, "thinking_level": "HIGH"}}}),
+            ),
+            (
+                "number shadows snake case",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": 123, "thinking_level": "HIGH"}}}),
+            ),
+            (
+                "unrecognized shadows snake case",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": "MINIMAL", "thinking_level": "HIGH"}}}),
+            ),
+            (
+                "empty",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": ""}}}),
+            ),
+            (
+                "leading whitespace",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": " HIGH"}}}),
+            ),
+            (
+                "trailing whitespace",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH "}}}),
+            ),
+            (
+                "unspecified",
+                json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": "THINKING_LEVEL_UNSPECIFIED"}}}),
+            ),
+        ] {
+            let signed = sign_request(
+                &signer,
+                gemini_generation_request(
+                    "/v1beta/models/gemini-3.8-flash:generateContent",
+                    &original,
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["model"], "gemini-3.8-flash", "{case}");
+            assert_eq!(body["request"], original, "{case}");
+        }
+
+        for (case, original, expected_model) in [
+            (
+                "double models prefix",
+                json!({
+                    "model": "models/models/gemini-3.8-flash",
+                    "request": {
+                        "contents": [],
+                        "generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}}
+                    }
+                }),
+                "models/models/gemini-3.8-flash",
+            ),
+            (
+                "non-object request",
+                json!({"model": "gemini-3.8-flash", "request": "not-an-object"}),
+                "gemini-3.8-flash",
+            ),
+        ] {
+            let signed = sign_request(
+                &signer,
+                gemini_generation_request("/v1internal:generateContent", &original),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+            let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["model"], expected_model, "{case}");
+            assert_eq!(body["request"], original["request"], "{case}");
+        }
+    }
+
+    struct AntigravityEnvelopeRecorder {
+        envelopes: std::sync::Mutex<Vec<Value>>,
+        replacement: Option<Bytes>,
+    }
+
+    impl cc_lb_upstream::GeminiEnvelopeHook for AntigravityEnvelopeRecorder {
+        fn shape_envelope_gemini(
+            &self,
+            request: GeminiEnvelopeRequest<'_>,
+        ) -> Result<cc_lb_upstream::GeminiEnvelopeResult, SignerError> {
+            let envelope = serde_json::from_slice(request.envelope_body).expect("hook envelope");
+            self.envelopes
+                .lock()
+                .expect("record envelopes")
+                .push(envelope);
+            Ok(cc_lb_upstream::GeminiEnvelopeResult {
+                envelope_body: self.replacement.clone(),
+                headers: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_envelope_hook_observes_qualified_antigravity_envelope_without_post_processing()
+    {
+        let signer = antigravity_test_signer();
+        let replacement = Bytes::from_static(
+            br#"{"model":"gemini-3.8-flash","request":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}}"#,
+        );
+        for replacement in [None, Some(replacement)] {
+            let hook = Arc::new(AntigravityEnvelopeRecorder {
+                envelopes: std::sync::Mutex::new(Vec::new()),
+                replacement: replacement.clone(),
+            });
+            let original = json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}}
+            });
+            let mut shaped = gemini_generation_request(
+                "/v1beta/models/gemini-3.8-flash:generateContent",
+                &original,
+            );
+            shaped.set_gemini_envelope_hook(hook.clone());
+            let signed = sign_request(&signer, shaped)
+                .await
+                .expect("hook signs envelope");
+            let envelopes = hook.envelopes.lock().expect("recorded envelopes");
+            let [body] = envelopes.as_slice() else {
+                panic!("hook must observe one envelope, got {envelopes:?}");
+            };
+            assert_eq!(body["model"], "gemini-3.8-flash-high");
+            assert_eq!(body["request"], original);
+            assert_eq!(body["userAgent"], "antigravity");
+            let request_id = body["requestId"].as_str().expect("request ID");
+            let uuid = request_id.strip_prefix("agent-").expect("agent prefix");
+            assert_eq!(Uuid::parse_str(uuid).expect("UUID").get_version_num(), 4);
+            assert!(
+                !body
+                    .as_object()
+                    .expect("envelope object")
+                    .contains_key("requestType")
+            );
+            if let Some(replacement) = replacement {
+                assert_eq!(
+                    signed.body(),
+                    &replacement,
+                    "hook replacement is emitted verbatim"
+                );
+            } else {
+                let emitted: Value =
+                    serde_json::from_slice(signed.body()).expect("signed envelope");
+                assert_eq!(&emitted, body, "hook observes the final generated envelope");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1693,6 +2201,23 @@ mod tests {
         assert_eq!(
             signed.headers().get(USER_AGENT),
             Some(&HeaderValue::from_static("antigravity/custom"))
+        );
+
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3.8-flash:countTokens"
+                .parse()
+                .expect("URL"),
+        );
+        shaped.set_body(Bytes::from_static(
+            br#"{"generateContentRequest":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}}"#,
+        ));
+        let signed = sign_request(&signer, shaped)
+            .await
+            .expect("tiered countTokens signs without qualification");
+        assert_eq!(
+            signed.body().as_ref(),
+            br#"{"request":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}},"model":"models/gemini-3.8-flash"}}"#
         );
     }
 
@@ -1730,6 +2255,42 @@ mod tests {
                 signed.headers().get(USER_AGENT),
                 Some(&HeaderValue::from_static("GeminiCLI/existing"))
             );
+        }
+
+        let now = 1_700_000_000;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now));
+        let refreshing = GeminiSubscriptionSigner::new_refreshing(
+            "gemini-access-token",
+            Some("project-123"),
+            now + 31,
+            clock,
+        )
+        .expect("refreshing Gemini CLI signer");
+        for (constructor, signer) in [("new", &signer), ("new_refreshing", &refreshing)] {
+            for (shape, original, expected) in [
+                (
+                    "unwrapped",
+                    br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}"#.as_slice(),
+                    br#"{"model":"gemini-3.8-flash","project":"project-123","request":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}}"#.as_slice(),
+                ),
+                (
+                    "already wrapped",
+                    br#"{"model":"gemini-3.8-flash","project":"project-123","request":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}},"requestId":"caller-req-123","requestType":"custom"}"#.as_slice(),
+                    br#"{"model":"gemini-3.8-flash","project":"project-123","request":{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}},"requestId":"caller-req-123","requestType":"custom"}"#.as_slice(),
+                ),
+            ] {
+                let mut shaped = shaped_request();
+                shaped.set_url(
+                    "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+                        .parse()
+                        .expect("URL"),
+                );
+                shaped.set_body(Bytes::from_static(original));
+                let signed = sign_request(signer, shaped)
+                    .await
+                    .unwrap_or_else(|error| panic!("{constructor}, {shape}: {error:?}"));
+                assert_eq!(signed.body().as_ref(), expected, "{constructor}, {shape}");
+            }
         }
     }
 

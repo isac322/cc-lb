@@ -431,8 +431,8 @@ defaults; every field is optional except `enabled`.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | required | Master switch on this principal. |
-| `refresh_lead_time_5m_secs` | `30` | Fire 30 s before the 5-minute TTL expires. Schedule = 4m30s after `message_start` / response begin. |
-| `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after `message_start` / response begin. |
+| `refresh_lead_time_5m_secs` | `30` | Fire 30 s before an Anthropic 5-minute or OpenAI 30-minute cache TTL expires (4m30s after Anthropic `message_start`, or 29m30s into an OpenAI 30m window). |
+| `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before an Anthropic 1-hour cache TTL expires (55m after `message_start`). OpenAI 12-hour retention is recorded with this snapshot metadata without periodic renewal. |
 | `max_refreshes_per_session` | `4` | Hard cap on keep-alive fires per session. OpenAI 30-minute keep-alive requires raising this to at least `13` for GPT-5.6. |
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
 | `snapshot_max_bytes` | `8388608` (8 MiB) | Shaped and trimmed body larger than this is not tracked. |
