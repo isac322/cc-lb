@@ -15,6 +15,7 @@ import {
   cx,
   Hint,
   IconButton,
+  Notice,
   Section,
   Skeleton,
   SkeletonRow,
@@ -63,6 +64,9 @@ export function PluginCatalog({
   onSelectPlugin: (id: string) => void;
 }) {
   const reg = usePluginRegistry();
+  const hasRegistryData = reg.data !== undefined;
+  const initialError = Boolean(reg.isError) && !hasRegistryData;
+  const staleError = Boolean(reg.isError) && hasRegistryData;
   const gc = useGcPlugins();
   const upstreams = useUpstreams();
   const hasAnthropicOauth =
@@ -120,6 +124,8 @@ export function PluginCatalog({
           >
             {reg.isLoading ? (
               <Skeleton as="span" className="block h-4 w-48" />
+            ) : initialError ? (
+              <span>Unavailable</span>
             ) : (
               <span className="tabular-nums">
                 {entries.length} available · {unusedRegisteredCount} not used
@@ -154,262 +160,303 @@ export function PluginCatalog({
           </div>
         }
       >
-        {/* Phones: one two-line row per plugin, edge to edge. Line 1 is the
+        {initialError ? (
+          <Notice
+            tone="danger"
+            title="Could not load plugin library"
+            action={
+              <Button size="sm" onClick={() => void reg.refetch()}>
+                Retry
+              </Button>
+            }
+          >
+            Check the admin connection and try again.
+          </Notice>
+        ) : (
+          <>
+            {staleError && (
+              <Notice
+                tone="warning"
+                className="mb-4"
+                title="Could not refresh plugin library"
+                action={
+                  <Button
+                    size="sm"
+                    loading={Boolean(reg.isFetching)}
+                    onClick={() => void reg.refetch()}
+                  >
+                    Retry
+                  </Button>
+                }
+              >
+                Showing the last loaded plugin list.
+              </Notice>
+            )}
+            {/* Phones: one two-line row per plugin, edge to edge. Line 1 is the
             name and how many places use it; line 2 where it runs and what it
             is. The hash, size, upload time and delete live in its detail. */}
-        <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
-          {reg.isLoading ? (
-            PLUGIN_LOADING_ROWS.map((row) => (
-              <li key={row} className="px-4 py-3" aria-hidden="true">
-                <Skeleton className="h-4 w-40" />
-                <Skeleton className="mt-2 h-3 w-56 max-w-full" />
-              </li>
-            ))
-          ) : entries.length ? (
-            entries.map((p) => {
-              const caption = [
-                (p.supported_slots ?? [])
-                  .map(
-                    (slot) => SLOTS.find((s) => s.id === slot)?.label ?? slot,
-                  )
-                  .join(', ') || 'Unknown slot',
-                p.version ? `v${p.version}` : null,
-                pluginDescription(p, hasAnthropicOauth),
-              ]
-                .filter(Boolean)
-                .join(' · ');
-              return (
-                <li key={p.id}>
-                  <button
-                    type="button"
-                    className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-                    onClick={() => onSelectPlugin(p.id)}
-                  >
-                    <span className="flex w-full items-center justify-between gap-3">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-body font-medium text-text">
-                          {p.name}
-                        </span>
-                        {p.is_builtin && (
-                          <Badge className="shrink-0" tone="neutral">
-                            Built-in
-                          </Badge>
-                        )}
-                      </span>
-                      <span
-                        className={cx(
-                          'shrink-0 text-body-sm tabular-nums',
-                          p.refcount > 0
-                            ? 'text-text-muted'
-                            : 'text-text-faint',
-                        )}
-                      >
-                        Used by {p.refcount}
-                      </span>
-                    </span>
-                    <span className="line-clamp-2 text-caption text-text-faint">
-                      {caption}
-                    </span>
-                  </button>
-                </li>
-              );
-            })
-          ) : (
-            <li className="px-4 py-8 text-center text-body-sm text-text-muted">
-              No plugins uploaded.
-            </li>
-          )}
-        </ul>
-        <Card className="hidden overflow-x-auto md:block">
-          <Table className="min-w-[960px] table-fixed">
-            <colgroup>
-              {PLUGIN_COLUMN_WIDTHS.map((className, index) => (
-                <col key={index} className={className} />
-              ))}
-            </colgroup>
-            <TableHead>
-              <tr>
-                <TableHeadCell>Name</TableHeadCell>
-                <TableHeadCell>Works in</TableHeadCell>
-                <TableHeadCell>File hash</TableHeadCell>
-                <TableHeadCell numeric>Size</TableHeadCell>
-                <TableHeadCell numeric>Used by</TableHeadCell>
-                <TableHeadCell>Added</TableHeadCell>
-                <TableHeadCell className="text-right">
-                  <span className="sr-only">Actions</span>
-                </TableHeadCell>
-              </tr>
-            </TableHead>
-            <tbody>
+            <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
               {reg.isLoading ? (
                 PLUGIN_LOADING_ROWS.map((row) => (
-                  <SkeletonRow
-                    key={row}
-                    className={PLUGIN_ROW_GEOMETRY_CLASS}
-                    cols={7}
-                    skeletonClassNames={PLUGIN_SKELETON_CLASSES}
-                  />
+                  <li key={row} className="px-4 py-3" aria-hidden="true">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="mt-2 h-3 w-56 max-w-full" />
+                  </li>
                 ))
               ) : entries.length ? (
                 entries.map((p) => {
-                  // One secondary line under the name: "v0.5.1 · label · description".
-                  const subline = [
+                  const caption = [
+                    (p.supported_slots ?? [])
+                      .map(
+                        (slot) =>
+                          SLOTS.find((s) => s.id === slot)?.label ?? slot,
+                      )
+                      .join(', ') || 'Unknown slot',
                     p.version ? `v${p.version}` : null,
-                    p.label,
                     pluginDescription(p, hasAnthropicOauth),
                   ]
                     .filter(Boolean)
                     .join(' · ');
                   return (
-                    // Pointer shortcut; keyboard users reach the same view
-                    // through the row's Inspect button.
-                    <tr
-                      key={p.id}
-                      className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row last:border-b-0 transition-colors cursor-pointer hover:bg-hover-bg`}
-                      onClick={() => onSelectPlugin(p.id)}
-                    >
-                      <TableCell>
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span
-                            className="truncate font-medium text-text"
-                            title={p.name}
-                          >
-                            {p.name}
-                          </span>
-                          {p.is_builtin && (
-                            <Badge className="shrink-0" tone="neutral">
-                              Built-in
-                            </Badge>
-                          )}
-                        </div>
-                        {subline ? (
-                          <div
-                            className="mt-0.5 truncate text-caption text-text-faint"
-                            title={subline}
-                          >
-                            {subline}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          {p.supported_slots && p.supported_slots.length > 0 ? (
-                            p.supported_slots.map((slot) => (
-                              <Badge key={slot} tone="neutral">
-                                {SLOTS.find((s) => s.id === slot)?.label ??
-                                  slot}
-                              </Badge>
-                            ))
-                          ) : (
-                            <Badge tone="warn">Unknown</Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <Hint label={p.sha256_hex}>
-                            <code className="cursor-help font-mono text-data text-text-muted">
-                              {p.sha256_hex.slice(0, 12)}…
-                            </code>
-                          </Hint>
-                          <IconButton
-                            label="Copy SHA256"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              copy(p.sha256_hex, 'SHA256');
-                            }}
-                          >
-                            <Copy
-                              className="w-3.5 h-3.5"
-                              strokeWidth={1.75}
-                              aria-hidden="true"
-                            />
-                          </IconButton>
-                        </div>
-                      </TableCell>
-                      <TableCell numeric>
-                        {p.is_builtin && p.size_bytes === 0 ? (
-                          <EmptyValue label="Built-in" />
-                        ) : (
-                          <>
-                            {(p.size_bytes / 1024).toFixed(1)}{' '}
-                            <span className="text-text-muted">KB</span>
-                          </>
-                        )}
-                      </TableCell>
-                      {/* Plain count: the row and its Inspect action already
-                          open the detail view that lists every use. */}
-                      <TableCell
-                        numeric
-                        className={
-                          p.refcount > 0 ? 'text-text' : 'text-text-faint'
-                        }
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                        onClick={() => onSelectPlugin(p.id)}
                       >
-                        {p.refcount}
-                      </TableCell>
-                      <TableCell className="text-text-muted">
-                        {p.is_builtin && p.uploaded_at_unix_secs === 0 ? (
-                          <EmptyValue label="Built-in" />
-                        ) : (
-                          <RelativeTime
-                            compact
-                            ts={new Date(p.uploaded_at_unix_secs * 1000)}
-                          />
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            aria-label={`Inspect ${p.name}`}
-                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onSelectPlugin(p.id);
-                            }}
+                        <span className="flex w-full items-center justify-between gap-3">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-body font-medium text-text">
+                              {p.name}
+                            </span>
+                            {p.is_builtin && (
+                              <Badge className="shrink-0" tone="neutral">
+                                Built-in
+                              </Badge>
+                            )}
+                          </span>
+                          <span
+                            className={cx(
+                              'shrink-0 text-body-sm tabular-nums',
+                              p.refcount > 0
+                                ? 'text-text-muted'
+                                : 'text-text-faint',
+                            )}
                           >
-                            Inspect
-                          </button>
-                          {p.is_builtin ? (
-                            // Keeps "Inspect" aligned with deletable rows.
-                            <span aria-hidden="true" className="w-11 md:w-8" />
-                          ) : (
-                            <IconButton
-                              label="Delete plugin"
-                              title={
-                                p.refcount > 0
-                                  ? `In use by ${p.refcount} reference(s)`
-                                  : 'Delete plugin'
-                              }
-                              className="hover:text-danger-text"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPendingDelete({
-                                  id: p.id,
-                                  revision: p.revision,
-                                  name: p.name,
-                                  refcount: p.refcount,
-                                });
-                              }}
-                            >
-                              <Trash2
-                                className="w-3.5 h-3.5"
-                                strokeWidth={1.75}
-                                aria-hidden="true"
-                              />
-                            </IconButton>
-                          )}
-                        </div>
-                      </TableCell>
-                    </tr>
+                            Used by {p.refcount}
+                          </span>
+                        </span>
+                        <span className="line-clamp-2 text-caption text-text-faint">
+                          {caption}
+                        </span>
+                      </button>
+                    </li>
                   );
                 })
               ) : (
-                <TableEmptyRow colSpan={7}>No plugins uploaded.</TableEmptyRow>
+                <li className="px-4 py-8 text-center text-body-sm text-text-muted">
+                  No plugins uploaded.
+                </li>
               )}
-            </tbody>
-          </Table>
-        </Card>
+            </ul>
+            <Card className="hidden overflow-x-auto md:block">
+              <Table className="min-w-[960px] table-fixed">
+                <colgroup>
+                  {PLUGIN_COLUMN_WIDTHS.map((className, index) => (
+                    <col key={index} className={className} />
+                  ))}
+                </colgroup>
+                <TableHead>
+                  <tr>
+                    <TableHeadCell>Name</TableHeadCell>
+                    <TableHeadCell>Works in</TableHeadCell>
+                    <TableHeadCell>File hash</TableHeadCell>
+                    <TableHeadCell numeric>Size</TableHeadCell>
+                    <TableHeadCell numeric>Used by</TableHeadCell>
+                    <TableHeadCell>Added</TableHeadCell>
+                    <TableHeadCell className="text-right">
+                      <span className="sr-only">Actions</span>
+                    </TableHeadCell>
+                  </tr>
+                </TableHead>
+                <tbody>
+                  {reg.isLoading ? (
+                    PLUGIN_LOADING_ROWS.map((row) => (
+                      <SkeletonRow
+                        key={row}
+                        className={PLUGIN_ROW_GEOMETRY_CLASS}
+                        cols={7}
+                        skeletonClassNames={PLUGIN_SKELETON_CLASSES}
+                      />
+                    ))
+                  ) : entries.length ? (
+                    entries.map((p) => {
+                      // One secondary line under the name: "v0.5.1 · label · description".
+                      const subline = [
+                        p.version ? `v${p.version}` : null,
+                        p.label,
+                        pluginDescription(p, hasAnthropicOauth),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ');
+                      return (
+                        // Pointer shortcut; keyboard users reach the same view
+                        // through the row's Inspect button.
+                        <tr
+                          key={p.id}
+                          className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row last:border-b-0 transition-colors cursor-pointer hover:bg-hover-bg`}
+                          onClick={() => onSelectPlugin(p.id)}
+                        >
+                          <TableCell>
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span
+                                className="truncate font-medium text-text"
+                                title={p.name}
+                              >
+                                {p.name}
+                              </span>
+                              {p.is_builtin && (
+                                <Badge className="shrink-0" tone="neutral">
+                                  Built-in
+                                </Badge>
+                              )}
+                            </div>
+                            {subline ? (
+                              <div
+                                className="mt-0.5 truncate text-caption text-text-faint"
+                                title={subline}
+                              >
+                                {subline}
+                              </div>
+                            ) : null}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {p.supported_slots &&
+                              p.supported_slots.length > 0 ? (
+                                p.supported_slots.map((slot) => (
+                                  <Badge key={slot} tone="neutral">
+                                    {SLOTS.find((s) => s.id === slot)?.label ??
+                                      slot}
+                                  </Badge>
+                                ))
+                              ) : (
+                                <Badge tone="warn">Unknown</Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              <Hint label={p.sha256_hex}>
+                                <code className="cursor-help font-mono text-data text-text-muted">
+                                  {p.sha256_hex.slice(0, 12)}…
+                                </code>
+                              </Hint>
+                              <IconButton
+                                label="Copy SHA256"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  copy(p.sha256_hex, 'SHA256');
+                                }}
+                              >
+                                <Copy
+                                  className="w-3.5 h-3.5"
+                                  strokeWidth={1.75}
+                                  aria-hidden="true"
+                                />
+                              </IconButton>
+                            </div>
+                          </TableCell>
+                          <TableCell numeric>
+                            {p.is_builtin && p.size_bytes === 0 ? (
+                              <EmptyValue label="Built-in" />
+                            ) : (
+                              <>
+                                {(p.size_bytes / 1024).toFixed(1)}{' '}
+                                <span className="text-text-muted">KB</span>
+                              </>
+                            )}
+                          </TableCell>
+                          {/* Plain count: the row and its Inspect action already
+                          open the detail view that lists every use. */}
+                          <TableCell
+                            numeric
+                            className={
+                              p.refcount > 0 ? 'text-text' : 'text-text-faint'
+                            }
+                          >
+                            {p.refcount}
+                          </TableCell>
+                          <TableCell className="text-text-muted">
+                            {p.is_builtin && p.uploaded_at_unix_secs === 0 ? (
+                              <EmptyValue label="Built-in" />
+                            ) : (
+                              <RelativeTime
+                                compact
+                                ts={new Date(p.uploaded_at_unix_secs * 1000)}
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                aria-label={`Inspect ${p.name}`}
+                                className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onSelectPlugin(p.id);
+                                }}
+                              >
+                                Inspect
+                              </button>
+                              {p.is_builtin ? (
+                                // Keeps "Inspect" aligned with deletable rows.
+                                <span
+                                  aria-hidden="true"
+                                  className="w-11 md:w-8"
+                                />
+                              ) : (
+                                <IconButton
+                                  label="Delete plugin"
+                                  title={
+                                    p.refcount > 0
+                                      ? `In use by ${p.refcount} reference(s)`
+                                      : 'Delete plugin'
+                                  }
+                                  className="hover:text-danger-text"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPendingDelete({
+                                      id: p.id,
+                                      revision: p.revision,
+                                      name: p.name,
+                                      refcount: p.refcount,
+                                    });
+                                  }}
+                                >
+                                  <Trash2
+                                    className="w-3.5 h-3.5"
+                                    strokeWidth={1.75}
+                                    aria-hidden="true"
+                                  />
+                                </IconButton>
+                              )}
+                            </div>
+                          </TableCell>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <TableEmptyRow colSpan={7}>
+                      No plugins uploaded.
+                    </TableEmptyRow>
+                  )}
+                </tbody>
+              </Table>
+            </Card>
+          </>
+        )}
       </Section>
 
       <PluginDeleteDialog

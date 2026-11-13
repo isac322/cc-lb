@@ -182,6 +182,9 @@ jobs:
           bun run --shell=bun lint
           bun run --shell=bun typecheck
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
+      - name: Run keepalive and plugin catalog Playwright E2E
+        run: |
+          bun run e2e e2e/issue-1282-keepalive-plugins.spec.ts --retries=0
       - name: Verify and capture credit and provider pool views
         run: |
           bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts --retries=0 \

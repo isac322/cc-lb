@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { type PluginEntry, usePluginReferences } from '../../lib/queries';
-import { Button, cx, Section, Skeleton } from '../ui/primitives';
+import { Button, cx, Notice, Section, Skeleton } from '../ui/primitives';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
 import { PluginDetailApply } from './PluginDetailApply';
 import { PluginDetailIntegrity } from './PluginDetailIntegrity';
@@ -32,6 +32,9 @@ export function PluginDetail({
   onBack: () => void;
 }) {
   const refs = usePluginReferences(plugin.id);
+  const hasRefData = refs.data !== undefined;
+  const initialRefError = Boolean(refs.isError) && !hasRefData;
+  const staleRefError = Boolean(refs.isError) && hasRefData;
   const [pendingDelete, setPendingDelete] = useState<{
     id: string;
     revision: number;
@@ -57,75 +60,115 @@ export function PluginDetail({
                     <Skeleton className="h-4 w-16 shrink-0" />
                   </div>
                 </div>
-              ) : refs.data?.references.length ? (
-                <>
-                  <ul className="divide-y divide-row">
-                    {refs.data.references.map((r, i) => (
-                      <li
-                        key={i}
-                        className={cx(
-                          USED_BY_ROW,
-                          !showAllUses && i >= PHONE_USED_BY_LIMIT
-                            ? 'max-sm:hidden'
-                            : undefined,
-                        )}
-                      >
-                        {r.kind === 'plugin_chain' ? (
-                          <>
-                            <span className={USED_BY_NAME}>
-                              <span className="max-sm:hidden">Principal </span>
-                              <a
-                                href={`/principals?selectedId=${r.principal_id}`}
-                                className={REFERENCE_LINK_CLASS}
-                              >
-                                {r.principal_name ?? r.principal_id}
-                              </a>
-                            </span>
-                            <span className={USED_BY_FACT}>
-                              <span className="sm:hidden">Principal · </span>
-                              {SLOTS.find((s) => s.id === r.slot)?.label ??
-                                r.slot}{' '}
-                              slot
-                            </span>
-                          </>
-                        ) : (
-                          <>
-                            <span className={USED_BY_NAME}>
-                              <span className="max-sm:hidden">Upstream </span>
-                              <a
-                                href={`/upstreams?selectedId=${r.upstream_id}`}
-                                className={REFERENCE_LINK_CLASS}
-                              >
-                                {r.upstream_name ?? r.upstream_id}
-                              </a>
-                            </span>
-                            <span className={USED_BY_FACT}>
-                              <span className="sm:hidden">Upstream · </span>
-                              Warmup
-                            </span>
-                          </>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  {refs.data.references.length > PHONE_USED_BY_LIMIT ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="mt-1 -ml-2.5 sm:hidden"
-                      aria-expanded={showAllUses}
-                      onClick={() => setShowAllUses((open) => !open)}
-                    >
-                      {showAllUses
-                        ? 'Show fewer'
-                        : `Show all ${refs.data.references.length}`}
+              ) : initialRefError ? (
+                <Notice
+                  tone="danger"
+                  title="Could not load plugin usage"
+                  action={
+                    <Button size="sm" onClick={() => void refs.refetch()}>
+                      Retry
                     </Button>
-                  ) : null}
-                </>
+                  }
+                >
+                  Reference details could not be fetched.
+                </Notice>
               ) : (
-                <p className="text-body text-text-muted">
-                  This plugin is uploaded but not used anywhere yet.
-                </p>
+                <>
+                  {staleRefError && (
+                    <Notice
+                      tone="warning"
+                      className="mb-3"
+                      title="Could not refresh plugin usage"
+                      action={
+                        <Button
+                          size="sm"
+                          loading={Boolean(refs.isFetching)}
+                          onClick={() => void refs.refetch()}
+                        >
+                          Retry
+                        </Button>
+                      }
+                    >
+                      Showing the last loaded references.
+                    </Notice>
+                  )}
+                  {refs.data?.references.length ? (
+                    <>
+                      <ul className="divide-y divide-row">
+                        {refs.data.references.map((r, i) => (
+                          <li
+                            key={i}
+                            className={cx(
+                              USED_BY_ROW,
+                              !showAllUses && i >= PHONE_USED_BY_LIMIT
+                                ? 'max-sm:hidden'
+                                : undefined,
+                            )}
+                          >
+                            {r.kind === 'plugin_chain' ? (
+                              <>
+                                <span className={USED_BY_NAME}>
+                                  <span className="max-sm:hidden">
+                                    Principal{' '}
+                                  </span>
+                                  <a
+                                    href={`/principals?selectedId=${r.principal_id}`}
+                                    className={REFERENCE_LINK_CLASS}
+                                  >
+                                    {r.principal_name ?? r.principal_id}
+                                  </a>
+                                </span>
+                                <span className={USED_BY_FACT}>
+                                  <span className="sm:hidden">
+                                    Principal ·{' '}
+                                  </span>
+                                  {SLOTS.find((s) => s.id === r.slot)?.label ??
+                                    r.slot}{' '}
+                                  slot
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span className={USED_BY_NAME}>
+                                  <span className="max-sm:hidden">
+                                    Upstream{' '}
+                                  </span>
+                                  <a
+                                    href={`/upstreams?selectedId=${r.upstream_id}`}
+                                    className={REFERENCE_LINK_CLASS}
+                                  >
+                                    {r.upstream_name ?? r.upstream_id}
+                                  </a>
+                                </span>
+                                <span className={USED_BY_FACT}>
+                                  <span className="sm:hidden">Upstream · </span>
+                                  Warmup
+                                </span>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      {refs.data.references.length > PHONE_USED_BY_LIMIT ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 -ml-2.5 sm:hidden"
+                          aria-expanded={showAllUses}
+                          onClick={() => setShowAllUses((open) => !open)}
+                        >
+                          {showAllUses
+                            ? 'Show fewer'
+                            : `Show all ${refs.data.references.length}`}
+                        </Button>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-body text-text-muted">
+                      This plugin is uploaded but not used anywhere yet.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </Section>
