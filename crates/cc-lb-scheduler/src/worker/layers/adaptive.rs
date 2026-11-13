@@ -8,7 +8,7 @@ use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
-use crate::middleware::TraceparentLayer;
+use crate::middleware::{OutcomePersistLayer, TraceparentLayer};
 use crate::retry::RetryClass;
 
 #[cfg(feature = "postgres")]
@@ -108,21 +108,38 @@ fn build_sqlite_worker(
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(worker_name)
-                    .backend(storage)
+                let pool = storage.pool().clone();
+                let persist_layer = OutcomePersistLayer::sqlite(pool, cancel.clone());
+                let persist_drain = persist_layer.clone();
+                let fatal_check = persist_layer.clone();
+                let worker = ApalisWorkerBuilder::new(worker_name.clone())
+                    .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
+                    .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
                     .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
                     .build(entity_job_handler);
+                let _heartbeat = fatal_check.spawn_heartbeat(worker_name);
                 worker
                     .run_until(async move {
-                        cancel.cancelled_owned().await;
+                        tokio::select! {
+                            () = cancel.cancelled_owned() => {}
+                            _ = persist_drain.wait_fatal_abort() => {}
+                        }
+                        persist_drain.wait_idle().await;
                         Ok::<(), WorkerError>(())
                     })
-                    .await
+                    .await?;
+                drop(_heartbeat);
+                if let Some(reason) = fatal_check.fatal_abort_reason() {
+                    return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
+                        reason,
+                    ))));
+                }
+                Ok(())
             })
         }),
     }
@@ -138,21 +155,38 @@ fn build_postgres_worker(
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(worker_name)
-                    .backend(storage)
+                let pool = storage.pool().clone();
+                let persist_layer = OutcomePersistLayer::postgres(pool, cancel.clone());
+                let persist_drain = persist_layer.clone();
+                let fatal_check = persist_layer.clone();
+                let worker = ApalisWorkerBuilder::new(worker_name.clone())
+                    .backend(persist_layer.wrap_storage(storage))
                     .data(ctx)
+                    .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
                     .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
                     .build(entity_job_handler);
+                let _heartbeat = fatal_check.spawn_heartbeat(worker_name);
                 worker
                     .run_until(async move {
-                        cancel.cancelled_owned().await;
+                        tokio::select! {
+                            () = cancel.cancelled_owned() => {}
+                            _ = persist_drain.wait_fatal_abort() => {}
+                        }
+                        persist_drain.wait_idle().await;
                         Ok::<(), WorkerError>(())
                     })
-                    .await
+                    .await?;
+                drop(_heartbeat);
+                if let Some(reason) = fatal_check.fatal_abort_reason() {
+                    return Err(WorkerError::BackendError(Box::new(SchedulerError::Job(
+                        reason,
+                    ))));
+                }
+                Ok(())
             })
         }),
     }

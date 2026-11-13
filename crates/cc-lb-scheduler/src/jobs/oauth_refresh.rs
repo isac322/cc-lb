@@ -162,7 +162,7 @@ where
             Err(error) => {
                 tracing::warn!(upstream_id = %job.upstream_id, error = %error, "oauth refresh job failed");
                 Ok(JobOutcome::Retry {
-                    delay: self.config.retry_delay,
+                    delay: Some(self.config.retry_delay),
                 })
             }
         }

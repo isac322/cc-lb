@@ -116,7 +116,7 @@ async fn refresh_all_keys_failed_fetch_does_not_block_other_keys() {
     assert_eq!(
         outcome,
         JobOutcome::Retry {
-            delay: COMPAT_REFRESH_RETRY_DELAY
+            delay: Some(COMPAT_REFRESH_RETRY_DELAY)
         }
     );
     assert_eq!(

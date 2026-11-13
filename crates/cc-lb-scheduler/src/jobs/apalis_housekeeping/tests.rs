@@ -173,6 +173,107 @@ mod sqlite {
     }
 
     #[tokio::test]
+    async fn reaps_stale_queued_locks_and_kills_only_stale_queued_keepalive_jobs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        for (worker, heartbeat_age) in
+            [("worker-prefetch-live", 10), ("worker-prefetch-stale", 121)]
+        {
+            sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES (?1, 'cron', 'default', '', ?2, ?2)")
+                .bind(worker)
+                .bind(i64::try_from(NOW_SECS - heartbeat_age)?)
+                .execute(&pool).await?;
+        }
+        for (owner, lock_by) in [
+            ("live", Some("worker-prefetch-live")),
+            ("stale", Some("worker-prefetch-stale")),
+            ("none", None),
+        ] {
+            for lock_age in [Some(121), Some(120), Some(10), None] {
+                for keepalive in [false, true] {
+                    let id = format!("queued-{owner}-{}-{keepalive}", lock_age.unwrap_or(0));
+                    let key = format!(
+                        "{}:{id}:1",
+                        if keepalive {
+                            "cache_keepalive"
+                        } else {
+                            "regular"
+                        }
+                    );
+                    sqlx::query("INSERT INTO Jobs (job, id, job_type, status, attempts, run_at, lock_by, lock_at, idempotency_key) VALUES (?1, ?2, 'adaptive', 'Queued', 2, ?3, ?4, ?5, ?6)")
+                        .bind(Vec::<u8>::new())
+                        .bind(id)
+                        .bind(i64::try_from(NOW_SECS)?)
+                        .bind(lock_by)
+                        .bind(lock_age.map(|age| i64::try_from(NOW_SECS - age).expect("test timestamp fits i64")))
+                        .bind(key)
+                        .execute(&pool).await?;
+                }
+            }
+        }
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &storage(&pool))
+        .await;
+        assert!(
+            matches!(
+                result,
+                ApalisHousekeepingJobResult::Done {
+                    stale_locks_reaped: 2,
+                    ..
+                }
+            ),
+            "{result:?}"
+        );
+        for (owner, lock_by) in [
+            ("live", Some("worker-prefetch-live")),
+            ("stale", Some("worker-prefetch-stale")),
+            ("none", None),
+        ] {
+            for lock_age in [Some(121), Some(120), Some(10), None] {
+                for keepalive in [false, true] {
+                    let id = format!("queued-{owner}-{}-{keepalive}", lock_age.unwrap_or(0));
+                    let row: (String, i64, Option<String>, Option<i64>, Option<i64>) =
+                        sqlx::query_as("SELECT status, attempts, lock_by, lock_at, done_at FROM Jobs WHERE id = ?1")
+                            .bind(&id).fetch_one(&pool).await?;
+                    let expected = if owner != "live" && lock_age == Some(121) {
+                        if keepalive {
+                            (
+                                "Killed".to_owned(),
+                                2,
+                                None,
+                                None,
+                                Some(i64::try_from(NOW_SECS)?),
+                            )
+                        } else {
+                            ("Pending".to_owned(), 3, None, None, None)
+                        }
+                    } else {
+                        (
+                            "Queued".to_owned(),
+                            2,
+                            lock_by.map(ToOwned::to_owned),
+                            lock_age.map(|age| {
+                                i64::try_from(NOW_SECS - age).expect("test timestamp fits i64")
+                            }),
+                            None,
+                        )
+                    };
+                    assert_eq!(row, expected, "{id}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn terminalizes_stale_running_keepalive_sessions_without_reenqueuing_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
@@ -787,6 +888,7 @@ mod postgres {
         );
         assert_postgres_stale_running_keepalive_recovery(pool).await?;
         assert_postgres_stale_running_lock_recovery(pool).await?;
+        assert_postgres_stale_queued_lock_recovery(pool).await?;
         let store = storage(pool);
         let handler =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30));
@@ -945,6 +1047,100 @@ mod postgres {
         assert!(lock_by.is_none());
         assert!(lock_at.is_none());
         assert_eq!(attempts, 1);
+        Ok(())
+    }
+
+    async fn assert_postgres_stale_queued_lock_recovery(
+        pool: &PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (worker, heartbeat_age) in
+            [("worker-prefetch-live", 10), ("worker-prefetch-stale", 121)]
+        {
+            sqlx::query("INSERT INTO apalis.workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES ($1, 'cron', 'default', '', $2, $2)")
+                .bind(worker)
+                .bind(ts(NOW_SECS - heartbeat_age))
+                .execute(pool).await?;
+        }
+        for (owner, lock_by) in [
+            ("live", Some("worker-prefetch-live")),
+            ("stale", Some("worker-prefetch-stale")),
+            ("none", None),
+        ] {
+            for lock_age in [Some(121), Some(120), Some(10), None] {
+                for keepalive in [false, true] {
+                    let id = format!("queued-{owner}-{}-{keepalive}", lock_age.unwrap_or(0));
+                    let key = format!(
+                        "{}:{id}:1",
+                        if keepalive {
+                            "cache_keepalive"
+                        } else {
+                            "regular"
+                        }
+                    );
+                    sqlx::query("INSERT INTO apalis.jobs (job, id, job_type, status, attempts, run_at, lock_by, lock_at, idempotency_key) VALUES ($1, $2, 'adaptive', 'Queued', 2, $3, $4, $5, $6)")
+                        .bind(Vec::<u8>::new())
+                        .bind(id)
+                        .bind(ts(NOW_SECS))
+                        .bind(lock_by)
+                        .bind(lock_age.map(|age| ts(NOW_SECS - age)))
+                        .bind(key)
+                        .execute(pool).await?;
+                }
+            }
+        }
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &storage(pool))
+        .await;
+        assert!(
+            matches!(
+                result,
+                super::ApalisHousekeepingJobResult::Done {
+                    stale_locks_reaped: 2,
+                    ..
+                }
+            ),
+            "{result:?}"
+        );
+        type PgQueuedRow = (
+            String,
+            i32,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        );
+        for (owner, lock_by) in [
+            ("live", Some("worker-prefetch-live")),
+            ("stale", Some("worker-prefetch-stale")),
+            ("none", None),
+        ] {
+            for lock_age in [Some(121), Some(120), Some(10), None] {
+                for keepalive in [false, true] {
+                    let id = format!("queued-{owner}-{}-{keepalive}", lock_age.unwrap_or(0));
+                    let row: PgQueuedRow = sqlx::query_as(
+                        "SELECT status, attempts, lock_by, lock_at, done_at FROM apalis.jobs WHERE id = $1",
+                    ).bind(&id).fetch_one(pool).await?;
+                    let expected = if owner != "live" && lock_age == Some(121) {
+                        if keepalive {
+                            ("Killed".to_owned(), 2, None, None, Some(ts(NOW_SECS)))
+                        } else {
+                            ("Pending".to_owned(), 3, None, None, None)
+                        }
+                    } else {
+                        (
+                            "Queued".to_owned(),
+                            2,
+                            lock_by.map(ToOwned::to_owned),
+                            lock_age.map(|age| ts(NOW_SECS - age)),
+                            None,
+                        )
+                    };
+                    assert_eq!(row, expected, "{id}");
+                }
+            }
+        }
         Ok(())
     }
 

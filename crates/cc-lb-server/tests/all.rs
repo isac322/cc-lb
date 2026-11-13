@@ -111,6 +111,8 @@ mod rfc_0002_fix_live_qa;
 mod scheduler_factory;
 #[path = "scheduler_init_hard_fail.rs"]
 mod scheduler_init_hard_fail;
+#[path = "scheduler_price_catalog_retry.rs"]
+mod scheduler_price_catalog_retry;
 #[path = "scheduler_startup_hard_fail.rs"]
 mod scheduler_startup_hard_fail;
 #[path = "scheduler_startup_no_migration_collision.rs"]
