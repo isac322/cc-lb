@@ -280,7 +280,14 @@ for (const viewport of [
       state.registry = 'populated';
       await warning.getByRole('button', { name: 'Retry', exact: true }).click();
       await expect(warning).toHaveCount(0);
-      await pluginRow('First plugin').click();
+      await (
+        viewport.width < 768
+          ? pluginRow('First plugin')
+          : pluginRow('First plugin').getByRole('button', {
+              name: 'Inspect First plugin',
+              exact: true,
+            })
+      ).click();
       await expect(page.getByRole('heading', { name: 'First plugin', exact: true })).toBeVisible();
       const usedBy = page.getByTestId('plugin-used-by-slot');
       const usageAlert = usedBy.getByRole('alert');
