@@ -59,15 +59,15 @@ The table below lists every job type registered in the scheduler. This list is d
 | **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
 | **AnthropicCompatRefreshJob** | Singleton | `cron:anthropic_compat_refresh:<tick_unix_secs>` | Maintenance | Every 24h by default; refreshes all registered compatibility keys concurrently | `anthropic_compat_etags` and `anthropic_compatibility_kv_v1` | 60s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
-| **CacheKeepaliveJob** | Entity | `cache_keepalive:<session_key_hash>:<generation>` | Maintenance (`max_attempts=1`) | Enqueued after an eligible Anthropic response begins at `message_start` / first response event | `cache_keepalive_sessions` generation fence + `apalis.jobs` idempotency key | TTL lead time |
+| **CacheKeepaliveJob** | Entity | `cache_keepalive:<session_key_hash>:<generation>` | Maintenance (SQL `max_attempts = 1`, no retries) | Enqueued after an eligible Anthropic response begins at `message_start` / first response event | `cache_keepalive_sessions` generation fence + `apalis.jobs` idempotency key | TTL lead time |
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
 | **UsagePruneJob** | Singleton | `singleton:usage_prune` | Maintenance | Every 24h (86,400s) | `request_events`, `audit_log`, `upstream_api_usage_v1` | 60s |
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
-| **UpstreamAffinityPurgeJob** | Singleton | `cron:upstream_affinity_purge:<tick_unix_secs>` | Maintenance (60s retry) | Every 10m (600s) plus up to 30s jitter | `upstream_affinity_v1` | Bounded to 1,000 rows/batch and 1,024 batches/run |
+| **UpstreamAffinityPurgeJob** | Singleton | `cron:upstream_affinity_purge:<tick_unix_secs>` | Maintenance (1 retry, up to 60s delay) | Every 10m (600s) plus up to 30s jitter | `upstream_affinity_v1` | Bounded to 1,000 rows/batch and 1,024 batches/run |
 | **PriceCatalogRefreshJob** | Singleton | `singleton:price_catalog_refresh` | Maintenance | Every 1h (3600s) | `price_catalog` | 10s |
 | **ApalisHousekeepingJob** | Singleton | `singleton:apalis_housekeeping` | Maintenance | Every 1h (3600s) | `apalis.jobs` | 10s |
 | **OAuthUsagePollCronJob** | Singleton | `cron:oauth_usage_poll:<tick_unix_secs>` | Maintenance | Every 60s (no jitter) | `oauth_usage_poll_cursors` | 60s |
-| **ApiKeyUsagePollCronJob** | Singleton | `cron:api_key_usage_poll:<tick_unix_secs>`; immediate polls use `api_key_usage_poll:<upstream_id>:<spec_revision>:<checked_at_unix_secs>` | Maintenance | Every 300s plus up to 15s jitter; also enqueued once (max attempts 1) when a key is saved or re-checked as `ok` | `upstream_api_key_details_v1`, `upstream_api_usage_v1` | 10s per provider request |
+| **ApiKeyUsagePollCronJob** | Singleton | `cron:api_key_usage_poll:<tick_unix_secs>`; immediate polls use `api_key_usage_poll:<upstream_id>:<spec_revision>:<checked_at_unix_secs>` | Maintenance (immediate polls use SQL `max_attempts = 1`, no retries) | Every 300s plus up to 15s jitter; also enqueued once when a key is saved or re-checked as `ok` | `upstream_api_key_details_v1`, `upstream_api_usage_v1` | 10s per provider request |
 | **WarmupWatchdogJob** | Singleton | `maintenance:warmup_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 | **OAuthRefreshWatchdogJob** | Singleton | `maintenance:oauth_refresh_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 
@@ -188,28 +188,31 @@ This design revokes decision ID D-arch-6 (which specified advisory-lock leader e
 
 ## 6. Retry Classes
 
-The scheduler defines three distinct retry classes to handle different failure modes. Each class uses an exponential backoff curve with 10% jitter to prevent thundering herds. These curves are defined in `SchedulerConfig::default()` and decision ID D-arch-7.
+`RetryClass::policy` in `crates/cc-lb-scheduler/src/retry.rs` defines the retry policies. `RetryPolicy`'s `max_attempts` counts retries after the initial execution. The worker uses the 1-based retry ordinal `attempt + 1`, so a policy with one retry permits two total runs.
 
 - **Probe**: Used for lightweight connectivity checks.
-  - Max attempts: 3
+  - Max attempts: 3 retries (4 total runs)
   - Base delay: 1s
   - Max delay: 5s
-  - Backoff curve: 1s, 2s, 4s (capped at 5s)
-- **Entity**: Used for heavy, external-facing operations like warmup or OAuth refresh.
-  - Max attempts: 5
+  - Backoff curve: 1s, 2s, 4s, each with ±10% jitter
+- **Entity** (`RetryClass::Adaptive`): Used for external operations like warmup or OAuth refresh.
+  - Max attempts: 5 retries (6 total runs)
   - Base delay: 30s
   - Max delay: 600s (10 minutes)
-  - Backoff curve: 30s, 60s, 120s, 240s, 480s
+  - Backoff curve: 30s, 60s, 120s, 240s, 480s, each with ±10% jitter
 - **Maintenance**: Used for internal database cleanup and rollups.
-  - Max attempts: 1
+  - Max attempts: 1 retry (2 total runs)
   - Base delay: 60s
   - Max delay: 60s
-  - Backoff curve: No retries (fails fast)
-- **Cache keepalive override**: `CacheKeepaliveJob` is enqueued with `max_attempts=1` even though it is an entity-shaped Apalis row. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded as terminal/noop state and metrics; they must not rely on Apalis retries.
+  - Backoff curve: one 60s delay with ±10% jitter, capped at 60s
+
+Within the retry budget, a positive `JobOutcome::Retry { delay: Some(d) }` reschedules without jitter at `min(d, max_delay)`. This preserves `PriceCatalogRefreshJob`'s 30s retry under the Maintenance class's 60s cap. `delay: None` uses the class's jittered backoff curve. `Duration::ZERO` returns an error and marks the row `Killed`, even when its retry budget is exhausted.
+
+SQL rows pushed with `max_attempts = 1` disable retries through `RetryPayload::allows_retry()`. This override applies to `CacheKeepaliveJob` and immediate API-key usage polls. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors remain cache keepalive business outcomes recorded as terminal/noop state and metrics.
 
 ## 7. Scheduler Failures and Admin Endpoint
 
-When a job exhausts its retry class, it remains in a terminal `Failed` or `Killed` state in Apalis. The admin endpoint reads those Apalis rows directly and surfaces them to operators.
+A rescheduled `Retry` returns the same row to `Pending` with a future `run_at`; the failure endpoint excludes it. When a job exhausts its retry class, `DeadLetter` marks the row `Killed`. Panics and invalid zero retry delays also produce terminal `Killed` rows. The admin endpoint reads terminal `Failed` rows whose SQL attempts are exhausted and `Killed` rows directly from Apalis.
 
 - **Ticket Model**: Terminal Apalis rows are the failure tickets. This satisfies the "ticket/metric only, no auto-page" promise defined in D-cut-3 without a `scheduler_failures` table.
 - **Triage Endpoint**: Operators can query `GET /admin/scheduler/failures` to read and triage these failures. The endpoint supports filtering by `job_type` and returns details about the failure, including the last error message and the number of attempts.
@@ -223,12 +226,14 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 - `cclb_scheduler_jobs_total` (Counter): Tracks job lifecycle events.
   - Labels: `job_type`, `status` (started, done, retry, skip, panicked, noop)
   - Cardinality: bounded registered job types * 6 statuses; includes `adaptive:cache_keepalive`.
+  - `retry` counts both rescheduled `Retry` outcomes and terminal `DeadLetter` outcomes. A rescheduled row stays `Pending`, not `Done`.
 - `cclb_scheduler_job_duration_seconds` (Histogram): Tracks job handler execution duration.
   - Labels: `job_type`
   - Cardinality: 15 (one per registered job type)
 - `cclb_scheduler_failures_total` (Counter): Tracks terminal job failures.
   - Labels: `job_type`
   - Cardinality: bounded registered job types; includes `adaptive:cache_keepalive`.
+  - Rescheduled retries do not increment this counter; terminal dead letters do.
 
 Cache keepalive-specific operator notes:
 
@@ -270,8 +275,8 @@ The [Admin consistency contract](consistency-contract.md#scheduler-jobs) states 
 ### Scheduler Stuck
 - **Symptom**: Jobs are not executing; queues are growing; `cclb_scheduler_jobs_total` is flat.
 - **Triage**:
-  1. Query `GET /admin/scheduler/status` and confirm `recurring_jobs[].next_run_at` is advancing across ticks.
-  2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern; a stuck row will show `status = 'Running'` with a stale `run_at`.
+  1. Query `GET /admin/scheduler/status` and check `recurring_jobs[].next_run_at`, which includes rescheduled `Pending` retries.
+  2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern. A `Pending` row with a future `run_at` is waiting for its retry delay; check the `retry` status in `cclb_scheduler_jobs_total`. For a `Running` row, inspect `lock_at` for a stale lease.
   3. Check the logs for database connection errors or lock contention.
   4. Verify that the worker threads are not blocked by long-running external HTTP calls.
 - **Resolution**: Restart the scheduler workers; the watchdog and enqueue paths create new work with a new idempotency key.

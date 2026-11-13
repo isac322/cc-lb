@@ -84,7 +84,7 @@ mod jobs {
             assert_eq!(
                 outcome,
                 JobOutcome::Retry {
-                    delay: Duration::from_secs(7)
+                    delay: Some(Duration::from_secs(7))
                 }
             );
             Ok(())

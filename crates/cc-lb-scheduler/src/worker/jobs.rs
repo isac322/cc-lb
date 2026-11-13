@@ -112,6 +112,10 @@ impl RetryPayload for Task<AdaptiveJob> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.attempt()).unwrap_or(u32::MAX)
     }
+
+    fn allows_retry(&self) -> bool {
+        self.max_attempts() != Some(1)
+    }
 }
 
 impl TraceparentCarrier for CronJob {
@@ -163,6 +167,10 @@ impl TraceparentCarrier for Task<CronJob> {
 impl RetryPayload for Task<CronJob> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.attempt()).unwrap_or(u32::MAX)
+    }
+
+    fn allows_retry(&self) -> bool {
+        self.max_attempts() != Some(1)
     }
 }
 

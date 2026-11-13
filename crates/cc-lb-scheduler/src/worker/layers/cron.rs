@@ -8,7 +8,7 @@ use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
-use crate::middleware::TraceparentLayer;
+use crate::middleware::{OutcomePersistLayer, TraceparentLayer};
 use crate::retry::RetryClass;
 
 #[cfg(feature = "postgres")]
@@ -70,9 +70,13 @@ fn build_sqlite_singleton_worker(
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let pool = storage.pool().clone();
+                let persist_layer = OutcomePersistLayer::sqlite(pool, cancel.clone());
+                let persist_drain = persist_layer.clone();
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
+                    .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
                     .layer(catch_panic_layer())
@@ -82,6 +86,7 @@ fn build_sqlite_singleton_worker(
                 worker
                     .run_until(async move {
                         cancel.cancelled_owned().await;
+                        persist_drain.wait_idle().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await
@@ -100,9 +105,13 @@ fn build_postgres_singleton_worker(
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let pool = storage.pool().clone();
+                let persist_layer = OutcomePersistLayer::postgres(pool, cancel.clone());
+                let persist_drain = persist_layer.clone();
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
+                    .layer(persist_layer)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
                     .layer(catch_panic_layer())
@@ -112,6 +121,7 @@ fn build_postgres_singleton_worker(
                 worker
                     .run_until(async move {
                         cancel.cancelled_owned().await;
+                        persist_drain.wait_idle().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await

@@ -34,6 +34,8 @@ mod watchdog_tests;
 mod watchdog_warmup_cycle_keys;
 #[path = "worker.rs"]
 mod worker;
+#[path = "worker_outcome_lifecycle.rs"]
+mod worker_outcome_lifecycle;
 #[path = "worker_restart_lifetime.rs"]
 mod worker_restart_lifetime;
 #[path = "worker_restart_lifetime_postgres.rs"]

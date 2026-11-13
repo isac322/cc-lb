@@ -4,7 +4,7 @@ description: Operate durable background work, OAuth warm-up, retries, and schedu
 slug: docs/operations/scheduler
 ---
 
-The scheduler separates request-path work from durable background tasks. Apalis storage owns delayed jobs, claims, retry state, and idempotency keys. Workers on each replica can claim work from the shared store.
+The scheduler separates request-path work from durable background tasks. Apalis storage owns delayed jobs, claims, retry state, and idempotency keys. Workers on each replica can claim work from the shared store. The worker's persistence layer records retry outcomes as `Pending` with a future `run_at` and exhausted retries as `Killed`.
 
 ## Important jobs
 
@@ -23,16 +23,18 @@ On SQLite, the application pool uses the configured database file, while the sch
 
 ## Retry classes
 
-| Class | Use | Attempts |
+| Class | Use | Retries |
 | --- | --- | ---: |
 | Probe | Lightweight connectivity checks | 3 |
-| Entity | External work such as warm-up or refresh | 5 |
+| Entity (`RetryClass::Adaptive`) | External work such as warm-up or refresh | 5 |
 | Maintenance | Internal cleanup and rollups | 1 |
 
-Cache keepalive uses one attempt. Misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded in metrics.
+Retries count executions after the initial run: Probe permits 4 total runs, Entity 6, and Maintenance 2. `delay: None` uses the class's jittered backoff. Positive handler retry delays bypass jitter and are capped at the class's maximum delay: 5s for Probe, 600s for Entity, and 60s for Maintenance. A zero delay is invalid and marks the row `Killed`.
+
+Cache keepalive and immediate API-key usage polls use SQL `max_attempts = 1`, which disables retries. Cache keepalive misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded in metrics.
 
 ## Failure triage
 
-Terminal jobs remain visible in the scheduler failure view. Inspect the job type, status, bounded reason, and attempt count. Resolve the underlying credential, storage, or configuration problem, then let the relevant watchdog enqueue a new idempotency key.
+`GET /admin/scheduler/status` includes rescheduled `Pending` retries in `next_run_at`. These rows wait until `run_at` and stay out of `GET /admin/scheduler/failures`. The failure view lists terminal `Failed` rows whose SQL attempts are exhausted and `Killed` rows, including exhausted retries, panics, and invalid zero retry delays. Inspect the job type, status, bounded reason, and attempt count. Resolve the underlying credential, storage, or configuration problem, then let the relevant watchdog enqueue a new idempotency key.
 
 Failure summaries redact prompts, authorization headers, API keys, ciphertext, and payload-shaped material.

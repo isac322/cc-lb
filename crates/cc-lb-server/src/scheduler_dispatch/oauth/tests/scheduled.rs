@@ -262,7 +262,7 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
                     .await
                     .expect("retryable response"),
                 JobOutcome::Retry {
-                    delay: std::time::Duration::from_secs(30),
+                    delay: Some(std::time::Duration::from_secs(30)),
                 }
             );
         }
@@ -457,7 +457,7 @@ async fn network_refresh_failure_keeps_existing_retry_policy() {
             .await
             .expect("network failure is retryable"),
         JobOutcome::Retry {
-            delay: std::time::Duration::from_secs(30),
+            delay: Some(std::time::Duration::from_secs(30)),
         }
     );
     let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
