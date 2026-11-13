@@ -269,18 +269,12 @@ pub(super) async fn gemini_live_websocket_handler(
                 );
         }
     };
+    let observation = state.lifecycle.begin_realtime_websocket(&auth, &path);
     if uri.path()
         != "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
     {
-        return cc_lb_engine::provider_scope_error_response(
-            cc_lb_domain::Provider::Gemini,
-            StatusCode::NOT_FOUND,
-            "operation_not_supported",
-            &format!("GET {} is not supported by cc-lb yet", uri.path()),
-        );
+        return observation.reject_unsupported_operation(cc_lb_domain::Provider::Gemini, &path);
     }
-    // OriginalUri retains the outer provider prefix even inside axum::nest.
-    let observation = state.lifecycle.begin_realtime_websocket(&auth, &path);
     // The setup frame supplies the model, but cannot make a disabled, unbound,
     // or OAuth-only upstream eligible for Live. Reject that structural absence
     // as HTTP; leave the full model-specific routing pipeline after setup.
@@ -296,12 +290,7 @@ pub(super) async fn gemini_live_websocket_handler(
         .iter()
         .any(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::GeminiApiKey)
     {
-        observation.finish(StatusCode::SERVICE_UNAVAILABLE);
-        return websocket_http_error(&WebSocketError::new(
-            503,
-            "route_no_upstream_after_filter",
-            "no eligible provider API-key upstream",
-        ));
+        return observation.reject_no_eligible_upstream(cc_lb_domain::Provider::Gemini);
     }
     let request_span = tracing::Span::current();
     let request_dispatch = tracing::dispatcher::get_default(Clone::clone);
@@ -335,7 +324,7 @@ pub(super) async fn gemini_live_websocket_handler(
                 let first = tokio::select! {
                     first = first => first,
                     _ = state.drain_controller.wait_for_draining() => {
-                        observation.finish(StatusCode::SERVICE_UNAVAILABLE);
+                        observation.finish_draining();
                         let _ = downstream.send(Message::Close(None)).now_or_never();
                         return;
                     }

@@ -87,10 +87,12 @@ Not yet supported: files, uploads, batches, vector stores, conversations, contai
 
 OpenAI-compatible Gemini requests retain their `/v1beta/openai/...` path and use the Gemini API key as `Authorization: Bearer`. Native Gemini requests use `x-goog-api-key`; OAuth remains limited to generation and token counting.
 
+On proxy request timeout, Gemini HTTP routes return HTTP `504` with a Gemini `DEADLINE_EXCEEDED` JSON error. Other HTTP routes return plain `request timed out`.
+
 Realtime and Live WebSockets authenticate the proxy client before upgrade and select one eligible API-key upstream for the connection lifetime; OAuth subscriptions are not eligible. A connection never reconnects or fails over to another credential. Text, binary, ping, and pong frames retain their payloads; client/provider close frames retain their explicit code and reason while propagating tunnel shutdown. A later connection failure closes the tunnel rather than returning a new HTTP response.
 Realtime and Live WebSocket admission uses an upstream-scoped circuit breaker keyed by the stable upstream UUID, independent of HTTP's host-keyed breaker. Provider `5xx` responses, transport failures, and timeouts count toward that WebSocket breaker; `4xx` and other non-`5xx` handshake responses do not. Handshake errors use a generic `upstream_unavailable` error code while preserving the provider HTTP status. Before upgrade, that status and safe allowlisted `Retry-After`, `x-ratelimit-*`, `anthropic-ratelimit-*`, and `ratelimit-*` headers are returned as HTTP response status and headers; after upgrade, the status is preserved in the WebSocket error, with any non-empty allowlisted headers under a top-level JSON `headers` object. An open local breaker returns a generic `502 upstream_unavailable` error. Once a provider connection owns a WebSocket, failures close it without reconnecting or failing over.
 
-Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
+Gemini Live rejects the handshake with HTTP `503` and a Gemini `UNAVAILABLE` JSON error when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. This rejection records one `route_no_upstream_after_filter` request event. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
 
 Realtime and Live routing filters receive the parsed, bounded header session identity as `RequestContext.thread_id`, using the existing header precedence. No setup-frame metadata fallback or Claude ancestry fields are added. Principal-limit denials publish one rejected limit decision through the shared audit and metrics path before returning the existing protocol-appropriate error; rejected sessions do not contact the provider.
 
@@ -102,13 +104,13 @@ With OpenTelemetry tracing enabled, Realtime and Live provider handshakes receiv
 
 OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
 
-New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.
+New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain and record status `101` with `drain_rejected`. After an upgrade, drain cannot produce a new HTTP response.
 
 Not yet supported: cachedContents operations other than create, file upload/download, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
 
 #### Unsupported operations and body limits
 
-An unsupported operation under a provider prefix returns HTTP **404**, with a provider-shaped `operation_not_supported` error and the message `<method> <canonical-path> is not supported by cc-lb yet`. It produces one terminal request event after authentication, without selecting an upstream. Unprefixed unsupported paths retain their previous rejection behavior.
+An unsupported operation under a provider prefix returns HTTP **404**, with a provider-shaped `operation_not_supported` error and the message `<method> <canonical-path> is not supported by cc-lb yet`. It produces one terminal request event after authentication, without selecting an upstream. Scoped Gemini Live WebSocket handshakes follow the same rule. Unprefixed unsupported paths retain their previous rejection behavior.
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
 
