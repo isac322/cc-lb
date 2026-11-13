@@ -278,20 +278,50 @@ describe('Gemini group placeholder in the provider pool card', () => {
       GEMINI,
       visible,
       response,
+      windows,
       false,
     );
     return { visible, placeholders };
   }
 
+  /** A live `/pool-history` reading, as the server returns it for OpenAI and Gemini. */
+  function liveHistory(
+    window: string,
+    eligible: number,
+    used: number | null,
+  ): PoolHistoryWindowResponse {
+    return {
+      window,
+      latest: {
+        snapshot_at_unix_secs: NOW,
+        utilization: used == null ? null : used / 100,
+        utilization_percent: used,
+        contributing_upstreams: used == null ? 0 : eligible,
+        eligible_upstreams: eligible,
+        stale_upstreams: 0,
+        max_observed_at_unix_millis: used == null ? null : NOW * 1000,
+        oldest_observed_at_unix_millis: used == null ? null : NOW * 1000,
+        max_staleness_secs: 300,
+        missing_observation_upstreams: 0,
+      },
+      series:
+        used == null
+          ? []
+          : [{ snapshot_at_unix_secs: NOW, utilization_percent: used }],
+    };
+  }
+
   it('QA-1: keeps an all-absent 5h beside a reported 7d as not reported', () => {
+    // Real server output: `/aggregate` omits every all-absent window, while the
+    // live `/pool-history` keeps it with no eligible upstream.
     const { visible, placeholders } = legendFor(
-      aggregate([
-        aggregateWindow('gemini_5h', 'absent', null),
-        aggregateWindow('gemini_7d', 'fresh', 100),
-        aggregateWindow('third_party_5h', 'absent', null),
-        aggregateWindow('third_party_7d', 'absent', null),
-      ]),
-      history(['gemini_5h', 'gemini_7d']),
+      aggregate([aggregateWindow('gemini_7d', 'fresh', 100)]),
+      [
+        liveHistory('gemini_5h', 0, null),
+        liveHistory('gemini_7d', 1, 100),
+        liveHistory('third_party_5h', 0, null),
+        liveHistory('third_party_7d', 0, null),
+      ],
     );
     expect(visible).toEqual(['gemini_7d']);
     expect(placeholders).toEqual({ gemini_5h: 'not-reported' });
@@ -344,11 +374,23 @@ describe('Gemini group placeholder in the provider pool card', () => {
       ).placeholders,
     ).toEqual({});
     expect(
-      poolGroupPlaceholders(GEMINI, ['gemini_7d'], undefined, true),
+      poolGroupPlaceholders(GEMINI, ['gemini_7d'], undefined, undefined, true),
     ).toEqual({});
     expect(
-      poolGroupPlaceholders(['5h', '7d'], ['7d'], undefined, false),
+      poolGroupPlaceholders(['5h', '7d'], ['7d'], undefined, undefined, false),
     ).toEqual({});
+  });
+
+  it('falls back to all-absent aggregate lots without a live reading', () => {
+    expect(
+      legendFor(
+        aggregate([
+          aggregateWindow('gemini_5h', 'absent', null),
+          aggregateWindow('gemini_7d', 'fresh', 100),
+        ]),
+        history(['gemini_7d']),
+      ).placeholders,
+    ).toEqual({ gemini_5h: 'not-reported' });
   });
 });
 

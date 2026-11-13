@@ -130,9 +130,16 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
         providerWindowKeys,
         visibleWindows,
         normalizedAggregate,
+        normalizedHistory,
         loading,
       ),
-    [loading, normalizedAggregate, providerWindowKeys, visibleWindows],
+    [
+      loading,
+      normalizedAggregate,
+      normalizedHistory,
+      providerWindowKeys,
+      visibleWindows,
+    ],
   );
   const legendWindows = useMemo(
     () =>

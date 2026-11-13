@@ -1923,10 +1923,12 @@ export function ProviderOverviewPage({
         poolChartWindows,
         visiblePoolWindows,
         normalizedPoolAggregate,
+        normalizedPoolHistoryWindows,
         quotaLoading,
       ),
     [
       normalizedPoolAggregate,
+      normalizedPoolHistoryWindows,
       poolChartWindows,
       quotaLoading,
       visiblePoolWindows,

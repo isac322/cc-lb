@@ -1,6 +1,7 @@
 import type {
   AggregateResponse,
   PeriodUnknownQuotaMeter,
+  PoolHistoryWindowResponse,
   QuotaSnapshot,
   SeriesResponseItem,
 } from '../../lib/api';
@@ -268,13 +269,17 @@ export function poolRetainedWindows(
  * Pool counterpart of `geminiGroupPlaceholderState`: Gemini group windows
  * left out of the pool while their same-group sibling is shown. The legend
  * keeps them as a neutral status, never a chart series or a value inferred
- * from the sibling: `not-reported` when every provider lot is absent,
- * otherwise `no-reading`. Empty while loading.
+ * from the sibling. `not-reported` when every account proves the window
+ * absent: the server omits such a window from `/aggregate` but keeps it in
+ * the live `/pool-history` reading with `eligible_upstreams` 0 (a
+ * `max_staleness_secs` marks that reading as live), or older aggregate lots
+ * are all `absent`. Otherwise `no-reading`. Empty while loading.
  */
 export function poolGroupPlaceholders(
   defaults: readonly string[],
   visibleWindows: readonly string[],
   aggregate: AggregateResponse | undefined,
+  history: readonly PoolHistoryWindowResponse[] | undefined,
   loading: boolean,
 ): Partial<Record<string, GeminiGroupPlaceholderState>> {
   const placeholders: Partial<Record<string, GeminiGroupPlaceholderState>> = {};
@@ -288,11 +293,13 @@ export function poolGroupPlaceholders(
     ) {
       continue;
     }
+    const live = history?.find((entry) => entry.window === window)?.latest;
     const lots =
       aggregate?.windows.find((entry) => entry.window === window)
         ?.provider_lots ?? [];
     placeholders[window] =
-      lots.length > 0 && lots.every((lot) => lot.state === 'absent')
+      (live?.max_staleness_secs != null && live.eligible_upstreams === 0) ||
+      (lots.length > 0 && lots.every((lot) => lot.state === 'absent'))
         ? 'not-reported'
         : 'no-reading';
   }

@@ -329,7 +329,9 @@ for (const width of [390, 768, 1440]) {
 }
 
 // Rule A: weekly 100% while every account's Gemini 5h is absent keeps a
-// neutral 5h legend row; the chart never plots the 5h window.
+// neutral 5h legend row; the chart never plots the 5h window. As the server
+// does, `/aggregate` omits all-absent windows and the live `/pool-history`
+// keeps them with no eligible upstream.
 async function installGeminiWeeklyExhaustedPool(page: Page) {
   const reported = (window: string) => window === 'gemini_7d';
   await page.route('**/admin/v1/subscription-quotas/aggregate?**', (route) => {
@@ -337,27 +339,27 @@ async function installGeminiWeeklyExhaustedPool(page: Page) {
     const response: AggregateResponse & { weighting: 'equal' } = {
       now_unix_secs: NOW, window_anchor_unix_secs: NOW, max_staleness_secs: 300,
       upstream_count: 1, caveats: [], weighting: 'equal',
-      windows: windows.gemini.map((window) => ({
+      windows: windows.gemini.filter(reported).map((window) => ({
         window,
         cc_window_start_unix_secs: NOW - 3600,
         cc_window_reset_unix_secs: NOW + 3600,
-        pool_pace_fraction: reported(window) ? 0.5 : null,
-        next_reset_unix_secs: reported(window) ? NOW + 86400 : null,
+        pool_pace_fraction: 0.5,
+        next_reset_unix_secs: NOW + 86400,
         used_tokens: 100,
-        utilization: reported(window) ? 1 : null,
-        utilization_percent: reported(window) ? 100 : null,
+        utilization: 1,
+        utilization_percent: 100,
         capacity_to_now_tokens_estimate: 500,
         projected_capacity_tokens_estimate: 1000,
         remaining_to_now_tokens_estimate: 0,
         confidence: 'high',
-        contributing_upstreams: reported(window) ? 1 : 0,
+        contributing_upstreams: 1,
         stale_upstreams: 0,
         missing_capacity_upstreams: 0,
         provider_lots: [{
           upstream_id: 'gemini-pool-fixture', upstream_name: 'gemini pool', window, source: 'api',
-          state: reported(window) ? 'fresh' : 'absent',
-          provider_start_unix_secs: null, provider_reset_unix_secs: reported(window) ? NOW + 86400 : null,
-          observed_at_unix_millis: NOW * 1000, utilization: reported(window) ? 1 : null,
+          state: 'fresh',
+          provider_start_unix_secs: null, provider_reset_unix_secs: NOW + 86400,
+          observed_at_unix_millis: NOW * 1000, utilization: 1,
           capacity_estimate_tokens: 1000, used_before_cc_window_tokens: 0,
           capacity_to_now_tokens_estimate: 500, projected_capacity_tokens_estimate: 1000,
           confidence: 'high', capacity_ratio: 1,
@@ -381,8 +383,8 @@ async function installGeminiWeeklyExhaustedPool(page: Page) {
           contributing_upstreams: reported(window) ? 1 : 0,
           eligible_upstreams: reported(window) ? 1 : 0,
           stale_upstreams: 0,
-          max_observed_at_unix_millis: NOW * 1000,
-          oldest_observed_at_unix_millis: (NOW - 30) * 1000,
+          max_observed_at_unix_millis: reported(window) ? NOW * 1000 : null,
+          oldest_observed_at_unix_millis: reported(window) ? (NOW - 30) * 1000 : null,
           max_staleness_secs: 300,
           missing_observation_upstreams: 0,
         },
