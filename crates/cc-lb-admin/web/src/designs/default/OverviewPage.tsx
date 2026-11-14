@@ -1479,6 +1479,8 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   );
 });
 
+const POOL_QUOTA_WINDOW_SET = new Set<string>(POOL_QUOTA_WINDOWS);
+
 export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
   seriesData,
   creditData,
@@ -1509,12 +1511,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
     : POOL_QUOTA_WINDOWS_DRAW_ORDER;
   const tooltipWindows = [
     ...POOL_QUOTA_WINDOWS.filter((window) => windows.includes(window)),
-    ...windows.filter(
-      (window) =>
-        !POOL_QUOTA_WINDOWS.includes(
-          window as (typeof POOL_QUOTA_WINDOWS)[number],
-        ),
-    ),
+    ...windows.filter((window) => !POOL_QUOTA_WINDOW_SET.has(window)),
   ];
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
@@ -1585,6 +1582,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         />
         <RTooltip
           cursor={CHART_CURSOR}
+          filterNull={false}
           content={({ active, payload, label }) => {
             if (!active) return null;
             const labelUnix = Number(label);
@@ -1613,10 +1611,16 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                   {fmtChartTooltip(labelUnix)}
                 </div>
                 {tooltipWindows.map((window) => {
+                  const alignedValue =
+                    quotaPoint != null && window in quotaPoint
+                      ? quotaPoint[window]
+                      : undefined;
                   const value =
-                    quotaPoint?.[window] ??
-                    payload?.find((entry) => String(entry.dataKey) === window)
-                      ?.value;
+                    alignedValue === undefined
+                      ? payload?.find(
+                          (entry) => String(entry.dataKey) === window,
+                        )?.value
+                      : alignedValue;
                   const shortLabel =
                     windowLabels?.[window] ?? windowLabel(window);
                   return (
