@@ -1507,6 +1507,15 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         ),
       ]
     : POOL_QUOTA_WINDOWS_DRAW_ORDER;
+  const tooltipWindows = [
+    ...POOL_QUOTA_WINDOWS.filter((window) => windows.includes(window)),
+    ...windows.filter(
+      (window) =>
+        !POOL_QUOTA_WINDOWS.includes(
+          window as (typeof POOL_QUOTA_WINDOWS)[number],
+        ),
+    ),
+  ];
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length && !creditData?.length ? (
@@ -1576,7 +1585,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         />
         <RTooltip
           cursor={CHART_CURSOR}
-          content={({ active, label }) => {
+          content={({ active, payload, label }) => {
             if (!active) return null;
             const labelUnix = Number(label);
             const creditPoint =
@@ -1603,8 +1612,11 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                 <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(labelUnix)}
                 </div>
-                {windows.map((window) => {
-                  const value = quotaPoint?.[window];
+                {tooltipWindows.map((window) => {
+                  const value =
+                    quotaPoint?.[window] ??
+                    payload?.find((entry) => String(entry.dataKey) === window)
+                      ?.value;
                   const shortLabel =
                     windowLabels?.[window] ?? windowLabel(window);
                   return (
