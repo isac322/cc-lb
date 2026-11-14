@@ -187,7 +187,10 @@ fn handle_event(
             partial.attempt_num = attempt_num;
         }
         LifecycleEvent::UpstreamResponseStarted {
-            status, headers, ..
+            status,
+            headers,
+            observed_at_unix_millis,
+            ..
         } => {
             let is_observable_status = (200..300).contains(&status) || status == 429;
             if !is_observable_status {
@@ -218,7 +221,8 @@ fn handle_event(
                 sink,
                 upstream_id,
                 &header_map,
-                system_time_unix_millis(SystemTime::now()),
+                observed_at_unix_millis
+                    .unwrap_or_else(|| system_time_unix_millis(SystemTime::now())),
             );
         }
         LifecycleEvent::RequestTerminated { .. } => {
@@ -370,7 +374,23 @@ mod tests {
             shape_ms: None,
             sign_ms: None,
             upstream_ttfb_ms: None,
+            observed_at_unix_millis: None,
         }
+    }
+    fn response_started_at(
+        event_id: &str,
+        headers: HeaderSnapshot,
+        observed_at_unix_millis: u64,
+    ) -> LifecycleEvent {
+        let mut event = response_started(event_id, headers);
+        if let LifecycleEvent::UpstreamResponseStarted {
+            observed_at_unix_millis: observed_at,
+            ..
+        } = &mut event
+        {
+            *observed_at = Some(observed_at_unix_millis);
+        }
+        event
     }
 
     fn quota_headers() -> HeaderSnapshot {
@@ -414,7 +434,7 @@ mod tests {
         })
         .await
         .unwrap();
-        tx.send(response_started("quota-a", quota_headers()))
+        tx.send(response_started_at("quota-a", quota_headers(), 1_700_000))
             .await
             .unwrap();
         drop(tx);
@@ -422,6 +442,7 @@ mod tests {
 
         let records = cache.records.lock().unwrap();
         assert_eq!(records.len(), 1);
+        assert_eq!(records[0].observed_at_unix_millis, 1_700_000);
         assert_eq!(records[0].upstream_id, upstream_id);
         assert_eq!(records[0].window, SubscriptionQuotaWindow::FiveHour);
         assert_eq!(records[0].utilization, Some(0.10));

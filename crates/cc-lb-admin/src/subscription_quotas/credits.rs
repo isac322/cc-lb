@@ -182,17 +182,14 @@ pub(super) async fn build_history(
         let durable = latest_by_upstream.remove(&upstream.id).unwrap_or_default();
         let current = current_credit_state(&durable, &cached);
         let latest = latest_balance(current.as_ref(), now, max_staleness);
-        let series = bound_points(
-            account_history(
-                checkpoints_by_upstream
-                    .remove(&upstream.id)
-                    .unwrap_or_default(),
-                &latest,
-                since.saturating_mul(1_000),
-                end,
-                now,
-            ),
-            max_points_per_series,
+        let series = account_history(
+            checkpoints_by_upstream
+                .remove(&upstream.id)
+                .unwrap_or_default(),
+            &latest,
+            since.saturating_mul(1_000),
+            end,
+            now,
         );
         // Match shipped OpenAI Pool quota membership. Disabled accounts can be
         // inspected in lists but never contribute to the current pool lens.
@@ -213,6 +210,9 @@ pub(super) async fn build_history(
         now,
     );
     pool.series = bound_points(pool.series, max_points_per_series);
+    for history in &mut histories {
+        history.series = bound_points(std::mem::take(&mut history.series), max_points_per_series);
+    }
     Ok(CreditHistoryResponse {
         now_unix_secs: now / 1_000,
         since_unix_secs: since,
@@ -516,25 +516,51 @@ fn account_history(
     }
     points
 }
-fn bound_points(mut points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint> {
+fn bound_points(points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint> {
     if points.len() <= max_points {
         return points;
     }
     let last = points.len() - 1;
-    let stride = (last as f64 / (max_points.saturating_sub(1) as f64)).ceil() as usize;
-    let mut bounded = Vec::with_capacity(max_points);
-    for index in (0..=last).step_by(stride.max(1)) {
-        bounded.push(points[index].clone());
-        if bounded.len() == max_points.saturating_sub(1) {
-            break;
+    let mut mandatory = vec![0, last];
+    for index in 1..=last {
+        let previous = &points[index - 1];
+        let current = &points[index];
+        if previous.balance.is_some() != current.balance.is_some()
+            || previous.contributing_upstreams != current.contributing_upstreams
+            || previous.eligible_upstreams != current.eligible_upstreams
+            || previous.at_unix_millis == current.at_unix_millis
+        {
+            mandatory.push(index);
         }
     }
-    if bounded.last().map(|point| point.at_unix_millis)
-        != points.last().map(|point| point.at_unix_millis)
-    {
-        bounded.push(points.pop().expect("non-empty points"));
+    mandatory.sort_unstable();
+    mandatory.dedup();
+    if mandatory.len() > max_points {
+        let mut bounded = mandatory
+            .into_iter()
+            .take(max_points.saturating_sub(1))
+            .collect::<Vec<_>>();
+        bounded.push(last);
+        bounded.sort_unstable();
+        bounded.dedup();
+        return bounded
+            .into_iter()
+            .map(|index| points[index].clone())
+            .collect();
     }
-    bounded
+
+    let mut selected = mandatory;
+    for slot in 1..max_points.saturating_sub(1) {
+        let candidate = slot * last / (max_points - 1);
+        if !selected.contains(&candidate) {
+            selected.push(candidate);
+        }
+    }
+    selected.sort_unstable();
+    selected
+        .into_iter()
+        .map(|index| points[index].clone())
+        .collect()
 }
 
 fn push_state_point(points: &mut Vec<CreditPoint>, point: CreditPoint) {
@@ -775,5 +801,89 @@ mod tests {
         }
         assert_eq!(exact_sum(std::iter::empty()), None);
         assert_eq!(exact_sum(["NaN"].into_iter()), None);
+    }
+    #[test]
+    fn pool_uses_unreduced_account_history_at_each_timestamp() {
+        let point = |at_unix_millis: u64, balance: &str| CreditPoint {
+            at_unix_millis,
+            balance: Some(balance.to_owned()),
+            observed_at_unix_millis: Some(at_unix_millis),
+            contributing_upstreams: 1,
+            eligible_upstreams: 1,
+        };
+        let histories = vec![
+            CreditUpstreamHistory {
+                upstream_id: Uuid::nil(),
+                latest: CreditLatest {
+                    balance: Some("190".to_owned()),
+                    observed_at_unix_millis: Some(4),
+                    state: "fresh",
+                },
+                series: vec![
+                    point(0, "100"),
+                    point(1, "90"),
+                    point(2, "80"),
+                    point(3, "200"),
+                    point(4, "190"),
+                ],
+            },
+            CreditUpstreamHistory {
+                upstream_id: Uuid::from_u128(1),
+                latest: CreditLatest {
+                    balance: Some("30".to_owned()),
+                    observed_at_unix_millis: Some(4),
+                    state: "fresh",
+                },
+                series: vec![point(0, "50"), point(3, "40"), point(4, "30")],
+            },
+        ];
+
+        let pool = pool_history(&histories, &[0, 1], 0, 4, 4);
+        assert_eq!(
+            pool.series
+                .iter()
+                .find(|point| point.at_unix_millis == 3)
+                .and_then(|point| point.balance.as_deref()),
+            Some("240"),
+        );
+    }
+
+    #[test]
+    fn bounded_points_keep_gaps_and_duplicate_timestamp_recovery() {
+        let point = |at_unix_millis: u64, balance: Option<&str>| CreditPoint {
+            at_unix_millis,
+            balance: balance.map(str::to_owned),
+            observed_at_unix_millis: balance.map(|_| at_unix_millis),
+            contributing_upstreams: usize::from(balance.is_some()),
+            eligible_upstreams: 1,
+        };
+        let bounded = bound_points(
+            vec![
+                point(0, Some("100")),
+                point(1, None),
+                point(2, Some("80")),
+                point(3, Some("70")),
+                point(4, Some("60")),
+            ],
+            3,
+        );
+        assert_eq!(bounded.len(), 3);
+        assert_eq!(bounded[1].balance, None);
+        assert_eq!(
+            bounded.last().and_then(|point| point.balance.as_deref()),
+            Some("60")
+        );
+
+        let recovery = bound_points(
+            vec![point(0, Some("100")), point(4, None), point(4, Some("90"))],
+            3,
+        );
+        assert_eq!(
+            recovery
+                .iter()
+                .map(|point| point.balance.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("100"), None, Some("90")],
+        );
     }
 }

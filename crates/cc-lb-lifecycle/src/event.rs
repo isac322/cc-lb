@@ -188,6 +188,9 @@ pub enum LifecycleEvent {
         sign_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_ttfb_ms: Option<u64>,
+        /// Capture time of the HTTP response headers, before off-path processing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_unix_millis: Option<u64>,
     },
     /// Provider quota frame handed to off-path consumers without parsing or
     /// copying its bytes. A missing matched response remains account-only.

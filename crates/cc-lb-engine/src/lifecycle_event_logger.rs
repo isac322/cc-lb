@@ -792,6 +792,7 @@ mod tests {
             shape_ms,
             sign_ms,
             upstream_ttfb_ms,
+            observed_at_unix_millis: None,
         }
     }
     fn upstream_started_with_attempt_stages(
@@ -812,6 +813,7 @@ mod tests {
             shape_ms: None,
             sign_ms: None,
             upstream_ttfb_ms,
+            observed_at_unix_millis: None,
         }
     }
 

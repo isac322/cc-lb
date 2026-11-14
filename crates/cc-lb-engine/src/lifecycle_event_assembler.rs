@@ -3499,6 +3499,7 @@ mod tests {
             shape_ms: None,
             sign_ms: None,
             upstream_ttfb_ms: Some(20),
+            observed_at_unix_millis: None,
         })
         .await
         .unwrap();
@@ -4433,6 +4434,7 @@ mod tests {
             shape_ms: Some(4),
             sign_ms: Some(5),
             upstream_ttfb_ms: Some(6),
+            observed_at_unix_millis: None,
         })
         .await
         .unwrap();

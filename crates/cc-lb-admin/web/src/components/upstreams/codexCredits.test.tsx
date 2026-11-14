@@ -320,6 +320,86 @@ describe('Codex credit observations', () => {
     }
   });
 
+  it('lets newer explicit credit availability recover from a derived fallback restriction', () => {
+    const facts = selectCodexCredits([
+      snapshot({
+        observed_at_unix_millis: (NOW - 600) * 1000,
+        fallback_available: false,
+        credits: credit({ has_credits: false }),
+      }),
+      snapshot({
+        window: 'unified',
+        observed_at_unix_millis: NOW * 1000,
+        credits: credit({ has_credits: true }),
+      }),
+    ]);
+    expect(facts?.status).toBe('Available');
+  });
+
+  it('uses a fresh unlimited field without stale companion availability', () => {
+    const facts = selectCodexCredits([
+      snapshot({
+        state: 'stale',
+        observed_at_unix_millis: (NOW - 600) * 1000,
+        credits: credit({
+          has_credits: false,
+          observations: {
+            has_credits: {
+              source: 'api',
+              observed_at_unix_millis: (NOW - 600) * 1000,
+            },
+          },
+        }),
+      }),
+      snapshot({
+        window: 'unified',
+        credits: credit({
+          unlimited: true,
+          observations: {
+            unlimited: {
+              source: 'api',
+              observed_at_unix_millis: NOW * 1000,
+            },
+          },
+        }),
+      }),
+    ], 300, NOW * 1000);
+    expect(facts?.status).toBe('Unlimited');
+  });
+
+  it('uses comparable request order before snapshot timestamps', () => {
+    const facts = selectCodexCredits([
+      snapshot({
+        observed_at_unix_millis: NOW * 1000,
+        credits: credit({
+          has_credits: true,
+          observations: {
+            has_credits: {
+              source: 'header',
+              observed_at_unix_millis: NOW * 1000,
+              request_order: { publisher: 'http', sequence: 2 },
+            },
+          },
+        }),
+      }),
+      snapshot({
+        window: 'unified',
+        observed_at_unix_millis: (NOW + 10) * 1000,
+        credits: credit({
+          has_credits: false,
+          observations: {
+            has_credits: {
+              source: 'api',
+              observed_at_unix_millis: (NOW + 10) * 1000,
+              request_order: { publisher: 'http', sequence: 1 },
+            },
+          },
+        }),
+      }),
+    ], 300, NOW * 1000);
+    expect(facts?.status).toBe('Available');
+  });
+
   it('does not refresh stale availability with a fresh balance-only observation', () => {
     const facts = selectCodexCredits([
       snapshot({

@@ -107,6 +107,7 @@ pub(super) fn publish_renewal_lifecycle(
         shape_ms: None,
         sign_ms: None,
         upstream_ttfb_ms: None,
+        observed_at_unix_millis: None,
     });
     if input.usage.usage_present {
         event_bus.publish_lifecycle(LifecycleEvent::UsageObserved {

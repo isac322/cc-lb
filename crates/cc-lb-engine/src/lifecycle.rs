@@ -7168,6 +7168,7 @@ impl Lifecycle {
                 event_id: o.event_id().to_owned(),
                 status: response.status().as_u16(),
                 headers: header_snapshot_from(response.headers(), routed.record.kind),
+                observed_at_unix_millis: Some(unix_now_ms(&*self.clock)),
                 bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
                 dns_ms: attempt_timings.dns_ms,
                 connect_ms: attempt_timings.connect_ms,

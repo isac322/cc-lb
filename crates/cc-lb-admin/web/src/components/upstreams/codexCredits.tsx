@@ -82,42 +82,72 @@ function fieldSourceLabel(
   return `${source}${stale ? ' · stale' : ''}`;
 }
 
+type CreditField =
+  | 'balance'
+  | 'has_credits'
+  | 'unlimited'
+  | 'limit_reached';
+
+interface CreditFieldEvidence {
+  snapshot: QuotaSnapshot;
+  observedAt: number;
+  requestOrder?: { publisher: string; sequence: number };
+}
+
+function compareCreditEvidence(
+  left: CreditFieldEvidence,
+  right: CreditFieldEvidence,
+): number {
+  const leftOrder = left.requestOrder;
+  const rightOrder = right.requestOrder;
+  if (
+    leftOrder != null &&
+    rightOrder != null &&
+    leftOrder.publisher === rightOrder.publisher &&
+    leftOrder.sequence !== rightOrder.sequence
+  ) {
+    return leftOrder.sequence - rightOrder.sequence;
+  }
+  return left.observedAt - right.observedAt;
+}
+
 function newestCreditField(
   snapshots: readonly QuotaSnapshot[],
-  field: 'balance' | 'has_credits' | 'unlimited' | 'limit_reached',
-): QuotaSnapshot | undefined {
-  return snapshots.reduce<QuotaSnapshot | undefined>((latest, snapshot) => {
-    if (snapshot.credits == null || snapshot.credits[field] == null)
-      return latest;
-    const observation = snapshot.credits.observations?.[field];
-    const at =
-      observation?.observed_at_unix_millis ??
-      snapshot.observed_at_unix_millis ??
-      -1;
-    const latestObservation = latest?.credits?.observations?.[field];
-    const latestAt =
-      latestObservation?.observed_at_unix_millis ??
-      latest?.observed_at_unix_millis ??
-      -1;
-    return latest === undefined ||
-      at > latestAt ||
-      (at === latestAt && snapshot.source === 'api' && latest.source !== 'api')
-      ? snapshot
-      : latest;
-  }, undefined);
+  field: CreditField,
+): CreditFieldEvidence | undefined {
+  return snapshots.reduce<CreditFieldEvidence | undefined>(
+    (latest, snapshot) => {
+      if (snapshot.credits == null || snapshot.credits[field] == null)
+        return latest;
+      const observation = snapshot.credits.observations?.[field];
+      const candidate = {
+        snapshot,
+        observedAt:
+          observation?.observed_at_unix_millis ??
+          snapshot.observed_at_unix_millis ??
+          -1,
+        requestOrder: observation?.request_order,
+      };
+      return latest == null || compareCreditEvidence(candidate, latest) > 0
+        ? candidate
+        : latest;
+    },
+    undefined,
+  );
 }
+
 function creditFieldIsFresh(
-  snapshot: QuotaSnapshot | undefined,
-  field: 'has_credits' | 'unlimited' | 'limit_reached',
+  evidence: CreditFieldEvidence | undefined,
+  field: Exclude<CreditField, 'balance'>,
   nowUnixMillis: number,
   maxStalenessSecs: number,
 ): boolean {
-  if (snapshot == null) return false;
-  const observation = snapshot.credits?.observations?.[field];
+  if (evidence == null) return false;
+  const observation = evidence.snapshot.credits?.observations?.[field];
   return observation != null
     ? Math.max(0, nowUnixMillis - observation.observed_at_unix_millis) <=
         maxStalenessSecs * 1000
-    : snapshot.state === 'fresh';
+    : evidence.snapshot.state === 'fresh';
 }
 
 /** Keep each fact attached to its own observation; a fresh balance is not a fresh availability flag. */
@@ -137,59 +167,94 @@ export function selectCodexCredits(
   );
   if (creditObservations.length === 0) return null;
 
-  const limitObservation = newestCreditField(
+  const limitEvidence = newestCreditField(
     creditObservations,
     'limit_reached',
   );
   const limit =
-    limitObservation?.credits?.limit_reached === true &&
+    limitEvidence?.snapshot.credits?.limit_reached === true &&
     creditFieldIsFresh(
-      limitObservation,
+      limitEvidence,
       'limit_reached',
       nowUnixMillis,
       maxStalenessSecs,
     )
-      ? limitObservation
+      ? limitEvidence
       : undefined;
   const unavailable = newest(
     observations.filter((snapshot) => snapshot.fallback_available === false),
   );
-  const availabilityObservations = [
-    newestCreditField(creditObservations, 'has_credits'),
-    newestCreditField(creditObservations, 'unlimited'),
-  ]
-    .filter((snapshot): snapshot is QuotaSnapshot => snapshot != null)
-    .sort(
-      (left, right) =>
-        (right.observed_at_unix_millis ?? 0) -
-        (left.observed_at_unix_millis ?? 0),
-    );
-  const availability = availabilityObservations[0];
+  const hasCredits = newestCreditField(creditObservations, 'has_credits');
+  const unlimited = newestCreditField(creditObservations, 'unlimited');
+  const latestAvailability = [hasCredits, unlimited]
+    .filter((evidence): evidence is CreditFieldEvidence => evidence != null)
+    .sort((left, right) => compareCreditEvidence(right, left))[0];
+  const hasCreditsFresh = creditFieldIsFresh(
+    hasCredits,
+    'has_credits',
+    nowUnixMillis,
+    maxStalenessSecs,
+  );
+  const unlimitedFresh = creditFieldIsFresh(
+    unlimited,
+    'unlimited',
+    nowUnixMillis,
+    maxStalenessSecs,
+  );
+  const availabilityStatus =
+    unlimitedFresh && unlimited?.snapshot.credits?.unlimited === true
+      ? 'Unlimited'
+      : hasCreditsFresh && hasCredits?.snapshot.credits?.has_credits === true
+        ? 'Available'
+        : hasCreditsFresh && hasCredits?.snapshot.credits?.has_credits === false
+          ? 'Unavailable'
+          : latestAvailability != null
+            ? 'Stale'
+            : 'Unknown';
+  const fallbackUnavailable =
+    unavailable != null &&
+    (unavailable.credits == null ||
+      latestAvailability == null ||
+      (unavailable.observed_at_unix_millis ?? -1) >=
+        latestAvailability.observedAt);
+  const statusEvidence =
+    limit ??
+    (fallbackUnavailable ? undefined : latestAvailability) ??
+    (availabilityStatus === 'Stale' ? latestAvailability : undefined);
   const statusObservation =
-    limit ?? unavailable ?? availability ?? newest(creditObservations);
-  const credits = statusObservation?.credits;
-  const availabilityFresh = availability
-    ? creditFieldIsFresh(
-        availability,
-        availability.credits?.has_credits != null ? 'has_credits' : 'unlimited',
-        nowUnixMillis,
-        maxStalenessSecs,
-      )
-    : false;
+    limit?.snapshot ??
+    (fallbackUnavailable ? unavailable : undefined) ??
+    statusEvidence?.snapshot ??
+    newest(creditObservations);
   const status = limit
     ? 'Blocked'
-    : unavailable
+    : fallbackUnavailable
       ? 'Unavailable'
-      : statusObservation?.state === 'stale' ||
-          (availability != null && !availabilityFresh)
-        ? 'Stale'
-        : credits?.unlimited === true
-          ? 'Unlimited'
-          : credits?.has_credits === true
-            ? 'Available'
-            : credits?.has_credits === false
-              ? 'Unavailable'
-              : 'Unknown';
+      : availabilityStatus;
+  const statusSource =
+    fallbackUnavailable && unavailable != null
+      ? sourceLabel(unavailable)
+      : limit != null
+        ? fieldSourceLabel(
+            limit.snapshot,
+            'limit_reached',
+            nowUnixMillis,
+            maxStalenessSecs,
+          )
+        : statusEvidence != null
+          ? fieldSourceLabel(
+              statusEvidence.snapshot,
+              statusEvidence === unlimited
+                ? 'unlimited'
+                : statusEvidence === hasCredits
+                  ? 'has_credits'
+                  : 'has_credits',
+              nowUnixMillis,
+              maxStalenessSecs,
+            )
+          : statusObservation
+            ? sourceLabel(statusObservation)
+            : 'Provider';
   const balanceObservation = newestCreditField(creditObservations, 'balance');
   return {
     status,
@@ -199,13 +264,11 @@ export function selectCodexCredits(
         : status === 'Available' || status === 'Unlimited'
           ? 'ok'
           : 'neutral',
-    statusSource: statusObservation
-      ? sourceLabel(statusObservation)
-      : 'Provider',
-    balance: balanceObservation?.credits?.balance ?? null,
+    statusSource,
+    balance: balanceObservation?.snapshot.credits?.balance ?? null,
     balanceSource: balanceObservation
       ? fieldSourceLabel(
-          balanceObservation,
+          balanceObservation.snapshot,
           'balance',
           nowUnixMillis,
           maxStalenessSecs,

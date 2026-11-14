@@ -158,6 +158,7 @@ fn kind_labels_cover_every_variant() {
             shape_ms: None,
             sign_ms: None,
             upstream_ttfb_ms: None,
+            observed_at_unix_millis: None,
         }
         .kind(),
         LifecycleEvent::RequestLogUpstreamErrorObserved {

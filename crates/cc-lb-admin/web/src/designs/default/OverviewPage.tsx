@@ -6,7 +6,6 @@ import {
   AreaChart,
   CartesianGrid,
   Line,
-  LineChart,
   ReferenceLine,
   Tooltip as RTooltip,
   XAxis,
@@ -1558,6 +1557,18 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
           allowDataOverflow={false}
           includeHidden
         />
+        {creditData ? (
+          <YAxis
+            {...CHART_AXIS}
+            yAxisId="credits"
+            orientation="right"
+            tickFormatter={formatCreditAxisTick}
+            width={44}
+            tickMargin={8}
+            domain={['auto', 'auto']}
+            allowDataOverflow={false}
+          />
+        ) : null}
         <ReferenceLine
           y={0}
           yAxisId="quota"
@@ -1568,56 +1579,78 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
           cursor={CHART_CURSOR}
           content={({ active, payload, label }) => {
             if (!active || !payload?.length) return null;
+            const labelUnix = Number(label);
+            const creditPoint =
+              creditData?.find((point) => point.unix === labelUnix) ??
+              creditData?.reduce<CreditPlotRow | undefined>(
+                (nearest, point) =>
+                  nearest == null ||
+                  Math.abs(point.unix - labelUnix) <
+                    Math.abs(nearest.unix - labelUnix)
+                    ? point
+                    : nearest,
+                undefined,
+              );
+            const creditRaw = creditPoint?.credit_balance;
+            const creditContributing =
+              creditPoint?.credit_contributing ?? 0;
+            const creditEligible = creditPoint?.credit_eligible ?? 0;
+            const partialCredit =
+              creditRaw != null && creditContributing < creditEligible;
             return (
               <div className="glass-strong min-w-40 rounded-md px-3 py-2 text-caption text-text">
                 <div className="mb-1.5 tabular-nums text-text-muted">
-                  {fmtChartTooltip(Number(label))}
+                  {fmtChartTooltip(labelUnix)}
                 </div>
-                {poolTooltipRows(payload).map((p) => {
-                  const key = String(p.dataKey);
-                  const credit = key === 'credits';
-                  const creditPoint = p.payload as CreditPlotRow | undefined;
-                  const raw = creditPoint?.credit_balance;
-                  const creditContributing =
-                    creditPoint?.credit_contributing ?? 0;
-                  const creditEligible = creditPoint?.credit_eligible ?? 0;
-                  const partialCredit =
-                    credit &&
-                    raw != null &&
-                    creditContributing < creditEligible;
-                  const shortLabel = credit
-                    ? 'Credits'
-                    : (windowLabels?.[key] ?? windowLabel(key));
-                  const longLabel = credit
-                    ? partialCredit
-                      ? `${creditContributing} of ${creditEligible} eligible accounts reported`
-                      : 'Absolute credit balance'
-                    : windowLabel(key, { long: true });
-                  return (
-                    <div
-                      key={key}
-                      className="flex items-center justify-between gap-3 py-0.5"
-                      data-slot="pool-tooltip-row"
-                    >
-                      <span
-                        className="inline-flex items-center gap-1.5 text-text-muted"
-                        title={longLabel}
+                {poolTooltipRows(payload)
+                  .filter((p) => String(p.dataKey) !== 'credits')
+                  .map((p) => {
+                    const key = String(p.dataKey);
+                    const shortLabel =
+                      windowLabels?.[key] ?? windowLabel(key);
+                    return (
+                      <div
+                        key={key}
+                        className="flex items-center justify-between gap-3 py-0.5"
+                        data-slot="pool-tooltip-row"
                       >
-                        {credit ? null : <WindowChip window={key} />}
-                        {credit ? shortLabel : `${shortLabel} window`}
-                      </span>
-                      <span className="font-medium tabular-nums">
-                        {credit
-                          ? raw == null
-                            ? '—'
-                            : `${raw} credits${partialCredit ? ` · ${creditContributing}/${creditEligible}` : ''}`
-                          : typeof p.value === 'number'
+                        <span
+                          className="inline-flex items-center gap-1.5 text-text-muted"
+                          title={windowLabel(key, { long: true })}
+                        >
+                          <WindowChip window={key} />
+                          {shortLabel} window
+                        </span>
+                        <span className="font-medium tabular-nums">
+                          {typeof p.value === 'number'
                             ? `${formatQuotaPercent(p.value)} used`
                             : '—'}
-                      </span>
-                    </div>
-                  );
-                })}
+                        </span>
+                      </div>
+                    );
+                  })}
+                {creditData ? (
+                  <div
+                    className="flex items-center justify-between gap-3 py-0.5"
+                    data-slot="pool-tooltip-row"
+                  >
+                    <span
+                      className="text-text-muted"
+                      title={
+                        partialCredit
+                          ? `${creditContributing} of ${creditEligible} eligible accounts reported`
+                          : 'Absolute credit balance'
+                      }
+                    >
+                      Credits
+                    </span>
+                    <span className="font-medium tabular-nums">
+                      {creditRaw == null
+                        ? '—'
+                        : `${creditRaw} credits${partialCredit ? ` · ${creditContributing}/${creditEligible}` : ''}`}
+                    </span>
+                  </div>
+                ) : null}
               </div>
             );
           }}
@@ -1625,6 +1658,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         {windows.map((window) => (
           <Area
             key={`fill-${window}`}
+            data={seriesData}
             yAxisId="quota"
             type="monotone"
             dataKey={window}
@@ -1640,6 +1674,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         {windows.map((window) => (
           <Area
             key={`stroke-${window}`}
+            data={seriesData}
             yAxisId="quota"
             type="monotone"
             dataKey={window}
@@ -1650,107 +1685,21 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
             connectNulls={false}
           />
         ))}
-      </AreaChart>
       {creditData ? (
-        <div className="pointer-events-none absolute inset-0">
-          <LineChart
-            responsive
-            className="size-full"
-            data={creditData}
-            margin={{ top: 16, right: 8, bottom: 0, left: 0 }}
-          >
-            <XAxis
-              dataKey="unix"
-              type="number"
-              domain={[rangeStartUnix, rangeEndUnix]}
-              allowDataOverflow
-              height={30}
-              tick={false}
-              axisLine={false}
-              tickLine={false}
-            />
-            <YAxis
-              yAxisId="quota-space"
-              width={44}
-              domain={[0, 100]}
-              tick={false}
-              axisLine={false}
-              tickLine={false}
-            />
-            <YAxis
-              {...CHART_AXIS}
-              yAxisId="credits"
-              orientation="right"
-              tickFormatter={formatCreditAxisTick}
-              width={44}
-              tickMargin={8}
-              domain={['auto', 'auto']}
-              allowDataOverflow={false}
-            />
-            <RTooltip
-              cursor={CHART_CURSOR}
-              content={({ active, payload, label }) => {
-                if (!active || !payload?.length) return null;
-                const creditPoint =
-                  creditData.find((point) => point.unix === Number(label)) ??
-                  creditData.reduce<CreditPlotRow | undefined>(
-                    (nearest, point) =>
-                      nearest == null ||
-                      Math.abs(point.unix - Number(label)) <
-                        Math.abs(nearest.unix - Number(label))
-                        ? point
-                        : nearest,
-                    undefined,
-                  );
-                const quotaPoint = seriesData.find(
-                  (point) => point.unix === Number(label),
-                );
-                return (
-                  <div className="glass-strong min-w-40 rounded-md px-3 py-2 text-caption text-text">
-                    <div className="mb-1.5 tabular-nums text-text-muted">
-                      {fmtChartTooltip(Number(label))}
-                    </div>
-                    {windows.map((window) => (
-                      <div
-                        key={window}
-                        className="flex items-center justify-between gap-3 py-0.5"
-                      >
-                        <span className="text-text-muted">
-                          {windowLabels?.[window] ?? windowLabel(window)} window
-                        </span>
-                        <span className="font-medium tabular-nums">
-                          {typeof quotaPoint?.[window] === 'number'
-                            ? `${formatQuotaPercent(quotaPoint[window] as number)} used`
-                            : '—'}
-                        </span>
-                      </div>
-                    ))}
-                    <div className="flex items-center justify-between gap-3 py-0.5">
-                      <span className="text-text-muted">Credits</span>
-                      <span className="font-medium tabular-nums">
-                        {creditPoint?.credit_balance == null
-                          ? '—'
-                          : `${creditPoint.credit_balance} credits`}
-                      </span>
-                    </div>
-                  </div>
-                );
-              }}
-            />
-            <Line
-              dataKey="credits"
-              yAxisId="credits"
-              type="stepAfter"
-              stroke="var(--color-text-muted)"
-              strokeWidth={1.5}
-              dot={false}
-              activeDot={false}
-              connectNulls={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </div>
+        <Line
+          data={creditData}
+          dataKey="credits"
+          yAxisId="credits"
+          type="stepAfter"
+          stroke="var(--color-text-muted)"
+          strokeWidth={1.5}
+          dot={false}
+          activeDot={false}
+          connectNulls={false}
+          isAnimationActive={false}
+        />
       ) : null}
+      </AreaChart>
     </div>
   );
 });
