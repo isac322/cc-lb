@@ -3,8 +3,13 @@ import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
 import {
+  type PoolRetentionSource,
+  poolGroupPlaceholders,
+} from '../components/upstreams/quotaWindowVisibility';
+import {
   PoolQuotaLegend,
   PoolQuotaThemedChart,
+  PoolRetentionNotes,
 } from '../designs/default/OverviewPage';
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
 import { useTimezone } from '../lib/locale';
@@ -71,6 +76,12 @@ export interface ProviderPoolCardProps {
   hasSubscription: boolean;
   rangeSecs: number;
   compact?: boolean;
+  /**
+   * The page's per-upstream `/latest` query. Gemini cards state from it how
+   * many accounts' readings come from an earlier poll; it never changes the
+   * pool figure.
+   */
+  retention?: PoolRetentionSource;
 }
 
 export const ProviderPoolCard = memo(function ProviderPoolCard({
@@ -78,6 +89,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
   hasSubscription,
   rangeSecs,
   compact = false,
+  retention,
 }: ProviderPoolCardProps) {
   const { effective: timeZone } = useTimezone();
   const providerWindowKeys = PROVIDER_WINDOW_KEYS[provider];
@@ -112,6 +124,30 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
         loading,
       ),
     [loading, normalizedAggregate, normalizedHistory, providerWindowKeys],
+  );
+  const placeholders = useMemo(
+    () =>
+      poolGroupPlaceholders(
+        providerWindowKeys,
+        visibleWindows,
+        normalizedAggregate,
+        normalizedHistory,
+        loading,
+      ),
+    [
+      loading,
+      normalizedAggregate,
+      normalizedHistory,
+      providerWindowKeys,
+      visibleWindows,
+    ],
+  );
+  const legendWindows = useMemo(
+    () =>
+      providerWindowKeys.filter(
+        (window) => visibleWindows.includes(window) || window in placeholders,
+      ),
+    [placeholders, providerWindowKeys, visibleWindows],
   );
   const latestSnapshotUnixSecs = useMemo(
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
@@ -252,7 +288,8 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 resets={resets}
                 paces={paces}
                 timeZone={timeZone}
-                windows={visibleWindows}
+                placeholders={placeholders}
+                windows={legendWindows}
               />
               {weighting === 'equal' ? (
                 <span className="sr-only">
@@ -294,6 +331,12 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                   <Badge tone="warn">Stale reading</Badge>
                 ) : null}
               </div>
+            ) : null}
+            {!loading && provider === 'gemini' ? (
+              <PoolRetentionNotes
+                retention={retention}
+                windows={legendWindows}
+              />
             ) : null}
           </>
         )}

@@ -79,26 +79,23 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
   So verdict is visual/x-domain, not payload bytes.
 
 ### TC-2 — Detail snapshot cards (per-window)
-- Surface: detail → grid of window cards (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
-- Initial: OAuth upstream selected.
-- Steps: read each card.
-- Expected: each active window shows utilization %, a meter bar matching the %, source
-  (Header/API/—), observed-at relative time, reset countdown or "not started".
-  `overage` card present only when overage billing enabled or monthly limit set.
-  `7d_fable` card is rendered conditionally only when Fable data exists (state is not missing).
-  When rendered, the `7d_fable` card displays "7d (Fable)" with pink color and correct utilization.
-  Values agree with `/subscription-quotas/latest` for that upstream.
-  - Card freshness rules (added with `quotaWindowVisibility.ts` `selectQuotaCardSnapshots`):
-    - `5h` and `7d` cards ALWAYS render whenever the upstream has a latest response, including when their state is `missing` (they render "no data"/`—` via `SnapshotStatusComposite`). This is a hard requirement: the two default windows must never disappear.
-    - Model-scoped cards (`7d_sonnet`, `7d_opus`, `7d_fable`) render only when state is not `missing` AND `observed_at_unix_millis` is within the last week (`>= (nowUnixSecs - 604800) * 1000`, boundary inclusive). A model window last observed more than 7 days ago has its card removed even though `/latest` still returns it as `stale`.
-    - `overage` card unchanged: renders when non-missing AND (`extra_usage_enabled` or `extra_usage_monthly_limit` set).
-    - Card order follows `QUOTA_WINDOW_ORDER` (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
+- Surface: detail drawer's Subscription Quota rows and period-unknown raw meters.
+- Initial: select OAuth fixtures with observed, `absent`, and `unobserved` windows, plus Gemini fixtures with `period_unknown_meters`.
+- Steps: inspect each fixture and compare its rows with `/admin/v1/subscription-quotas/latest`.
+- Expected:
+  - Observed canonical windows show utilization and a matching meter, source, observation age, and reset countdown or "Not started". Fresh and stale readings retain their reported values.
+  - `absent` windows never render numeric meters. The section shows "Not offered" when every applicable canonical window is explicitly absent and no raw meters remain.
+  - `unobserved` means no reading, not explicit absence. With no canonical or raw reading, the section shows "No quota reading yet". Anthropic can retain unobserved `5h` and `7d` placeholders; OpenAI and Gemini do not fabricate default window rows.
+  - Model-scoped canonical rows (`7d_sonnet`, `7d_opus`, `7d_fable`) require an actual observation. The Fable row uses the label "7d (Fable)" and pink color. Explicitly absent and unobserved model windows stay hidden.
+  - Extra usage requires an enabled budget with a finite, positive monthly limit. Credit state retains its separate display.
+  - Gemini `period_unknown_meters` show the provider's raw utilization, model or bucket identity, reset time when available, and observation freshness. They never acquire inferred `5h` or `7d` labels or pace markers.
+  - Raw-only Gemini data remains visible even when canonical windows are absent or unobserved. Mixed canonical and raw data retains both readings.
+  - `PaceLegend` renders only when at least one displayed meter has pace information. Empty, all-absent, raw-only, and extra-usage-only displays have no pace legend.
+  - Canonical rows follow `QUOTA_WINDOW_ORDER`; all displayed values agree with `/latest`.
 
 ### TC-4 — Detail empty / loading states
-- Steps: (a) select an OAuth upstream with no quota rows; (b) observe during initial load.
-- Expected: (a) "No data in range" empty state in Quota History and/or
-  "No subscription quota data for <name>"; (b) "Loading…"/skeleton, no flstyle flash of
-  fabricated data.
+- Steps: (a) select an OAuth upstream with no quota observations; (b) select one with only explicit absence; (c) select Gemini with only period-unknown raw meters; (d) observe during initial load.
+- Expected: (a) "No quota reading yet" in the quota section and "No data in range" in Quota History; (b) "Not offered" with no fabricated meter; (c) raw meters remain visible without canonical period labels or a pace legend; (d) loading text or skeletons, with no flash of fabricated data.
 
 ### TC-5 — Overview pool quota (regression guard — must stay correct)
 - Surface: Overview page → Pool quota card (stacked bar 5h/7d, popover, trend chart, legend).

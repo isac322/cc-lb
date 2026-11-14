@@ -327,3 +327,102 @@ for (const width of [390, 768, 1440]) {
     }
   }
 }
+
+// Rule A: weekly 100% while every account's Gemini 5h is absent keeps a
+// neutral 5h legend row; the chart never plots the 5h window. As the server
+// does, `/aggregate` omits all-absent windows and the live `/pool-history`
+// keeps them with no eligible upstream.
+async function installGeminiWeeklyExhaustedPool(page: Page) {
+  const reported = (window: string) => window === 'gemini_7d';
+  await page.route('**/admin/v1/subscription-quotas/aggregate?**', (route) => {
+    if (new URL(route.request().url()).searchParams.get('provider') !== 'gemini') return route.fallback();
+    const response: AggregateResponse & { weighting: 'equal' } = {
+      now_unix_secs: NOW, window_anchor_unix_secs: NOW, max_staleness_secs: 300,
+      upstream_count: 1, caveats: [], weighting: 'equal',
+      windows: windows.gemini.filter(reported).map((window) => ({
+        window,
+        cc_window_start_unix_secs: NOW - 3600,
+        cc_window_reset_unix_secs: NOW + 3600,
+        pool_pace_fraction: 0.5,
+        next_reset_unix_secs: NOW + 86400,
+        used_tokens: 100,
+        utilization: 1,
+        utilization_percent: 100,
+        capacity_to_now_tokens_estimate: 500,
+        projected_capacity_tokens_estimate: 1000,
+        remaining_to_now_tokens_estimate: 0,
+        confidence: 'high',
+        contributing_upstreams: 1,
+        stale_upstreams: 0,
+        missing_capacity_upstreams: 0,
+        provider_lots: [{
+          upstream_id: 'gemini-pool-fixture', upstream_name: 'gemini pool', window, source: 'api',
+          state: 'fresh',
+          provider_start_unix_secs: null, provider_reset_unix_secs: NOW + 86400,
+          observed_at_unix_millis: NOW * 1000, utilization: 1,
+          capacity_estimate_tokens: 1000, used_before_cc_window_tokens: 0,
+          capacity_to_now_tokens_estimate: 500, projected_capacity_tokens_estimate: 1000,
+          confidence: 'high', capacity_ratio: 1,
+        }],
+        caveats: [],
+      })),
+    };
+    return route.fulfill({ json: response });
+  });
+  await page.route('**/admin/v1/subscription-quotas/pool-history?**', (route) => {
+    if (new URL(route.request().url()).searchParams.get('provider') !== 'gemini') return route.fallback();
+    const response: PoolHistoryResponse & { weighting: 'equal' } = {
+      now_unix_secs: NOW,
+      weighting: 'equal',
+      windows: windows.gemini.map((window) => ({
+        window,
+        latest: {
+          snapshot_at_unix_secs: NOW,
+          utilization: reported(window) ? 1 : null,
+          utilization_percent: reported(window) ? 100 : null,
+          contributing_upstreams: reported(window) ? 1 : 0,
+          eligible_upstreams: reported(window) ? 1 : 0,
+          stale_upstreams: 0,
+          max_observed_at_unix_millis: reported(window) ? NOW * 1000 : null,
+          oldest_observed_at_unix_millis: reported(window) ? (NOW - 30) * 1000 : null,
+          max_staleness_secs: 300,
+          missing_observation_upstreams: 0,
+        },
+        // Older 5h buckets must never be drawn as if current.
+        series: [
+          { snapshot_at_unix_secs: NOW - 120, utilization_percent: reported(window) ? 100 : 40 },
+          { snapshot_at_unix_secs: NOW - 60, utilization_percent: reported(window) ? 100 : 40 },
+        ],
+      })),
+    };
+    return route.fulfill({ json: response });
+  });
+}
+
+for (const width of [390, 768, 1440]) {
+  for (const theme of ['light', 'dark'] as const) {
+    for (const surface of ['overview', 'gemini'] as const) {
+      test(`QA-1/9: Gemini pool keeps a not-reported 5h legend row on ${surface} at ${width}px ${theme}`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height: 900 });
+        await installPoolFixtures(page, 'recovered');
+        await installGeminiWeeklyExhaustedPool(page);
+        await page.addInitScript((value) => localStorage.setItem('cclb.theme', value), theme);
+        await page.goto(surface === 'overview' ? '/' : '/providers/gemini');
+        const card = page.getByTestId(surface === 'overview' ? 'provider-pool-gemini' : 'pool-quota-card');
+        const rows = card.getByTestId('pool-quota-legend-slot');
+        await expect(rows).toHaveCount(2);
+        await expect(rows.nth(0)).toHaveAttribute('data-window', 'gemini_5h');
+        await expect(rows.nth(0)).toHaveAttribute('data-placeholder', 'not-reported');
+        await expect(rows.nth(0)).toContainText('Not reported');
+        await expect(rows.nth(0).getByRole('meter')).toHaveCount(0);
+        await expect(rows.nth(0)).not.toContainText(/%/);
+        await expect(rows.nth(1).locator('[data-slot="pool-quota-legend-used"]')).toHaveText('100%');
+        // Only the weekly window is plotted.
+        await expect(card.locator('path.recharts-area-curve')).toHaveCount(1);
+        expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath('gemini-pool-placeholder.png'), fullPage: true });
+      });
+    }
+  }
+}

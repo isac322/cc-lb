@@ -12,7 +12,12 @@ use axum::{
     routing::get,
 };
 use cc_lb_clock::Clock;
-use cc_lb_control::DynamicViewHolder;
+use cc_lb_control::{
+    DynamicViewHolder,
+    gemini_period_unknown_quota::{
+        GeminiQuotaGroupKind, GeminiRawMeterOrigin, load_gemini_period_unknown_quota,
+    },
+};
 use cc_lb_domain::{
     SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaCredits, SubscriptionQuotaDataState,
 };
@@ -82,6 +87,29 @@ struct LatestUpstreamResponse {
     upstream_id: String,
     upstream_name: String,
     windows: Vec<LatestWindowResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    period_unknown_meters: Vec<LatestPeriodUnknownMeterResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LatestPeriodUnknownMeterResponse {
+    group: GeminiQuotaGroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bucket_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    known_period: Option<String>,
+    remaining_fraction: f64,
+    utilization: f64,
+    reset_time_unix_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remaining_amount: Option<String>,
+    origin: GeminiRawMeterOrigin,
+    source: String,
+    state: String,
+    observed_at_unix_millis: u64,
+    age_secs: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -508,9 +536,7 @@ async fn build_pool_history_response(
             Some(range_secs.saturating_add(divisor - 1) / divisor.max(1))
         }
     };
-    if provider == PoolQuotaProvider::Anthropic
-        && windows.contains(&SubscriptionQuotaWindow::FiveHour)
-    {
+    if provider == PoolQuotaProvider::Anthropic {
         let upstreams = pool_quota_upstreams(
             list_all_upstreams_storage(storage)
                 .await
@@ -529,25 +555,36 @@ async fn build_pool_history_response(
         let view = state.dynamic_view.load();
         let now = now_unix_millis(&*state.clock);
         let max_staleness = view.subscription_quota_routing_max_staleness_secs;
-        if !upstreams.is_empty()
-            && upstreams.iter().all(|upstream| {
-                let snapshots = view.subscription_quota_cache.snapshot_for_upstream(
-                    upstream.id,
-                    now,
-                    max_staleness,
-                );
-                five_hour_is_absent(
-                    latest
-                        .iter()
-                        .filter(|sample| sample.upstream_id == upstream.id),
-                    snapshots.iter().find(|snapshot| snapshot.window == "5h"),
+        let durable_by_window = index_current_quota_samples(
+            &latest,
+            &sources_for_merge(SubscriptionQuotaSourceMerge::Merged),
+        );
+        let mut absent_counts = HashMap::<SubscriptionQuotaWindow, usize>::new();
+        for upstream in &upstreams {
+            let snapshots = view.subscription_quota_cache.snapshot_for_upstream(
+                upstream.id,
+                now,
+                max_staleness,
+            );
+            for window in &windows {
+                if current_quota_observation(
+                    &durable_by_window,
+                    (upstream.id, *window),
+                    &snapshots,
+                    SubscriptionQuotaSourceMerge::Merged,
                     now,
                     max_staleness,
                 )
-            })
-        {
-            windows.retain(|window| *window != SubscriptionQuotaWindow::FiveHour);
+                .is_some_and(|observation| observation.absent)
+                {
+                    *absent_counts.entry(*window).or_default() += 1;
+                }
+            }
         }
+        windows.retain(|window| {
+            upstreams.is_empty()
+                || absent_counts.get(window).copied().unwrap_or(0) != upstreams.len()
+        });
     }
 
     let mut latest_by_window = if provider == PoolQuotaProvider::Anthropic {
@@ -770,7 +807,40 @@ async fn build_latest_response(
             .subscription_quota_routing_max_staleness_secs
     });
     let now_unix_millis = now_unix_millis(&*state.clock);
+    let include_period_unknown_meters = source != SubscriptionQuotaSourceMerge::Header
+        && (query.windows.is_none()
+            || windows.iter().any(|window| {
+                matches!(
+                    window,
+                    SubscriptionQuotaWindow::GeminiFiveHour
+                        | SubscriptionQuotaWindow::GeminiSevenDay
+                        | SubscriptionQuotaWindow::ThirdPartyFiveHour
+                        | SubscriptionQuotaWindow::ThirdPartySevenDay
+                )
+            }));
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
+    let mut durable_latest_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
+    if include_period_unknown_meters {
+        let gemini_ids = upstreams
+            .iter()
+            .filter(|upstream| upstream.kind == UpstreamKind::GeminiOauth)
+            .map(|upstream| upstream.id)
+            .collect::<Vec<_>>();
+        if !gemini_ids.is_empty() {
+            // A peer replica can have a cold cache after another replica publishes
+            // canonical windows. Batch the durable suppression guard across upstreams.
+            for sample in storage
+                .list_latest_subscription_quota_for_upstreams(&gemini_ids)
+                .await
+                .map_err(storage_error)?
+            {
+                durable_latest_by_upstream
+                    .entry(sample.upstream_id)
+                    .or_default()
+                    .push(sample);
+            }
+        }
+    }
     let dynamic_view = state.dynamic_view.load();
     let mut response_upstreams = Vec::with_capacity(upstreams.len());
 
@@ -780,6 +850,92 @@ async fn build_latest_response(
             now_unix_millis,
             max_staleness_secs,
         );
+        let mut period_unknown_meters = Vec::new();
+        if upstream.kind == UpstreamKind::GeminiOauth && include_period_unknown_meters {
+            let record = load_gemini_period_unknown_quota(storage, upstream.id)
+                .await
+                .map_err(storage_error)?
+                .filter(|record| match upstream.oauth_credentials.as_ref() {
+                    Some(credentials) => credentials
+                        .decrypt(&state.aead, upstream.id.as_bytes())
+                        .map(|bundle| {
+                            record.binding.matches_credential(
+                                bundle.account_id.as_deref(),
+                                bundle.project_id.as_deref(),
+                                upstream.oauth_token_generation,
+                            )
+                        })
+                        .unwrap_or(false),
+                    None => record.binding.is_unscoped(),
+                });
+            if let Some(record) = record {
+                for (group, group_record, canonical_windows) in [
+                    (
+                        GeminiQuotaGroupKind::Gemini,
+                        record.gemini,
+                        ["gemini_5h", "gemini_7d"],
+                    ),
+                    (
+                        GeminiQuotaGroupKind::ThirdParty,
+                        record.third_party,
+                        ["third_party_5h", "third_party_7d"],
+                    ),
+                ] {
+                    let Some(group_record) = group_record else {
+                        continue;
+                    };
+                    let latest_canonical_observed_at = snapshots
+                        .iter()
+                        .filter(|snapshot| {
+                            snapshot.state != SubscriptionQuotaDataState::Unobserved
+                                && canonical_windows.contains(&snapshot.window.as_str())
+                        })
+                        .filter_map(|snapshot| snapshot.observed_at_unix_millis)
+                        .chain(
+                            durable_latest_by_upstream
+                                .get(&upstream.id)
+                                .into_iter()
+                                .flatten()
+                                .filter(|sample| {
+                                    canonical_windows.contains(&sample.window.as_str())
+                                })
+                                .map(|sample| sample.observed_at_unix_millis),
+                        )
+                        .max();
+                    // Same-poll absence and raw meters share a timestamp; only a
+                    // strictly newer canonical observation supersedes the raw group.
+                    if latest_canonical_observed_at.is_some_and(|observed_at| {
+                        observed_at > group_record.observed_at_unix_millis
+                    }) {
+                        continue;
+                    }
+                    let age_millis =
+                        now_unix_millis.saturating_sub(group_record.observed_at_unix_millis);
+                    let state = if age_millis <= max_staleness_secs.saturating_mul(1_000) {
+                        "fresh"
+                    } else {
+                        "stale"
+                    };
+                    period_unknown_meters.extend(group_record.meters.into_iter().map(|meter| {
+                        LatestPeriodUnknownMeterResponse {
+                            group,
+                            model_id: meter.model_id,
+                            bucket_id: meter.bucket_id,
+                            known_period: meter.known_period,
+                            remaining_fraction: meter.remaining_fraction,
+                            utilization: (1.0 - meter.remaining_fraction).clamp(0.0, 1.0),
+                            reset_time_unix_secs: meter.reset_time_unix_secs,
+                            remaining_amount: meter.remaining_amount,
+                            origin: meter.origin,
+                            source: "api".to_owned(),
+                            state: state.to_owned(),
+                            observed_at_unix_millis: group_record.observed_at_unix_millis,
+                            age_secs: age_millis / 1_000,
+                        }
+                    }));
+                }
+            }
+        }
         let windows = snapshots
             .into_iter()
             .filter(|snapshot| window_filter.contains(snapshot.window.as_str()))
@@ -791,6 +947,7 @@ async fn build_latest_response(
             upstream_id: upstream.id.to_string(),
             upstream_name: upstream.name,
             windows,
+            period_unknown_meters,
         });
     }
 
@@ -1030,27 +1187,42 @@ async fn build_cc_lb_aggregate_response_for_provider(
 
     let dynamic_view = dynamic_view.load();
     let allowed_sources = sources_for_merge(source);
+    let durable_by_window = index_current_quota_samples(&durable_latest, &allowed_sources);
+    // Compare absence to the raw checkpoints, not the freshness overlay below.
+    let mut max_raw_lot_observed_at = HashMap::<(Uuid, SubscriptionQuotaWindow), u64>::new();
+    for lot in &provider_lots {
+        max_raw_lot_observed_at
+            .entry((lot.upstream_id, lot.window))
+            .and_modify(|observed| *observed = (*observed).max(lot.observed_at_unix_millis))
+            .or_insert(lot.observed_at_unix_millis);
+    }
     let mut latest_candidates = Vec::new();
-    let mut absent_five_hour = HashSet::new();
+    let mut current_observations = HashMap::new();
+    let mut absent_windows = HashSet::new();
     for upstream in &upstreams {
         let snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
             upstream.id,
             now_unix_millis,
             max_staleness_secs,
         );
-        if provider == PoolQuotaProvider::Anthropic
-            && five_hour_is_absent(
-                durable_latest.iter().filter(|sample| {
-                    sample.upstream_id == upstream.id && allowed_sources.contains(&sample.source)
-                }),
-                snapshots.iter().find(|snapshot| {
-                    snapshot.window == "5h" && snapshot_matches_source(snapshot, source)
-                }),
+        for window in &windows {
+            let key = (upstream.id, *window);
+            if let Some(observation) = current_quota_observation(
+                &durable_by_window,
+                key,
+                &snapshots,
+                source,
                 now_unix_millis,
                 max_staleness_secs,
-            )
-        {
-            absent_five_hour.insert(upstream.id);
+            ) {
+                if observation_tombstones_lots(
+                    observation,
+                    max_raw_lot_observed_at.get(&key).copied(),
+                ) {
+                    absent_windows.insert(key);
+                }
+                current_observations.insert(key, observation);
+            }
         }
         for snapshot in snapshots {
             if !snapshot_matches_source(&snapshot, source) {
@@ -1084,21 +1256,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
                 for upstream in &upstreams {
                     timing.insert(
                         secs,
-                        provider_pool_observation(
-                            durable_latest.iter().filter(|sample| {
-                                sample.upstream_id == upstream.id
-                                    && sample.window == window
-                                    && allowed_sources.contains(&sample.source)
-                            }),
-                            latest_candidates
-                                .iter()
-                                .find(|(id, candidate_window, _, _)| {
-                                    *id == upstream.id && *candidate_window == window
-                                })
-                                .map(|(_, _, snapshot, _)| snapshot),
-                            now_unix_millis,
-                            max_staleness_secs,
-                        ),
+                        current_observations.get(&(upstream.id, window)).copied(),
                         now_unix_millis,
                         max_staleness_secs,
                     );
@@ -1161,9 +1319,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
         .iter()
         .filter_map(|lot| {
             let upstream = upstream_by_id.get(&lot.upstream_id)?;
-            if lot.window == SubscriptionQuotaWindow::FiveHour
-                && absent_five_hour.contains(&lot.upstream_id)
-            {
+            if absent_windows.contains(&(lot.upstream_id, lot.window)) {
                 return None;
             }
             Some(provider_lot_input_from_storage(
@@ -1227,8 +1383,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
             .filter(|(upstream_id, window, _, _)| {
                 window_secs(*window).is_some()
                     && !covered_by_provider_lots.contains(&(*upstream_id, *window))
-                    && !(*window == SubscriptionQuotaWindow::FiveHour
-                        && absent_five_hour.contains(upstream_id))
+                    && !absent_windows.contains(&(*upstream_id, *window))
             })
             .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
                 upstream_by_id.get(upstream_id).map(|upstream| {
@@ -1244,7 +1399,9 @@ async fn build_cc_lb_aggregate_response_for_provider(
     );
     let mut non_duration_lot_inputs = latest_candidates
         .iter()
-        .filter(|(_, window, _, _)| window_secs(*window).is_none())
+        .filter(|(upstream_id, window, _, _)| {
+            window_secs(*window).is_none() && !absent_windows.contains(&(*upstream_id, *window))
+        })
         .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
             upstream_by_id.get(upstream_id).map(|upstream| {
                 provider_lot_input_from_snapshot(
@@ -1264,6 +1421,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
                 sample.sample_kind == SubscriptionQuotaSampleKind::Sample
                     && allowed_sources.contains(&sample.source)
                     && window_secs(sample.window).is_none()
+                    && !absent_windows.contains(&(sample.upstream_id, sample.window))
             })
             .filter_map(|sample| {
                 upstream_by_id.get(&sample.upstream_id).map(|upstream| {
@@ -1320,10 +1478,7 @@ async fn build_cc_lb_aggregate_response_for_provider(
             let (cc_start, _) = cc_window_bounds(now_unix_secs, secs);
             let ids = upstreams
                 .iter()
-                .filter(|upstream| {
-                    window != SubscriptionQuotaWindow::FiveHour
-                        || !absent_five_hour.contains(&upstream.id)
-                })
+                .filter(|upstream| !absent_windows.contains(&(upstream.id, window)))
                 .map(|upstream| push_interval(upstream.id, cc_start, now_unix_secs))
                 .collect::<Vec<_>>();
             (window, ids)
@@ -1342,11 +1497,10 @@ async fn build_cc_lb_aggregate_response_for_provider(
 
     let mut aggregate_windows = Vec::new();
     for window in windows {
-        let ineligible_upstreams = if window == SubscriptionQuotaWindow::FiveHour {
-            absent_five_hour.len()
-        } else {
-            0
-        };
+        let ineligible_upstreams = upstreams
+            .iter()
+            .filter(|upstream| absent_windows.contains(&(upstream.id, window)))
+            .count();
         if ineligible_upstreams > 0 && ineligible_upstreams == upstreams.len() {
             continue;
         }
@@ -1543,6 +1697,57 @@ fn provider_pool_observation<'a>(
     // Select a whole observation: newer absence or missing utilization must
     // never borrow an older numeric value and its apparent freshness.
     durable.chain(cached).max_by_key(rank)
+}
+
+type CurrentQuotaSamples<'a> =
+    HashMap<(Uuid, SubscriptionQuotaWindow), [Option<&'a SubscriptionQuotaSample>; 2]>;
+
+fn index_current_quota_samples<'a>(
+    samples: &'a [SubscriptionQuotaSample],
+    allowed_sources: &[SubscriptionQuotaSource],
+) -> CurrentQuotaSamples<'a> {
+    let mut indexed = HashMap::with_capacity(samples.len());
+    for sample in samples {
+        if allowed_sources.contains(&sample.source) {
+            let slots = indexed
+                .entry((sample.upstream_id, sample.window))
+                .or_insert([None; 2]);
+            slots[usize::from(sample.source == SubscriptionQuotaSource::Api)] = Some(sample);
+        }
+    }
+    indexed
+}
+
+fn current_quota_observation(
+    durable: &CurrentQuotaSamples<'_>,
+    key: (Uuid, SubscriptionQuotaWindow),
+    snapshots: &[SubscriptionQuotaCandidateSnapshot],
+    source: SubscriptionQuotaSourceMerge,
+    now_unix_millis: u64,
+    max_staleness_secs: u64,
+) -> Option<ProviderPoolObservation> {
+    provider_pool_observation(
+        durable
+            .get(&key)
+            .into_iter()
+            .flat_map(|samples| samples.iter().copied().flatten()),
+        snapshots.iter().find(|snapshot| {
+            snapshot.window == key.1.as_str()
+                && snapshot.state != SubscriptionQuotaDataState::Unobserved
+                && snapshot_matches_source(snapshot, source)
+        }),
+        now_unix_millis,
+        max_staleness_secs,
+    )
+}
+
+fn observation_tombstones_lots(
+    observation: ProviderPoolObservation,
+    max_raw_lot_observed_at: Option<u64>,
+) -> bool {
+    observation.absent
+        && max_raw_lot_observed_at
+            .is_none_or(|observed| observation.observed_at_unix_millis >= observed)
 }
 
 struct ProviderPoolSnapshot {
@@ -2666,39 +2871,13 @@ pub(crate) fn five_hour_is_absent<'a>(
     now_unix_millis: u64,
     max_staleness_secs: u64,
 ) -> bool {
-    let rank = |observed_at: u64, api: bool| {
-        (
-            now_unix_millis.saturating_sub(observed_at) <= max_staleness_secs.saturating_mul(1_000),
-            observed_at,
-            api,
-        )
-    };
-    let durable = samples
-        .filter(|sample| sample.window == SubscriptionQuotaWindow::FiveHour)
-        .max_by_key(|sample| {
-            rank(
-                sample.observed_at_unix_millis,
-                sample.source == SubscriptionQuotaSource::Api,
-            )
-        });
-    let cached = snapshot.filter(|snapshot| {
-        snapshot.state != SubscriptionQuotaDataState::Unobserved
-            && snapshot.observed_at_unix_millis.is_some()
-    });
-    if let Some(cached) = cached
-        && durable.is_none_or(|sample| {
-            rank(
-                cached.observed_at_unix_millis.unwrap_or(0),
-                cached.source.as_deref() == Some("api"),
-            ) >= rank(
-                sample.observed_at_unix_millis,
-                sample.source == SubscriptionQuotaSource::Api,
-            )
-        })
-    {
-        return cached.state == SubscriptionQuotaDataState::Absent;
-    }
-    durable.is_some_and(|sample| sample.sample_kind == SubscriptionQuotaSampleKind::Absent)
+    provider_pool_observation(
+        samples.filter(|sample| sample.window == SubscriptionQuotaWindow::FiveHour),
+        snapshot,
+        now_unix_millis,
+        max_staleness_secs,
+    )
+    .is_some_and(|observation| observation.absent)
 }
 
 fn latest_window_response(
@@ -2960,6 +3139,127 @@ fn now_unix_millis(clock: &dyn Clock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // QA-01: source selection ranks complete observations, never individual fields.
+    #[test]
+    fn current_observation_ranks_whole_observations() {
+        let upstream_id = Uuid::new_v4();
+        let sample = |source: &str, kind: &str, observed: u64, utilization: Option<f64>| {
+            serde_json::from_value::<SubscriptionQuotaSample>(json!({
+                "upstream_id": upstream_id,
+                "window": "7d",
+                "source": source,
+                "sample_kind": kind,
+                "observed_at_unix_millis": observed,
+                "ingested_at_unix_millis": observed,
+                "sample_id": Uuid::new_v4(),
+                "utilization": utilization,
+                "resets_at_unix_secs": utilization.map(|_| 2_000),
+            }))
+            .unwrap()
+        };
+        let snapshot = |state: &str, source: &str, observed: u64| {
+            serde_json::from_value::<SubscriptionQuotaCandidateSnapshot>(json!({
+                "window": "7d",
+                "state": state,
+                "source": source,
+                "observed_at_unix_millis": observed,
+                "max_staleness_secs": 10,
+            }))
+            .unwrap()
+        };
+        let durable = [
+            sample("header", "sample", 990_000, Some(0.6)),
+            sample("api", "absent", 995_000, None),
+        ];
+        for source in [
+            SubscriptionQuotaSourceMerge::Header,
+            SubscriptionQuotaSourceMerge::Api,
+            SubscriptionQuotaSourceMerge::Merged,
+        ] {
+            let indexed = index_current_quota_samples(&durable, &sources_for_merge(source));
+            let winner = current_quota_observation(
+                &indexed,
+                (upstream_id, SubscriptionQuotaWindow::SevenDay),
+                &[snapshot("unobserved", "api", 1_000_000)],
+                source,
+                1_000_000,
+                10,
+            )
+            .unwrap();
+            assert_eq!(
+                winner.absent,
+                source != SubscriptionQuotaSourceMerge::Header
+            );
+            assert_eq!(
+                winner.utilization,
+                if winner.absent { None } else { Some(0.6) }
+            );
+            assert_eq!(
+                winner.resets_at_unix_secs,
+                if winner.absent { None } else { Some(2_000) }
+            );
+        }
+        // Fresh beats stale; within either class newer wins; API breaks ties.
+        for (header_at, api_at, expected_api) in [
+            (995_000, 980_000, false),
+            (980_000, 995_000, true),
+            (970_000, 980_000, true),
+            (995_000, 995_000, true),
+        ] {
+            let samples = [
+                sample("header", "sample", header_at, Some(0.6)),
+                sample("api", "absent", api_at, None),
+            ];
+            let winner = provider_pool_observation(samples.iter(), None, 1_000_000, 10).unwrap();
+            assert_eq!(winner.api, expected_api);
+            assert_eq!(winner.absent, expected_api);
+            assert_eq!(winner.utilization.is_none(), expected_api);
+            assert_eq!(winner.resets_at_unix_secs.is_none(), expected_api);
+        }
+        let older_numeric = [sample("header", "sample", 990_000, Some(0.6))];
+        let absent = snapshot("absent", "api", 995_000);
+        let winner =
+            provider_pool_observation(older_numeric.iter(), Some(&absent), 1_000_000, 0).unwrap();
+        assert!(winner.absent);
+        assert_eq!(winner.utilization, None);
+        assert_eq!(winner.resets_at_unix_secs, None);
+        let missing_numeric = [sample("api", "sample", 999_000, None)];
+        let winner =
+            provider_pool_observation(missing_numeric.iter(), Some(&absent), 1_000_000, 10)
+                .unwrap();
+        assert!(!winner.absent);
+        assert_eq!(winner.utilization, None);
+    }
+
+    // QA-02: absence may tombstone only checkpoints at or before its timestamp.
+    #[test]
+    fn tombstone_boundary_by_checkpoint_timestamp() {
+        let absent = ProviderPoolObservation {
+            observed_at_unix_millis: 2_000,
+            utilization: None,
+            resets_at_unix_secs: None,
+            absent: true,
+            api: true,
+        };
+        for (checkpoint, expected) in [
+            (None, true),
+            (Some(1_999), true),
+            (Some(2_000), true),
+            (Some(2_001), false),
+        ] {
+            assert_eq!(observation_tombstones_lots(absent, checkpoint), expected);
+        }
+        let recovered = ProviderPoolObservation {
+            observed_at_unix_millis: 3_000,
+            utilization: Some(0.6),
+            resets_at_unix_secs: Some(10_000),
+            absent: false,
+            api: true,
+        };
+        assert!(!observation_tombstones_lots(recovered, Some(1_000)));
+        assert!(!observation_tombstones_lots(recovered, None));
+    }
 
     #[test]
     fn quota_windows_are_provider_scoped() {

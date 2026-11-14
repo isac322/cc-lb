@@ -31,6 +31,9 @@ use cc_lb_control::anthropic_metadata::{
     cedar_ember_identity_meta_key, cedar_ember_meta_key, fetch_oauth_profile_at,
     make_metadata_http_client,
 };
+use cc_lb_control::gemini_period_unknown_quota::{
+    GeminiRawQuotaBinding, persist_gemini_period_unknown_quota,
+};
 
 use crate::scheduler_dispatch::http::{
     RefreshRequestError, decrypt_bundle, fetch_gemini_account_metadata, fetch_gemini_quota,
@@ -313,26 +316,52 @@ impl SchedulerDispatch {
             .await?;
         self.validate_usage_poll_fence(&upstream, &fence).await?;
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
-        let (records, cedar_ember, affected_main_published) = if is_anthropic {
+        let (records, cedar_ember, affected_main_published, raw_updates) = if is_anthropic {
             let (records, cedar_ember) =
                 parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;
-            (records, cedar_ember, true)
+            (
+                records,
+                cedar_ember,
+                true,
+                super::usage::GeminiRawUpdates::default(),
+            )
         } else {
             let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
-            let (records, affected_main_published) = super::usage::parse_provider_usage_body(
-                super::usage::ProviderUsageContext {
-                    upstream_id: upstream.id,
-                    kind: upstream.kind,
-                    profile: bundle.oauth_profile,
-                    project_id: bundle.project_id.as_deref(),
-                },
-                &response.body,
-                observed_at_unix_millis,
-            )?;
-            (records, None, affected_main_published)
+            let (records, affected_main_published, raw_updates) =
+                super::usage::parse_provider_usage_body(
+                    super::usage::ProviderUsageContext {
+                        upstream_id: upstream.id,
+                        kind: upstream.kind,
+                        profile: bundle.oauth_profile,
+                        project_id: bundle.project_id.as_deref(),
+                    },
+                    &response.body,
+                    observed_at_unix_millis,
+                )?;
+            (records, None, affected_main_published, raw_updates)
         };
         self.publish_usage_poll(&upstream, &fence, poll_sequence, &records)
             .await?;
+        if upstream.kind == UpstreamKind::GeminiOauth {
+            let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
+            let binding = GeminiRawQuotaBinding::from_credential(
+                bundle.account_id.as_deref(),
+                bundle.project_id.as_deref(),
+                upstream.oauth_token_generation,
+            );
+            self.validate_usage_poll_fence(&upstream, &fence).await?;
+            if let Err(error) = persist_gemini_period_unknown_quota(
+                self.storage.as_ref(),
+                upstream.id,
+                binding,
+                raw_updates.gemini,
+                raw_updates.third_party,
+            )
+            .await
+            {
+                tracing::warn!(upstream_id = %upstream.id, %error, "Gemini period-unknown quota write failed");
+            }
+        }
         if !is_anthropic {
             let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
             self.enrich_provider_account_metadata(
@@ -667,7 +696,9 @@ impl SchedulerDispatch {
         user_agent: &str,
         summary_response: crate::scheduler_dispatch::http::UsageFetchResponse,
     ) -> FetchOutcome {
-        if summary_response.status == http::StatusCode::UNAUTHORIZED {
+        if summary_response.status == http::StatusCode::UNAUTHORIZED
+            || summary_response.status == http::StatusCode::TOO_MANY_REQUESTS
+        {
             return FetchOutcome::Response(summary_response);
         }
         let present = if summary_response.status.is_success() {
@@ -677,10 +708,7 @@ impl SchedulerDispatch {
         };
         let mut fallback = serde_json::Map::new();
         let mut fallback_succeeded = false;
-        for (name, needed) in [("gemini", !present.0), ("third_party", !present.1)] {
-            if !needed {
-                continue;
-            }
+        if !present.0 || !present.1 {
             match fetch_gemini_quota(
                 &self.http,
                 base_url,
@@ -695,12 +723,28 @@ impl SchedulerDispatch {
                     return FetchOutcome::Response(response);
                 }
                 Ok(response) if response.status.is_success() => {
-                    if let Ok(value) = serde_json::from_slice(&response.body) {
-                        fallback.insert(name.to_owned(), value);
-                        fallback_succeeded = true;
+                    match sonic_rs::from_slice::<serde_json::Value>(&response.body) {
+                        Ok(value) if value.is_object() => {
+                            if !present.0 {
+                                fallback.insert("gemini".to_owned(), value.clone());
+                            }
+                            if !present.1 {
+                                fallback.insert("third_party".to_owned(), value);
+                            }
+                            fallback_succeeded = true;
+                        }
+                        Ok(_) => {
+                            tracing::warn!(status = %response.status, "Gemini quota fallback was not a JSON object")
+                        }
+                        Err(error) => {
+                            tracing::warn!(status = %response.status, line = error.line(), column = error.column(), "Gemini quota fallback JSON parse failed")
+                        }
                     }
                 }
-                Ok(_) | Err(_) => {}
+                Ok(response) => {
+                    tracing::warn!(status = %response.status, "Gemini quota fallback failed")
+                }
+                Err(error) => tracing::warn!(%error, "Gemini quota fallback fetch failed"),
             }
         }
         if !summary_response.status.is_success() && !fallback_succeeded {

@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import type {
+  PeriodUnknownQuotaMeter,
+  QuotaSnapshot,
+  SeriesResponseItem,
+} from '../../lib/api';
 import { buildQuotaChartData } from './buildQuotaChartData';
 import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  geminiGroupPlaceholderState,
+  geminiGroupSibling,
+  geminiRetainedReading,
+  hasQuotaCardPace,
   isObservedAtOrAfter,
+  type PoolRetentionRow,
+  type PoolRetentionSource,
+  poolRetainedAccounts,
+  quotaCardPacePct,
   selectQuotaCardSnapshots,
+  selectQuotaDetailState,
   selectVisibleGraphWindows,
   seriesHasInRangeData,
 } from './quotaWindowVisibility';
@@ -424,6 +438,326 @@ describe('selectQuotaCardSnapshots', () => {
   });
 });
 
+describe('Gemini group placeholder (rule A)', () => {
+  const weeklyExhausted = snap({
+    window: 'gemini_7d',
+    utilization: 1,
+    resets_at_unix_secs: 2_000_000_000,
+  });
+  const absent = (window: QuotaSnapshot['window']) =>
+    snap({ window, state: 'absent', utilization: null });
+  const unobserved = (window: QuotaSnapshot['window']) =>
+    snap({ window, state: 'unobserved', utilization: null });
+
+  it('pairs each Gemini window with its same-group sibling only', () => {
+    expect(geminiGroupSibling('gemini_5h')).toBe('gemini_7d');
+    expect(geminiGroupSibling('gemini_7d')).toBe('gemini_5h');
+    expect(geminiGroupSibling('third_party_5h')).toBe('third_party_7d');
+    expect(geminiGroupSibling('third_party_7d')).toBe('third_party_5h');
+    expect(geminiGroupSibling('5h')).toBeNull();
+    expect(geminiGroupSibling('7d_fable')).toBeNull();
+  });
+
+  it('QA-1: weekly 100% with an absent (missing or disabled) 5h is not reported', () => {
+    const windows = [absent('gemini_5h'), weeklyExhausted];
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBe(
+      'not-reported',
+    );
+    expect(geminiGroupPlaceholderState(windows, 'gemini_7d')).toBeNull();
+    expect(GEMINI_GROUP_PLACEHOLDER_TEXT['not-reported']).toBe('Not reported');
+    const cards = selectQuotaCardSnapshots({
+      latestWindows: windows,
+      provider: 'gemini',
+    });
+    expect(cards.map((card) => [card.window, card.utilization])).toEqual([
+      ['gemini_5h', null],
+      ['gemini_7d', 1],
+    ]);
+    expect(quotaCardPacePct(cards[0], 1_000_000_000)).toBeNull();
+  });
+
+  it('QA-2: both windows with readings render normally', () => {
+    const windows = [snap({ window: 'gemini_5h' }), weeklyExhausted];
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBeNull();
+    expect(geminiGroupPlaceholderState(windows, 'gemini_7d')).toBeNull();
+  });
+
+  it('QA-3: an unobserved or missing sibling has no reading', () => {
+    expect(
+      geminiGroupPlaceholderState(
+        [unobserved('gemini_5h'), weeklyExhausted],
+        'gemini_5h',
+      ),
+    ).toBe('no-reading');
+    expect(geminiGroupPlaceholderState([weeklyExhausted], 'gemini_5h')).toBe(
+      'no-reading',
+    );
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [weeklyExhausted],
+        provider: 'gemini',
+      }).map((card) => [card.window, card.state, card.utilization]),
+    ).toEqual([
+      ['gemini_5h', 'unobserved', null],
+      ['gemini_7d', 'fresh', 1],
+    ]);
+  });
+
+  it('keeps a weekly placeholder beside a stale 5h reading, per group', () => {
+    const windows = [
+      snap({ window: 'third_party_5h', state: 'stale', utilization: 0.9 }),
+      absent('third_party_7d'),
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+    ];
+    expect(geminiGroupPlaceholderState(windows, 'third_party_7d')).toBe(
+      'not-reported',
+    );
+    expect(geminiGroupPlaceholderState(windows, 'gemini_5h')).toBeNull();
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: windows,
+        provider: 'gemini',
+      }).map((card) => card.window),
+    ).toEqual(['third_party_5h', 'third_party_7d']);
+  });
+
+  it('QA-4: a group without any reading stays hidden; all absent is not offered', () => {
+    const groupAbsent = [
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+      snap({ window: 'third_party_5h', utilization: 0.3 }),
+      snap({ window: 'third_party_7d', utilization: 0.5 }),
+    ];
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: groupAbsent,
+        provider: 'gemini',
+      }).map((card) => card.window),
+    ).toEqual(['third_party_5h', 'third_party_7d']);
+    for (const sibling of [
+      absent('gemini_7d'),
+      unobserved('gemini_7d'),
+      snap({ window: 'gemini_7d', utilization: null }),
+      snap({ window: 'gemini_7d', utilization: Number.NaN }),
+    ]) {
+      expect(
+        geminiGroupPlaceholderState(
+          [absent('gemini_5h'), sibling],
+          'gemini_5h',
+        ),
+      ).toBeNull();
+    }
+    const allAbsent = [
+      absent('gemini_5h'),
+      absent('gemini_7d'),
+      absent('third_party_5h'),
+      absent('third_party_7d'),
+    ];
+    const cards = selectQuotaCardSnapshots({
+      latestWindows: allAbsent,
+      provider: 'gemini',
+    });
+    expect(cards).toEqual([]);
+    expect(
+      selectQuotaDetailState({
+        latestWindows: allAbsent,
+        cards,
+        rawMeters: [],
+        provider: 'gemini',
+      }),
+    ).toBe('not-offered');
+  });
+
+  it('never applies to Anthropic or OpenAI windows', () => {
+    const windows = [absent('5h'), snap({ window: '7d', utilization: 1 })];
+    expect(geminiGroupPlaceholderState(windows, '5h')).toBeNull();
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: windows,
+        provider: 'openai',
+      }).map((card) => card.window),
+    ).toEqual(['7d']);
+  });
+});
+
+describe('Gemini retained reading', () => {
+  const T1 = 1_000_000_000_000;
+  const T2 = T1 + 3_600_000;
+  const meter = (
+    group: PeriodUnknownQuotaMeter['group'],
+    observedAt: number,
+  ): PeriodUnknownQuotaMeter => ({
+    group,
+    model_id: `${group}-unlabeled`,
+    remaining_fraction: 0.5,
+    utilization: 0.5,
+    reset_time_unix_secs: null,
+    origin: 'retrieve_user_quota_summary',
+    source: 'api',
+    state: 'fresh',
+    observed_at_unix_millis: observedAt,
+    age_secs: 0,
+  });
+  // t1: 5h 20%; t2: weekly 100% plus an unlabeled bucket, 5h omitted.
+  const t2Windows = [
+    snap({
+      window: 'gemini_5h',
+      utilization: 0.2,
+      observed_at_unix_millis: T1,
+    }),
+    snap({ window: 'gemini_7d', utilization: 1, observed_at_unix_millis: T2 }),
+    snap({
+      window: 'third_party_5h',
+      utilization: 0.2,
+      observed_at_unix_millis: T1,
+    }),
+    snap({
+      window: 'third_party_7d',
+      utilization: 1,
+      observed_at_unix_millis: T2,
+    }),
+  ];
+  const t2Meters = [meter('gemini', T2), meter('third_party', T2)];
+
+  it('marks the omitted 5h of both groups as retained, never the newer weekly', () => {
+    for (const window of ['gemini_5h', 'third_party_5h']) {
+      expect(geminiRetainedReading(t2Windows, t2Meters, window)).toBe(true);
+    }
+    for (const window of ['gemini_7d', 'third_party_7d']) {
+      expect(geminiRetainedReading(t2Windows, t2Meters, window)).toBe(false);
+    }
+  });
+
+  it('counts a newer same-group period-unknown meter alone', () => {
+    const sameAsSibling = t2Windows.map((s) => ({
+      ...s,
+      observed_at_unix_millis: T1,
+    }));
+    expect(
+      geminiRetainedReading(sameAsSibling, [meter('gemini', T2)], 'gemini_5h'),
+    ).toBe(true);
+    // Another group's meter never ages this group.
+    expect(
+      geminiRetainedReading(
+        sameAsSibling,
+        [meter('third_party', T2)],
+        'gemini_5h',
+      ),
+    ).toBe(false);
+  });
+
+  it('healthy control: one poll observed together is current', () => {
+    const healthy = t2Windows.map((s) => ({
+      ...s,
+      observed_at_unix_millis: T2,
+    }));
+    for (const window of ['gemini_5h', 'gemini_7d', 'third_party_5h']) {
+      expect(geminiRetainedReading(healthy, t2Meters, window)).toBe(false);
+    }
+  });
+
+  it('ignores readingless, non-Gemini and unobserved-time windows', () => {
+    expect(
+      geminiRetainedReading(
+        [
+          snap({
+            window: 'gemini_5h',
+            state: 'absent',
+            utilization: null,
+            observed_at_unix_millis: T1,
+          }),
+          snap({ window: 'gemini_7d', observed_at_unix_millis: T2 }),
+        ],
+        [],
+        'gemini_5h',
+      ),
+    ).toBe(false);
+    expect(
+      geminiRetainedReading(
+        [
+          snap({ window: '5h', observed_at_unix_millis: T1 }),
+          snap({ window: '7d', observed_at_unix_millis: T2 }),
+        ],
+        [],
+        '5h',
+      ),
+    ).toBe(false);
+    expect(
+      geminiRetainedReading(
+        [snap({ window: 'gemini_5h', observed_at_unix_millis: null })],
+        t2Meters,
+        'gemini_5h',
+      ),
+    ).toBe(false);
+  });
+
+  describe('pool retained accounts (poolRetainedAccounts)', () => {
+    const row = (
+      id: string,
+      [fiveHour, weekly]: readonly [number, number],
+      {
+        meters = [],
+        enabled,
+      }: { meters?: PeriodUnknownQuotaMeter[]; enabled?: boolean } = {},
+    ): PoolRetentionRow => ({
+      upstream: { id, enabled },
+      windows: [
+        snap({ window: 'gemini_5h', observed_at_unix_millis: fiveHour }),
+        snap({ window: 'gemini_7d', observed_at_unix_millis: weekly }),
+      ],
+      periodUnknownMeters: meters,
+    });
+    const source = (rows: PoolRetentionRow[]): PoolRetentionSource => ({
+      rows,
+      pending: false,
+      error: false,
+    });
+
+    it('counts accounts whose /latest reading is retained, per window', () => {
+      expect([
+        ...poolRetainedAccounts(
+          source([row('a', [T1, T2]), row('b', [T1, T2]), row('c', [T2, T2])]),
+        ),
+      ]).toEqual([['gemini_5h', 2]]);
+    });
+
+    it('counts both windows when the later poll returned only raw meters', () => {
+      expect([
+        ...poolRetainedAccounts(
+          source([row('a', [T1, T1], { meters: [meter('gemini', T2)] })]),
+        ),
+      ]).toEqual([
+        ['gemini_5h', 1],
+        ['gemini_7d', 1],
+      ]);
+    });
+
+    it('skips disabled accounts and counts nothing for a healthy pool', () => {
+      expect(
+        poolRetainedAccounts(source([row('a', [T1, T2], { enabled: false })]))
+          .size,
+      ).toBe(0);
+      expect(
+        poolRetainedAccounts(
+          source([row('a', [T2, T2], { meters: [meter('gemini', T2)] })]),
+        ).size,
+      ).toBe(0);
+    });
+
+    it('counts nothing while /latest is pending or failed', () => {
+      const rows = [row('a', [T1, T2])];
+      expect(
+        poolRetainedAccounts({ rows, pending: true, error: false }).size,
+      ).toBe(0);
+      expect(
+        poolRetainedAccounts({ rows, pending: false, error: true }).size,
+      ).toBe(0);
+      expect(poolRetainedAccounts(undefined).size).toBe(0);
+    });
+  });
+});
+
 describe('Extra usage budget visibility', () => {
   it.each([
     { enabled: false, budget: 5000, visible: false },
@@ -504,4 +838,134 @@ describe('quota chart markers', () => {
     );
     expect(result.markers).toEqual([]);
   });
+});
+
+describe('QA-15: settled quota detail state', () => {
+  const canonical = {
+    anthropic: ['5h', '7d'],
+    openai: ['5h', '7d'],
+    gemini: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+  } as const;
+  const raw: PeriodUnknownQuotaMeter = {
+    group: 'gemini',
+    model_id: 'gemini-pro',
+    remaining_fraction: 0.4,
+    utilization: 0.6,
+    reset_time_unix_secs: null,
+    origin: 'retrieve_user_quota',
+    source: 'api',
+    state: 'fresh',
+    observed_at_unix_millis: 1_000_000,
+    age_secs: 0,
+  };
+
+  it.each(['anthropic', 'openai', 'gemini'] as const)(
+    'requires every %s canonical window to prove not offered',
+    (provider) => {
+      const latestWindows = canonical[provider].map((window) =>
+        snap({ window, state: 'absent' }),
+      );
+      const input = { latestWindows, cards: [], rawMeters: [], provider };
+      expect(selectQuotaDetailState(input)).toBe('not-offered');
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: latestWindows.slice(1),
+        }),
+      ).toBe('no-reading');
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: [
+            snap({ ...latestWindows[0], state: 'unobserved' }),
+            ...latestWindows.slice(1),
+          ],
+        }),
+      ).toBe('no-reading');
+      expect(selectQuotaDetailState({ ...input, rawMeters: [raw] })).toBe(
+        'rows',
+      );
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: [],
+          rawMeters: [raw],
+        }),
+      ).toBe('rows');
+      expect(selectQuotaDetailState({ ...input, cards: [snap({})] })).toBe(
+        'rows',
+      );
+      expect(selectQuotaDetailState({ ...input, latestWindows: [] })).toBe(
+        'no-data',
+      );
+      expect(
+        selectQuotaDetailState({
+          ...input,
+          latestWindows: undefined,
+          rawMeters: [raw],
+        }),
+      ).toBe('no-data');
+    },
+  );
+
+  it('preserves Anthropic placeholders but gives OpenAI and Gemini a no-reading state', () => {
+    for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
+      const latestWindows = canonical[provider].map((window) =>
+        snap({ window, state: 'unobserved' }),
+      );
+      const cards = selectQuotaCardSnapshots({ latestWindows, provider });
+      expect(
+        selectQuotaDetailState({
+          latestWindows,
+          cards,
+          rawMeters: [],
+          provider,
+        }),
+      ).toBe(provider === 'anthropic' ? 'rows' : 'no-reading');
+    }
+  });
+});
+
+describe('QA-16: shared quota card pace eligibility', () => {
+  const now = 1_000_000;
+  it.each([
+    { state: 'unobserved' },
+    { state: 'absent' },
+    { window: 'overage' },
+    { utilization: null },
+    { resets_at_unix_secs: null },
+    { resets_at_unix_secs: now },
+    { resets_at_unix_secs: now - 1 },
+    { resets_at_unix_secs: now + 5 * 3600 },
+    { resets_at_unix_secs: now + 6 * 3600 },
+    { resets_at_unix_secs: Infinity },
+    { resets_at_unix_secs: NaN },
+    { window: 'unified' },
+    {
+      credits: {
+        has_credits: true,
+        unlimited: null,
+        limit_reached: null,
+        balance: '1',
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+    },
+  ] satisfies Partial<QuotaSnapshot>[])(
+    'rejects ineligible pace: %j',
+    (overrides) => {
+      const reading = snap({ resets_at_unix_secs: now + 3600, ...overrides });
+      expect(quotaCardPacePct(reading, now)).toBeNull();
+      expect(hasQuotaCardPace(reading, now)).toBe(false);
+    },
+  );
+
+  it.each(['fresh', 'stale'] as const)(
+    'keeps %s running timed windows paced',
+    (state) => {
+      const reading = snap({ state, resets_at_unix_secs: now + 3600 });
+      expect(quotaCardPacePct(reading, now)).toBe(80);
+      expect(hasQuotaCardPace(reading, now)).toBe(true);
+    },
+  );
 });

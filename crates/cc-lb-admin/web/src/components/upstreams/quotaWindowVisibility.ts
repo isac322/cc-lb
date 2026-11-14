@@ -1,5 +1,12 @@
-import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import type {
+  AggregateResponse,
+  PeriodUnknownQuotaMeter,
+  PoolHistoryWindowResponse,
+  QuotaSnapshot,
+  SeriesResponseItem,
+} from '../../lib/api';
 import type { ProviderFamily } from '../../lib/providers';
+import { quotaPacePct } from '../../lib/quotaSeverity';
 import { selectCodexCredits } from './codexCredits';
 
 /**
@@ -121,10 +128,204 @@ export function selectVisibleGraphWindows({
 }
 
 /**
- * API reports for the upstream. Proven-absent windows are hidden. Anthropic
- * keeps its 5h and 7d unobserved placeholders; OpenAI and Gemini only show
- * windows with an actual observation. Extra usage additionally requires its
- * switch to be enabled and a finite, positive monthly budget.
+ * Neutral status of a Gemini model-family window kept beside its group's
+ * reported sibling: `not-reported` when the latest enumeration returned it
+ * `absent`, `no-reading` when it is `unobserved` or missing.
+ */
+export type GeminiGroupPlaceholderState = 'not-reported' | 'no-reading';
+
+/** Visible status copy for each placeholder state, shared by every surface. */
+export const GEMINI_GROUP_PLACEHOLDER_TEXT: Readonly<
+  Record<GeminiGroupPlaceholderState, string>
+> = {
+  'not-reported': 'Not reported',
+  'no-reading': 'No reading',
+};
+
+const GEMINI_GROUP_SIBLING: Readonly<Record<string, string>> = {
+  gemini_5h: 'gemini_7d',
+  gemini_7d: 'gemini_5h',
+  third_party_5h: 'third_party_7d',
+  third_party_7d: 'third_party_5h',
+};
+
+/** The other duration of the same Gemini quota group, or null. */
+export function geminiGroupSibling(window: string): string | null {
+  return GEMINI_GROUP_SIBLING[window] ?? null;
+}
+
+/**
+ * A Gemini group (`gemini_5h`/`gemini_7d`, `third_party_5h`/`third_party_7d`)
+ * whose one window has a numeric reading keeps its other window visible as a
+ * neutral placeholder: no meter, pace, reset or number, never inferred from
+ * the sibling. Null when `window` is outside a Gemini group, has its own
+ * snapshot to render, or its sibling has no reading either (an all-absent
+ * group stays hidden).
+ */
+export function geminiGroupPlaceholderState(
+  windows: readonly QuotaSnapshot[] | null | undefined,
+  window: string,
+): GeminiGroupPlaceholderState | null {
+  const sibling = geminiGroupSibling(window);
+  if (sibling == null || !windows) return null;
+  const reading = windows.find((snap) => snap.window === sibling);
+  if (
+    reading == null ||
+    (reading.state !== 'fresh' && reading.state !== 'stale') ||
+    reading.utilization == null ||
+    !Number.isFinite(reading.utilization)
+  ) {
+    return null;
+  }
+  const own = windows.find((snap) => snap.window === window);
+  if (own == null || own.state === 'unobserved') return 'no-reading';
+  if (own.state === 'absent') return 'not-reported';
+  return null;
+}
+
+/**
+ * True for a Gemini group window whose numeric (fresh or stale) reading was
+ * observed before the newest observation of its group: the sibling canonical
+ * window or a same-group period-unknown meter. A poll that omits a window
+ * leaves its earlier reading in place, so that reading is retained, never
+ * current: callers present it as stale and draw no pace.
+ */
+export function geminiRetainedReading(
+  windows: readonly QuotaSnapshot[] | null | undefined,
+  periodUnknownMeters: readonly PeriodUnknownQuotaMeter[] | null | undefined,
+  window: string,
+): boolean {
+  const sibling = geminiGroupSibling(window);
+  if (sibling == null || !windows) return false;
+  const own = windows.find((snap) => snap.window === window);
+  if (
+    own == null ||
+    (own.state !== 'fresh' && own.state !== 'stale') ||
+    own.utilization == null ||
+    !Number.isFinite(own.utilization) ||
+    own.observed_at_unix_millis == null
+  ) {
+    return false;
+  }
+  const group = window.startsWith('gemini_') ? 'gemini' : 'third_party';
+  const newest = Math.max(
+    windows.find((snap) => snap.window === sibling)?.observed_at_unix_millis ??
+      Number.NEGATIVE_INFINITY,
+    ...(periodUnknownMeters ?? [])
+      .filter((meter) => meter.group === group)
+      .map((meter) => meter.observed_at_unix_millis),
+  );
+  return own.observed_at_unix_millis < newest;
+}
+
+/** One upstream's `/latest` reading, as the pool's retained-reading count needs it. */
+export interface PoolRetentionRow {
+  upstream: { id: string; enabled?: boolean };
+  windows: readonly QuotaSnapshot[];
+  periodUnknownMeters: readonly PeriodUnknownQuotaMeter[];
+}
+
+/** Per-upstream `/latest` rows behind a pool card, with that query's state. */
+export interface PoolRetentionSource {
+  rows: readonly PoolRetentionRow[];
+  pending: boolean;
+  error: boolean;
+}
+
+/** Pool caption when `/latest` failed, so retained readings went unchecked. */
+export const POOL_RETENTION_UNAVAILABLE_TEXT =
+  "Couldn't check for retained readings";
+
+/**
+ * How many enabled accounts' `/latest` readings are retained from an earlier
+ * poll (`geminiRetainedReading`), per Gemini group window. It reads `/latest`
+ * alone: a fact about the accounts, not about the separately polled pool
+ * figure. Empty while `/latest` is pending or failed.
+ */
+export function poolRetainedAccounts(
+  source: PoolRetentionSource | undefined,
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  if (!source || source.pending || source.error) return counts;
+  for (const row of source.rows) {
+    if (row.upstream.enabled === false) continue;
+    for (const snap of row.windows) {
+      if (
+        geminiRetainedReading(row.windows, row.periodUnknownMeters, snap.window)
+      ) {
+        counts.set(snap.window, (counts.get(snap.window) ?? 0) + 1);
+      }
+    }
+  }
+  return counts;
+}
+
+/**
+ * Pool counterpart of `geminiGroupPlaceholderState`: Gemini group windows
+ * left out of the pool while their same-group sibling is shown. The legend
+ * keeps them as a neutral status, never a chart series or a value inferred
+ * from the sibling. `not-reported` when every account proves the window
+ * absent: the server omits such a window from `/aggregate` but keeps it in
+ * the live `/pool-history` reading with `eligible_upstreams` 0 (a
+ * `max_staleness_secs` marks that reading as live), or older aggregate lots
+ * are all `absent`. Otherwise `no-reading`. Empty while loading.
+ */
+export function poolGroupPlaceholders(
+  defaults: readonly string[],
+  visibleWindows: readonly string[],
+  aggregate: AggregateResponse | undefined,
+  history: readonly PoolHistoryWindowResponse[] | undefined,
+  loading: boolean,
+): Partial<Record<string, GeminiGroupPlaceholderState>> {
+  const placeholders: Partial<Record<string, GeminiGroupPlaceholderState>> = {};
+  if (loading) return placeholders;
+  for (const window of defaults) {
+    const sibling = geminiGroupSibling(window);
+    if (
+      sibling == null ||
+      visibleWindows.includes(window) ||
+      !visibleWindows.includes(sibling)
+    ) {
+      continue;
+    }
+    const live = history?.find((entry) => entry.window === window)?.latest;
+    const lots =
+      aggregate?.windows.find((entry) => entry.window === window)
+        ?.provider_lots ?? [];
+    placeholders[window] =
+      (live?.max_staleness_secs != null && live.eligible_upstreams === 0) ||
+      (lots.length > 0 && lots.every((lot) => lot.state === 'absent'))
+        ? 'not-reported'
+        : 'no-reading';
+  }
+  return placeholders;
+}
+
+/** A Gemini group placeholder for a window the response did not carry. */
+const MISSING_WINDOW_SNAPSHOT: Omit<QuotaSnapshot, 'window'> = {
+  state: 'unobserved',
+  source: null,
+  utilization: null,
+  status: null,
+  resets_at_unix_secs: null,
+  surpassed_threshold: null,
+  representative_claim: null,
+  disabled_reason: null,
+  extra_usage_enabled: null,
+  extra_usage_monthly_limit: null,
+  extra_usage_used_credits: null,
+  observed_at_unix_millis: null,
+  age_secs: null,
+};
+
+/**
+ * API reports for the upstream. Proven-absent windows are hidden, except a
+ * Gemini group window kept as a placeholder beside its reported sibling
+ * (`geminiGroupPlaceholderState`; a missing one is synthesized as
+ * `unobserved`). Anthropic keeps its 5h and 7d unobserved placeholders;
+ * OpenAI and Gemini otherwise only show windows with an actual observation.
+ * Extra usage additionally requires its switch to be enabled and a finite,
+ * positive monthly budget.
  */
 export function selectQuotaCardSnapshots({
   latestWindows,
@@ -137,6 +338,15 @@ export function selectQuotaCardSnapshots({
   const result: QuotaSnapshot[] = [];
   for (const window of orderedWindows(latestWindows)) {
     const snap = byWindow.get(window);
+    if (geminiGroupPlaceholderState(latestWindows, window) != null) {
+      result.push(
+        snap ?? {
+          ...MISSING_WINDOW_SNAPSHOT,
+          window: window as QuotaSnapshot['window'],
+        },
+      );
+      continue;
+    }
     if (!snap) continue;
     // Credit observations from the API (Overage) and headers (Unified) are
     // rendered once below, with each fact retaining its source and freshness.
@@ -166,4 +376,62 @@ export function selectQuotaCardSnapshots({
     if (creditSnapshot) result.push({ ...creditSnapshot, window: 'unified' });
   }
   return result;
+}
+
+/** Keep the legend and the actual row's pace tick on the same eligibility rule. */
+export function quotaCardPacePct(
+  snap: QuotaSnapshot,
+  nowUnixSecs: number,
+): number | null {
+  if (
+    snap.window === 'overage' ||
+    snap.credits != null ||
+    snap.state === 'unobserved' ||
+    snap.state === 'absent' ||
+    snap.utilization == null ||
+    snap.resets_at_unix_secs == null ||
+    snap.resets_at_unix_secs <= nowUnixSecs
+  ) {
+    return null;
+  }
+  return quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs);
+}
+
+export function hasQuotaCardPace(
+  snap: QuotaSnapshot,
+  nowUnixSecs: number,
+): boolean {
+  return quotaCardPacePct(snap, nowUnixSecs) != null;
+}
+
+const CANONICAL_WINDOWS: Record<ProviderFamily, readonly string[]> = {
+  anthropic: ['5h', '7d'],
+  openai: ['5h', '7d'],
+  gemini: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+};
+
+export function selectQuotaDetailState({
+  latestWindows,
+  cards,
+  rawMeters,
+  provider,
+}: {
+  latestWindows: readonly QuotaSnapshot[] | null | undefined;
+  cards: readonly QuotaSnapshot[];
+  rawMeters: readonly PeriodUnknownQuotaMeter[];
+  provider: ProviderFamily;
+}): 'no-data' | 'rows' | 'not-offered' | 'no-reading' {
+  if (!latestWindows) return 'no-data';
+  if (cards.length > 0 || rawMeters.length > 0) return 'rows';
+  if (latestWindows.length === 0) return 'no-data';
+  if (
+    CANONICAL_WINDOWS[provider].every((window) =>
+      latestWindows.some(
+        (snap) => snap.window === window && snap.state === 'absent',
+      ),
+    )
+  ) {
+    return 'not-offered';
+  }
+  return 'no-reading';
 }

@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   LatestResponse,
+  PeriodUnknownQuotaMeter,
   QuotaSnapshot,
   SubscriptionQuotaWindow,
 } from '../../lib/api';
@@ -187,12 +188,15 @@ describe('UpstreamUsageTable', () => {
       ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
       ['gemini', 'gemini_oauth', true, 'active', null, null],
     ]);
-    usageData.rows[1]!.windows = [snap('gemini_5h', 0.3)];
+    usageData.rows[1]!.windows = [
+      snap('gemini_5h', 0.3),
+      snap('gemini_7d', 0.4),
+    ];
     render(<UpstreamUsageTable data={usageData} />);
     const claude = screen.getByRole('link', { name: /claude/ });
     const gemini = screen.getByRole('link', { name: /gemini/ });
-    expect(claude.querySelectorAll('[data-window]')).toHaveLength(3);
-    expect(gemini.querySelectorAll('[data-window]')).toHaveLength(3);
+    expect(claude.querySelectorAll('[data-window]')).toHaveLength(4);
+    expect(gemini.querySelectorAll('[data-window]')).toHaveLength(4);
     expect(
       claude
         .querySelector('[data-window="gemini_5h"]')
@@ -444,10 +448,7 @@ describe('UpstreamUsageTable', () => {
     );
   });
 
-  it.each([
-    ['openai_oauth', '5h', '7d'],
-    ['gemini_oauth', 'gemini_5h', 'gemini_7d'],
-  ] as const)(
+  it.each([['openai_oauth', '5h', '7d']] as const)(
     'omits absent windows across a weekly-only %s fleet and preserves mixed-row alignment',
     (kind, shortWindow, weeklyWindow) => {
       const weekly = {
@@ -486,6 +487,47 @@ describe('UpstreamUsageTable', () => {
       expect(absent.getAttribute('data-window')).toBe(shortWindow);
       expect(absent.className).toBe('hidden @4xl:block');
       expect(absent.textContent).toBe('');
+    },
+  );
+
+  it.each([
+    ['absent', 'not-reported', 'Not reported'],
+    ['unobserved', 'no-reading', 'No reading'],
+  ] as const)(
+    'keeps a %s Gemini 5h beside a weekly reading as a placeholder cell on provider pages',
+    (state, placeholder, text) => {
+      const usageData = data([
+        ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ]);
+      usageData.rows[0]!.windows = [
+        snap('gemini_5h', null, state),
+        snap('gemini_7d', 1),
+        snap('third_party_5h', null, 'absent'),
+        snap('third_party_7d', null, 'absent'),
+      ];
+      const { container } = render(<UpstreamUsageTable data={usageData} />);
+      // Provider columns: the placeholder keeps Gemini 5h; the wholly absent
+      // Claude·OSS group stays hidden.
+      expect(
+        Array.from(
+          container.querySelectorAll('[aria-hidden="true"].border-b > span'),
+          (span) => span.textContent,
+        ),
+      ).toEqual(['Upstream', 'Gemini 5h', 'Gemini 7d', 'Coupons']);
+      const cell = screen.getByTestId('usage-slot-placeholder');
+      expect(cell.getAttribute('data-window')).toBe('gemini_5h');
+      expect(cell.getAttribute('data-state')).toBe(placeholder);
+      expect(cell.getAttribute('aria-hidden')).toBeNull();
+      expect(cell.textContent).toContain(text);
+      expect(cell.textContent).not.toMatch(/%|used|resets|Reset/);
+      expect(within(cell).queryByRole('meter')).toBeNull();
+      expect(screen.queryByTestId('usage-absent-cell')).toBeNull();
+      expect(screen.queryByTestId('usage-cell-empty')).toBeNull();
+      expect(
+        screen.getByRole('meter', {
+          name: 'Gemini models · weekly limit window used',
+        }),
+      ).toBeTruthy();
     },
   );
 
@@ -644,4 +686,613 @@ describe('UpstreamUsageTable', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(toggle.textContent).toBe('Show fewer');
   });
+});
+
+describe('UpstreamUsageTable shared layout', () => {
+  /** Desktop window header labels (aria-hidden row), without name/Coupons. */
+  const headerLabels = (container: HTMLElement) =>
+    Array.from(
+      container.querySelectorAll('[aria-hidden="true"].border-b > span'),
+      (span) => span.textContent,
+    ).filter((text) => text !== 'Upstream' && text !== 'Coupons');
+
+  function mixedFleet() {
+    const usageData = data([
+      ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
+      ['codex', 'openai_oauth', true, 'active', 0.4, 0.5],
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ['key', 'anthropic_api_key', true, 'active', null, null],
+    ]);
+    const claude = usageData.rows[0]!;
+    claude.windows = [...claude.windows, snap('7d_fable', 0.6)];
+    usageData.rows[2]!.windows = [
+      snap('gemini_5h', 0.3),
+      snap('gemini_7d', 0.35),
+      snap('third_party_5h', 0.9),
+      snap('third_party_7d', 0.7),
+    ];
+    return usageData;
+  }
+
+  const slotWindows = (cell: Element | null) =>
+    Array.from(cell?.querySelectorAll('[data-window]') ?? [], (slot) =>
+      slot.getAttribute('data-window'),
+    );
+
+  it('maps every provider into exactly the generic 5h and 7d columns', () => {
+    const { container } = render(
+      <UpstreamUsageTable data={mixedFleet()} layout="shared" />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d']);
+
+    const claude = screen.getByRole('link', { name: /claude/ });
+    expect(claude.querySelector('[data-window="5h"]')?.textContent).toContain(
+      '10%used',
+    );
+    const claude7d = claude.querySelector('[data-column="7d"]');
+    expect(slotWindows(claude7d)).toEqual(['7d', '7d_fable']);
+    expect(
+      within(claude7d as HTMLElement).getByText('All models'),
+    ).toBeTruthy();
+    expect(within(claude7d as HTMLElement).getByText('Fable')).toBeTruthy();
+    expect(
+      within(claude).getByRole('meter', { name: '7d (Fable) window used' }),
+    ).toBeTruthy();
+
+    const codex = screen.getByRole('link', { name: /codex/ });
+    expect(
+      Array.from(codex.querySelectorAll('[data-window]'), (cell) =>
+        cell.getAttribute('data-window'),
+      ),
+    ).toEqual(['5h', '7d']);
+    expect(codex.querySelector('[data-column]')).toBeNull();
+
+    const key = screen.getByRole('link', { name: /key/ });
+    expect(within(key).getByTestId('usage-no-quota').textContent).toBe(
+      'No subscription quota',
+    );
+  });
+
+  it('shows each Gemini group as its own aligned slot, never combined', () => {
+    render(<UpstreamUsageTable data={mixedFleet()} layout="shared" />);
+    const gemini = screen.getByRole('link', { name: /gemini/ });
+    const fiveHour = gemini.querySelector('[data-column="5h"]');
+    const weekly = gemini.querySelector('[data-column="7d"]');
+    expect(slotWindows(fiveHour)).toEqual(['gemini_5h', 'third_party_5h']);
+    expect(slotWindows(weekly)).toEqual(['gemini_7d', 'third_party_7d']);
+
+    const [geminiSlot, thirdPartySlot] = Array.from(
+      fiveHour?.querySelectorAll('[data-window]') ?? [],
+    ) as HTMLElement[];
+    expect(within(geminiSlot!).getByText('Gemini models')).toBeTruthy();
+    expect(geminiSlot!.textContent).toContain('30%used');
+    expect(within(thirdPartySlot!).getByText('Claude & GPT-OSS')).toBeTruthy();
+    expect(thirdPartySlot!.textContent).toContain('90%used');
+    expect(fiveHour?.textContent).not.toContain('60%');
+    for (const name of [
+      'Gemini models · 5-hour limit window used',
+      'Claude and GPT-OSS models · 5-hour limit window used',
+      'Gemini models · weekly limit window used',
+      'Claude and GPT-OSS models · weekly limit window used',
+    ]) {
+      expect(within(gemini).getByRole('meter', { name })).toBeTruthy();
+    }
+    expect(screen.queryByText('Gemini 5h')).toBeNull();
+    expect(screen.queryByText('Claude·OSS 7d')).toBeNull();
+  });
+
+  it.each([
+    ['absent', 'not-reported', 'Not reported'],
+    ['unobserved', 'no-reading', 'No reading'],
+  ] as const)(
+    'keeps a %s Gemini 5h slot as a neutral placeholder beside an exhausted weekly reading (%s)',
+    (state, placeholder, text) => {
+      const usageData = data([
+        ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ]);
+      usageData.rows[0]!.windows = [
+        snap('gemini_5h', null, state),
+        snap('gemini_7d', 1),
+        snap('third_party_5h', 0.2),
+        snap('third_party_7d', 0.4),
+      ];
+      const { container } = render(
+        <UpstreamUsageTable data={usageData} layout="shared" />,
+      );
+      expect(headerLabels(container)).toEqual(['5h', '7d']);
+      const slot = screen.getByTestId('usage-slot-placeholder');
+      expect(slot.getAttribute('data-window')).toBe('gemini_5h');
+      expect(slot.getAttribute('data-state')).toBe(placeholder);
+      expect(slot.textContent).toContain('Gemini models');
+      expect(slot.textContent).toContain(text);
+      expect(slot.textContent).not.toMatch(/%|used|resets|Reset/);
+      expect(within(slot).queryByRole('meter')).toBeNull();
+      expect(
+        screen.queryByRole('meter', {
+          name: 'Gemini models · 5-hour limit window used',
+        }),
+      ).toBeNull();
+      const weekly = container.querySelector(
+        '[data-column="7d"] [data-window="gemini_7d"]',
+      );
+      expect(weekly?.textContent).toContain('100%used');
+      // Alignment: the 5h column still lists both groups in order.
+      expect(
+        slotWindows(container.querySelector('[data-column="5h"]')),
+      ).toEqual(['gemini_5h', 'third_party_5h']);
+    },
+  );
+
+  it('hides a wholly unreported Gemini group from both columns', () => {
+    const usageData = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows = [
+      snap('gemini_5h', 0.3),
+      snap('gemini_7d', 0.4),
+      snap('third_party_5h', null, 'absent'),
+      snap('third_party_7d', null, 'absent'),
+    ];
+    const { container } = render(
+      <UpstreamUsageTable data={usageData} layout="shared" />,
+    );
+    expect(screen.queryByText('Claude & GPT-OSS')).toBeNull();
+    expect(screen.queryByTestId('usage-slot-placeholder')).toBeNull();
+    expect(slotWindows(container.querySelector('[data-column="5h"]'))).toEqual([
+      'gemini_5h',
+    ]);
+    expect(slotWindows(container.querySelector('[data-column="7d"]'))).toEqual([
+      'gemini_7d',
+    ]);
+  });
+
+  it('keeps both columns for a weekly-only fleet and names absent 5h as Not offered', () => {
+    const usageData = data([
+      ['claude', 'anthropic_oauth', true, 'active', null, null],
+      ['codex', 'openai_oauth', true, 'active', null, null],
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows = [snap('5h', null, 'absent'), snap('7d', 0.2)];
+    usageData.rows[1]!.windows = [snap('5h', null, 'absent'), snap('7d', 0.3)];
+    usageData.rows[2]!.windows = [
+      snap('gemini_5h', null, 'absent'),
+      snap('gemini_7d', 0.4),
+      snap('third_party_5h', null, 'absent'),
+      snap('third_party_7d', null, 'absent'),
+    ];
+    const { container } = render(
+      <UpstreamUsageTable data={usageData} layout="shared" />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d']);
+    for (const name of [/^claude/, /^codex/]) {
+      const row = screen.getByRole('link', { name });
+      const cell = within(row).getByTestId('usage-cell-status');
+      expect(cell.getAttribute('data-window')).toBe('5h');
+      expect(cell.getAttribute('data-state')).toBe('not-offered');
+      expect(cell.getAttribute('aria-hidden')).toBeNull();
+      expect(within(cell).getByText('Not offered').className).toBe('sr-only');
+      expect(cell.textContent).toContain('—');
+      expect(cell.textContent).not.toContain('%');
+      expect(
+        within(row).queryByRole('meter', { name: '5h window used' }),
+      ).toBeNull();
+      expect(
+        within(row).getByRole('meter', { name: '7d window used' }),
+      ).toBeTruthy();
+    }
+    const gemini = screen.getByRole('link', { name: /^gemini/ });
+    const placeholder = within(gemini).getByTestId('usage-slot-placeholder');
+    expect(placeholder.getAttribute('data-window')).toBe('gemini_5h');
+    expect(placeholder.textContent).toContain('Not reported');
+    expect(screen.queryByTestId('usage-absent-cell')).toBeNull();
+    expect(screen.queryByTestId('usage-cell-empty')).toBeNull();
+  });
+
+  it.each([
+    ['anthropic_oauth', '5h'],
+    ['openai_oauth', '5h'],
+  ] as const)(
+    'shows an unobserved %s window as No reading without a meter',
+    (kind, window) => {
+      const usageData = data([['solo', kind, true, 'active', null, 0.5]]);
+      usageData.rows[0]!.windows.push(snap(window, null, 'unobserved'));
+      render(<UpstreamUsageTable data={usageData} layout="shared" />);
+      const cell = screen.getByTestId('usage-cell-status');
+      expect(cell.getAttribute('data-window')).toBe('5h');
+      expect(cell.getAttribute('data-state')).toBe('no-reading');
+      expect(cell.textContent).toContain('No reading');
+      expect(cell.textContent).not.toMatch(/%|—/);
+      expect(
+        screen.queryByRole('meter', { name: '5h window used' }),
+      ).toBeNull();
+    },
+  );
+
+  it('reads No reading in both columns when no Gemini group has a reading', () => {
+    const usageData = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows = [
+      snap('gemini_5h', null, 'unobserved'),
+      snap('gemini_7d', null, 'unobserved'),
+      snap('third_party_5h', null, 'absent'),
+      snap('third_party_7d', null, 'absent'),
+    ];
+    const { container } = render(
+      <UpstreamUsageTable data={usageData} layout="shared" />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d']);
+    expect(
+      screen
+        .getAllByTestId('usage-cell-status')
+        .map((cell) => `${cell.dataset.window}:${cell.dataset.state}`),
+    ).toEqual(['5h:no-reading', '7d:no-reading']);
+    expect(screen.queryByText('Gemini models')).toBeNull();
+    expect(screen.queryAllByRole('meter')).toHaveLength(0);
+  });
+
+  it('reads Not offered in both columns for an all-absent Gemini upstream', () => {
+    const usageData = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows = [
+      snap('gemini_5h', null, 'absent'),
+      snap('gemini_7d', null, 'absent'),
+      snap('third_party_5h', null, 'absent'),
+      snap('third_party_7d', null, 'absent'),
+    ];
+    const { rerender } = render(
+      <UpstreamUsageTable data={usageData} layout="shared" />,
+    );
+    const cells = screen.getAllByTestId('usage-cell-status');
+    expect(
+      cells.map((cell) => `${cell.dataset.window}:${cell.dataset.state}`),
+    ).toEqual(['5h:not-offered', '7d:not-offered']);
+    for (const cell of cells) {
+      expect(cell.textContent).toContain('—');
+      expect(within(cell).getByText('Not offered').className).toBe('sr-only');
+      expect(cell.textContent).not.toContain('No reading');
+    }
+
+    // A period-unknown raw meter is a reading, so absence is not proven.
+    rerender(
+      <UpstreamUsageTable
+        data={{
+          ...usageData,
+          rows: [
+            {
+              ...usageData.rows[0]!,
+              periodUnknownMeters: [
+                {
+                  group: 'gemini',
+                  model_id: 'gemini-2.5-pro',
+                  known_period: null,
+                  remaining_fraction: 0.6,
+                  utilization: 0.4,
+                  reset_time_unix_secs: null,
+                  origin: 'retrieve_user_quota',
+                  source: 'api',
+                  state: 'fresh',
+                  observed_at_unix_millis: NOW * 1000,
+                  age_secs: 0,
+                },
+              ],
+            },
+          ],
+        }}
+        layout="shared"
+      />,
+    );
+    expect(
+      screen
+        .getAllByTestId('usage-cell-status')
+        .map((cell) => cell.dataset.state),
+    ).toEqual(['no-reading', 'no-reading']);
+  });
+
+  it('marks a stale Gemini slot and a stale Anthropic cell, without pace', () => {
+    const usageData = data([
+      ['claude', 'anthropic_oauth', true, 'active', 0.42, 0.2],
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    const claude5h = usageData.rows[0]!.windows[0]!;
+    claude5h.state = 'stale';
+    claude5h.age_secs = 12 * 60;
+    usageData.rows[1]!.windows = [
+      { ...snap('gemini_5h', 0.3), state: 'stale', age_secs: 3 * 3600 },
+      snap('gemini_7d', 0.35),
+    ];
+    render(<UpstreamUsageTable data={usageData} layout="shared" />);
+
+    const claude = screen.getByRole('link', { name: /^claude/ });
+    const stale5h = claude.querySelector('[data-window="5h"]') as HTMLElement;
+    expect(stale5h.dataset.state).toBe('stale');
+    expect(stale5h.textContent).toContain('42%used');
+    expect(within(stale5h).getByText('Stale · 12m ago')).toBeTruthy();
+    expect(stale5h.textContent).not.toContain('resets in');
+    const claudeMeter = within(claude).getByRole('meter', {
+      name: '5h window used, stale reading',
+    });
+    expect(claudeMeter.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    // The fresh 7d reading in the same row keeps its pace tick.
+    expect(
+      within(claude)
+        .getByRole('meter', { name: '7d window used' })
+        .querySelector('[data-slot="pace-marker"]'),
+    ).not.toBeNull();
+    expect(
+      within(claude).getByRole('meter', { name: '7d window used' }),
+    ).toBeTruthy();
+
+    const gemini = screen.getByRole('link', { name: /^gemini/ });
+    const staleSlot = gemini.querySelector(
+      '[data-window="gemini_5h"]',
+    ) as HTMLElement;
+    expect(staleSlot.dataset.state).toBe('stale');
+    expect(within(staleSlot).getByText('Stale · 3h ago')).toBeTruthy();
+    expect(
+      within(staleSlot).getByRole('meter', {
+        name: 'Gemini models · 5-hour limit window used, stale reading',
+      }),
+    ).toBeTruthy();
+    const fresh7d = gemini.querySelector(
+      '[data-window="gemini_7d"]',
+    ) as HTMLElement;
+    expect(fresh7d.dataset.state).toBeUndefined();
+    expect(fresh7d.textContent).toContain('resets in');
+  });
+
+  it('keeps the shared columns for an API-key-only fleet', () => {
+    const { container } = render(
+      <UpstreamUsageTable
+        data={data([['key', 'anthropic_api_key', true, 'active', null, null]])}
+        layout="shared"
+      />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d']);
+    expect(screen.getByTestId('usage-no-quota').textContent).toBe(
+      'No subscription quota',
+    );
+  });
+
+  it.each([
+    ['anthropic_oauth', '5h'],
+    ['openai_oauth', '5h'],
+    ['gemini_oauth', 'gemini_5h'],
+  ] as const)(
+    'keeps generic 5h/7d columns for a %s-only fleet',
+    (kind, fiveHour) => {
+      const usageData = data([['solo', kind, true, 'active', null, null]]);
+      usageData.rows[0]!.windows = [
+        snap(fiveHour, 0.25),
+        snap(fiveHour === '5h' ? '7d' : 'gemini_7d', 0.5),
+      ];
+      const { container } = render(
+        <UpstreamUsageTable data={usageData} layout="shared" />,
+      );
+      expect(headerLabels(container)).toEqual(['5h', '7d']);
+    },
+  );
+
+  it('keeps the provider layout columns when no layout is given', () => {
+    const geminiOnly = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    geminiOnly.rows[0]!.windows = mixedFleet().rows[2]!.windows;
+    const { container, unmount } = render(
+      <UpstreamUsageTable data={geminiOnly} />,
+    );
+    expect(headerLabels(container)).toEqual([
+      'Gemini 5h',
+      'Gemini 7d',
+      'Claude·OSS 5h',
+      'Claude·OSS 7d',
+    ]);
+    expect(container.querySelector('[data-column]')).toBeNull();
+    unmount();
+
+    const anthropicOnly = data([
+      ['claude', 'anthropic_oauth', true, 'active', 0.1, 0.2],
+    ]);
+    anthropicOnly.rows[0]!.windows.push(snap('7d_fable', 0.6));
+    const provider = render(<UpstreamUsageTable data={anthropicOnly} />);
+    expect(headerLabels(provider.container)).toEqual([
+      '5h',
+      '7d',
+      '7d (Fable)',
+    ]);
+  });
+
+  it('keeps the Codex credits column beside the shared columns', () => {
+    const usageData = data([
+      ['codex', 'openai_oauth', true, 'active', 0.4, 0.5],
+    ]);
+    usageData.rows[0]!.windows.push({
+      ...snap('unified', null),
+      credits: {
+        has_credits: true,
+        unlimited: false,
+        limit_reached: false,
+        balance: '12.5',
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+    });
+    const { container } = render(
+      <UpstreamUsageTable data={usageData} layout="shared" />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d', 'Codex credits']);
+    expect(screen.getByTestId('codex-credit-facts')).toBeTruthy();
+  });
+
+  it('pends an all-Gemini fleet with only 5h and 7d skeletons', () => {
+    const usageData = data([
+      ['gemini-a', 'gemini_oauth', true, 'active', null, null],
+      ['gemini-b', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    const { container } = render(
+      <UpstreamUsageTable
+        data={{ ...usageData, quotaPending: true }}
+        layout="shared"
+      />,
+    );
+    expect(headerLabels(container)).toEqual(['5h', '7d']);
+    for (const row of screen.getAllByTestId('upstream-usage-row')) {
+      expect(
+        Array.from(row.querySelectorAll('[data-window]'), (cell) =>
+          cell.getAttribute('data-window'),
+        ),
+      ).toEqual(['5h', '7d']);
+    }
+    expect(screen.queryByText('7d (Fable)')).toBeNull();
+    expect(screen.queryByText('Codex credits')).toBeNull();
+    expect(screen.queryAllByRole('meter')).toHaveLength(0);
+    // Three skeletons per cell: figure, caption, meter.
+    expect(container.querySelectorAll('.skeleton')).toHaveLength(2 * 2 * 3);
+  });
+
+  it('loads the upstream list with two shared skeleton columns', () => {
+    const { container } = render(
+      <UpstreamUsageTable
+        data={{ ...data([]), isLoading: true }}
+        layout="shared"
+      />,
+    );
+    const [first] = screen.getAllByTestId('upstream-list-loading-row');
+    // Name skeleton plus two columns of figure and meter.
+    expect(first!.querySelectorAll('.skeleton')).toHaveLength(1 + 2 * 2);
+    expect(container.querySelectorAll('.skeleton')).toHaveLength(3 * 5);
+  });
+});
+
+describe('UpstreamUsageTable retained Gemini readings', () => {
+  const T1 = NOW - 3600;
+
+  function observedAt(
+    snapshot: QuotaSnapshot,
+    observedUnixSecs: number,
+  ): QuotaSnapshot {
+    return {
+      ...snapshot,
+      observed_at_unix_millis: observedUnixSecs * 1000,
+      age_secs: NOW - observedUnixSecs,
+    };
+  }
+
+  function rawMeter(
+    group: PeriodUnknownQuotaMeter['group'],
+    observedUnixSecs: number,
+  ): PeriodUnknownQuotaMeter {
+    return {
+      group,
+      model_id: `${group}-unlabeled`,
+      known_period: null,
+      remaining_fraction: 0.5,
+      utilization: 0.5,
+      reset_time_unix_secs: null,
+      origin: 'retrieve_user_quota_summary',
+      source: 'api',
+      state: 'fresh',
+      observed_at_unix_millis: observedUnixSecs * 1000,
+      age_secs: NOW - observedUnixSecs,
+    };
+  }
+
+  /** t1: both 5h at 20%. t2: both weeklies at 100% plus unlabeled raw meters. */
+  function retainedFleet(fiveHourObserved: number) {
+    const usageData = data([
+      ['gemini', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0] = {
+      ...usageData.rows[0]!,
+      windows: [
+        observedAt(snap('gemini_5h', 0.2), fiveHourObserved),
+        observedAt(snap('gemini_7d', 1), NOW),
+        observedAt(snap('third_party_5h', 0.2), fiveHourObserved),
+        observedAt(snap('third_party_7d', 1), NOW),
+      ],
+      periodUnknownMeters: [
+        rawMeter('gemini', NOW),
+        rawMeter('third_party', NOW),
+      ],
+    };
+    return usageData;
+  }
+
+  const cell = (container: HTMLElement, window: string) =>
+    container.querySelector(
+      `[data-testid="usage-cell"][data-window="${window}"]`,
+    ) as HTMLElement;
+
+  it.each(['provider', 'shared'] as const)(
+    'marks retained 5h readings in both Gemini groups as stale (%s layout)',
+    (layout) => {
+      const { container } = render(
+        <UpstreamUsageTable data={retainedFleet(T1)} layout={layout} />,
+      );
+      for (const [window, name] of [
+        ['gemini_5h', 'Gemini models · 5-hour limit'],
+        ['third_party_5h', 'Claude and GPT-OSS models · 5-hour limit'],
+      ] as const) {
+        const retained = cell(container, window);
+        expect(retained.dataset.state).toBe('stale');
+        expect(retained.textContent).toContain('20%used');
+        expect(within(retained).getByText('Stale · 1h ago')).toBeTruthy();
+        expect(retained.textContent).not.toContain('resets in');
+        const meter = within(retained).getByRole('meter', {
+          name: `${name} window used, stale reading`,
+        });
+        expect(meter.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      }
+      for (const window of ['gemini_7d', 'third_party_7d']) {
+        const current = cell(container, window);
+        expect(current.dataset.state).toBeUndefined();
+        expect(current.textContent).toContain('100%used');
+        expect(current.textContent).toContain('resets in');
+      }
+    },
+  );
+
+  it.each(['provider', 'shared'] as const)(
+    'marks a 5h reading retained behind a newer raw meter alone (%s layout)',
+    (layout) => {
+      const usageData = data([
+        ['gemini', 'gemini_oauth', true, 'active', null, null],
+      ]);
+      usageData.rows[0] = {
+        ...usageData.rows[0]!,
+        windows: [
+          observedAt(snap('gemini_5h', 0.2), T1),
+          observedAt(snap('gemini_7d', 0.4), T1),
+        ],
+        periodUnknownMeters: [rawMeter('gemini', NOW)],
+      };
+      const { container } = render(
+        <UpstreamUsageTable data={usageData} layout={layout} />,
+      );
+      expect(cell(container, 'gemini_5h').dataset.state).toBe('stale');
+      expect(cell(container, 'gemini_7d').dataset.state).toBe('stale');
+    },
+  );
+
+  it.each(['provider', 'shared'] as const)(
+    'keeps same-observation readings current (%s layout)',
+    (layout) => {
+      const { container } = render(
+        <UpstreamUsageTable data={retainedFleet(NOW)} layout={layout} />,
+      );
+      for (const window of [
+        'gemini_5h',
+        'gemini_7d',
+        'third_party_5h',
+        'third_party_7d',
+      ]) {
+        const current = cell(container, window);
+        expect(current.dataset.state).toBeUndefined();
+        expect(current.textContent).not.toContain('Stale');
+        expect(current.textContent).toContain('resets in');
+      }
+      expect(screen.queryByRole('meter', { name: /stale reading/ })).toBeNull();
+    },
+  );
 });

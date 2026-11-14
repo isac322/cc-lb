@@ -4,20 +4,30 @@
 // Reset parts are content-sized so the meter absorbs the spare width.
 // The label can truncate on narrow viewports; reset values stay on one line.
 import type { ReactNode } from 'react';
-import { type QuotaSnapshot, windowLabel } from '../../lib/api';
+import {
+  type PeriodUnknownQuotaMeter,
+  type QuotaSnapshot,
+  windowLabel,
+} from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { useLocale } from '../../lib/locale';
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
-  quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx, Hint, Skeleton } from '../ui/primitives';
 import { ResetCountdownParts } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
 import { CodexCreditSummary, selectCodexCredits } from './codexCredits';
-import { isOverageActive } from './quotaWindowVisibility';
+import { formatPeriodUnknownUsedPct } from './periodUnknownMeters';
+import {
+  GEMINI_GROUP_PLACEHOLDER_TEXT,
+  type GeminiGroupPlaceholderState,
+  isOverageActive,
+  quotaCardPacePct,
+} from './quotaWindowVisibility';
+import { formatSpan } from './UpstreamUsageTable';
 
 const ROWS_CLASS =
   'grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content] divide-y divide-border-row';
@@ -27,6 +37,9 @@ const NAME_CELL_CLASS = 'col-start-1 min-w-0 flex items-center gap-2';
 const METER_CELL_CLASS =
   'col-start-2 ml-3 min-w-0 flex items-center gap-3 @[40rem]:ml-6';
 const USED_CELL_CLASS = 'shrink-0 text-right text-body tabular-nums';
+/** Spans meter and reset columns so a squeezed meter track never clips it. */
+const PLACEHOLDER_CELL_CLASS =
+  'col-start-2 col-span-4 ml-3 min-w-0 truncate text-body-sm text-text-muted @[40rem]:ml-6';
 const RESET_PREFIX_CELL_CLASS =
   'col-start-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
 const RESET_VALUE_CELL_CLASS =
@@ -79,21 +92,74 @@ function usd(minorUnits: number): string {
   })}`;
 }
 
+/**
+ * A Gemini group window kept beside its reported sibling: the label and a
+ * neutral status, with no meter, pace, reset or number.
+ */
+function QuotaPlaceholderRow({
+  window,
+  label,
+  state,
+}: {
+  window: string;
+  label?: string;
+  state: GeminiGroupPlaceholderState;
+}) {
+  return (
+    <div
+      role="listitem"
+      data-window={window}
+      data-placeholder={state}
+      className={ROW_CLASS}
+    >
+      <WindowName
+        window={window}
+        label={label ?? windowLabel(window)}
+        longLabel={windowLabel(window, { long: true })}
+      />
+      <span className={PLACEHOLDER_CELL_CLASS} data-slot="window-placeholder">
+        {state === 'not-reported' ? (
+          <Hint label="The provider's latest reading did not report this window. Its usage is not inferred from the other window.">
+            <span tabIndex={0} className={HINT_TRIGGER_CLASS}>
+              {GEMINI_GROUP_PLACEHOLDER_TEXT[state]}
+            </span>
+          </Hint>
+        ) : (
+          GEMINI_GROUP_PLACEHOLDER_TEXT[state]
+        )}
+      </span>
+    </div>
+  );
+}
+
 export function QuotaWindowRow({
   snap,
   nowUnixSecs,
   label,
   creditObservations,
+  placeholder,
+  retained = false,
 }: {
   snap: QuotaSnapshot;
   nowUnixSecs: number;
   label?: string;
   creditObservations?: readonly QuotaSnapshot[];
+  /** From `geminiGroupPlaceholderState`: render the neutral placeholder. */
+  placeholder?: GeminiGroupPlaceholderState | null;
+  /** From `geminiRetainedReading`: an earlier poll's reading, never current. */
+  retained?: boolean;
 }) {
-  const { effective: locale } = useLocale();
-  const korean = locale.toLowerCase().startsWith('ko');
   // The unified window is visible only when it carries Codex credit state.
   const windowName: string = snap.window;
+  if (placeholder != null) {
+    return (
+      <QuotaPlaceholderRow
+        window={windowName}
+        label={label}
+        state={placeholder}
+      />
+    );
+  }
   if (
     (windowName === 'unified' && snap.credits == null) ||
     snap.state === 'absent'
@@ -125,19 +191,20 @@ export function QuotaWindowRow({
       ? null
       : snap.utilization * 100;
 
+  // A Gemini reading retained from an earlier poll than its group's latest
+  // observation reads as stale: neutral figure, no pace, no reset.
+  const stale = retained && !isOverage && usedPct != null;
   const notStarted =
     !isOverage &&
     !unobserved &&
+    !stale &&
     (snap.utilization == null ||
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
-  const started = !isOverage && !unobserved && !notStarted;
-  // Even pace only for a running timed window (never Extra usage).
-  const pacePct = started
-    ? quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs)
-    : null;
+  const started = !isOverage && !unobserved && !notStarted && !stale;
+  const pacePct = stale ? null : quotaCardPacePct(snap, nowUnixSecs);
   const severityClass =
-    QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(usedPct, pacePct)];
+    QUOTA_SEVERITY_TEXT_CLASS[stale ? 'ok' : quotaSeverity(usedPct, pacePct)];
 
   let used: ReactNode;
   if (isOverage && overageUsed != null) {
@@ -162,6 +229,27 @@ export function QuotaWindowRow({
 
   const facts: ReactNode[] = [];
   if (unobserved) facts.push(<span key="none">No reading</span>);
+  if (stale) {
+    const ageSecs =
+      snap.age_secs ??
+      (snap.observed_at_unix_millis == null
+        ? null
+        : nowUnixSecs - snap.observed_at_unix_millis / 1000);
+    facts.push(
+      <Hint
+        key="stale"
+        label="Stale reading: the provider's latest poll did not report this window, so this is its last reading."
+      >
+        <span
+          tabIndex={0}
+          className={cx(HINT_TRIGGER_CLASS, 'text-warn-text')}
+          data-slot="window-stale"
+        >
+          {ageSecs == null ? 'Stale' : `Stale · ${formatSpan(ageSecs)} ago`}
+        </span>
+      </Hint>,
+    );
+  }
   if (notStarted)
     facts.push(
       <Hint
@@ -180,7 +268,136 @@ export function QuotaWindowRow({
       ? snap.resets_at_unix_secs * 1000
       : null;
 
-  const resetParts = (
+  const resetParts = <QuotaResetCells resetTime={resetTime} />;
+
+  const resetStatus =
+    resetTime != null ? (
+      resetParts
+    ) : facts.length > 0 ? (
+      <ResetStatusCells facts={facts} />
+    ) : (
+      <EmptyResetCells />
+    );
+
+  return (
+    <div
+      role="listitem"
+      data-window={snap.window}
+      data-state={stale ? 'stale' : undefined}
+      className={ROW_CLASS}
+    >
+      <WindowName
+        window={snap.window}
+        label={displayLabel}
+        longLabel={longLabel}
+      />
+      <div className={METER_CELL_CLASS}>
+        <UsageMeter
+          className="min-w-0 flex-1"
+          label={stale ? `${longLabel}, stale reading` : longLabel}
+          pacePct={pacePct}
+          usedPct={usedPct}
+        />
+        <span className={USED_CELL_CLASS}>{used}</span>
+      </div>
+      {resetStatus}
+    </div>
+  );
+}
+
+export function QuotaPeriodUnknownRow({
+  meter,
+  nowUnixSecs,
+}: {
+  meter: PeriodUnknownQuotaMeter;
+  nowUnixSecs: number;
+}) {
+  const identifier = meter.model_id ?? meter.bucket_id ?? meter.group;
+  const knownPeriod = meter.known_period?.trim();
+  const usedPct = formatPeriodUnknownUsedPct(meter.remaining_fraction);
+  const resetTime =
+    meter.reset_time_unix_secs != null &&
+    meter.reset_time_unix_secs > nowUnixSecs
+      ? meter.reset_time_unix_secs * 1000
+      : null;
+  return (
+    <div
+      role="listitem"
+      data-period-unknown={meter.group}
+      className={ROW_CLASS}
+    >
+      <span className={NAME_CELL_CLASS}>
+        <span
+          aria-hidden="true"
+          data-slot="window-swatch"
+          className="size-2.5 shrink-0 rounded-xs"
+          style={{ backgroundColor: 'var(--color-neutral)' }}
+        />
+        <span className="min-w-0">
+          <span
+            className="block font-mono text-data text-text truncate max-w-[22ch]"
+            title={identifier}
+          >
+            {identifier}
+          </span>
+          {knownPeriod ? (
+            <Hint label="The provider reported this window period, but its reset time was missing or invalid.">
+              <span
+                tabIndex={0}
+                className="text-caption text-text-muted"
+                title="The provider reported this window period, but its reset time was missing or invalid."
+              >
+                {`${knownPeriod} · Reset unavailable`}
+              </span>
+            </Hint>
+          ) : (
+            <span
+              className="text-caption text-text-muted"
+              title="The provider reported remaining quota without a window duration."
+            >
+              Period unknown
+            </span>
+          )}
+        </span>
+      </span>
+      <div className={METER_CELL_CLASS}>
+        <UsageMeter
+          className="min-w-0 flex-1"
+          label={
+            knownPeriod
+              ? `${identifier} ${knownPeriod} reset unavailable`
+              : `${identifier} period unknown`
+          }
+          pacePct={null}
+          usedPct={usedPct}
+        />
+        <span className={USED_CELL_CLASS}>
+          {usedPct != null ? (
+            <span className="text-text">
+              {formatQuotaPercent(usedPct)} used
+            </span>
+          ) : (
+            <span className="text-text-faint">
+              <span aria-hidden="true">—</span>
+              <span className="sr-only">No reading</span>
+            </span>
+          )}
+        </span>
+      </div>
+      {resetTime != null ? (
+        <QuotaResetCells resetTime={resetTime} />
+      ) : (
+        <EmptyResetCells />
+      )}
+    </div>
+  );
+}
+
+/** Canonical and period-unknown rows share reset wording and column alignment. */
+function QuotaResetCells({ resetTime }: { resetTime: number | null }) {
+  const { effective: locale } = useLocale();
+  const korean = locale.toLowerCase().startsWith('ko');
+  return (
     <ResetCountdownParts
       ts={resetTime}
       compact
@@ -218,35 +435,6 @@ export function QuotaWindowRow({
         </>
       )}
     />
-  );
-
-  const resetStatus =
-    resetTime != null ? (
-      resetParts
-    ) : facts.length > 0 ? (
-      <ResetStatusCells facts={facts} />
-    ) : (
-      <EmptyResetCells />
-    );
-
-  return (
-    <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
-      <WindowName
-        window={snap.window}
-        label={displayLabel}
-        longLabel={longLabel}
-      />
-      <div className={METER_CELL_CLASS}>
-        <UsageMeter
-          className="min-w-0 flex-1"
-          label={longLabel}
-          pacePct={pacePct}
-          usedPct={usedPct}
-        />
-        <span className={USED_CELL_CLASS}>{used}</span>
-      </div>
-      {resetStatus}
-    </div>
   );
 }
 

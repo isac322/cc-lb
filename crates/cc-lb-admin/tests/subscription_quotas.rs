@@ -2275,3 +2275,1174 @@ async fn subscription_quotas_suite_part_2() {
     subscription_quota_anthropic_five_hour_absence_is_not_unknown_and_is_reversible().await;
     provider_pool_history_does_not_refresh_stale_checkpoint_readings().await;
 }
+
+#[tokio::test]
+async fn subscription_quotas_absence_suite() {
+    absence_eligibility_matrix().await;
+    absence_tombstone_and_recovery().await;
+    absence_source_cache_staleness_matrix().await;
+    absence_anthropic_pool_history_and_snapshots().await;
+}
+
+struct AbsenceStaticCache(Vec<(Uuid, cc_lb_domain::SubscriptionQuotaCandidateSnapshot)>);
+
+impl cc_lb_control::SubscriptionQuotaCacheLike for AbsenceStaticCache {
+    fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
+
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        _now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+        SubscriptionQuotaWindow::all()
+            .iter()
+            .map(|window| {
+                self.0
+                    .iter()
+                    .find(|(id, snapshot)| *id == upstream_id && snapshot.window == window.as_str())
+                    .map(|(_, snapshot)| snapshot.clone())
+                    .unwrap_or_else(|| {
+                        serde_json::from_value(json!({
+                            "window": window.as_str(),
+                            "state": "unobserved",
+                            "max_staleness_secs": max_staleness_secs,
+                        }))
+                        .unwrap()
+                    })
+            })
+            .collect()
+    }
+}
+
+fn absence_snapshot(
+    sample: &SubscriptionQuotaSample,
+) -> cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+    serde_json::from_value(json!({
+        "window": sample.window.as_str(),
+        "state": if sample.sample_kind == SubscriptionQuotaSampleKind::Absent { "absent" } else { "fresh" },
+        "source": sample.source.as_str(),
+        "utilization": sample.utilization,
+        "resets_at_unix_secs": sample.resets_at_unix_secs,
+        "observed_at_unix_millis": sample.observed_at_unix_millis,
+        "max_staleness_secs": 1_800,
+    }))
+    .unwrap()
+}
+
+fn absence_set_cache(
+    server: &admin_test_common::SpawnedAdminServer,
+    cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike>,
+) {
+    let next = cc_lb_control::DynamicViewBuilder::from_view(&server.dynamic_view.load())
+        .subscription_quota_cache(cache)
+        .build();
+    server.dynamic_view.store(next);
+}
+
+fn absence_sample(
+    upstream_id: Uuid,
+    window: SubscriptionQuotaWindow,
+    observed_at: u64,
+    source: SubscriptionQuotaSource,
+    utilization: Option<f64>,
+) -> SubscriptionQuotaSample {
+    let mut sample = match utilization {
+        Some(value) => quota_observation(
+            upstream_id,
+            observed_at,
+            Uuid::new_v4().as_u128(),
+            source,
+            value,
+            Some(SubscriptionQuotaStatus::Allowed),
+        ),
+        None => {
+            quota_absent_observation(upstream_id, observed_at, Uuid::new_v4().as_u128(), source)
+        }
+    };
+    sample.window = window;
+    sample
+}
+
+async fn absence_aggregate(
+    server: &admin_test_common::SpawnedAdminServer,
+    provider: &str,
+    windows: &str,
+    source: &str,
+    max_staleness_secs: u64,
+) -> serde_json::Value {
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?provider={provider}&windows={windows}&source={source}&max_staleness_secs={max_staleness_secs}"
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{provider}/{windows}/{source}: {body}"
+    );
+    body
+}
+
+async fn absence_create_upstream(
+    server: &admin_test_common::SpawnedAdminServer,
+    provider: &str,
+    name: &str,
+) -> Uuid {
+    if provider == "anthropic" {
+        create_oauth_upstream(server, name).await
+    } else {
+        create_kind_oauth_upstream(server, name, &format!("{provider}_oauth")).await
+    }
+}
+
+// QA-03: Absent removes eligibility; Unobserved remains eligible and missing.
+async fn absence_eligibility_matrix() {
+    let empty = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+        empty.storage.as_ref(),
+        &empty.dynamic_view,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+    assert!(oauth.five_hour.is_some());
+    assert!(oauth.seven_day.is_some());
+    for (provider, target, present_twin) in [
+        (
+            "openai",
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+        ),
+        (
+            "gemini",
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            SubscriptionQuotaWindow::GeminiSevenDay,
+        ),
+        (
+            "anthropic",
+            SubscriptionQuotaWindow::SevenDayFable,
+            SubscriptionQuotaWindow::SevenDay,
+        ),
+    ] {
+        let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+        let (status, _, defaults) = server
+            .client
+            .get(&format!(
+                "/admin/v1/subscription-quotas/aggregate?provider={provider}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!defaults["windows"].as_array().unwrap().is_empty());
+        for window in defaults["windows"].as_array().unwrap() {
+            assert_eq!(window["eligible_upstreams"], 0);
+        }
+        let first = absence_create_upstream(&server, provider, "absent-member").await;
+        let absent = absence_sample(
+            first,
+            target,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            SubscriptionQuotaSource::Api,
+            None,
+        );
+        let twin = absence_sample(
+            first,
+            present_twin,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            SubscriptionQuotaSource::Api,
+            Some(0.6),
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(&[absent.clone(), twin])
+            .await
+            .unwrap();
+        for cached in [false, true] {
+            let cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike> = if cached {
+                Arc::new(AbsenceStaticCache(vec![(first, absence_snapshot(&absent))]))
+            } else {
+                Arc::new(cc_lb_control::NoopSubscriptionQuotaCache)
+            };
+            absence_set_cache(&server, cache);
+            let body = absence_aggregate(
+                &server,
+                provider,
+                &format!("{},{}", target.as_str(), present_twin.as_str()),
+                "merged",
+                1_800,
+            )
+            .await;
+            let windows = body["windows"].as_array().unwrap();
+            assert_eq!(windows.len(), 1, "{provider}, cached={cached}: {body}");
+            assert_eq!(windows[0]["window"], present_twin.as_str());
+            assert_eq!(windows[0]["eligible_upstreams"], 1);
+            assert_close(windows[0]["utilization"].as_f64(), 0.6);
+            if matches!(provider, "openai" | "gemini") {
+                let (status, _, history) = server
+                    .client
+                    .get(&format!(
+                        "/admin/v1/subscription-quotas/pool-history?provider={provider}&windows={}&since_unix_secs={}&until_unix_secs={}",
+                        target.as_str(),
+                        CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+                        CHECKPOINT_TEST_NOW_UNIX_SECS,
+                    ))
+                    .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{provider}, cached={cached}: {history}"
+                );
+                let windows = history["windows"].as_array().unwrap();
+                assert_eq!(windows.len(), 1, "{provider}, cached={cached}: {history}");
+                assert_eq!(windows[0]["window"], target.as_str());
+                assert_eq!(
+                    windows[0]["latest"]["eligible_upstreams"], 0,
+                    "all-absent {provider} pool-history retains the window, cached={cached}: {history}",
+                );
+            }
+        }
+        let second = absence_create_upstream(&server, provider, "present-member").await;
+        let present = absence_sample(
+            second,
+            target,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 50,
+            SubscriptionQuotaSource::Api,
+            Some(0.4),
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(std::slice::from_ref(&present))
+            .await
+            .unwrap();
+        let body = absence_aggregate(&server, provider, target.as_str(), "merged", 1_800).await;
+        assert_eq!(body["windows"][0]["eligible_upstreams"], 1);
+        assert_eq!(body["windows"][0]["contributing_upstreams"], 1);
+        assert_close(body["windows"][0]["utilization"].as_f64(), 0.4);
+        let second_absent = absence_sample(
+            second,
+            target,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 40,
+            SubscriptionQuotaSource::Api,
+            None,
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(&[second_absent])
+            .await
+            .unwrap();
+        let body = absence_aggregate(&server, provider, target.as_str(), "merged", 1_800).await;
+        assert!(
+            body["windows"].as_array().unwrap().is_empty(),
+            "{provider}: {body}"
+        );
+        let restored = absence_sample(
+            second,
+            target,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 30,
+            SubscriptionQuotaSource::Api,
+            Some(0.4),
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(std::slice::from_ref(&restored))
+            .await
+            .unwrap();
+        let third = absence_create_upstream(&server, provider, "unobserved-member").await;
+        absence_set_cache(
+            &server,
+            Arc::new(AbsenceStaticCache(vec![
+                (first, absence_snapshot(&absent)),
+                (second, absence_snapshot(&restored)),
+            ])),
+        );
+        let body = absence_aggregate(&server, provider, target.as_str(), "merged", 1_800).await;
+        let window = &body["windows"][0];
+        assert_eq!(window["eligible_upstreams"], 2, "{provider}: {body}");
+        assert_eq!(window["contributing_upstreams"], 1);
+        assert_eq!(window["missing_capacity_upstreams"], 1);
+        assert!(
+            window["provider_lots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|lot| {
+                    lot["upstream_id"] == third.to_string() && lot["state"] == "unobserved"
+                })
+        );
+    }
+}
+
+// QA-04: tombstones hide every historical lot but never destroy the series.
+async fn absence_tombstone_and_recovery() {
+    for (provider, window) in [
+        ("gemini", SubscriptionQuotaWindow::GeminiSevenDay),
+        ("anthropic", SubscriptionQuotaWindow::SevenDay),
+        ("anthropic", SubscriptionQuotaWindow::SevenDaySonnet),
+        ("anthropic", SubscriptionQuotaWindow::SevenDayOpus),
+        ("anthropic", SubscriptionQuotaWindow::SevenDayFable),
+    ] {
+        let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+        absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+        let first = absence_create_upstream(&server, provider, "tombstoned").await;
+        let mut prior_cycle = absence_sample(
+            first,
+            window,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 300,
+            SubscriptionQuotaSource::Api,
+            Some(0.2),
+        );
+        prior_cycle.resets_at_unix_secs = Some(CHECKPOINT_TEST_NOW_UNIX_SECS - 200);
+        let numeric = absence_sample(
+            first,
+            window,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+            SubscriptionQuotaSource::Api,
+            Some(0.6),
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(&[prior_cycle, numeric.clone()])
+            .await
+            .unwrap();
+        server
+            .storage
+            .append_request_event(&usage_event(
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 90,
+                "tombstoned-usage",
+                first,
+                "tombstoned",
+                400,
+            ))
+            .await
+            .unwrap();
+        server.storage.rollup_usage_once().await.unwrap();
+        let checkpoint_query = cc_lb_storage_api::SubscriptionQuotaCheckpointRangeQuery {
+            upstream_ids: vec![first],
+            windows: vec![window],
+            sources: vec![SubscriptionQuotaSource::Api],
+            since_unix_millis: (CHECKPOINT_TEST_NOW_UNIX_SECS - 600) * 1_000,
+            until_unix_millis: CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+        };
+        let checkpoints = server
+            .storage
+            .list_subscription_quota_slim_checkpoints(checkpoint_query.clone())
+            .await
+            .unwrap();
+        assert_eq!(checkpoints.len(), 2);
+        let lot_query = cc_lb_storage_api::SubscriptionQuotaProviderLotQuery {
+            upstream_ids: vec![first],
+            windows: vec![window],
+            sources: vec![SubscriptionQuotaSource::Api],
+            since_unix_millis: (CHECKPOINT_TEST_NOW_UNIX_SECS - 604_800) * 1_000,
+            until_unix_millis: CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            source_merge: cc_lb_storage_api::SubscriptionQuotaSourceMerge::Api,
+            evaluation_unix_secs: CHECKPOINT_TEST_NOW_UNIX_SECS,
+        };
+        assert_eq!(
+            server
+                .storage
+                .list_subscription_quota_provider_lots(lot_query.clone())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let series_path = format!(
+            "/admin/v1/subscription-quotas/series?upstream_ids={first}&windows={}&source=api&since_unix_secs={}&until_unix_secs={}&bucket_secs=60",
+            window.as_str(),
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 600,
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+        );
+        let (status, _, before_series) = server.client.get(&series_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let before = absence_aggregate(&server, provider, window.as_str(), "api", 1_800).await;
+        assert_eq!(before["windows"][0]["used_tokens"], 400);
+        let absent = absence_sample(
+            first,
+            window,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            SubscriptionQuotaSource::Api,
+            None,
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(&[absent])
+            .await
+            .unwrap();
+        let after = absence_aggregate(&server, provider, window.as_str(), "api", 1_800).await;
+        assert!(
+            after["windows"].as_array().unwrap().is_empty(),
+            "{provider}/{}: {after}",
+            window.as_str()
+        );
+        assert_eq!(
+            server
+                .storage
+                .list_subscription_quota_slim_checkpoints(checkpoint_query.clone())
+                .await
+                .unwrap(),
+            checkpoints
+        );
+        assert_eq!(
+            server
+                .storage
+                .list_subscription_quota_provider_lots(lot_query)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let (status, _, after_series) = server.client.get(&series_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after_series, before_series);
+        if provider == "anthropic" {
+            let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+                server.storage.as_ref(),
+                &server.dynamic_view,
+                &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+            )
+            .await
+            .unwrap();
+            match window {
+                SubscriptionQuotaWindow::SevenDay => assert!(oauth.seven_day.is_none()),
+                SubscriptionQuotaWindow::SevenDaySonnet => {
+                    assert!(oauth.seven_day_sonnet.is_none())
+                }
+                SubscriptionQuotaWindow::SevenDayOpus => assert!(oauth.seven_day_opus.is_none()),
+                SubscriptionQuotaWindow::SevenDayFable => assert!(oauth.limits.is_none()),
+                _ => unreachable!(),
+            }
+        }
+        let second = absence_create_upstream(&server, provider, "surviving").await;
+        server
+            .storage
+            .record_subscription_quota_samples(&[absence_sample(
+                second,
+                window,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 50,
+                SubscriptionQuotaSource::Api,
+                Some(0.2),
+            )])
+            .await
+            .unwrap();
+        server
+            .storage
+            .append_request_event(&usage_event(
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 90,
+                "surviving-usage",
+                second,
+                "surviving",
+                100,
+            ))
+            .await
+            .unwrap();
+        server.storage.rollup_usage_once().await.unwrap();
+        let partial = absence_aggregate(&server, provider, window.as_str(), "api", 1_800).await;
+        let live = &partial["windows"][0];
+        assert_eq!(live["eligible_upstreams"], 1);
+        assert_eq!(live["used_tokens"], 100);
+        assert_eq!(live["provider_lots"].as_array().unwrap().len(), 1);
+        assert_eq!(live["provider_lots"][0]["upstream_id"], second.to_string());
+        let mut recovered = numeric;
+        recovered.sample_id = Uuid::new_v4();
+        recovered.observed_at_unix_millis = (CHECKPOINT_TEST_NOW_UNIX_SECS - 10) * 1_000;
+        recovered.ingested_at_unix_millis = recovered.observed_at_unix_millis;
+        server
+            .storage
+            .record_subscription_quota_samples(&[recovered.clone()])
+            .await
+            .unwrap();
+        let restored = absence_aggregate(&server, provider, window.as_str(), "api", 1_800).await;
+        assert_eq!(restored["windows"][0]["eligible_upstreams"], 2);
+        assert_eq!(restored["windows"][0]["used_tokens"], 500);
+        let revived = restored["windows"][0]["provider_lots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lot| lot["upstream_id"] == first.to_string())
+            .unwrap();
+        assert_close(revived["utilization"].as_f64(), 0.6);
+        assert_eq!(
+            revived["observed_at_unix_millis"],
+            recovered.observed_at_unix_millis
+        );
+        assert_eq!(
+            server
+                .storage
+                .list_subscription_quota_slim_checkpoints(checkpoint_query)
+                .await
+                .unwrap(),
+            checkpoints,
+            "same numeric recovery stays deadbanded"
+        );
+    }
+}
+
+// QA-05: source filtering and stale absence are identical with and without cache.
+async fn absence_source_cache_staleness_matrix() {
+    for (provider, window) in [
+        ("openai", SubscriptionQuotaWindow::SevenDay),
+        ("gemini", SubscriptionQuotaWindow::GeminiSevenDay),
+    ] {
+        let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+        let upstream = absence_create_upstream(&server, provider, "source-matrix").await;
+        let header = absence_sample(
+            upstream,
+            window,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+            SubscriptionQuotaSource::Header,
+            Some(0.6),
+        );
+        let absent = absence_sample(
+            upstream,
+            window,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            SubscriptionQuotaSource::Api,
+            None,
+        );
+        server
+            .storage
+            .record_subscription_quota_samples(&[header, absent.clone()])
+            .await
+            .unwrap();
+        for phase in 0..3 {
+            let latest = match phase {
+                0 => absent.clone(),
+                1 => absence_sample(
+                    upstream,
+                    window,
+                    CHECKPOINT_TEST_NOW_UNIX_SECS - 30,
+                    SubscriptionQuotaSource::Header,
+                    Some(0.6),
+                ),
+                _ => absence_sample(
+                    upstream,
+                    window,
+                    CHECKPOINT_TEST_NOW_UNIX_SECS - 10,
+                    SubscriptionQuotaSource::Api,
+                    Some(0.6),
+                ),
+            };
+            if phase > 0 {
+                server
+                    .storage
+                    .record_subscription_quota_samples(std::slice::from_ref(&latest))
+                    .await
+                    .unwrap();
+            }
+            for cached in [false, true] {
+                let cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike> = if cached {
+                    Arc::new(AbsenceStaticCache(vec![(
+                        upstream,
+                        absence_snapshot(&latest),
+                    )]))
+                } else {
+                    Arc::new(cc_lb_control::NoopSubscriptionQuotaCache)
+                };
+                absence_set_cache(&server, cache);
+                for source in ["header", "api", "merged"] {
+                    for max_staleness_secs in [1_800, 0] {
+                        let body = absence_aggregate(
+                            &server,
+                            provider,
+                            window.as_str(),
+                            source,
+                            max_staleness_secs,
+                        )
+                        .await;
+                        let omitted =
+                            (source == "api" && phase < 2) || (source == "merged" && phase == 0);
+                        let windows = body["windows"].as_array().unwrap();
+                        assert_eq!(
+                            windows.is_empty(),
+                            omitted,
+                            "{provider}, phase={phase}, cached={cached}, source={source}, max_staleness_secs={max_staleness_secs}: {body}"
+                        );
+                        if !omitted {
+                            assert_eq!(windows[0]["eligible_upstreams"], 1);
+                            assert_close(windows[0]["utilization"].as_f64(), 0.6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// QA-06: Anthropic drops all-absent pooled windows without changing other providers.
+async fn absence_anthropic_pool_history_and_snapshots() {
+    let clock = Arc::new(TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS));
+    let server = admin_test_common::spawn_admin_server_with_clock(clock.clone()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let first = create_oauth_upstream(&server, "history-first").await;
+    let second = create_oauth_upstream(&server, "history-second").await;
+    let mut samples = Vec::new();
+    for id in [first, second] {
+        for window in [
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ] {
+            samples.push(absence_sample(
+                id,
+                window,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+                SubscriptionQuotaSource::Api,
+                None,
+            ));
+        }
+    }
+    samples.push(absence_sample(
+        first,
+        SubscriptionQuotaWindow::SevenDay,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+        SubscriptionQuotaSource::Api,
+        None,
+    ));
+    samples.push(absence_sample(
+        second,
+        SubscriptionQuotaWindow::SevenDay,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+        SubscriptionQuotaSource::Api,
+        Some(0.4),
+    ));
+    server
+        .storage
+        .record_subscription_quota_samples(&samples)
+        .await
+        .unwrap();
+    let path = format!(
+        "/admin/v1/subscription-quotas/pool-history?provider=anthropic&windows=5h,7d,7d_fable&since_unix_secs={}&until_unix_secs={}",
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 120,
+    );
+    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Provider::Anthropic,
+        clock.as_ref(),
+    )
+    .await
+    .unwrap();
+    let (status, _, history) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    let windows = history["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 1, "{history}");
+    assert_eq!(windows[0]["window"], "7d");
+    assert_eq!(windows[0]["latest"]["eligible_upstreams"], 1);
+    assert_close(windows[0]["latest"]["utilization"].as_f64(), 0.4);
+    let stored = server
+        .storage
+        .list_latest_pool_quota_snapshot_summaries(
+            Provider::Anthropic,
+            &[
+                SubscriptionQuotaWindow::FiveHour,
+                SubscriptionQuotaWindow::SevenDay,
+                SubscriptionQuotaWindow::SevenDayFable,
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].window, SubscriptionQuotaWindow::SevenDay);
+    assert_eq!(stored[0].eligible_upstreams, 1);
+    clock.advance_secs(60);
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            absence_sample(
+                first,
+                SubscriptionQuotaWindow::SevenDayFable,
+                CHECKPOINT_TEST_NOW_UNIX_SECS + 60,
+                SubscriptionQuotaSource::Api,
+                Some(0.6),
+            ),
+            absence_sample(
+                first,
+                SubscriptionQuotaWindow::SevenDay,
+                CHECKPOINT_TEST_NOW_UNIX_SECS + 60,
+                SubscriptionQuotaSource::Api,
+                Some(0.2),
+            ),
+        ])
+        .await
+        .unwrap();
+    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Provider::Anthropic,
+        clock.as_ref(),
+    )
+    .await
+    .unwrap();
+    let (status, _, recovered) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    let windows = recovered["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 2);
+    let weekly = windows
+        .iter()
+        .find(|window| window["window"] == "7d")
+        .unwrap();
+    assert_eq!(weekly["latest"]["eligible_upstreams"], 2);
+    assert_close(weekly["latest"]["utilization"].as_f64(), 0.3);
+    assert_eq!(weekly["series"].as_array().unwrap().len(), 2);
+    let fable = windows
+        .iter()
+        .find(|window| window["window"] == "7d_fable")
+        .unwrap();
+    assert_eq!(fable["latest"]["eligible_upstreams"], 1);
+    assert_close(fable["latest"]["utilization"].as_f64(), 0.6);
+    assert_eq!(fable["series"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn subscription_quotas_period_unknown_suite() {
+    latest_period_unknown_meters_contract().await;
+    latest_period_unknown_meters_follow_filters().await;
+    latest_meters_survive_credential_rotation().await;
+}
+
+fn period_unknown_record(observed_at_unix_millis: u64) -> serde_json::Value {
+    json!({
+        "version": 1,
+        "binding": {},
+        "gemini": {
+            "observed_at_unix_millis": observed_at_unix_millis,
+            "meters": [{
+                "group": "gemini",
+                "model_id": "gemini-2.5-pro",
+                "known_period": "5h",
+                "remaining_fraction": 0.4,
+                "reset_time_unix_secs": CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600,
+                "origin": "retrieve_user_quota",
+            }],
+        },
+        "third_party": {
+            "observed_at_unix_millis": observed_at_unix_millis - 60_000,
+            "meters": [{
+                "group": "third_party",
+                "bucket_id": "unlabeled-0",
+                "remaining_fraction": 0.25,
+                "reset_time_unix_secs": null,
+                "remaining_amount": "12",
+                "origin": "retrieve_user_quota_summary",
+            }],
+        },
+    })
+}
+
+fn period_unknown_record_for_binding(
+    observed_at_unix_millis: u64,
+    binding: serde_json::Value,
+) -> serde_json::Value {
+    let mut record = period_unknown_record(observed_at_unix_millis);
+    record["binding"] = binding;
+    record
+}
+
+async fn period_unknown_seed(
+    server: &admin_test_common::SpawnedAdminServer,
+    upstream_id: Uuid,
+    value: &str,
+) {
+    use cc_lb_storage_api::MetaStore;
+
+    server
+        .storage
+        .put_meta_value(
+            &cc_lb_control::gemini_period_unknown_quota::gemini_period_unknown_quota_meta_key(
+                upstream_id,
+            ),
+            value,
+        )
+        .await
+        .unwrap();
+}
+
+async fn period_unknown_latest(
+    server: &admin_test_common::SpawnedAdminServer,
+    query: &str,
+) -> serde_json::Value {
+    let (status, _, body) = server
+        .client
+        .get(&format!("/admin/v1/subscription-quotas/latest?{query}"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{query}: {body}");
+    body
+}
+
+fn period_unknown_upstream(body: &serde_json::Value, upstream_id: Uuid) -> &serde_json::Value {
+    body["upstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|upstream| upstream["upstream_id"] == upstream_id.to_string())
+        .unwrap()
+}
+
+// QA-12: raw API meters are display-only, credential-independent, and fenced per group.
+async fn latest_period_unknown_meters_contract() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "raw-gemini", "gemini_oauth").await;
+    let anthropic = create_oauth_upstream(&server, "raw-anthropic").await;
+    let empty = create_kind_oauth_upstream(&server, "raw-empty", "gemini_oauth").await;
+    let aggregate_without_row =
+        absence_aggregate(&server, "gemini", "gemini_5h,third_party_5h", "merged", 60).await;
+    let observed_at = (CHECKPOINT_TEST_NOW_UNIX_SECS - 60) * 1_000;
+    let record = period_unknown_record(observed_at).to_string();
+    period_unknown_seed(&server, gemini, &record).await;
+    period_unknown_seed(&server, anthropic, &record).await;
+    let body = period_unknown_latest(&server, "max_staleness_secs=60").await;
+    let meters = period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+        .as_array()
+        .unwrap();
+    assert_eq!(meters.len(), 2);
+    assert_eq!(meters[0]["group"], "gemini");
+    assert_eq!(meters[0]["model_id"], "gemini-2.5-pro");
+    assert!(meters[0].get("bucket_id").is_none());
+    assert!(meters[0].get("remaining_amount").is_none());
+    assert_eq!(meters[0]["remaining_fraction"], 0.4);
+    assert_close(meters[0]["utilization"].as_f64(), 0.6);
+    assert_eq!(
+        meters[0]["reset_time_unix_secs"],
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600
+    );
+    assert_eq!(meters[0]["known_period"], "5h");
+    assert!(meters[1].get("known_period").is_none());
+    assert_eq!(meters[0]["origin"], "retrieve_user_quota");
+    assert_eq!(meters[0]["source"], "api");
+    assert_eq!(meters[0]["state"], "fresh");
+    assert_eq!(meters[0]["observed_at_unix_millis"], observed_at);
+    assert_eq!(meters[0]["age_secs"], 60);
+    assert_eq!(meters[1]["group"], "third_party");
+    assert_eq!(meters[1]["bucket_id"], "unlabeled-0");
+    assert!(meters[1].get("model_id").is_none());
+    assert_eq!(meters[1]["remaining_amount"], "12");
+    assert_eq!(meters[1]["remaining_fraction"], 0.25);
+    assert_eq!(meters[1]["utilization"], 0.75);
+    assert!(meters[1]["reset_time_unix_secs"].is_null());
+    assert_eq!(meters[1]["origin"], "retrieve_user_quota_summary");
+    assert_eq!(meters[1]["source"], "api");
+    assert_eq!(meters[1]["state"], "stale");
+    assert_eq!(meters[1]["observed_at_unix_millis"], observed_at - 60_000);
+    assert_eq!(meters[1]["age_secs"], 120);
+    assert!(!body.to_string().contains("credential_fingerprint"));
+    assert!(!body.to_string().contains("oauth_token_generation"));
+    assert!(!body.to_string().contains("identity_sha256"));
+    assert!(!body.to_string().contains("\"binding\""));
+    for upstream in [anthropic, empty] {
+        assert!(
+            period_unknown_upstream(&body, upstream)
+                .get("period_unknown_meters")
+                .is_none()
+        );
+    }
+    assert_eq!(
+        aggregate_without_row,
+        absence_aggregate(&server, "gemini", "gemini_5h,third_party_5h", "merged", 60).await,
+    );
+
+    let mut same_poll_absent = absence_sample(
+        gemini,
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        observed_at / 1_000,
+        SubscriptionQuotaSource::Api,
+        None,
+    );
+    same_poll_absent.observed_at_unix_millis = observed_at;
+    server
+        .storage
+        .record_subscription_quota_samples(std::slice::from_ref(&same_poll_absent))
+        .await
+        .unwrap();
+    let body = period_unknown_latest(&server, "").await;
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "same-poll durable absence must not suppress raw meters",
+    );
+
+    // Cache-only canonical data suppresses just its own group. Unobserved
+    // placeholders never suppress, even when they carry a later timestamp.
+    let mut third_party = same_poll_absent.clone();
+    third_party.window = SubscriptionQuotaWindow::ThirdPartySevenDay;
+    third_party.observed_at_unix_millis = observed_at + 1;
+    let mut unobserved = absence_snapshot(&same_poll_absent);
+    unobserved.state = cc_lb_domain::SubscriptionQuotaDataState::Unobserved;
+    unobserved.observed_at_unix_millis = Some(observed_at + 1);
+    absence_set_cache(
+        &server,
+        Arc::new(AbsenceStaticCache(vec![
+            (gemini, absence_snapshot(&third_party)),
+            (gemini, unobserved),
+        ])),
+    );
+    let body = period_unknown_latest(&server, "").await;
+    let meters = period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+        .as_array()
+        .unwrap();
+    assert_eq!(meters.len(), 1);
+    assert_eq!(meters[0]["group"], "gemini");
+
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let mut newer_canonical = same_poll_absent;
+    newer_canonical.sample_id = Uuid::new_v4();
+    newer_canonical.observed_at_unix_millis = observed_at + 1;
+    newer_canonical.sample_kind = SubscriptionQuotaSampleKind::Sample;
+    newer_canonical.utilization = Some(0.5);
+    server
+        .storage
+        .record_subscription_quota_samples(&[newer_canonical])
+        .await
+        .unwrap();
+    let body = period_unknown_latest(&server, "").await;
+    let meters = period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+        .as_array()
+        .unwrap();
+    assert_eq!(meters.len(), 1);
+    assert_eq!(
+        meters[0]["group"], "third_party",
+        "durable rows suppress on a cold-cache peer"
+    );
+
+    for invalid in [
+        "not-json",
+        r#"{"version":99,"gemini":null,"third_party":null}"#,
+    ] {
+        period_unknown_seed(&server, empty, invalid).await;
+        let body = period_unknown_latest(&server, "").await;
+        assert!(
+            period_unknown_upstream(&body, empty)
+                .get("period_unknown_meters")
+                .is_none()
+        );
+    }
+}
+
+// QA-13: raw meters obey source, canonical-window, and upstream selection filters.
+async fn latest_period_unknown_meters_follow_filters() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "filter-gemini", "gemini_oauth").await;
+    let other = create_kind_oauth_upstream(&server, "filter-other", "gemini_oauth").await;
+    let record = period_unknown_record(CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000).to_string();
+    period_unknown_seed(&server, gemini, &record).await;
+    period_unknown_seed(&server, other, &record).await;
+    for source in ["header", "api", "merged"] {
+        for (windows, included) in [
+            ("", true),
+            ("&windows=gemini_5h", true),
+            ("&windows=gemini_7d", true),
+            ("&windows=third_party_5h", true),
+            ("&windows=third_party_7d", true),
+            ("&windows=5h,third_party_7d", true),
+            ("&windows=5h,7d", false),
+        ] {
+            let query = format!("source={source}{windows}&upstream_ids={gemini}");
+            let body = period_unknown_latest(&server, &query).await;
+            assert_eq!(body["upstreams"].as_array().unwrap().len(), 1, "{query}");
+            let upstream = period_unknown_upstream(&body, gemini);
+            assert_eq!(
+                upstream.get("period_unknown_meters").is_some(),
+                included && source != "header",
+                "{query}: {body}",
+            );
+        }
+    }
+    let body = period_unknown_latest(&server, &format!("upstream_ids={other}")).await;
+    assert_eq!(body["upstreams"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        period_unknown_upstream(&body, other)["period_unknown_meters"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+async fn replace_gemini_credential(
+    server: &admin_test_common::SpawnedAdminServer,
+    upstream_id: Uuid,
+    account_id: Option<&str>,
+    project_id: Option<&str>,
+    access_token: &str,
+) -> cc_lb_storage_api::UpstreamRecord {
+    use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_storage_api::{OAuthTokensCreate, UpstreamStore, UpstreamUpdate};
+
+    let upstream = UpstreamStore::get_by_id(server.storage.as_ref(), upstream_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle = OAuthTokenBundle {
+        access_token: access_token.to_owned(),
+        refresh_token: "same-account-test-refresh-token".to_owned(),
+        expires_at_unix_secs: CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: account_id.map(str::to_owned),
+        project_id: project_id.map(str::to_owned),
+        oauth_profile: Default::default(),
+        scopes: Vec::new(),
+        never_refresh: false,
+    };
+    let tokens = EncryptedOAuthTokens::encrypt(
+        &AeadService::from_master_key([0; 32]),
+        &bundle,
+        upstream_id.as_bytes(),
+    )
+    .unwrap();
+    UpstreamStore::update(
+        server.storage.as_ref(),
+        upstream_id,
+        upstream.revision,
+        UpstreamUpdate {
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens,
+                never_refresh: false,
+            }),
+            oauth_token_generation: Some(upstream.oauth_token_generation + 1),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+// QA-14: credential rotation preserves only the matching account/project subject.
+async fn latest_meters_survive_credential_rotation() {
+    use cc_lb_control::gemini_period_unknown_quota::GeminiRawQuotaBinding;
+
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "rotation-gemini", "gemini_oauth").await;
+
+    let first = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-a"),
+        "initial-test-token",
+    )
+    .await;
+    let email_binding = GeminiRawQuotaBinding::from_credential(
+        Some("member@example.test"),
+        Some("proj-a"),
+        first.oauth_token_generation,
+    );
+    period_unknown_seed(
+        &server,
+        gemini,
+        &period_unknown_record_for_binding(
+            CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            serde_json::to_value(email_binding).unwrap(),
+        )
+        .to_string(),
+    )
+    .await;
+    let baseline = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    let baseline_meters =
+        period_unknown_upstream(&baseline, gemini)["period_unknown_meters"].clone();
+    assert_eq!(baseline_meters.as_array().unwrap().len(), 2);
+    assert!(!baseline.to_string().contains("identity_sha256"));
+    assert!(!baseline.to_string().contains("\"binding\""));
+
+    // (a) Routine refresh with the same email/project keeps the meters.
+    let refreshed = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-a"),
+        "rotated-test-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["period_unknown_meters"],
+        baseline_meters
+    );
+    assert_eq!(
+        refreshed.oauth_token_generation,
+        first.oauth_token_generation + 1
+    );
+
+    // (b) Changing either project or account immediately hides the old subject.
+    replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("proj-b"),
+        "project-replaced-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
+    replace_gemini_credential(
+        &server,
+        gemini,
+        Some("other@example.test"),
+        Some("proj-a"),
+        "account-replaced-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
+
+    // (c) Project-only imports are fenced to the OAuth token generation.
+    let project_only = replace_gemini_credential(
+        &server,
+        gemini,
+        None,
+        Some("proj-only"),
+        "project-only-token",
+    )
+    .await;
+    let project_binding = GeminiRawQuotaBinding::from_credential(
+        None,
+        Some("proj-only"),
+        project_only.oauth_token_generation,
+    );
+    period_unknown_seed(
+        &server,
+        gemini,
+        &period_unknown_record_for_binding(
+            CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            serde_json::to_value(project_binding).unwrap(),
+        )
+        .to_string(),
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["period_unknown_meters"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    replace_gemini_credential(
+        &server,
+        gemini,
+        None,
+        Some("proj-only"),
+        "project-only-rotated-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("period_unknown_meters")
+            .is_none()
+    );
+}
