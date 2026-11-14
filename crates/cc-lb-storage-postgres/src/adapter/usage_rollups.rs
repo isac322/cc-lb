@@ -1837,6 +1837,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 OR id LIKE 'pricing_completeness_stage_%_verified_count' \
                 OR id LIKE 'pricing_completeness_stage_%_verify_cursor' \
                 OR id LIKE 'pricing_completeness_stage_%_verified_min_seq' \
+                OR id LIKE 'pricing_completeness_stage_%_verified_max_seq' \
                 OR id LIKE 'pricing_completeness_stage_%_verifying'",
         )
         .execute(&mut *tx)
@@ -2187,7 +2188,9 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         let selected_rows = sqlx::query(
             "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, model \
              FROM usage_rollup_pricing_backfill_stage_v1 \
-             WHERE slot_id = $1 LIMIT $2",
+             WHERE slot_id = $1 \
+             ORDER BY resolution, bucket_start_unix_secs, principal_id, upstream_id, model \
+             LIMIT $2",
         )
         .bind(&slot_id)
         .bind(ROLLUP_BATCH_LIMIT)
@@ -2204,7 +2207,9 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                         upstream_id, model, priced_event_count, unpriced_event_count, \
                         unmetered_event_count \
                  FROM usage_rollup_pricing_backfill_stage_v1 \
-                 WHERE slot_id = $1 LIMIT $2 \
+                 WHERE slot_id = $1 \
+                 ORDER BY resolution, bucket_start_unix_secs, principal_id, upstream_id, model \
+                 LIMIT $2 \
              ) \
              UPDATE usage_rollups_v2 AS r \
              SET priced_event_count = r.priced_event_count + s.priced_event_count, \
