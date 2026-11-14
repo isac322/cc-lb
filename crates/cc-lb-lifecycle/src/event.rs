@@ -188,6 +188,27 @@ pub enum LifecycleEvent {
         sign_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_ttfb_ms: Option<u64>,
+        /// Capture time of the HTTP response headers, before off-path processing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_unix_millis: Option<u64>,
+    },
+    /// Provider quota frame handed to off-path consumers without parsing or
+    /// copying its bytes. A missing matched response remains account-only.
+    UpstreamQuotaFrameObserved {
+        event_id: EventId,
+        upstream_id: Uuid,
+        observed_at_unix_millis: u64,
+        frame: bytes::Bytes,
+        matched_response_id: Option<String>,
+    },
+    /// Off-path estimate from an own-response meter. Ambiguous WebSocket turns
+    /// invalidate earlier estimates and remain unknown.
+    RequestFundingObserved {
+        event_id: EventId,
+        attempt_num: u32,
+        funding: Option<cc_lb_request_log::RequestFunding>,
+        response_id: Option<String>,
+        ambiguous: bool,
     },
     RequestLogUpstreamErrorObserved {
         event_id: EventId,
@@ -258,6 +279,9 @@ pub enum LifecycleEvent {
         /// classify the request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_kind: Option<cc_lb_request_log::RequestEventKind>,
+        /// Whether late or ambiguous quota evidence invalidated funding.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        funding_ambiguous: bool,
     },
     /// Emitted by the pricing subscriber after cost is computed from usage
     /// counts, model, and upstream kind. The assembler merges these micros
@@ -288,6 +312,8 @@ impl LifecycleEvent {
             | Self::LimitDecision { event_id, .. }
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
+            | Self::UpstreamQuotaFrameObserved { event_id, .. }
+            | Self::RequestFundingObserved { event_id, .. }
             | Self::RequestLogUpstreamErrorObserved { event_id, .. }
             | Self::UpstreamStreamDiagnosticsObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
@@ -309,6 +335,8 @@ impl LifecycleEvent {
             Self::LimitDecision { .. } => "limit_decision",
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
+            Self::UpstreamQuotaFrameObserved { .. } => "upstream_quota_frame_observed",
+            Self::RequestFundingObserved { .. } => "request_funding_observed",
             Self::RequestLogUpstreamErrorObserved { .. } => "request_log_upstream_error_observed",
             Self::UpstreamStreamDiagnosticsObserved { .. } => {
                 "upstream_stream_diagnostics_observed"

@@ -100,20 +100,34 @@ type SlotVersions = HashMap<(Uuid, SubscriptionQuotaWindow), SourceVersions>;
 /// `observed_at_unix_millis` in its `(upstream, window, source)` slot.
 /// Strictly newer observations always replace, older ones never do, and an
 /// empty slot always accepts.
-#[derive(Clone, Copy, Debug)]
 enum EqualObservedAt<'a> {
     Replace,
+    /// Keep the resident observation when a durable fallback has the same
+    /// timestamp; strictly newer values still replace it.
+    Keep,
     /// Replace only if the slot has not been replaced since these versions
     /// were captured, so a read that raced a concurrent install cannot
     /// restore older content.
     ReplaceIfUnchangedSince(&'a SlotVersions),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SubscriptionQuotaCache {
     inner: Arc<RwLock<HashMap<Uuid, HashMap<SubscriptionQuotaWindow, WindowSlots>>>>,
     poll_sequence: AtomicU64,
     published_polls: parking_lot::Mutex<HashMap<Uuid, u64>>,
+    poll_publisher: Uuid,
+}
+
+impl Default for SubscriptionQuotaCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            poll_sequence: AtomicU64::new(0),
+            published_polls: parking_lot::Mutex::default(),
+            poll_publisher: Uuid::new_v4(),
+        }
+    }
 }
 
 impl SubscriptionQuotaCache {
@@ -125,6 +139,13 @@ impl SubscriptionQuotaCache {
     /// request cannot publish after a newer poll has published its batch.
     pub(crate) fn begin_poll(&self) -> u64 {
         self.poll_sequence.fetch_add(1, AtomicOrdering::Relaxed) + 1
+    }
+
+    pub(crate) fn credit_request_order(&self, sequence: u64) -> cc_lb_domain::CreditRequestOrder {
+        cc_lb_domain::CreditRequestOrder {
+            publisher: self.poll_publisher,
+            sequence,
+        }
     }
 
     pub(crate) fn publish_poll(
@@ -210,6 +231,11 @@ impl SubscriptionQuotaCache {
     pub fn upsert_observation(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
         self.upsert_with_tie_policy(upstream_id, record, EqualObservedAt::Replace);
     }
+    /// Install a durable read-side fallback without overwriting an equal-time
+    /// live observation that arrived while storage was being read.
+    pub fn upsert_durable_if_newer(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
+        self.upsert_with_tie_policy(upstream_id, record, EqualObservedAt::Keep);
+    }
 
     fn upsert_with_tie_policy(
         &self,
@@ -217,7 +243,7 @@ impl SubscriptionQuotaCache {
         record: &SubscriptionQuotaSample,
         tie: EqualObservedAt<'_>,
     ) {
-        let snapshot = MergedQuotaSnapshot::from_record(record);
+        let mut snapshot = MergedQuotaSnapshot::from_record(record);
         let mut guard = self.inner.write();
         let slots = guard
             .entry(upstream_id)
@@ -240,6 +266,7 @@ impl SubscriptionQuotaCache {
                 Ordering::Less => false,
                 Ordering::Equal => match tie {
                     EqualObservedAt::Replace => true,
+                    EqualObservedAt::Keep => false,
                     EqualObservedAt::ReplaceIfUnchangedSince(captured) => {
                         let captured = captured
                             .get(&(upstream_id, record.window))
@@ -252,6 +279,24 @@ impl SubscriptionQuotaCache {
             },
         };
         if accept {
+            if record.sample_kind == SubscriptionQuotaSampleKind::Sample {
+                let source = match record.source {
+                    SubscriptionQuotaSource::Header => cc_lb_domain::CreditSource::Header,
+                    SubscriptionQuotaSource::Api => cc_lb_domain::CreditSource::Api,
+                };
+                if let Some(incoming) = snapshot.credits.as_mut() {
+                    incoming.stamp_observations(record.observed_at_unix_millis, source);
+                }
+                if let Some(current) = slot.as_mut()
+                    && let Some(mut credits) = current.credits.take()
+                {
+                    credits.stamp_observations(current.observed_at_unix_millis, source);
+                    if let Some(incoming) = snapshot.credits.as_ref() {
+                        credits.merge_observations(incoming);
+                    }
+                    snapshot.credits = Some(credits);
+                }
+            }
             *slot = Some(snapshot);
             *version = version.wrapping_add(1);
         }
@@ -314,6 +359,9 @@ impl SubscriptionQuotaCacheLike for SubscriptionQuotaCache {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
         self.upsert_observation(record.upstream_id, record);
     }
+    fn upsert_durable_if_newer(&self, record: &SubscriptionQuotaSample) {
+        self.upsert_durable_if_newer(record.upstream_id, record);
+    }
 
     fn snapshot_for_upstream(
         &self,
@@ -344,9 +392,34 @@ fn candidate_from_sources(
         .api
         .as_ref()
         .is_some_and(|snapshot| is_fresh(snapshot, now_unix_millis, max_staleness_secs));
-    let Some(merged) = merge_sources(sources, header_fresh, api_fresh) else {
+    let Some(mut merged) = merge_sources(sources, header_fresh, api_fresh) else {
         return unobserved_candidate(window, max_staleness_secs);
     };
+    let mut credits: Option<SubscriptionQuotaCredits> = None;
+    for snapshot in [sources.header.as_ref(), sources.api.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if snapshot.sample_kind == SubscriptionQuotaSampleKind::Absent {
+            continue;
+        }
+        if let Some(raw) = snapshot.credits.as_ref() {
+            let mut incoming = raw.clone();
+            incoming.stamp_observations(
+                snapshot.observed_at_unix_millis,
+                match snapshot.source {
+                    MergedSource::Header => cc_lb_domain::CreditSource::Header,
+                    MergedSource::Api => cc_lb_domain::CreditSource::Api,
+                },
+            );
+            if let Some(current) = credits.as_mut() {
+                current.merge_observations(&incoming);
+            } else {
+                credits = Some(incoming);
+            }
+        }
+    }
+    merged.credits = credits;
     let state = match merged.sample_kind {
         SubscriptionQuotaSampleKind::Absent => SubscriptionQuotaDataState::Absent,
         SubscriptionQuotaSampleKind::Sample => {

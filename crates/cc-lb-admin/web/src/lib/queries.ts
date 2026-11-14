@@ -30,6 +30,7 @@ import {
   type ConfigFileSavedResponse,
   type ConfigHistoryResponse,
   type ConfigValidationReport,
+  type CreditHistoryResponse,
   completeOauthDraft,
   createUpstreamFromOauthDraft,
   type DashboardSummaryResponse,
@@ -234,7 +235,12 @@ interface QuotaQueryIdentity {
 
 function hasSameQuotaIdentity(
   previousQueryKey: readonly unknown[] | undefined,
-  resource: 'latest' | 'series' | 'aggregate' | 'pool-history',
+  resource:
+    | 'latest'
+    | 'series'
+    | 'aggregate'
+    | 'pool-history'
+    | 'credit-history',
   currentParams: QuotaQueryIdentity,
 ): boolean {
   const previousParams = previousQueryKey?.[2];
@@ -348,6 +354,8 @@ export const qk = {
     ['subscription-quota', 'aggregate', params] as const,
   subscriptionQuotaPoolHistory: (params: Record<string, any>) =>
     ['subscription-quota', 'pool-history', params] as const,
+  subscriptionCreditHistory: (params: Record<string, unknown>) =>
+    ['subscription-quota', 'credit-history', params] as const,
   cacheKeepaliveSessions: (
     principalId: string,
     filters: CacheKeepaliveSessionsFilters,
@@ -1120,6 +1128,43 @@ export function useSubscriptionQuotaPoolHistory(params: {
           'pool-history',
           scopedParams,
         )
+          ? previousData
+          : undefined,
+    },
+    POLLING_INTERVALS.QUOTA_POOL_HISTORY_MS,
+  );
+}
+
+/** One request for the visible OpenAI OAuth rows, using the page's shared range. */
+export function useCreditHistory(
+  upstreamIds: readonly string[],
+  rangeSecs: number,
+) {
+  const providers = useEffectiveProviders();
+  const ids = [...upstreamIds].sort().join(',');
+  const params = {
+    upstreamIds: ids,
+    providers: providers?.join(','),
+    rangeSecs,
+  };
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionCreditHistory(params),
+      enabled:
+        ids.length > 0 &&
+        (providers === undefined || providers.includes('openai')),
+      queryFn: ({ signal }) => {
+        const search = new URLSearchParams({
+          upstream_ids: ids,
+          relative_range_secs: String(rangeSecs),
+        });
+        return getJson<CreditHistoryResponse>(
+          `/admin/v1/subscription-quotas/credit-history?${search}`,
+          { signal },
+        );
+      },
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'credit-history', params)
           ? previousData
           : undefined,
     },

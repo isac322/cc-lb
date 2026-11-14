@@ -81,6 +81,7 @@ import {
   buildQuotaChartData,
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
+import { CodexCreditMini } from '../components/upstreams/codexCredits';
 import {
   isAnthropicBaseUrl,
   usageFixLine,
@@ -767,7 +768,13 @@ function UpstreamsPage() {
             ]
               .filter(Boolean)
               .join('\n'),
-            trailing: !upstream.enabled ? null : quotaPending ? (
+            trailing: !upstream.enabled ? null : provider === 'openai' &&
+              oauth ? (
+              <CodexCreditMini
+                data={row.creditHistory}
+                pending={upstreamUsage.creditHistoryPending}
+              />
+            ) : quotaPending ? (
               <Skeleton as="span" className="inline-block h-4 w-8" />
             ) : peakSnap != null && peak != null ? (
               <>
@@ -1722,6 +1729,7 @@ export function DetailView({
               key={snap.window}
               snap={snap}
               creditObservations={selectedLatest?.windows}
+              maxStalenessSecs={quotaLatest.data?.max_staleness_secs}
               nowUnixSecs={nowUnixSecs}
               placeholder={geminiGroupPlaceholderState(
                 selectedLatest?.windows,

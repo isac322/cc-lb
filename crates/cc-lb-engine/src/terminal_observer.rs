@@ -410,6 +410,7 @@ struct Inner {
     /// lifecycle events are buffered in `TerminalState::pending_events`
     /// instead of reaching the bus.
     authn_reached: AtomicBool,
+    funding_ambiguous: AtomicBool,
     started_unix_ms: u64,
     started: Instant,
     state: Mutex<TerminalState>,
@@ -483,6 +484,7 @@ impl LifecycleContext {
                 }),
                 finalized: AtomicBool::new(false),
                 authn_reached: AtomicBool::new(false),
+                funding_ambiguous: AtomicBool::new(false),
                 authentication_completed_emitted: AtomicBool::new(false),
             }),
         }
@@ -1031,6 +1033,21 @@ impl Inner {
     /// Publish a lifecycle event on the bus, or buffer it until the request
     /// reaches authentication.
     fn emit_or_buffer(&self, event: LifecycleEvent) {
+        if matches!(
+            &event,
+            LifecycleEvent::RequestFundingObserved {
+                ambiguous: true,
+                ..
+            }
+        ) || matches!(
+            &event,
+            LifecycleEvent::UpstreamQuotaFrameObserved {
+                matched_response_id: None,
+                ..
+            }
+        ) {
+            self.funding_ambiguous.store(true, Ordering::Release);
+        }
         if self.authn_reached.load(Ordering::Acquire) {
             self.bus.publish_lifecycle(event);
             return;
@@ -1110,6 +1127,7 @@ impl Inner {
                     finalize_ms: state.finalize_ms,
                     internal_errors: state.internal_errors.clone(),
                     event_kind: state.event_kind,
+                    funding_ambiguous: self.funding_ambiguous.load(Ordering::Acquire),
                 });
         }
     }
@@ -2737,5 +2755,34 @@ mod tests {
             expect_terminated(rx.recv().await.expect("terminal event delivered"));
         assert_eq!(status, StatusCode::OK.as_u16());
         assert!(matches!(reason, TerminationReason::Success));
+    }
+    #[tokio::test]
+    async fn terminal_snapshot_carries_ambiguous_funding() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_funding_ambiguous".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+
+        observer.mark_authn_reached();
+        observer.emit_lifecycle(LifecycleEvent::RequestFundingObserved {
+            event_id: observer.event_id().to_owned(),
+            attempt_num: 1,
+            funding: None,
+            response_id: None,
+            ambiguous: true,
+        });
+        observer.finish();
+
+        let LifecycleEvent::RequestTerminated {
+            funding_ambiguous, ..
+        } = rx.recv().await.expect("terminal event delivered")
+        else {
+            panic!("expected request termination");
+        };
+        assert!(funding_ambiguous);
     }
 }

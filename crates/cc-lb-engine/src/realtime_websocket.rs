@@ -504,6 +504,7 @@ impl RealtimeWebSocketSession {
                 shape_ms: None,
                 sign_ms: None,
                 upstream_ttfb_ms: None,
+                observed_at_unix_millis: None,
             });
         }
     }

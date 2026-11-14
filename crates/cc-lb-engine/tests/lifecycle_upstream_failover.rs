@@ -951,6 +951,7 @@ async fn oauth_429_headers_still_ingested_on_failover() {
         quota_rx,
         Some(fixture.quota_cache.clone() as Arc<dyn SubscriptionQuotaCacheLike>),
         None,
+        Some(test_bus.bus_arc()),
     );
 
     let (first_status, _body) = fixture.send().await;

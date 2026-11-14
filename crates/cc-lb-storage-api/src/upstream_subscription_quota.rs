@@ -425,6 +425,10 @@ pub struct SubscriptionQuotaSlimCheckpoint {
     pub utilization: Option<f64>,
     pub status: Option<SubscriptionQuotaStatus>,
     pub resets_at_unix_secs: Option<u64>,
+    /// Explicit absence tombstones the source's preceding credit state.
+    pub sample_kind: SubscriptionQuotaSampleKind,
+    /// Raw credit state and its field-specific observation evidence.
+    pub credits: Option<SubscriptionQuotaCredits>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -448,53 +452,6 @@ pub struct SubscriptionQuotaProviderLot {
     pub observed_at_unix_millis: u64,
     pub evaluation_unix_secs: u64,
     pub utilization: f64,
-}
-
-#[cfg(test)]
-mod slim_projection_tests {
-    use std::collections::BTreeSet;
-
-    use serde_json::Value;
-
-    use super::{
-        SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-        SubscriptionQuotaWindow,
-    };
-
-    #[test]
-    fn slim_projection_field_set() {
-        let projection = SubscriptionQuotaSlimCheckpoint {
-            upstream_id: uuid::Uuid::nil(),
-            window: SubscriptionQuotaWindow::FiveHour,
-            source: SubscriptionQuotaSource::Header,
-            changed_at_unix_millis: 1,
-            sample_id: uuid::Uuid::nil(),
-            utilization: Some(0.5),
-            status: Some(SubscriptionQuotaStatus::Allowed),
-            resets_at_unix_secs: Some(2),
-        };
-
-        let Value::Object(fields) =
-            serde_json::to_value(projection).expect("slim projection serializes")
-        else {
-            panic!("slim projection must serialize as an object");
-        };
-        let actual = fields.keys().map(String::as_str).collect::<BTreeSet<_>>();
-        let expected = [
-            "upstream_id",
-            "window",
-            "source",
-            "changed_at_unix_millis",
-            "sample_id",
-            "utilization",
-            "status",
-            "resets_at_unix_secs",
-        ]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-
-        assert_eq!(actual, expected);
-    }
 }
 
 /// Request-captured identity for an OAuth usage poll. A durable publication

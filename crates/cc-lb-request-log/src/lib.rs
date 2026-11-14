@@ -4,6 +4,7 @@
 
 mod cache;
 mod event_kind;
+mod funding;
 mod header_snapshot;
 mod request_diagnostics;
 mod request_event;
@@ -15,6 +16,7 @@ pub use cache::{
     RequestCacheLookbackPrefix, RequestCacheState, RequestNativeCacheObservation,
 };
 pub use event_kind::{ParseRequestEventKindError, RequestEventKind};
+pub use funding::{ParseRequestFundingError, RequestFunding};
 pub use header_snapshot::{CostBreakdown, HeaderSnapshot};
 pub use request_diagnostics::{
     REQUEST_DIAGNOSTICS_SCHEMA, RequestDiagnostics, RequestDiagnosticsRecord,

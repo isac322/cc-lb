@@ -80,5 +80,5 @@ pub use cc_lb_domain::PrincipalKindLite;
 pub use cc_lb_request_log::{
     FinalRequestEventUpdate, RequestCacheBreakpoint, RequestCacheBreakpointSource,
     RequestCacheState, RequestEvent, RequestEventKind, RequestEventPartial, RequestEventPhase,
-    RequestEventUpdate,
+    RequestEventUpdate, RequestFunding,
 };

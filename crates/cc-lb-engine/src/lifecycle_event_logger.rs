@@ -792,6 +792,7 @@ mod tests {
             shape_ms,
             sign_ms,
             upstream_ttfb_ms,
+            observed_at_unix_millis: None,
         }
     }
     fn upstream_started_with_attempt_stages(
@@ -812,6 +813,7 @@ mod tests {
             shape_ms: None,
             sign_ms: None,
             upstream_ttfb_ms,
+            observed_at_unix_millis: None,
         }
     }
 
@@ -873,6 +875,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 
@@ -1450,6 +1453,7 @@ mod tests {
                 finalize_ms: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
+                funding_ambiguous: false,
             },
         ]);
 

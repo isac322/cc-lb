@@ -333,6 +333,7 @@ mod tests {
             finalize_ms: None,
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -384,6 +385,7 @@ mod tests {
             finalize_ms: None,
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -425,6 +427,7 @@ mod tests {
             finalize_ms: None,
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -497,6 +500,7 @@ mod tests {
             finalize_ms: None,
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 

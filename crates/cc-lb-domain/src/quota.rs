@@ -56,7 +56,7 @@ pub enum SubscriptionQuotaDataState {
 }
 
 /// Provider-reported credit state used by subscription quota routing and admin views.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubscriptionQuotaCredits {
     /// Provider-reported availability flag.
     pub has_credits: Option<bool>,
@@ -70,6 +70,9 @@ pub struct SubscriptionQuotaCredits {
     pub approx_local_messages: Option<[u64; 2]>,
     /// Optional provider-reported cloud-message estimate pair.
     pub approx_cloud_messages: Option<[u64; 2]>,
+    /// Per-field evidence; absent on legacy records.
+    #[serde(default, skip_serializing_if = "crate::CreditObservations::is_empty")]
+    pub observations: crate::CreditObservations,
 }
 
 impl SubscriptionQuotaCredits {

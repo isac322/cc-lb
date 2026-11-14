@@ -287,7 +287,8 @@ fn parse_codex_credits(headers: &http::HeaderMap) -> Option<SubscriptionQuotaCre
     let balance = headers
         .get("x-codex-credits-balance")
         .and_then(|value| value.to_str().ok())
-        .and_then(parse_string);
+        .filter(|value| cc_lb_domain::is_credit_balance(value))
+        .map(str::to_owned);
     if has_credits.is_none() && unlimited.is_none() && balance.is_none() {
         return None;
     }
@@ -298,6 +299,7 @@ fn parse_codex_credits(headers: &http::HeaderMap) -> Option<SubscriptionQuotaCre
         balance,
         approx_local_messages: None,
         approx_cloud_messages: None,
+        ..Default::default()
     })
 }
 

@@ -531,6 +531,7 @@ fn batch_b_wire_snapshots_are_stable() {
         upstream_stream_warning_message: Some("upstream response decoding failed".to_owned()),
         iterations: Some(json!([{ "type": "message", "input_tokens": 100 }])),
         keepalive_session_key_hash: None,
+        funding: None,
     };
     let request_event_json = json!({
         "ts": 1_700_000_000u64,

@@ -182,3 +182,13 @@ and `list_latest_subscription_quota_checkpoints_for_upstreams`, together with
 their SQLite/Postgres bucketing and full-record read helpers, have been
 deleted. Full checkpoint rows are only read directly by tests that verify what
 the writer persisted.
+
+## Update (2026-11-15): effective credit state
+
+For Codex credits, “state change” means a change to the effective credit values
+merged across `unified`/`overage` and `header`/`api`. Only such a change records
+the observation's physical-source checkpoint; unchanged observations update
+latest per-field provenance without growing history. History records the
+effective state known at commit: late observations older than that state do not
+create backdated credit checkpoints or rewrite the past. Non-credit quota
+fields retain their existing per-source checkpoint behavior.

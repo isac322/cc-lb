@@ -787,6 +787,14 @@ Antigravity content requests use `https://daily-cloudcode-pa.googleapis.com`. Fo
 
 `retrieveUserQuota` and unlabeled summary buckets retain period-unknown raw meters, exposed as `period_unknown_meters` on `GET /admin/v1/subscription-quotas/latest`. Polling keeps the provider's remaining fraction and reset time without inferring a `5h` or `7d` period from reset distance. Each poll makes at most one fallback fetch, preserves `429` throttling, and leaves prior observations intact when the fallback fails instead of writing false `Absent` records.
 
+OpenAI OAuth credit balances are retained as raw decimal strings in quota
+observations. `GET /admin/v1/subscription-quotas/credit-history` returns
+per-upstream and pool balance history for the requested relative range. Pool
+membership matches the enabled OpenAI OAuth quota pool. Historical points hold
+recorded balance state; only the current tail uses the balance sidecar's own
+freshness. Missing, invalid, unlimited, stale, and partial balances remain
+distinguishable. The pool sum is exact before clients truncate it for display.
+
 > [!WARNING]
 > Google Antigravity Additional Terms [§6](https://antigravity.google/terms) prohibit using third-party software, tools, or services to access the Service with Antigravity OAuth. The terms state that this is a breach and may be grounds for suspension or termination of Antigravity and/or Gemini CLI accounts. Operators decide at their own risk whether to use this integration.
 

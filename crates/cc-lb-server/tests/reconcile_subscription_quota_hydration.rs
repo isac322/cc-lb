@@ -413,6 +413,7 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
             balance: Some("62500.0000000001".to_owned()),
             approx_local_messages: Some([10, 20]),
             approx_cloud_messages: Some([30, 40]),
+            ..Default::default()
         });
         peer.storage
             .record_subscription_quota_samples(std::slice::from_ref(&record))
@@ -461,6 +462,24 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
                 "balance": "62500.0000000001",
                 "approx_local_messages": [10, 20],
                 "approx_cloud_messages": [30, 40],
+                "observations": {
+                    "has_credits": {
+                        "observed_at_unix_millis": record.observed_at_unix_millis,
+                        "source": source.as_str(),
+                    },
+                    "unlimited": {
+                        "observed_at_unix_millis": record.observed_at_unix_millis,
+                        "source": source.as_str(),
+                    },
+                    "limit_reached": {
+                        "observed_at_unix_millis": record.observed_at_unix_millis,
+                        "source": source.as_str(),
+                    },
+                    "balance": {
+                        "observed_at_unix_millis": record.observed_at_unix_millis,
+                        "source": source.as_str(),
+                    },
+                },
             })
         );
     }

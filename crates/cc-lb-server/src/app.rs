@@ -1409,6 +1409,7 @@ async fn build_app_with_storage_inner(
             lifecycle_subscription_quota_rx,
             Some(cache),
             Some(subscription_quota_sink.clone()),
+            Some(event_bus.clone()),
         );
     let lifecycle_limit_rejection_audit_subscriber_handle =
         cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(

@@ -277,6 +277,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             shape_ms: Some(profile.token_base() + 3),
             sign_ms: Some(profile.token_base() + 4),
             upstream_ttfb_ms: Some(profile.token_base() + 5),
+            observed_at_unix_millis: None,
         },
         EventOp::Usage => LifecycleEvent::UsageObserved {
             event_id,
@@ -312,6 +313,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             io_timings: Default::default(),
             upstream_body_ms: Some(profile.token_base() + 10),
             event_kind: None,
+            funding_ambiguous: false,
         },
     }
 }

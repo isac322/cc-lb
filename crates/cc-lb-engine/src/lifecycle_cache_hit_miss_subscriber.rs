@@ -507,6 +507,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 

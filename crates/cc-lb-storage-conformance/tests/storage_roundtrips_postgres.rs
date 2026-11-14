@@ -610,6 +610,13 @@ fn upstream_subscription_quota_credit_only_changes_create_checkpoints_postgres()
     );
 }
 #[test]
+fn upstream_subscription_quota_effective_credit_checkpoint_history_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_effective_credit_checkpoint_history",
+        upstream_subscription_quota_store::effective_credit_checkpoint_history,
+    );
+}
+#[test]
 fn upstream_subscription_quota_absent_replaces_latest_without_erasing_history_postgres() {
     run_postgres_scenario(
         "upstream_subscription_quota_absent_replaces_latest_without_erasing_history",

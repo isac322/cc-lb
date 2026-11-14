@@ -18,6 +18,7 @@ import {
   useState,
 } from 'react';
 import type {
+  CreditHistoryResponse,
   LatestResponse,
   PeriodUnknownQuotaMeter,
   QuotaSnapshot,
@@ -28,6 +29,7 @@ import {
   type CouponInventory,
   useUpstreamCouponInventory,
 } from '../../lib/couponInventory';
+import { type CreditMiniData, creditMiniData } from '../../lib/creditHistory';
 import { sumTokens } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
 import {
@@ -38,6 +40,7 @@ import {
 import { type ProviderFamily, providerOf } from '../../lib/providers';
 import {
   type Upstream,
+  useCreditHistory,
   useStatus,
   useSubscriptionQuotaLatest,
   useUpstreams,
@@ -50,11 +53,12 @@ import {
   quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
+import { TIME_PRESET_SECONDS, useSharedTimeRange } from '../../lib/timePresets';
 import { cx, Skeleton } from '../ui/primitives';
 import { PaceLegend, UsageMeter } from '../ui/UsageMeter';
 import {
   type CodexCreditFacts,
-  CodexCreditSummary,
+  CodexCreditMini,
   selectCodexCredits,
 } from './codexCredits';
 import {
@@ -134,6 +138,10 @@ export interface UpstreamUsageRow {
   periodUnknownMeters: PeriodUnknownQuotaMeter[];
   /** Spend and tokens over the last 7 days; `null` when unknown. */
   usage7d: UpstreamUsage7d | null;
+  /** Freshness limit used for field-specific Codex observations. */
+  creditMaxStalenessSecs?: number;
+  /** Credit balance history for this OpenAI OAuth upstream. */
+  creditHistory?: CreditMiniData;
 }
 
 export interface UpstreamUsageData {
@@ -144,6 +152,8 @@ export interface UpstreamUsageData {
   statusPending: boolean;
   usagePending: boolean;
   quotaError: boolean;
+  creditHistory?: CreditHistoryResponse;
+  creditHistoryPending?: boolean;
   /** Rows carrying a reconnect nudge (warn or danger). */
   reconnectCount: number;
   coupons?: ReadonlyMap<string, CouponInventory>;
@@ -163,12 +173,14 @@ export function buildUpstreamUsageRows({
   status,
   nudges,
   usageByUpstreamId,
+  creditHistory,
 }: {
   upstreams: readonly Upstream[];
   latest: LatestResponse | undefined;
   status: readonly RuntimeStatusEntry[] | undefined;
   nudges: ReadonlyMap<string, OAuthReconnectNudge>;
   usageByUpstreamId: ReadonlyMap<string, UpstreamUsage7d>;
+  creditHistory?: CreditHistoryResponse;
 }): UpstreamUsageRow[] {
   return upstreams.map((upstream) => {
     const runtime = status?.find((s) => s.id === upstream.id);
@@ -184,6 +196,8 @@ export function buildUpstreamUsageRows({
       windows: latestRow?.windows ?? [],
       periodUnknownMeters: latestRow?.period_unknown_meters ?? [],
       usage7d: usageByUpstreamId.get(upstream.id) ?? null,
+      creditMaxStalenessSecs: latest?.max_staleness_secs,
+      creditHistory: creditMiniData(creditHistory).get(upstream.id),
     };
   });
 }
@@ -238,6 +252,13 @@ export function useUpstreamUsageData(
     'totals',
   );
   const { nudges } = useOAuthReconnectNudges(upstreams);
+  const { range } = useSharedTimeRange();
+  const creditQ = useCreditHistory(
+    upstreams
+      .filter((upstream) => upstream.kind === 'openai_oauth')
+      .map((upstream) => upstream.id),
+    TIME_PRESET_SECONDS[range],
+  );
 
   const usageByUpstreamId = useMemo(() => {
     const m = new Map<string, UpstreamUsage7d>();
@@ -261,8 +282,16 @@ export function useUpstreamUsageData(
         status: statusQ.data?.upstreams,
         nudges,
         usageByUpstreamId,
+        creditHistory: creditQ.data,
       }),
-    [upstreams, latestQ.data, statusQ.data, nudges, usageByUpstreamId],
+    [
+      upstreams,
+      latestQ.data,
+      statusQ.data,
+      nudges,
+      usageByUpstreamId,
+      creditQ.data,
+    ],
   );
 
   return {
@@ -274,6 +303,8 @@ export function useUpstreamUsageData(
     statusPending: statusQ.data === undefined && statusQ.isPending,
     usagePending: usageQ.data === undefined && usageQ.isPending,
     quotaError: latestQ.isError,
+    creditHistory: creditQ.data,
+    creditHistoryPending: creditQ.isPending,
     reconnectCount: rows.filter((r) => r.nudge != null).length,
   };
 }
@@ -488,6 +519,8 @@ function WindowCell({
   nowUnixSecs,
   timeZone,
   creditFacts,
+  creditHistory,
+  creditHistoryPending,
   retained = false,
 }: {
   windowName: UsageWindow;
@@ -496,16 +529,25 @@ function WindowCell({
   nowUnixSecs: number;
   timeZone: string;
   creditFacts?: CodexCreditFacts | null;
+  creditHistory?: CreditMiniData;
+  creditHistoryPending?: boolean;
   /** A Gemini reading older than its group's latest observation. */
   retained?: boolean;
 }) {
-  if (windowName === 'unified' && creditFacts != null) {
+  if (
+    windowName === 'unified' &&
+    (creditFacts != null || creditHistory != null || creditHistoryPending)
+  ) {
     return (
       <div className="min-w-0" data-testid="usage-cell" data-window="unified">
         <span className="mb-1.5 block text-label text-text-muted @4xl:hidden">
           Codex credits
         </span>
-        <CodexCreditSummary facts={creditFacts} />
+        <CodexCreditMini
+          compact
+          data={creditHistory}
+          pending={creditHistoryPending}
+        />
       </div>
     );
   }
@@ -644,7 +686,7 @@ function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
   if (window === 'unified') {
     return (
       row.upstream.kind === 'openai_oauth' &&
-      selectCodexCredits(row.windows) != null
+      (selectCodexCredits(row.windows) != null || row.creditHistory != null)
     );
   }
   const snap = row.windows.find((candidate) => candidate.window === window);
@@ -1058,8 +1100,12 @@ function RowBody({
               timeZone={timeZone}
               windowName={w}
               creditFacts={
-                w === 'unified' ? selectCodexCredits(row.windows) : null
+                w === 'unified'
+                  ? selectCodexCredits(row.windows, row.creditMaxStalenessSecs)
+                  : null
               }
+              creditHistory={w === 'unified' ? row.creditHistory : undefined}
+              creditHistoryPending={w === 'unified' ? pending : false}
             />
           );
         })
