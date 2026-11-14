@@ -300,6 +300,7 @@ impl SchedulerDispatch {
         } else {
             first_response
         };
+        let response_received_at_unix_millis = now_unix_millis(&*self.clock);
         if response.status == http::StatusCode::TOO_MANY_REQUESTS {
             return Ok(OAuthUsagePollObservation::Throttled {
                 observed_at_unix_secs,
@@ -315,7 +316,7 @@ impl SchedulerDispatch {
             .fetch_openai_reset_inventory(&upstream, &fence, &response.body)
             .await?;
         self.validate_usage_poll_fence(&upstream, &fence).await?;
-        let observed_at_unix_millis = now_unix_millis(&*self.clock);
+        let observed_at_unix_millis = response_received_at_unix_millis;
         let (mut records, cedar_ember, affected_main_published, raw_updates) = if is_anthropic {
             let (records, cedar_ember) =
                 parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;

@@ -872,7 +872,7 @@ async fn build_latest_response(
             {
                 dynamic_view
                     .subscription_quota_cache
-                    .upsert_observation(&sample);
+                    .upsert_durable_if_newer(&sample);
                 durable_latest_by_upstream
                     .entry(sample.upstream_id)
                     .or_default()

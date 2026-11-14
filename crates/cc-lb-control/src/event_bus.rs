@@ -415,9 +415,16 @@ impl RequestEventBus for InMemoryBus {
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
         if matches!(&event, LifecycleEvent::UpstreamQuotaFrameObserved { .. }) {
-            // The quota subscriber and assembler both receive this off-path
-            // frame. It never enters admin broadcasts or the proxy path.
-            self.send_to_assembler(event.clone());
+            // Account-only frames feed only the quota subscriber. A request
+            // identity is required before the assembler may create a row.
+            let request_scoped = matches!(
+                &event,
+                LifecycleEvent::UpstreamQuotaFrameObserved { event_id, .. }
+                    if !event_id.is_empty()
+            );
+            if request_scoped {
+                self.send_to_assembler(event.clone());
+            }
             let tx = self
                 .inner
                 .lifecycle_subscription_quota_tx

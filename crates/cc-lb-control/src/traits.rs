@@ -14,6 +14,9 @@ use crate::dynamic_view::{DynamicView, DynamicViewHolder};
 pub trait SubscriptionQuotaCacheLike: Send + Sync {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample);
 
+    fn upsert_durable_if_newer(&self, record: &SubscriptionQuotaSample) {
+        self.upsert_observation(record);
+    }
     fn snapshot_for_upstream(
         &self,
         upstream_id: Uuid,

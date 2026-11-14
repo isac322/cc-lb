@@ -100,9 +100,11 @@ type SlotVersions = HashMap<(Uuid, SubscriptionQuotaWindow), SourceVersions>;
 /// `observed_at_unix_millis` in its `(upstream, window, source)` slot.
 /// Strictly newer observations always replace, older ones never do, and an
 /// empty slot always accepts.
-#[derive(Clone, Copy, Debug)]
 enum EqualObservedAt<'a> {
     Replace,
+    /// Keep the resident observation when a durable fallback has the same
+    /// timestamp; strictly newer values still replace it.
+    Keep,
     /// Replace only if the slot has not been replaced since these versions
     /// were captured, so a read that raced a concurrent install cannot
     /// restore older content.
@@ -229,6 +231,11 @@ impl SubscriptionQuotaCache {
     pub fn upsert_observation(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
         self.upsert_with_tie_policy(upstream_id, record, EqualObservedAt::Replace);
     }
+    /// Install a durable read-side fallback without overwriting an equal-time
+    /// live observation that arrived while storage was being read.
+    pub fn upsert_durable_if_newer(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
+        self.upsert_with_tie_policy(upstream_id, record, EqualObservedAt::Keep);
+    }
 
     fn upsert_with_tie_policy(
         &self,
@@ -259,6 +266,7 @@ impl SubscriptionQuotaCache {
                 Ordering::Less => false,
                 Ordering::Equal => match tie {
                     EqualObservedAt::Replace => true,
+                    EqualObservedAt::Keep => false,
                     EqualObservedAt::ReplaceIfUnchangedSince(captured) => {
                         let captured = captured
                             .get(&(upstream_id, record.window))
@@ -350,6 +358,9 @@ impl MergedQuotaSnapshot {
 impl SubscriptionQuotaCacheLike for SubscriptionQuotaCache {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
         self.upsert_observation(record.upstream_id, record);
+    }
+    fn upsert_durable_if_newer(&self, record: &SubscriptionQuotaSample) {
+        self.upsert_durable_if_newer(record.upstream_id, record);
     }
 
     fn snapshot_for_upstream(
