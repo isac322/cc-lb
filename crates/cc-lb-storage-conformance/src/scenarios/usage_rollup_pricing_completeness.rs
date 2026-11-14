@@ -283,8 +283,16 @@ where
                     .await?;
                 ensure!(rows.len() == 1);
                 let row = &rows[0];
+                let (expected_minute, expected_state) = if cross_batch
+                    && batch + 1 < passes
+                    && backend.kind() == BackendKind::Postgres
+                {
+                    ((1, 0, 0, 0), PricingCompleteness::Unknown)
+                } else {
+                    ((1, 0, 1, 0), PricingCompleteness::Unpriced)
+                };
                 ensure!(
-                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == (1, 0, 1, 0),
+                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == expected_minute,
                     "cross_batch={cross_batch}, batch={batch}: recreated minute must retain only the post-prune suffix: {row:?}"
                 );
                 ensure!(
@@ -295,7 +303,7 @@ where
                         unmetered_event_count: row.unmetered_event_count,
                         total_tokens: row.input_tokens,
                         virtual_cost_micros: row.virtual_cost_micros,
-                    }) == Some(PricingCompleteness::Unpriced),
+                    }) == Some(expected_state),
                     "recreated minute must never become known-zero"
                 );
             }
@@ -762,14 +770,22 @@ where
                     .iter()
                     .find(|row| row.model == "interior-other")
                     .ok_or_else(|| anyhow::anyhow!("missing interior-other control row"))?;
+                let expected_control = if mode == "intact_control"
+                    || backend.kind() == BackendKind::Sqlite
+                {
+                    (1, 1, 0, 0)
+                } else {
+                    (1, 0, 0, 0)
+                };
                 ensure!(
                     (
                         control_row.request_count,
                         control_row.priced_event_count,
                         control_row.unpriced_event_count,
                         control_row.unmetered_event_count,
-                    ) == (1, 1, 0, 0),
-                    "{mode}: intact suffix row must be priced: {control_row:?}"
+                    ) == expected_control,
+                    "{mode} ({:?}): unexpected interior-other row: {control_row:?}",
+                    backend.kind()
                 );
             }
 

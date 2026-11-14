@@ -228,7 +228,7 @@ impl CrashFixture {
 
     async fn reset_iteration(&self) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(
-            "TRUNCATE TABLE request_events_v1, usage_rollups_v2, usage_rollup_checkpoints_v1 RESTART IDENTITY CASCADE",
+            "TRUNCATE TABLE request_events_v1, usage_rollups_v2, usage_rollup_pricing_backfill_stage_v1, usage_rollup_checkpoints_v1 RESTART IDENTITY CASCADE",
         )
         .execute(&self.pool)
         .await?;
@@ -597,6 +597,13 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
         .await
         .unwrap();
         assert_eq!(classified, 0, "classification writes must roll back with the cursor");
+        let staged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(staged, 0, "staged candidates must roll back with the cursor");
         let cursor: (i64, String) = sqlx::query_as(
             "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
              WHERE id = 'pricing_completeness_backfill_cursor'",
