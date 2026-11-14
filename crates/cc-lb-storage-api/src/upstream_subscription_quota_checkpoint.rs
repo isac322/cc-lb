@@ -12,8 +12,9 @@ const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubscriptionQuotaSemanticFingerprint([u8; 32]);
 
-impl SubscriptionQuotaSemanticFingerprint {
-    pub fn from_sample(record: &SubscriptionQuotaSample) -> Self {
+macro_rules! fingerprint_fields {
+    ($record:expr) => {{
+        let record = $record;
         let mut bytes = Vec::with_capacity(256);
         bytes.push(SEMANTIC_FINGERPRINT_VERSION);
         write_optional_f64(&mut bytes, record.utilization);
@@ -30,7 +31,13 @@ impl SubscriptionQuotaSemanticFingerprint {
         write_optional_f64(&mut bytes, record.extra_usage_monthly_limit);
         write_optional_f64(&mut bytes, record.extra_usage_used_credits);
         write_optional_credits(&mut bytes, record.credits.as_ref());
-        Self(*blake3::hash(&bytes).as_bytes())
+        SubscriptionQuotaSemanticFingerprint(*blake3::hash(&bytes).as_bytes())
+    }};
+}
+
+impl SubscriptionQuotaSemanticFingerprint {
+    pub fn from_sample(record: &SubscriptionQuotaSample) -> Self {
+        fingerprint_fields!(record)
     }
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -101,6 +108,129 @@ impl From<&SubscriptionQuotaSample> for SubscriptionQuotaCheckpointRecord {
             credits: record.credits.clone(),
             extra_usage_used_credits: record.extra_usage_used_credits,
             ingested_at_unix_millis: record.ingested_at_unix_millis,
+        }
+    }
+}
+/// Result of comparing commit-known credit values across both physical streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditCheckpointChange {
+    Older,
+    Unchanged,
+    Changed,
+}
+
+impl SubscriptionQuotaCheckpointRecord {
+    /// Credit state is shared by Unified/Overage; quota state remains source-local.
+    pub fn has_effective_credit_state(&self) -> bool {
+        self.credits.is_some()
+            && matches!(
+                self.window,
+                SubscriptionQuotaWindow::Unified | SubscriptionQuotaWindow::Overage
+            )
+    }
+
+    /// Whether the record carries any non-credit quota state.
+    pub fn has_quota_state(&self) -> bool {
+        self.utilization.is_some()
+            || self.status.is_some()
+            || self.resets_at_unix_secs.is_some()
+            || self.surpassed_threshold.is_some()
+            || self.fallback_percentage.is_some()
+            || self.fallback_available.is_some()
+            || self.overage_in_use.is_some()
+            || self.overage_period_monthly_utilization.is_some()
+            || self.upgrade_paths.is_some()
+            || self.disabled_reason.is_some()
+            || self.extra_usage_enabled.is_some()
+            || self.extra_usage_monthly_limit.is_some()
+            || self.extra_usage_used_credits.is_some()
+    }
+
+    /// Normalize a physical checkpoint and compare its effective credit values.
+    /// `rows` contains the recorded per-key anchors as of this observation.
+    /// `latest` supplies commit-known freshness without rewriting historical anchors.
+    pub fn prepare_credit_checkpoint(
+        &mut self,
+        mut rows: Vec<crate::SubscriptionQuotaSlimCheckpoint>,
+        latest: Vec<crate::SubscriptionQuotaSlimCheckpoint>,
+    ) -> CreditCheckpointChange {
+        use cc_lb_domain::{CreditSource, SubscriptionQuotaCredits};
+        use std::collections::BTreeMap;
+        let newest = rows
+            .iter()
+            .chain(&latest)
+            .map(|row| row.changed_at_unix_millis)
+            .max();
+        let older = newest.is_some_and(|at| self.changed_at_unix_millis < at);
+        if !older {
+            rows.extend(latest);
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.window,
+                row.source,
+                row.changed_at_unix_millis,
+                row.sample_id,
+            )
+        });
+        let mut states = BTreeMap::<_, SubscriptionQuotaCredits>::new();
+        for row in rows {
+            let key = (row.window, row.source);
+            if row.sample_kind == SubscriptionQuotaSampleKind::Absent {
+                states.remove(&key);
+            } else if let Some(mut credits) = row.credits {
+                credits.stamp_observations(
+                    row.changed_at_unix_millis,
+                    if row.source == SubscriptionQuotaSource::Api {
+                        CreditSource::Api
+                    } else {
+                        CreditSource::Header
+                    },
+                );
+                states.entry(key).or_default().merge_observations(&credits);
+            }
+        }
+        let merge = |states: &BTreeMap<_, SubscriptionQuotaCredits>| {
+            let mut effective = SubscriptionQuotaCredits::default();
+            for credits in states.values() {
+                effective.merge_observations(credits);
+            }
+            effective
+        };
+        let before = merge(&states);
+        if older {
+            self.credits = Some(before);
+            self.semantic_fingerprint = fingerprint_fields!(&*self);
+            return CreditCheckpointChange::Older;
+        }
+        let key = (self.window, self.source);
+        if let Some(mut incoming) = self.credits.take() {
+            incoming.stamp_observations(
+                self.changed_at_unix_millis,
+                if self.source == SubscriptionQuotaSource::Api {
+                    CreditSource::Api
+                } else {
+                    CreditSource::Header
+                },
+            );
+            states.entry(key).or_default().merge_observations(&incoming);
+        }
+        let after = merge(&states);
+        let changed = before.has_credits != after.has_credits
+            || before.unlimited != after.unlimited
+            || before.limit_reached != after.limit_reached
+            || before.balance != after.balance
+            || before.approx_local_messages != after.approx_local_messages
+            || before.approx_cloud_messages != after.approx_cloud_messages;
+        // Physical quota provenance stays on the row. Credit fields retain the
+        // effective snapshot and their own original field provenance so a
+        // subsequent quota-only change cannot resurrect ignored stale credits.
+        self.credits = Some(after);
+        self.semantic_fingerprint = fingerprint_fields!(&*self);
+        if changed {
+            CreditCheckpointChange::Changed
+        } else {
+            CreditCheckpointChange::Unchanged
         }
     }
 }

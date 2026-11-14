@@ -219,11 +219,11 @@ async fn record_samples_in_tx(
                 }
             }
         }
-        upsert_latest(tx, &record).await?;
         if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
             insert_checkpoint_if_changed(tx, &SubscriptionQuotaCheckpointRecord::from(&*record))
                 .await?;
         }
+        upsert_latest(tx, &record).await?;
     }
     Ok(())
 }
@@ -259,18 +259,78 @@ pub(super) async fn insert_checkpoint_if_changed(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
+    let credit_state = record.has_effective_credit_state();
+    let mut prepared;
+    let (record, credit_change) = if credit_state {
+        let current_rows = sqlx::query(
+            "WITH keys(window,source) AS ( \
+              VALUES ('unified','header'),('unified','api'),('overage','header'),('overage','api') \
+            ), anchors AS ( \
+              SELECT cp.* FROM keys JOIN upstream_subscription_quota_checkpoints_v1 cp \
+                ON cp.rowid = (SELECT rowid FROM upstream_subscription_quota_checkpoints_v1 \
+                  WHERE upstream_id=?1 AND window=keys.window AND source=keys.source \
+                  ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1) \
+            ) SELECT upstream_id,window,source,changed_at_unix_millis,sample_id, \
+                utilization,status,resets_at_unix_secs,sample_kind,credits_json \
+              FROM anchors \
+              UNION ALL SELECT upstream_id,window,source,observed_at_unix_millis, \
+                sample_id,utilization,status,resets_at_unix_secs,sample_kind,credits_json \
+              FROM upstream_subscription_quota_latest_v1 \
+              WHERE upstream_id=?1 AND window IN ('unified','overage')",
+        )
+        .bind(record.upstream_id.to_string())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let current_rows = current_rows
+            .into_iter()
+            .map(row_to_slim_checkpoint)
+            .collect::<StorageResult<Vec<_>>>()?;
+        prepared = record.clone();
+        let mut change =
+            prepared.prepare_credit_checkpoint(current_rows.clone(), current_rows.clone());
+        if change == cc_lb_storage_api::CreditCheckpointChange::Older {
+            let asof_rows = sqlx::query(
+                "WITH keys(window,source) AS ( \
+                  VALUES ('unified','header'),('unified','api'),('overage','header'),('overage','api') \
+                ), anchors AS ( \
+                  SELECT cp.* FROM keys JOIN upstream_subscription_quota_checkpoints_v1 cp \
+                    ON cp.rowid = (SELECT rowid FROM upstream_subscription_quota_checkpoints_v1 \
+                      WHERE upstream_id=?1 AND window=keys.window AND source=keys.source \
+                        AND changed_at_unix_millis <= ?2 \
+                      ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1) \
+                ) SELECT upstream_id,window,source,changed_at_unix_millis,sample_id, \
+                    utilization,status,resets_at_unix_secs,sample_kind,credits_json \
+                  FROM anchors",
+            ).bind(record.upstream_id.to_string())
+                .bind(u64_to_i64(record.changed_at_unix_millis, "credit as-of timestamp")?)
+                .fetch_all(&mut **tx).await.map_err(map_sqlx_error)?;
+            let asof_rows = asof_rows
+                .into_iter()
+                .map(row_to_slim_checkpoint)
+                .collect::<StorageResult<Vec<_>>>()?;
+            prepared = record.clone();
+            change = prepared.prepare_credit_checkpoint(asof_rows, current_rows);
+        }
+        (
+            &prepared,
+            change == cc_lb_storage_api::CreditCheckpointChange::Changed,
+        )
+    } else {
+        (record, false)
+    };
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let credits_json = encode_credits(record.credits.as_ref())?;
     let unchanged = sqlx::query_scalar::<_, bool>(
-        "SELECT (semantic_fingerprint = ?1 AND credits_json IS ?14) OR ( \
+        "SELECT semantic_fingerprint = ?1 OR ( \
              status IS ?2 AND resets_at_unix_secs IS ?3 \
              AND surpassed_threshold IS ?4 AND fallback_percentage IS ?5 \
              AND fallback_available IS ?6 AND overage_in_use IS ?7 \
              AND overage_period_monthly_utilization IS ?8 AND upgrade_paths IS ?9 \
              AND disabled_reason IS ?10 AND extra_usage_enabled IS ?11 \
              AND extra_usage_monthly_limit IS ?12 AND extra_usage_used_credits IS ?13 \
-             AND credits_json IS ?14 \
-             AND utilization IS NOT NULL AND ?15 IS NOT NULL AND ABS(utilization - ?15) < 0.001 \
+             AND (?19 OR json_remove(credits_json, '$.observations') IS json_remove(?14, '$.observations')) \
+             AND (utilization IS ?15 OR (utilization IS NOT NULL AND ?15 IS NOT NULL AND ABS(utilization - ?15) < 0.001)) \
          ) FROM upstream_subscription_quota_checkpoints_v1 \
          WHERE upstream_id = ?16 AND window = ?17 AND source = ?18 \
          ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1",
@@ -298,11 +358,15 @@ pub(super) async fn insert_checkpoint_if_changed(
     .bind(record.upstream_id.to_string())
     .bind(record.window.as_str())
     .bind(record.source.as_str())
+    .bind(credit_state)
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
 
-    if unchanged == Some(true) {
+    if !credit_change
+        && (unchanged == Some(true)
+            || (credit_state && unchanged.is_none() && !record.has_quota_state()))
+    {
         return Ok(false);
     }
     let result = sqlx::query(

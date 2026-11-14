@@ -86,7 +86,9 @@ pub(in super::super) async fn list_slim_checkpoints(
     Ok(checkpoints)
 }
 
-fn row_to_slim_checkpoint(row: PgRow) -> StorageResult<SubscriptionQuotaSlimCheckpoint> {
+pub(in super::super) fn row_to_slim_checkpoint(
+    row: PgRow,
+) -> StorageResult<SubscriptionQuotaSlimCheckpoint> {
     let status = row
         .try_get::<Option<String>, _>("status")
         .map_err(map_sqlx_error)?

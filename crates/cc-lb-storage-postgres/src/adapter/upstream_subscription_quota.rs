@@ -166,6 +166,7 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
         records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        lock_credit_upstreams(&mut tx, records.iter().map(|record| record.upstream_id)).await?;
         let mut inserted = 0usize;
         for record in records {
             if insert_checkpoint_if_changed(&mut tx, record).await? {
@@ -198,6 +199,7 @@ async fn record_samples_in_tx(
     conn: &mut PgConnection,
     records: &[SubscriptionQuotaSample],
 ) -> StorageResult<()> {
+    lock_credit_upstreams(conn, records.iter().map(|record| record.upstream_id)).await?;
     for incoming in records {
         let mut record = std::borrow::Cow::Borrowed(incoming);
         if incoming.sample_kind == SubscriptionQuotaSampleKind::Sample
@@ -207,18 +209,6 @@ async fn record_samples_in_tx(
                     SubscriptionQuotaWindow::Unified | SubscriptionQuotaWindow::Overage
                 ))
         {
-            // Serialize read/merge/write even when this source has no latest
-            // row yet. The transaction lock is off the proxy request path.
-            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(format!(
-                    "credit:{}:{}:{}",
-                    incoming.upstream_id,
-                    incoming.window.as_str(),
-                    incoming.source.as_str()
-                ))
-                .execute(&mut *conn)
-                .await
-                .map_err(map_sqlx_error)?;
             let previous = sqlx::query(
                 "SELECT credits_json, observed_at_unix_millis FROM upstream_subscription_quota_latest_v1 \
                  WHERE upstream_id = $1 AND \"window\" = $2 AND source = $3",
@@ -256,11 +246,11 @@ async fn record_samples_in_tx(
                 }
             }
         }
-        upsert_latest(conn, &record).await?;
         if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
             insert_checkpoint_if_changed(conn, &SubscriptionQuotaCheckpointRecord::from(&*record))
                 .await?;
         }
+        upsert_latest(conn, &record).await?;
     }
     Ok(())
 }
@@ -276,15 +266,90 @@ async fn notify_quota_change(storage: &PostgresStorage, upstream_id: Uuid) {
     }
 }
 
+async fn lock_credit_upstreams(
+    conn: &mut PgConnection,
+    upstream_ids: impl Iterator<Item = Uuid>,
+) -> StorageResult<()> {
+    for id in upstream_ids.collect::<BTreeSet<_>>() {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("credit:{id}"))
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
 async fn insert_checkpoint_if_changed(
     conn: &mut PgConnection,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
+    let credit_state = record.has_effective_credit_state();
+    let mut prepared;
+    let (record, credit_change) = if credit_state {
+        let current_rows = sqlx::query(
+            r#"WITH keys("window", source) AS (
+                VALUES ('unified','header'),('unified','api'),('overage','header'),('overage','api')
+            ), anchors AS (
+                SELECT anchor.* FROM keys CROSS JOIN LATERAL (
+                    SELECT * FROM upstream_subscription_quota_checkpoints_v1
+                    WHERE upstream_id=$1 AND "window"=keys."window" AND source=keys.source
+                    ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1
+                ) anchor
+            ) SELECT upstream_id,"window",source,changed_at_unix_millis,sample_id,
+                utilization,status,resets_at_unix_secs,sample_kind,credits_json
+              FROM anchors
+              UNION ALL SELECT upstream_id,"window",source,observed_at_unix_millis,sample_id,
+                utilization,status,resets_at_unix_secs,sample_kind,credits_json
+              FROM upstream_subscription_quota_latest_v1
+              WHERE upstream_id=$1 AND "window" IN ('unified','overage')"#,
+        )
+        .bind(record.upstream_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        let current_rows = current_rows
+            .into_iter()
+            .map(aggregate::row_to_slim_checkpoint)
+            .collect::<StorageResult<Vec<_>>>()?;
+        prepared = record.clone();
+        let mut change =
+            prepared.prepare_credit_checkpoint(current_rows.clone(), current_rows.clone());
+        if change == cc_lb_storage_api::CreditCheckpointChange::Older {
+            let asof_rows = sqlx::query(
+                r#"WITH keys("window", source) AS (
+                    VALUES ('unified','header'),('unified','api'),('overage','header'),('overage','api')
+                ), anchors AS (
+                    SELECT anchor.* FROM keys CROSS JOIN LATERAL (
+                        SELECT * FROM upstream_subscription_quota_checkpoints_v1
+                        WHERE upstream_id=$1 AND "window"=keys."window" AND source=keys.source
+                          AND changed_at_unix_millis <= $2
+                        ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1
+                    ) anchor
+                ) SELECT upstream_id,"window",source,changed_at_unix_millis,sample_id,
+                    utilization,status,resets_at_unix_secs,sample_kind,credits_json
+                  FROM anchors"#,
+            ).bind(record.upstream_id)
+                .bind(u64_to_i64(record.changed_at_unix_millis, "credit as-of timestamp")?)
+                .fetch_all(&mut *conn).await.map_err(map_sqlx_error)?;
+            let asof_rows = asof_rows
+                .into_iter()
+                .map(aggregate::row_to_slim_checkpoint)
+                .collect::<StorageResult<Vec<_>>>()?;
+            prepared = record.clone();
+            change = prepared.prepare_credit_checkpoint(asof_rows, current_rows);
+        }
+        (
+            &prepared,
+            change == cc_lb_storage_api::CreditCheckpointChange::Changed,
+        )
+    } else {
+        (record, false)
+    };
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let credits_json = encode_credits(record.credits.as_ref())?;
-    let latest = sqlx::query_as::<_, (Vec<u8>, Option<String>, bool)>(
+    let latest = sqlx::query_as::<_, (Vec<u8>, bool)>(
         r#"SELECT semantic_fingerprint,
-                  credits_json,
                   status IS NOT DISTINCT FROM $4::text
                   AND resets_at_unix_secs IS NOT DISTINCT FROM $5::bigint
                   AND surpassed_threshold IS NOT DISTINCT FROM $6::double precision
@@ -297,9 +362,10 @@ async fn insert_checkpoint_if_changed(
                   AND extra_usage_enabled IS NOT DISTINCT FROM $13::boolean
                   AND extra_usage_monthly_limit IS NOT DISTINCT FROM $14::double precision
                   AND extra_usage_used_credits IS NOT DISTINCT FROM $15::double precision
-                  AND credits_json::jsonb IS NOT DISTINCT FROM $16::jsonb
-                  AND utilization IS NOT NULL AND $17::double precision IS NOT NULL
-                  AND ABS(utilization - $17) < 0.001 AS within_deadband
+                  AND ($18::boolean OR (credits_json::jsonb - 'observations') IS NOT DISTINCT FROM ($16::jsonb - 'observations'))
+                  AND (utilization IS NOT DISTINCT FROM $17::double precision
+                       OR (utilization IS NOT NULL AND $17::double precision IS NOT NULL
+                           AND ABS(utilization - $17) < 0.001)) AS within_deadband
            FROM upstream_subscription_quota_checkpoints_v1
            WHERE upstream_id = $1 AND "window" = $2 AND source = $3
            ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1"#,
@@ -326,17 +392,19 @@ async fn insert_checkpoint_if_changed(
     .bind(record.extra_usage_used_credits)
     .bind(credits_json.as_deref())
     .bind(record.utilization)
+    .bind(credit_state)
     .fetch_optional(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
-    if latest
-        .as_ref()
-        .is_some_and(|(fingerprint, previous_credits, within_deadband)| {
-            let same_credits = *previous_credits == credits_json;
-            (fingerprint.as_slice() == &record.semantic_fingerprint.as_bytes()[..] && same_credits)
-                || (*within_deadband && same_credits)
-        })
+    if !credit_change
+        && (latest
+            .as_ref()
+            .is_some_and(|(fingerprint, within_deadband)| {
+                fingerprint.as_slice() == &record.semantic_fingerprint.as_bytes()[..]
+                    || *within_deadband
+            })
+            || (credit_state && latest.is_none() && !record.has_quota_state()))
     {
         return Ok(false);
     }

@@ -58,6 +58,30 @@ fn semantic_checkpoint_ignores_runtime_and_evidence_fields() {
 }
 
 #[test]
+fn credit_provenance_never_changes_semantic_fingerprint() {
+    let mut base = semantic_checkpoint_base_record();
+    base.credits = Some(cc_lb_domain::SubscriptionQuotaCredits {
+        has_credits: Some(true),
+        balance: Some("100.00".to_owned()),
+        ..Default::default()
+    });
+    let mut refreshed = base.clone();
+    base.credits
+        .as_mut()
+        .unwrap()
+        .stamp_observations(1_000, cc_lb_domain::CreditSource::Api);
+    refreshed
+        .credits
+        .as_mut()
+        .unwrap()
+        .stamp_observations(2_000, cc_lb_domain::CreditSource::Header);
+    assert_eq!(
+        base.semantic_checkpoint_fingerprint(),
+        refreshed.semantic_checkpoint_fingerprint()
+    );
+}
+
+#[test]
 fn semantic_checkpoint_changes_for_each_quota_semantic_field() {
     // Given: a fully populated quota observation.
     let base = semantic_checkpoint_base_record();

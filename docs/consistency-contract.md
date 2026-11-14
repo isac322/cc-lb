@@ -311,10 +311,11 @@ retain field-specific observation time and source for `has_credits`, `unlimited`
 `limit_reached`, and `balance`. Missing fields do not refresh an older field.
 Routing compares explicit flags by their own newest applicable evidence:
 balance never implies availability, and stale positive flags never admit traffic.
-Checkpoint semantic fingerprints exclude provenance metadata, but checkpoint
-deduplication also requires the full serialized credit state, including field
-observations, to match. A refreshed field timestamp or poll order can therefore
-add a checkpoint even when the semantic values are unchanged.
+Credit checkpoint identity compares effective credit values merged across both
+physical streams, excluding provenance metadata. Unchanged polls update latest
+per-field provenance without adding checkpoints. History records state known at
+commit; older delayed credit observations do not create backdated checkpoints or
+rewrite past states. Non-credit quota fields keep per-source change detection.
 
 Request events may carry nullable `funding` evidence. `included_estimated` and
 `credits_estimated` require a complete main-limit response matched to the

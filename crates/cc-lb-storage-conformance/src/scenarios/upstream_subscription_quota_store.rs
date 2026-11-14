@@ -173,6 +173,235 @@ scenario!(
     }
 );
 
+pub async fn effective_credit_checkpoint_history<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let fixture = backend.create_fixture().await?;
+    let result = async {
+        let storage = backend.open(&fixture).await?;
+        let sample = |upstream, at, source, balance: &str| {
+            let mut row = observation(upstream, at, at, source, 0.25);
+            row.window = if source == SubscriptionQuotaSource::Api {
+                SubscriptionQuotaWindow::Overage
+            } else {
+                SubscriptionQuotaWindow::Unified
+            };
+            row.utilization = None;
+            row.status = None;
+            row.resets_at_unix_secs = None;
+            row.extra_usage_enabled = None;
+            row.extra_usage_monthly_limit = None;
+            row.extra_usage_used_credits = None;
+            row.surpassed_threshold = None;
+            row.fallback_percentage = None;
+            row.fallback_available = None;
+            row.overage_in_use = None;
+            row.overage_period_monthly_utilization = None;
+            row.upgrade_paths = None;
+            row.disabled_reason = None;
+            row.credits = Some(SubscriptionQuotaCredits {
+                has_credits: Some(true),
+                balance: Some(balance.to_owned()),
+                ..Default::default()
+            });
+            row
+        };
+        let repeated = upstream_id(80);
+        for at in [1_000, 2_000, 3_000] {
+            storage
+                .record_subscription_quota_samples(&[sample(
+                    repeated,
+                    at,
+                    SubscriptionQuotaSource::Api,
+                    "100",
+                )])
+                .await?;
+        }
+        ensure!(
+            checkpoint_rows(&storage, &[repeated]).await?.len() == 1,
+            "unchanged nonempty credits must not checkpoint each successful poll"
+        );
+        let latest = storage
+            .list_latest_subscription_quota_for_upstreams(&[repeated])
+            .await?;
+        ensure!(
+            latest[0]
+                .credits
+                .as_ref()
+                .unwrap()
+                .observations
+                .balance
+                .unwrap()
+                .observed_at_unix_millis
+                == 3_000,
+            "unchanged polls must still advance durable field provenance"
+        );
+
+        for (upstream, include_ten) in [(upstream_id(81), true), (upstream_id(82), false)] {
+            let mut rows = vec![
+                sample(upstream, 1_000, SubscriptionQuotaSource::Api, "100"),
+                sample(upstream, 5_000, SubscriptionQuotaSource::Header, "50"),
+            ];
+            if include_ten {
+                rows.push(sample(
+                    upstream,
+                    10_000,
+                    SubscriptionQuotaSource::Api,
+                    "100",
+                ));
+            }
+            rows.push(sample(
+                upstream,
+                20_000,
+                SubscriptionQuotaSource::Api,
+                "100",
+            ));
+            storage.record_subscription_quota_samples(&rows).await?;
+            let history = storage
+                .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
+                    upstream_ids: vec![upstream],
+                    windows: vec![
+                        SubscriptionQuotaWindow::Overage,
+                        SubscriptionQuotaWindow::Unified,
+                    ],
+                    sources: vec![
+                        SubscriptionQuotaSource::Api,
+                        SubscriptionQuotaSource::Header,
+                    ],
+                    since_unix_millis: 0,
+                    until_unix_millis: 15_000,
+                })
+                .await?;
+            let mut history = history;
+            history.sort_by_key(|row| (row.changed_at_unix_millis, row.sample_id, row.source));
+            let mut effective = SubscriptionQuotaCredits::default();
+            for row in history {
+                if let Some(mut credits) = row.credits {
+                    credits.stamp_observations(
+                        row.changed_at_unix_millis,
+                        if row.source == SubscriptionQuotaSource::Api {
+                            CreditSource::Api
+                        } else {
+                            CreditSource::Header
+                        },
+                    );
+                    effective.merge_observations(&credits);
+                }
+            }
+            ensure!(
+                effective.balance.as_deref() == Some(if include_ten { "100" } else { "50" }),
+                "historical query must distinguish source-return at t10 from t20"
+            );
+        }
+
+        let alternating = upstream_id(83);
+        let mut expected_changes = 0;
+        for index in 0..8 {
+            let source = if index % 2 == 0 {
+                SubscriptionQuotaSource::Api
+            } else {
+                SubscriptionQuotaSource::Header
+            };
+            let balance = if index % 2 == 0 { "100" } else { "50" };
+            let at = 30_000 + index * 1_000;
+            storage
+                .record_subscription_quota_samples(&[
+                    sample(alternating, at, source, balance),
+                    sample(alternating, at + 1, source, balance),
+                ])
+                .await?;
+            expected_changes += 1;
+            ensure!(
+                checkpoint_rows(&storage, &[alternating]).await?.len() == expected_changes,
+                "disagreeing sources must checkpoint exactly their effective value transitions"
+            );
+        }
+        let count = checkpoint_rows(&storage, &[repeated]).await?.len();
+        storage
+            .record_subscription_quota_samples(&[sample(
+                repeated,
+                1_500,
+                SubscriptionQuotaSource::Header,
+                "50",
+            )])
+            .await?;
+        ensure!(
+            checkpoint_rows(&storage, &[repeated]).await?.len() == count,
+            "late older credit evidence must not rewrite recorded history"
+        );
+        let mut late_quota = sample(repeated, 2_000, SubscriptionQuotaSource::Header, "50");
+        late_quota.utilization = Some(0.8);
+        storage
+            .record_subscription_quota_samples(&[late_quota.clone()])
+            .await?;
+        let checkpoints = checkpoint_rows(&storage, &[repeated]).await?;
+        ensure!(
+            checkpoints.len() == count + 1,
+            "delayed credit suppression must preserve real source-local quota changes"
+        );
+        ensure!(
+            checkpoints
+                .last()
+                .unwrap()
+                .credits
+                .as_ref()
+                .and_then(|c| c.balance.as_deref())
+                == Some("100"),
+            "delayed quota checkpoint must carry the recorded effective credit state"
+        );
+        let mut quota_only = sample(repeated, 4_000, SubscriptionQuotaSource::Header, "50");
+        quota_only.credits = None;
+        quota_only.utilization = Some(0.3);
+        storage
+            .record_subscription_quota_samples(&[quota_only])
+            .await?;
+        let checkpoints = checkpoint_rows(&storage, &[repeated]).await?;
+        let carried = checkpoints.last().unwrap().credits.as_ref().unwrap();
+        ensure!(
+            carried.balance.as_deref() == Some("100"),
+            "later quota changes must not resurrect ignored late credits"
+        );
+        ensure!(
+            carried
+                .observations
+                .balance
+                .unwrap()
+                .observed_at_unix_millis
+                == 3_000,
+            "quota checkpoints must preserve the effective field's original provenance"
+        );
+        drop(storage);
+        let reopened = backend.open_independent(&fixture).await?;
+        let latest = reopened
+            .list_latest_subscription_quota_for_upstreams(&[repeated])
+            .await?;
+        let mut effective = SubscriptionQuotaCredits::default();
+        for row in latest {
+            if let Some(credits) = row.credits {
+                effective.merge_observations(&credits);
+            }
+        }
+        ensure!(
+            effective.balance.as_deref() == Some("100"),
+            "restart must retain latest effective balance"
+        );
+        ensure!(
+            effective
+                .observations
+                .balance
+                .unwrap()
+                .observed_at_unix_millis
+                == 3_000,
+            "restart and late evidence must not regress field provenance"
+        );
+        Ok(())
+    }
+    .await;
+    backend.teardown(fixture).await?;
+    result
+}
+
 scenario!(
     same_millis_appends_with_different_sample_ids_dont_collide,
     |storage| async move {
