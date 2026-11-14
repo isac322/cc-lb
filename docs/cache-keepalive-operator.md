@@ -315,10 +315,19 @@ catalog rate or complete write split is unpriced, even if the observed tokens
 were all cache reads.
 
 Dashboard rollups count priced, unpriced and unmetered renewal events
-separately. These counts do not alter retained tokens, known spend or renewal
-history. A price backfill uses retained event evidence only; it does not
-recalculate old costs at today's rates. When retention has removed the
-evidence, the missing classification remains unknown.
+separately during ordinary ingestion, alongside the same request, token and
+cost delta. Existing rollup totals keep their known spend and receive no
+historical pricing classification, even when raw renewal events remain.
+Old workers can leave additional unclassified gaps. A gap is `partial` when
+there is a priced request or positive recorded cost, and `unknown` otherwise,
+including when legacy tokens and cost are both zero. Updating all workers
+prevents new gaps but does not repair history; old readers may still display
+missing prices as zero.
+
+The independent historical category-cost backfill remains unchanged. Native
+write presence and effective-write lower bounds remain available, without
+promising exact effective-write reconstruction for old rollups. Historical
+renewal rows are not rewritten or re-priced at today's rates.
 
 Overview and estimated API-key usage show `List price unavailable` or
 `Price unknown` with a dash instead of a zero. A partial amount carries `+`

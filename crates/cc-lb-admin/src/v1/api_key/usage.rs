@@ -609,7 +609,6 @@ async fn estimated_month(
             .unmetered_event_count
             .saturating_add(rollup.unmetered_event_count);
     }
-    totals.pricing.total_tokens = totals.tokens;
     totals.pricing.virtual_cost_micros = totals.cost_usd_micros;
     Ok(totals)
 }

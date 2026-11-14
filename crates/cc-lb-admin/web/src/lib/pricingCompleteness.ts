@@ -1,12 +1,10 @@
 import type { PricingCompleteness, UsageBucket } from './api';
-import { sumTokens, type TokenComponents } from './format';
 
 export interface PricingCompletenessInput {
   request_count: number;
   priced_event_count: number;
   unpriced_event_count: number;
   unmetered_event_count: number;
-  total_tokens: number;
   virtual_cost_micros: number;
 }
 
@@ -16,25 +14,6 @@ export interface PricingCounts {
   priced_request_count?: number;
   unpriced_request_count?: number;
   unmetered_request_count?: number;
-}
-
-export interface NativeWriteTokenFields {
-  cache_write_input_tokens?: number | null;
-  cache_write_input_tokens_30m?: number | null;
-  cache_write_input_tokens_12h?: number | null;
-}
-
-export function sumCompletenessTokens(
-  bucket: TokenComponents & NativeWriteTokenFields,
-): number {
-  return (
-    sumTokens(bucket) +
-    Math.max(
-      bucket.cache_write_input_tokens ?? 0,
-      (bucket.cache_write_input_tokens_30m ?? 0) +
-        (bucket.cache_write_input_tokens_12h ?? 0),
-    )
-  );
 }
 
 /** Keep the classification branches in sync with cc-lb-storage-api. */
@@ -55,20 +34,9 @@ export function derivePricingCompleteness(
       return input.virtual_cost_micros > 0 ? 'priced' : 'known_zero';
     return 'unmetered';
   }
-  if (
-    input.total_tokens === 0 &&
-    input.priced_event_count === 0 &&
-    input.unpriced_event_count === 0 &&
-    input.virtual_cost_micros === 0
-  )
-    return 'unmetered';
-  if (
-    input.priced_event_count === 0 &&
-    input.unpriced_event_count === 0 &&
-    input.virtual_cost_micros === 0
-  )
-    return 'unknown';
-  return 'partial';
+  return input.priced_event_count > 0 || input.virtual_cost_micros > 0
+    ? 'partial'
+    : 'unknown';
 }
 
 export function sumBucketPricing(
@@ -78,36 +46,23 @@ export function sumBucketPricing(
 }
 
 export function sumPricingCounts(
-  buckets: readonly (PricingCounts &
-    TokenComponents &
-    NativeWriteTokenFields & {
-      request_count: number;
-      total_tokens?: number;
-      virtual_cost_micros: number;
-    })[],
+  buckets: readonly (PricingCounts & {
+    request_count: number;
+    virtual_cost_micros: number;
+  })[],
 ): PricingCounts {
   let request_count = 0;
   let priced_request_count = 0;
   let unpriced_request_count = 0;
   let unmetered_request_count = 0;
-  let total_tokens = 0;
   let virtual_cost_micros = 0;
-  let hasPricing = false;
   for (const bucket of buckets) {
     request_count += bucket.request_count;
     priced_request_count += bucket.priced_request_count ?? 0;
     unpriced_request_count += bucket.unpriced_request_count ?? 0;
     unmetered_request_count += bucket.unmetered_request_count ?? 0;
-    total_tokens += bucket.total_tokens ?? sumCompletenessTokens(bucket);
     virtual_cost_micros += bucket.virtual_cost_micros;
-    hasPricing ||=
-      bucket.pricing_completeness !== undefined ||
-      bucket.priced_request_count !== undefined ||
-      bucket.unpriced_request_count !== undefined ||
-      bucket.unmetered_request_count !== undefined;
   }
-  // Older servers did not classify requests. Preserve their display contract.
-  if (!hasPricing) return { request_count };
   return {
     request_count,
     priced_request_count,
@@ -118,7 +73,6 @@ export function sumPricingCounts(
       priced_event_count: priced_request_count,
       unpriced_event_count: unpriced_request_count,
       unmetered_event_count: unmetered_request_count,
-      total_tokens,
       virtual_cost_micros,
     }),
   };

@@ -228,8 +228,8 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         .and_then(|value| value.to_str().ok())
         .expect("summary ETag")
         .to_owned();
-    assert!(usage_etag.starts_with("W/\"dashboard:usage:v2:"));
-    assert!(summary_etag.starts_with("W/\"dashboard:summary:v2:"));
+    assert!(usage_etag.starts_with("W/\"dashboard:usage:v3:"));
+    assert!(summary_etag.starts_with("W/\"dashboard:summary:v3:"));
     let checkpoint = storage.usage_rollup_checkpoint().await.unwrap().unwrap();
     let window_end = now.div_ceil(60) * 60;
     for (uri, old_etag) in [
@@ -1188,16 +1188,16 @@ async fn usage_is_unchanged_when_diagnostics_are_taken_before_storage() {
 }
 
 #[tokio::test]
-async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
+async fn dashboard_semantics_version_invalidates_old_etags_without_new_traffic() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     storage
         .append_request_event(&usage_event(
             TEST_NOW_UNIX_SECS - 60,
-            "pricing-backfill",
+            "pricing-legacy-validator",
             Uuid::from_u128(1),
             "test",
-            5,
+            0,
         ))
         .await
         .unwrap();
@@ -1206,13 +1206,6 @@ async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
     sqlx::query(
         "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
          unpriced_event_count = 0, unmetered_event_count = 0",
-    )
-    .execute(storage.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN \
-         ('pricing_completeness_backfill_upper', 'pricing_completeness_backfill_cursor')",
     )
     .execute(storage.pool())
     .await
@@ -1241,11 +1234,14 @@ async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
                 .unwrap()["pricing_completeness"]
         };
         assert_eq!(completeness, "unknown", "{uri}");
-        validators.push((uri, headers[header::ETAG].to_str().unwrap().to_owned()));
+        let etag = headers[header::ETAG].to_str().unwrap().to_owned();
+        assert!(etag.contains(":v3:"), "{etag}");
+        validators.push((uri, etag));
     }
     storage.rollup_usage_once().await.unwrap();
     assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
-    for (uri, previous_etag) in validators {
+    for (uri, current_etag) in validators {
+        let previous_etag = current_etag.replacen(":v3:", ":v2:", 1);
         let (status, headers, bytes) = authed_bytes_with_headers(
             admin_app.clone(),
             "GET",
@@ -1255,7 +1251,7 @@ async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{uri}");
-        assert_ne!(headers[header::ETAG].to_str().unwrap(), previous_etag);
+        assert_eq!(headers[header::ETAG].to_str().unwrap(), current_etag);
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         let bucket = if uri.contains("/summary") {
             &body["totals"]
@@ -1267,9 +1263,20 @@ async fn dashboard_backfill_only_updates_invalidate_summary_and_usage_etags() {
                 .find(|bucket| bucket["request_count"] == 1)
                 .unwrap()
         };
-        assert_eq!(bucket["pricing_completeness"], "known_zero", "{uri}");
-        assert_eq!(bucket["priced_request_count"], 1, "{uri}");
+        assert_eq!(bucket["pricing_completeness"], "unknown", "{uri}");
+        assert_eq!(bucket["priced_request_count"], 0, "{uri}");
         assert_eq!(bucket["unpriced_request_count"], 0, "{uri}");
+        let (status, headers, bytes) = authed_bytes_with_headers(
+            admin_app.clone(),
+            "GET",
+            uri,
+            None,
+            &[(header::IF_NONE_MATCH.as_str(), current_etag.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED, "{uri}");
+        assert_eq!(headers[header::ETAG].to_str().unwrap(), current_etag);
+        assert!(bytes.is_empty(), "{uri}");
     }
 }
 
@@ -1304,7 +1311,7 @@ async fn mixed_and_legacy_pricing_preserve_full_totals_parity_with_filters() {
         ("mixed", 5, None),
         ("legacy-unknown", 5, None),
         ("legacy-partial", 5, Some(10)),
-        ("legacy-unmetered", 0, None),
+        ("legacy-zero", 0, None),
         ("legacy-cache-write", 0, None),
     ]
     .into_iter()
@@ -1380,7 +1387,7 @@ async fn mixed_and_legacy_pricing_preserve_full_totals_parity_with_filters() {
                     ("mixed", "partial", 1, 1, 0),
                     ("legacy-unknown", "unknown", 0, 0, 0),
                     ("legacy-partial", "partial", 0, 0, 0),
-                    ("legacy-unmetered", "unmetered", 0, 0, 0),
+                    ("legacy-zero", "unknown", 0, 0, 0),
                     ("legacy-cache-write", "unknown", 0, 0, 0),
                 ] {
                     let bucket =
@@ -1473,7 +1480,6 @@ async fn legacy_cache_write_zero_aggregate_does_not_hide_ttl_usage() {
             priced_event_count: mixed.priced_event_count,
             unpriced_event_count: mixed.unpriced_event_count,
             unmetered_event_count: mixed.unmetered_event_count,
-            total_tokens: mixed.effective_cache_write_tokens(),
             virtual_cost_micros: mixed.virtual_cost_micros,
         }),
         Some(PricingCompleteness::Unpriced),
@@ -1637,33 +1643,11 @@ fn assert_usage_totals_match_full_collapse(full: &Value, totals: &Value) {
                 .filter_map(|bucket| bucket[field].as_u64())
                 .sum::<u64>()
         };
-        let total_tokens = full_buckets.iter().fold(0_u64, |total, bucket| {
-            [
-                bucket["input_tokens"].as_u64().unwrap_or(0),
-                bucket["output_tokens"].as_u64().unwrap_or(0),
-                bucket["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-                bucket["cache_read_input_tokens"].as_u64().unwrap_or(0),
-                bucket["cache_write_input_tokens"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .max(
-                        bucket["cache_write_input_tokens_30m"]
-                            .as_u64()
-                            .unwrap_or(0)
-                            .saturating_add(
-                                bucket["cache_write_input_tokens_12h"].as_u64().unwrap_or(0),
-                            ),
-                    ),
-            ]
-            .into_iter()
-            .fold(total, u64::saturating_add)
-        });
         let expected_completeness = derive_pricing_completeness(PricingCompletenessInput {
             request_count: sum("request_count"),
             priced_event_count: sum("priced_request_count"),
             unpriced_event_count: sum("unpriced_request_count"),
             unmetered_event_count: sum("unmetered_request_count"),
-            total_tokens,
             virtual_cost_micros: sum("virtual_cost_micros"),
         })
         .map(|value| serde_json::to_value(value).unwrap());

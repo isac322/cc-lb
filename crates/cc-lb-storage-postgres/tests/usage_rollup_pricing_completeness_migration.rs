@@ -18,7 +18,7 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
-async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() -> TestResult {
+async fn migration_166_to_168_is_metadata_only_and_never_repairs_history() -> TestResult {
     let Some(fixture) = Fixture::create(166).await? else {
         return Ok(());
     };
@@ -62,76 +62,41 @@ async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() ->
         migrator.run_direct(Some(168), &mut connection, false).await?;
         assert!(started.elapsed() < Duration::from_secs(2),"already-applied migration should be a fast no-op");
         connection.close().await?;
-        assert_eq!(totals(pool).await?,(0,0,0));
+        assert_eq!(totals(pool).await?, (0, 0, 0));
         let high_water = fixture.storage.usage_rollup_checkpoint().await?;
-        let before = fixture.storage.usage_rollup_revision().await?;
-        let first = fixture.storage.rollup_usage_once().await?;
-        assert_eq!(first.processed_events,0);
-        let cursor: (i64,String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
-            .fetch_one(pool).await?;
-        assert_eq!(cursor.0,2);
-        assert_ne!(cursor.1,"0");
-        assert_eq!(totals(pool).await?,(0,0,0));
-        let staged: (i64,i64,i64) = sqlx::query_as(
-            "SELECT SUM(priced_event_count)::BIGINT,SUM(unpriced_event_count)::BIGINT,SUM(unmetered_event_count)::BIGINT \
-             FROM usage_rollup_pricing_backfill_stage_v1",
-        ).fetch_one(pool).await?;
-        assert_eq!(staged,(6666,6666,6668));
-        let scanned: i64 = sqlx::query_scalar(
-            "SELECT value FROM usage_rollup_checkpoints_v1 \
-             WHERE id='pricing_completeness_stage_base_scanned_count'",
-        )
-        .fetch_one(pool)
-        .await?;
-        assert_eq!(scanned, 10_000);
-        let resumed = PostgresStorage::new(pool.clone(),Arc::new(cc_lb_clock::SystemClock));
-        // The short scan page initializes verification; it does not flush staged counts.
-        resumed.rollup_usage_once().await?;
-        assert_eq!(totals(pool).await?,(0,0,0));
-        let verified: i64 = sqlx::query_scalar(
-            "SELECT value FROM usage_rollup_checkpoints_v1 \
-             WHERE id='pricing_completeness_stage_base_verified_count'",
-        ).fetch_optional(pool).await?.unwrap_or(0);
-        assert_eq!(verified, 0);
-        resumed.rollup_usage_once().await?;
-        assert_eq!(totals(pool).await?,(0,0,0));
-        let verified: i64 = sqlx::query_scalar(
-            "SELECT value FROM usage_rollup_checkpoints_v1 \
-             WHERE id='pricing_completeness_stage_base_verified_count'",
-        ).fetch_one(pool).await?;
-        assert_eq!(verified, 10_000);
-        resumed.rollup_usage_once().await?;
-        assert_eq!(totals(pool).await?,(6666,6668,6668));
-        let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1")
-            .fetch_one(pool).await?;
-        assert_eq!(staged,0);
-        let scan_marker: Option<i64> = sqlx::query_scalar(
-            "SELECT value FROM usage_rollup_checkpoints_v1 \
-             WHERE id='pricing_completeness_stage_base_scanned_count'",
-        ).fetch_optional(pool).await?;
-        assert_eq!(scan_marker, None);
-        let finished: (i64, String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
-            .fetch_one(pool).await?;
-        assert_eq!(finished, (0, "0".to_owned()));
-        assert_eq!(resumed.usage_rollup_checkpoint().await?,high_water);
-        assert_ne!(resumed.usage_rollup_revision().await?,before);
-        let revision = resumed.usage_rollup_revision().await?;
-        resumed.rollup_usage_once().await?;
-        assert_eq!(resumed.usage_rollup_revision().await?,revision);
-        for resolution in [UsageRollupResolution::Minute,UsageRollupResolution::Hour] {
-            let rows = resumed.query_usage_rollups_in_range(resolution,1800000000,1800003600).await?;
-            let row = rows.iter().find(|r| r.model=="pricing").unwrap();
-            assert_eq!((row.priced_event_count,row.unpriced_event_count,row.unmetered_event_count),(3333,3334,3334));
-            if let Some(row) = rows.iter().find(|r| r.model=="legacy") {
-                assert_eq!((row.priced_event_count,row.unpriced_event_count,row.unmetered_event_count),(0,0,0));
-            }
+        let revision = fixture.storage.usage_rollup_revision().await?;
+        let resumed = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+        for _ in 0..4 {
+            let run = resumed.rollup_usage_once().await?;
+            assert_eq!(run.processed_events, 0);
+            assert_eq!(run.updated_rollups, 0);
+            assert_eq!(totals(pool).await?, (0, 0, 0));
         }
+        assert_eq!(resumed.usage_rollup_checkpoint().await?, high_water);
+        assert_eq!(resumed.usage_rollup_revision().await?, revision);
+        let legacy: Vec<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT request_count,priced_event_count,unpriced_event_count,unmetered_event_count, \
+             effective_cache_write_input_tokens FROM usage_rollups_v2 ORDER BY resolution,model",
+        ).fetch_all(pool).await?;
+        assert_eq!(legacy.len(), 3);
+        assert!(legacy.iter().all(|(_, p, u, m, effective)| (*p, *u, *m, *effective) == (0, 0, 0, None)));
+        assert_eq!(legacy.iter().map(|row| row.0).sum::<i64>(), 20003);
+        let lifecycle_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_%'",
+        ).fetch_one(pool).await?;
+        assert_eq!(lifecycle_count, 0);
+        let stage_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+             WHERE table_schema=current_schema() AND table_name='usage_rollup_pricing_backfill_stage_v1')",
+        ).fetch_one(pool).await?;
+        assert!(!stage_exists);
         let fresh = Fixture::create(168).await?.expect("same PostgreSQL DSN");
         let parity = shape(pool).await? == shape(fresh.storage.pool()).await?;
+        fresh.storage.verify_schema_current().await?;
         fresh.drop_schema().await?;
-        assert!(parity,"fast/current initialize schema must match incremental migration schema");
-        sqlx::query("DROP TABLE usage_rollups_v2").execute(pool).await?;
-        assert_eq!(resumed.usage_rollup_revision().await?,revision);
+        assert!(parity, "fast/current initialize schema must match incremental migration schema");
+        resumed.initialize().await?;
+        resumed.verify_schema_current().await?;
         Ok(())
     }.await;
     let teardown = fixture.drop_schema().await;
@@ -180,7 +145,99 @@ async fn gemini_normal_and_nested_merges_preserve_pricing_classification() -> Te
 }
 
 #[tokio::test]
-async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
+async fn historical_cost_components_recover_without_classifying_pricing() -> TestResult {
+    let Some(fixture) = Fixture::create(166).await? else {
+        return Ok(());
+    };
+    let result: TestResult = async {
+        let pool = fixture.storage.pool();
+        sqlx::raw_sql(
+            "INSERT INTO request_events_v1 \
+             (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens, \
+              list_cost_usd_micros,list_cost_input_micros) \
+             VALUES ('category-history','category-history',to_timestamp(1800000000), \
+                     1800000000000,200,0,'category-history',5,50,50); \
+             INSERT INTO usage_rollups_v2 \
+             (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model, \
+              request_count,input_tokens,virtual_cost_micros,updated_at) \
+             SELECT resolution,1800000000,'unknown','00000000-0000-0000-0000-000000000000', \
+                    'unknown','category-history',1,5,50,NOW() \
+             FROM (VALUES ('minute'),('hour')) AS resolutions(resolution); \
+             INSERT INTO usage_rollup_checkpoints_v1 (id,value,value_xid) \
+             SELECT 'high_water',seq,tx_id FROM request_events_v1; \
+             UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
+        )
+        .execute(pool)
+        .await?;
+        let mut connection = fixture.connect_standalone().await?;
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(168), &mut connection, false)
+            .await?;
+        connection.close().await?;
+        let high_water = fixture.storage.usage_rollup_checkpoint().await?;
+        let revision = fixture.storage.usage_rollup_revision().await?;
+        assert_eq!(
+            fixture.storage.rollup_usage_once().await?.processed_events,
+            0
+        );
+        assert_eq!(fixture.storage.usage_rollup_checkpoint().await?, high_water);
+        assert_ne!(fixture.storage.usage_rollup_revision().await?, revision);
+        assert_eq!(totals(pool).await?, (0, 0, 0));
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = fixture
+                .storage
+                .query_usage_rollups_in_range(resolution, 1_800_000_000, 1_800_003_600)
+                .await?;
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(
+                (
+                    row.request_count,
+                    row.input_tokens,
+                    row.virtual_cost_micros,
+                    row.cost_input_micros,
+                    row.cost_components_event_count
+                ),
+                (1, 5, 50, 50, 1)
+            );
+            assert_eq!(row.effective_cache_write_input_tokens, None);
+            assert_eq!(
+                derive_pricing_completeness(PricingCompletenessInput {
+                    request_count: row.request_count,
+                    priced_event_count: row.priced_event_count,
+                    unpriced_event_count: row.unpriced_event_count,
+                    unmetered_event_count: row.unmetered_event_count,
+                    virtual_cost_micros: row.virtual_cost_micros,
+                }),
+                Some(PricingCompleteness::Partial)
+            );
+        }
+        let revision = fixture.storage.usage_rollup_revision().await?;
+        for _ in 0..3 {
+            assert_eq!(
+                fixture.storage.rollup_usage_once().await?.processed_events,
+                0
+            );
+            assert_eq!(fixture.storage.usage_rollup_revision().await?, revision);
+        }
+        let components: i64 =
+            sqlx::query_scalar("SELECT SUM(cost_input_micros)::BIGINT FROM usage_rollups_v2")
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(
+            components, 100,
+            "independent cost backfill must remain exactly-once"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn xid_seq_inversion_prune_and_bucket_recreation_never_repair_history() -> TestResult {
     for intact in [true, false] {
         let Some(fixture) = Fixture::create(168).await? else {
             return Ok(());
@@ -274,15 +331,12 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
                     1000,
                 );
             }
-            sqlx::raw_sql(
-                "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0; \
-                 DELETE FROM usage_rollup_checkpoints_v1 \
-                 WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
+            sqlx::query(
+                "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0",
             )
             .execute(pool)
             .await?;
-            fixture.storage.rollup_usage_once().await?;
-            if intact {
+            for _ in 0..4 {
                 fixture.storage.rollup_usage_once().await?;
             }
             for (resolution, bucket_start) in [
@@ -304,7 +358,7 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
                         row.unpriced_event_count,
                         row.unmetered_event_count,
                     ),
-                    if intact { (1, 0, 1, 0) } else { (1, 0, 0, 0) },
+                    (1, 0, 0, 0),
                     "intact={intact}, resolution={resolution:?}",
                 );
                 assert_eq!(
@@ -313,14 +367,9 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
                         priced_event_count: row.priced_event_count,
                         unpriced_event_count: row.unpriced_event_count,
                         unmetered_event_count: row.unmetered_event_count,
-                        total_tokens: row.input_tokens,
                         virtual_cost_micros: row.virtual_cost_micros,
                     }),
-                    Some(if intact {
-                        PricingCompleteness::Unpriced
-                    } else {
-                        PricingCompleteness::Unknown
-                    }),
+                    Some(PricingCompleteness::Unknown),
                 );
             }
             Ok(())
@@ -334,515 +383,104 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
 }
 
 #[tokio::test]
-async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
-    for (post_upper_count, intact) in [
-        (1_i64, true),
-        (1, false),
-        (257, true),
-        (257, false),
-        (600, false),
-    ] {
-        {
-            let Some(fixture) = Fixture::create(168).await? else {
-                return Ok(());
-            };
-            let result: TestResult = async {
-                const H: u64 = 1_800_003_600;
-                let pool = fixture.storage.pool();
-                sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
-                    .execute(pool).await?;
-                sqlx::query(
-                    "INSERT INTO request_events_v1 \
-                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
-                     SELECT 'post-old-'||i,'post-old-'||i,to_timestamp(1799996400),1799996400000,200,0,'post-old',1,1 \
-                     FROM generate_series(1,999) AS i",
-                ).execute(pool).await?;
-                let insert = "INSERT INTO request_events_v1 \
-                    (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
-                    VALUES ($1,$1,to_timestamp($2::double precision),$3,200,0,$4,10,$5) RETURNING seq";
-                let e_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("post-E").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
-                    .bind("post-other").bind(Some(5_i64)).fetch_one(pool).await?;
-                assert_eq!(e_seq, 1000);
-                let mut conn_a = fixture.connect_standalone().await?;
-                let mut conn_b = fixture.connect_standalone().await?;
-                let mut conn_c = fixture.connect_standalone().await?;
-                let mut conn_d = fixture.connect_standalone().await?;
-                sqlx::query("BEGIN").execute(&mut conn_a).await?;
-                let x_a: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_a).await?;
-                // A's xid predates the fillers, but it allocates its seq only after D.
-                sqlx::query(
-                    "INSERT INTO request_events_v1 \
-                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
-                     SELECT 'post-middle-'||i,'post-middle-'||i,to_timestamp(1800007200),1800007200000,200,0,'post-middle',1 \
-                     FROM generate_series(1,18997) AS i",
-                ).execute(pool).await?;
-                sqlx::query("BEGIN").execute(&mut conn_b).await?;
-                let x_b: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_b).await?;
-                sqlx::query("BEGIN").execute(&mut conn_c).await?;
-                let x_c: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_c).await?;
-                let c_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("post-C").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
-                    .bind("post-other").bind(Some(5_i64)).fetch_one(&mut conn_c).await?;
-                sqlx::query("BEGIN").execute(&mut conn_d).await?;
-                let x_d: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_d).await?;
-                sqlx::query(
-                    "INSERT INTO request_events_v1 \
-                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
-                     SELECT 'post-D-'||i,'post-D-'||i,to_timestamp(1800007200),1800007200000,200,0,'post-D',1 \
-                     FROM generate_series(1,$1::bigint) AS i",
-                ).bind(if post_upper_count == 257 { 256 } else { post_upper_count }).execute(&mut conn_d).await?;
-                // Split post-upper allocations around A when testing 257 post-upper rows (D1..D256, A, X, B).
-                let mut conn_x = if post_upper_count == 257 {
-                    let mut conn_x = fixture.connect_standalone().await?;
-                    sqlx::query("BEGIN").execute(&mut conn_x).await?;
-                    Some(conn_x)
-                } else {
-                    None
-                };
-                let a_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("post-A").bind((H + 350) as f64).bind(((H + 350) * 1000) as i64)
-                    .bind("post-target").bind(Some(0_i64)).fetch_one(&mut conn_a).await?;
-                if let Some(conn_x) = conn_x.as_mut() {
-                    let x_seq: i64 = sqlx::query_scalar(insert)
-                        .bind("post-X").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
-                        .bind("post-D").bind(Some(1_i64)).fetch_one(&mut *conn_x).await?;
-                    assert_eq!((a_seq, x_seq), (20255, 20256));
-                }
-                let b_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("post-B").bind((H + 340) as f64).bind(((H + 340) * 1000) as i64)
-                    .bind("post-target").bind(None::<i64>).fetch_one(&mut conn_b).await?;
-                assert_eq!(c_seq, 19998);
-                assert_eq!(b_seq, 20000 + post_upper_count);
-                assert!(x_a.parse::<u64>()? < x_b.parse::<u64>()?);
-                assert!(x_b.parse::<u64>()? < x_c.parse::<u64>()?);
-                assert!(x_c.parse::<u64>()? < x_d.parse::<u64>()?);
-                sqlx::query("COMMIT").execute(&mut conn_a).await?;
-                wait_until_xid_below_xmin(pool, &x_a).await?;
-                let first_processed = fixture.storage.rollup_usage_once().await?.processed_events;
-                assert!(first_processed > 0 && first_processed <= 10_000);
-                fixture.storage.prune_usage_rollups_before(H + 360, H + 330, 2000).await?;
-                sqlx::query("COMMIT").execute(&mut conn_b).await?;
-                sqlx::query("COMMIT").execute(&mut conn_c).await?;
-                sqlx::query("COMMIT").execute(&mut conn_d).await?;
-                let mut last_xid = x_d;
-                if let Some(mut conn_x) = conn_x {
-                    last_xid = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                        .fetch_one(&mut conn_x).await?;
-                    sqlx::query("COMMIT").execute(&mut conn_x).await?;
-                    conn_x.close().await?;
-                }
-                conn_a.close().await?;
-                conn_b.close().await?;
-                conn_c.close().await?;
-                conn_d.close().await?;
-                wait_until_xid_below_xmin(pool, &last_xid).await?;
-                // Exactly 9,998 remaining fillers + B + C fill the next batch;
-                // committed D remains above high_water despite its lower seq.
-                let mut second_processed = 0;
-                for _ in 0..3 {
-                    second_processed += fixture.storage.rollup_usage_once().await?.processed_events;
-                    let current: (i64, String) = sqlx::query_as(
-                        "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
-                    )
-                    .fetch_one(pool)
-                    .await?;
-                    if current == (c_seq, x_c.clone()) {
-                        break;
-                    }
-                }
-                assert!(second_processed > 0 && second_processed <= 20_000);
-                let high_water: (i64, String) = sqlx::query_as(
-                    "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
-                )
-                .fetch_one(pool).await?;
-                assert_eq!(high_water, (c_seq, x_c));
-                if !intact {
-                    assert_eq!(fixture.storage.prune_request_events_before(
-                        (H + 345) * 1000 * 1_000_000, 1000).await?, 1000);
-                }
-                sqlx::raw_sql(
-                    "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0; \
-                     DELETE FROM usage_rollup_checkpoints_v1 \
-                     WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
-                ).execute(pool).await?;
-                for _ in 0..6 {
-                    fixture.storage.rollup_usage_once().await?;
-                }
-                for (resolution, bucket_start) in [
-                    (UsageRollupResolution::Hour, H),
-                    (UsageRollupResolution::Minute, H + 300),
-                ] {
-                    let rows = fixture.storage.query_usage_rollups_in_range(
-                        resolution, bucket_start, bucket_start + 3600).await?;
-                    let row = rows.iter().find(|row| row.model == "post-target")
-                        .expect("recreated post-upper target bucket");
-                    assert_eq!((row.request_count, row.priced_event_count,
-                        row.unpriced_event_count, row.unmetered_event_count),
-                        if intact { (1, 0, 1, 0) } else { (1, 0, 0, 0) },
-                        "post_upper_count={post_upper_count}, intact={intact}, resolution={resolution:?}");
-                    assert_eq!(derive_pricing_completeness(PricingCompletenessInput {
-                        request_count: row.request_count,
-                        priced_event_count: row.priced_event_count,
-                        unpriced_event_count: row.unpriced_event_count,
-                        unmetered_event_count: row.unmetered_event_count,
-                        total_tokens: row.input_tokens,
-                        virtual_cost_micros: row.virtual_cost_micros,
-                    }), Some(if intact { PricingCompleteness::Unpriced }
-                        else { PricingCompleteness::Unknown }));
-                }
-                Ok(())
-            }.await;
-            let teardown = fixture.drop_schema().await;
-            result?;
-            teardown?;
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn bottom_slot_xid_seq_inversion_single_and_multi_batch_preserves_unknown() -> TestResult {
-    for multi_batch in [false, true] {
-        for intact in [true, false] {
-            let Some(fixture) = Fixture::create(168).await? else {
-                return Ok(());
-            };
-            let result: TestResult = async {
-                const H: u64 = 1_800_003_600;
-                let pool = fixture.storage.pool();
-                sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
-                    .execute(pool)
-                    .await?;
-                let mut conn_0 = if multi_batch {
-                    let mut conn = fixture.connect_standalone().await?;
-                    sqlx::query("BEGIN").execute(&mut conn).await?;
-                    let _: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                        .fetch_one(&mut conn)
-                        .await?;
-                    Some(conn)
-                } else {
-                    None
-                };
-                let mut conn_a = fixture.connect_standalone().await?;
-                let mut conn_b = fixture.connect_standalone().await?;
-                let mut conn_c = fixture.connect_standalone().await?;
-                sqlx::query("BEGIN").execute(&mut conn_a).await?;
-                let x_a: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_a)
-                    .await?;
-                sqlx::query("BEGIN").execute(&mut conn_b).await?;
-                let x_b: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_b)
-                    .await?;
-                sqlx::query("BEGIN").execute(&mut conn_c).await?;
-                let x_c: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                    .fetch_one(&mut conn_c)
-                    .await?;
-                assert!(x_a.parse::<u64>()? < x_b.parse::<u64>()?);
-                assert!(x_b.parse::<u64>()? < x_c.parse::<u64>()?);
-                // B allocates the very bottom seq despite its newer xid. It is
-                // the only raw event removed in the damaged control.
-                let insert = "INSERT INTO request_events_v1 \
-                    (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
-                    VALUES ($1,$1,TO_TIMESTAMP($2::double precision),$3,200,0,$4,10,$5) RETURNING seq";
-                let b_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("bottom-B")
-                    .bind((H + 340) as f64)
-                    .bind(((H + 340) * 1000) as i64)
-                    .bind("bottom-target")
-                    .bind(None::<i64>)
-                    .fetch_one(&mut conn_b)
-                    .await?;
-                assert_eq!(b_seq, 1);
-                if let Some(conn_0) = conn_0.as_mut() {
-                    let x_0: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-                        .fetch_one(&mut *conn_0)
-                        .await?;
-                    assert!(x_0.parse::<u64>()? < x_a.parse::<u64>()?);
-                    let d_seq: i64 = sqlx::query_scalar(insert)
-                        .bind("bottom-D")
-                        .bind((H + 400) as f64)
-                        .bind(((H + 400) * 1000) as i64)
-                        .bind("bottom-filler")
-                        .bind(Some(1_i64))
-                        .fetch_one(&mut *conn_0)
-                        .await?;
-                    assert_eq!(d_seq, 2);
-                }
-                let a_seq: i64 = sqlx::query_scalar(insert)
-                    .bind("bottom-A")
-                    .bind((H + 350) as f64)
-                    .bind(((H + 350) * 1000) as i64)
-                    .bind("bottom-target")
-                    .bind(Some(0_i64))
-                    .fetch_one(&mut conn_a)
-                    .await?;
-                // In the multi-page case, C fills all but one row of Batch 1.
-                // Without B, A takes its final slot through seq == expected_seq;
-                // only Batch 2 reaches D and discovers the missing bottom seq.
-                let c_seq: i64 = if multi_batch {
-                    sqlx::query_scalar(
-                        "WITH inserted AS ( \
-                             INSERT INTO request_events_v1 \
-                             (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
-                             SELECT 'bottom-C-'||i,'bottom-C-'||i,TO_TIMESTAMP($1::double precision),$2,200,0,'bottom-other',10,5 \
-                             FROM GENERATE_SERIES(1,9999) AS i RETURNING seq \
-                         ) SELECT MAX(seq) FROM inserted",
-                    )
-                    .bind((H + 400) as f64)
-                    .bind(((H + 400) * 1000) as i64)
-                    .fetch_one(&mut conn_c)
-                    .await?
-                } else {
-                    sqlx::query_scalar(insert)
-                        .bind("bottom-C")
-                        .bind((H + 400) as f64)
-                        .bind(((H + 400) * 1000) as i64)
-                        .bind("bottom-other")
-                        .bind(Some(5_i64))
-                        .fetch_one(&mut conn_c)
-                        .await?
-                };
-                assert_eq!(
-                    (a_seq, c_seq),
-                    if multi_batch { (3, 10_002) } else { (2, 3) },
-                );
-                if let Some(conn_0) = conn_0.as_mut() {
-                    sqlx::query("COMMIT").execute(&mut *conn_0).await?;
-                }
-                sqlx::query("COMMIT").execute(&mut conn_a).await?;
-                wait_until_xid_below_xmin(pool, &x_a).await?;
-                let run = fixture.storage.rollup_usage_once().await?;
-                assert_eq!(run.processed_events, if multi_batch { 2 } else { 1 });
-                if multi_batch {
-                    assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 0);
-                }
-                fixture
-                    .storage
-                    .prune_usage_rollups_before(H + 360, H + 330, 2000)
-                    .await?;
-                sqlx::query("COMMIT").execute(&mut conn_b).await?;
-                sqlx::query("COMMIT").execute(&mut conn_c).await?;
-                if let Some(conn_0) = conn_0 {
-                    conn_0.close().await?;
-                }
-                conn_a.close().await?;
-                conn_b.close().await?;
-                conn_c.close().await?;
-                wait_until_xid_below_xmin(pool, &x_c).await?;
-                assert_eq!(
-                    fixture.storage.rollup_usage_once().await?.processed_events,
-                    if multi_batch { 10_000 } else { 2 },
-                );
-                let high_water: (i64, String) = sqlx::query_as(
-                    "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
-                )
-                .fetch_one(pool)
-                .await?;
-                assert_eq!(high_water, (c_seq, x_c));
-                if !intact {
-                    assert_eq!(
-                        fixture
-                            .storage
-                            .prune_request_events_before((H + 345) * 1000 * 1_000_000, 1000)
-                            .await?,
-                        1,
-                    );
-                }
-                sqlx::raw_sql(
-                    "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0; \
-                     DELETE FROM usage_rollup_checkpoints_v1 \
-                     WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
-                )
-                .execute(pool)
-                .await?;
-                fixture.storage.rollup_usage_once().await?;
-                if multi_batch && !intact {
-                    let counts: (i64, i64, i64, i64) = sqlx::query_as(
-                        "SELECT request_count,priced_event_count,unpriced_event_count,unmetered_event_count \
-                         FROM usage_rollups_v2 WHERE resolution='minute' \
-                         AND bucket_start_unix_secs=$1 AND model='bottom-target'",
-                    )
-                    .bind((H + 300) as i64)
-                    .fetch_one(pool)
-                    .await?;
-                    assert_eq!(counts, (1, 0, 0, 0), "unproven A must remain staged");
-                    let staged: (i64, i64, i64) = sqlx::query_as(
-                        "SELECT priced_event_count,unpriced_event_count,unmetered_event_count \
-                         FROM usage_rollup_pricing_backfill_stage_v1 WHERE slot_id='base' \
-                         AND resolution='minute' AND bucket_start_unix_secs=$1 AND model='bottom-target'",
-                    )
-                    .bind((H + 300) as i64)
-                    .fetch_one(pool)
-                    .await?;
-                    assert_eq!(staged, (1, 0, 0), "Batch 1 must reach and stage A");
-                }
-                fixture.storage.rollup_usage_once().await?;
-                for _ in 0..2 {
-                    fixture.storage.rollup_usage_once().await?;
-                }
-                if multi_batch {
-                    // The full scan page, short scan page, full verification
-                    // page, and final short verification/flush are separate
-                    // bounded transactions.
-                    fixture.storage.rollup_usage_once().await?;
-                    fixture.storage.rollup_usage_once().await?;
-                }
-                let staged: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
-                )
-                .fetch_one(pool)
-                .await?;
-                assert_eq!(staged, 0);
-                let cursor: (i64, String) = sqlx::query_as(
-                    "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 \
-                     WHERE id='pricing_completeness_backfill_cursor'",
-                )
-                .fetch_one(pool)
-                .await?;
-                assert_eq!(cursor, (0, "0".to_owned()));
-                let rows = fixture
-                    .storage
-                    .query_usage_rollups_in_range(UsageRollupResolution::Minute, H + 300, H + 360)
-                    .await?;
-                let row = rows.iter().find(|row| row.model == "bottom-target")
-                    .expect("recreated bottom target bucket");
-                assert_eq!(
-                    (row.request_count, row.priced_event_count,
-                     row.unpriced_event_count, row.unmetered_event_count),
-                    if intact { (1, 0, 1, 0) } else { (1, 0, 0, 0) },
-                    "multi_batch={multi_batch}, intact={intact}",
-                );
-                assert_eq!(
-                    derive_pricing_completeness(PricingCompletenessInput {
-                        request_count: row.request_count,
-                        priced_event_count: row.priced_event_count,
-                        unpriced_event_count: row.unpriced_event_count,
-                        unmetered_event_count: row.unmetered_event_count,
-                        total_tokens: row.input_tokens,
-                        virtual_cost_micros: row.virtual_cost_micros,
-                    }),
-                    Some(if intact {
-                        PricingCompleteness::Unpriced
-                    } else {
-                        PricingCompleteness::Unknown
-                    }),
-                );
-                Ok(())
-            }
-            .await;
-            let teardown = fixture.drop_schema().await;
-            result?;
-            teardown?;
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn staged_pricing_flush_and_abort_resume_in_bounded_passes() -> TestResult {
-    for abort in [false, true] {
-        let Some(fixture) = Fixture::create(168).await? else {
-            return Ok(());
+async fn old_worker_gaps_and_new_live_classification_remain_additive() -> TestResult {
+    let Some(fixture) = Fixture::create(168).await? else {
+        return Ok(());
+    };
+    let result: TestResult = async {
+        let pool = fixture.storage.pool();
+        sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
+            .execute(pool).await?;
+        let event = cc_lb_storage_api::RequestEvent {
+            request_id: "live-pricing".to_owned(),
+            event_id: Some("live-pricing".to_owned()),
+            ts: 1_800_000_001,
+            ts_ms: Some(1_800_000_001_000),
+            model: Some("forward-only".to_owned()),
+            status: 200,
+            input_tokens: Some(5),
+            cost_usd_micros: Some(0),
+            ..Default::default()
         };
-        let result: TestResult = async {
-            let pool = fixture.storage.pool();
-            sqlx::raw_sql(
-                "UPDATE usage_rollup_reconciliations_v1 SET status='complete'; \
-                 INSERT INTO usage_rollups_v2 \
-                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,updated_at) \
-                 SELECT 'minute',1800000000+i*60,'staged','00000000-0000-0000-0000-000000000000', \
-                        'unknown','staged',1,NOW() FROM GENERATE_SERIES(1,20001) AS i; \
-                 INSERT INTO usage_rollup_pricing_backfill_stage_v1 \
-                 (slot_id,resolution,bucket_start_unix_secs,principal_id,upstream_id,model,priced_event_count) \
-                 SELECT 'base',resolution,bucket_start_unix_secs,principal_id,upstream_id,model,1 \
-                 FROM usage_rollups_v2;",
-            )
-            .execute(pool)
-            .await?;
-            if abort {
-                sqlx::query(
-                    "INSERT INTO usage_rollup_checkpoints_v1 (id,value) \
-                     VALUES ('pricing_completeness_stage_abort',1)",
-                )
-                .execute(pool)
-                .await?;
-            } else {
-                // Resume a proven slot with more staged keys than fit in two
-                // flush transactions; its scan cursor must survive until empty.
-                sqlx::raw_sql(
-                    "INSERT INTO usage_rollup_checkpoints_v1 (id,value,value_xid) VALUES \
-                     ('pricing_completeness_backfill_upper',0,'0'::xid8), \
-                     ('pricing_completeness_backfill_cursor',1,'0'::xid8), \
-                     ('pricing_completeness_backfill_expected_seq',0,'0'::xid8), \
-                     ('pricing_completeness_live_watermark',0,'0'::xid8), \
-                     ('pricing_completeness_flushing_base',1,'0'::xid8);",
-                )
-                .execute(pool)
-                .await?;
-            }
-            let mut revision = fixture.storage.usage_rollup_revision().await?;
-            for (index, remaining) in [10_001_i64, 1, 0].into_iter().enumerate() {
-                let run = fixture.storage.rollup_usage_once().await?;
-                assert_eq!(run.processed_events, 0);
-                assert_eq!(
-                    run.updated_rollups,
-                    if abort { 0 } else if index < 2 { 10_000 } else { 1 },
-                );
-                let staged: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
-                )
-                .fetch_one(pool)
-                .await?;
-                assert_eq!(staged, remaining, "abort={abort}, pass={index}");
-                assert_eq!(
-                    totals(pool).await?,
-                    (if abort { 0 } else { 20_001 - remaining }, 0, 0),
-                );
-                let marker: Option<i64> = sqlx::query_scalar(
-                    "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id=$1",
-                )
-                .bind(if abort {
-                    "pricing_completeness_stage_abort"
-                } else {
-                    "pricing_completeness_flushing_base"
-                })
-                .fetch_optional(pool)
-                .await?;
-                assert_eq!(
-                    marker,
-                    if remaining == 0 {
-                        None
-                    } else {
-                        Some(if abort { 1 } else { index as i64 + 2 })
-                    },
-                );
-                if !abort {
-                    let next_revision = fixture.storage.usage_rollup_revision().await?;
-                    assert_ne!(next_revision, revision, "each flush must invalidate the revision");
-                    revision = next_revision;
-                    let cursor: (i64, String) = sqlx::query_as(
-                        "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 \
-                         WHERE id='pricing_completeness_backfill_cursor'",
-                    )
-                    .fetch_one(pool)
-                    .await?;
-                    assert_eq!(cursor, (if remaining == 0 { 0 } else { 1 }, "0".to_owned()));
-                }
-            }
-            Ok(())
+        fixture.storage.append_request_event(&event).await?;
+        let xid: String = sqlx::query_scalar("SELECT tx_id::text FROM request_events_v1 LIMIT 1")
+            .fetch_one(pool).await?;
+        wait_until_xid_below_xmin(pool, &xid).await?;
+        assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 1);
+        // An old worker advances the SAME ordinary checkpoint and totals without
+        // supplying classification counters. Retained raw evidence is not repair authority.
+        sqlx::query(
+            "INSERT INTO request_events_v1 \
+             (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+             VALUES ('old-worker','old-worker',to_timestamp(1800000001),1800000001000,200,0,'forward-only',7,9)",
+        ).execute(pool).await?;
+        sqlx::raw_sql(
+            "UPDATE usage_rollups_v2 SET request_count=request_count+1,input_tokens=input_tokens+7, \
+                 virtual_cost_micros=virtual_cost_micros+9; \
+             UPDATE usage_rollup_checkpoints_v1 SET (value,value_xid)= \
+                 (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) \
+                 WHERE id='high_water';",
+        ).execute(pool).await?;
+        let old_checkpoint = fixture.storage.usage_rollup_checkpoint().await?;
+        for _ in 0..3 {
+            assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 0);
+            assert_eq!(totals(pool).await?, (2, 0, 0));
         }
-        .await;
-        let teardown = fixture.drop_schema().await;
-        result?;
-        teardown?;
-    }
-    Ok(())
+        let next = cc_lb_storage_api::RequestEvent {
+            request_id: "live-unpriced".to_owned(),
+            event_id: Some("live-unpriced".to_owned()),
+            cost_usd_micros: None,
+            input_tokens: None,
+            cache_write_input_tokens_30m: Some(11),
+            ..event.clone()
+        };
+        fixture.storage.append_request_event(&next).await?;
+        let unmetered = cc_lb_storage_api::RequestEvent {
+            request_id: "live-unmetered".to_owned(),
+            event_id: Some("live-unmetered".to_owned()),
+            input_tokens: None,
+            cost_usd_micros: None,
+            ..event.clone()
+        };
+        fixture.storage.append_request_event(&unmetered).await?;
+        let xid: String = sqlx::query_scalar(
+            "SELECT tx_id::text FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1",
+        ).fetch_one(pool).await?;
+        wait_until_xid_below_xmin(pool, &xid).await?;
+        // Both workers contend on the ordinary advisory transaction lock.
+        let (left, right) = tokio::join!(
+            fixture.storage.rollup_usage_once(),
+            fixture.storage.rollup_usage_once(),
+        );
+        assert_eq!(left?.processed_events + right?.processed_events, 2);
+        assert_ne!(fixture.storage.usage_rollup_checkpoint().await?, old_checkpoint);
+        let revision = fixture.storage.usage_rollup_revision().await?;
+        fixture.storage.append_request_event(&next).await?;
+        assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 0);
+        assert_eq!(fixture.storage.usage_rollup_revision().await?, revision);
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = fixture.storage.query_usage_rollups_in_range(
+                resolution, 1_800_000_000, 1_800_003_600,
+            ).await?;
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!((row.request_count, row.priced_event_count, row.unpriced_event_count,
+                row.unmetered_event_count, row.input_tokens, row.virtual_cost_micros),
+                (4, 1, 1, 1, 12, 9));
+            assert_eq!(row.effective_cache_write_input_tokens, Some(11));
+            assert_eq!(derive_pricing_completeness(PricingCompletenessInput {
+                request_count: row.request_count,
+                priced_event_count: row.priced_event_count,
+                unpriced_event_count: row.unpriced_event_count,
+                unmetered_event_count: row.unmetered_event_count,
+                virtual_cost_micros: row.virtual_cost_micros,
+            }), Some(PricingCompleteness::Partial));
+        }
+        Ok(())
+    }.await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
 }
 
 async fn wait_until_xid_below_xmin(pool: &PgPool, xid: &str) -> TestResult {

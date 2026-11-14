@@ -12,7 +12,6 @@ import type {
   PricingCompleteness,
   UsageBucket,
 } from '../lib/api';
-import type { NativeWriteTokenFields } from '../lib/pricingCompleteness';
 import { PrincipalProviderTable } from './PrincipalProviderTable';
 import {
   type MergedPrincipalUsage,
@@ -58,7 +57,6 @@ function row(
         cacheHitRatio: null,
         requests: pricing.request_count,
         tokens: 100,
-        completenessTokens: 100,
         promptTokens: 100,
       },
     },
@@ -76,53 +74,85 @@ function show(rows: MergedPrincipalUsage[]) {
 }
 
 describe('PrincipalProviderTable pricing truth', () => {
-  it.each([
-    { cache_write_input_tokens: 7 },
-    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
-  ] satisfies NativeWriteTokenFields[])(
-    'keeps native-write-only legacy rows and both footer totals unknown: %j',
-    (nativeWrites) => {
-      const bucket: UsageBucket & NativeWriteTokenFields = {
-        bucket_start_unix_secs: 0,
-        request_count: 1,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        error_count: 0,
-        virtual_cost_micros: 0,
-        latency_ms_sum: 0,
-        latency_count: 0,
-        priced_request_count: 0,
-        unpriced_request_count: 0,
-        unmetered_request_count: 0,
-        ...nativeWrites,
-      };
-      const usage: DashboardUsageResponse = {
-        range: '24h',
-        step: 'hour',
-        group_by: 'principal',
-        window_start_unix_secs: 0,
-        window_end_unix_secs: 3600,
-        observed: true,
-        series: [{ key: 'Legacy principal', buckets: [bucket] }],
-      };
-      const { container } = show(
-        mergePrincipalProviderUsage({ anthropic: usage }, new Map()),
+  it('qualifies shares only when the cost denominator is incomplete', () => {
+    const view = show([row('Priced', 'priced', 2_500_000)]);
+    expect(
+      screen.getByRole('columnheader', { name: 'Provider share' }),
+    ).toBeDefined();
+    view.unmount();
+    show([row('Priced', 'priced', 2_500_000), row('Legacy', 'unknown')]);
+    expect(
+      screen.getByRole('columnheader', { name: 'Known-cost share' }),
+    ).toBeDefined();
+  });
+
+  it.each(['priced', 'unknown'] as const)(
+    'shows an absent provider as a plain dash beside a %s provider',
+    (state) => {
+      render(
+        <PrincipalProviderTable
+          rows={[
+            row('One provider', state, state === 'priced' ? 2_500_000 : 0),
+          ]}
+          providers={['anthropic', 'openai']}
+          loading={false}
+          error={false}
+        />,
       );
       const principal = screen.getByTestId('multi-provider-principal-row');
-      const footer = container.querySelector('tfoot');
-      expect(
-        principal.querySelectorAll('[title="Price unknown"]'),
-      ).toHaveLength(2);
-      expect(footer?.querySelectorAll('[title="Price unknown"]')).toHaveLength(
-        2,
-      );
-      expect(principal.textContent).not.toContain('$0.00');
-      expect(footer?.textContent).not.toContain('$0.00');
-      expect(footer?.textContent).not.toContain('100%');
+      const cells = within(principal).getAllByRole('cell');
+      const absent = cells[cells.length - 1];
+      expect(absent.textContent).toBe('—');
+      expect(absent.querySelector('[title]')).toBeNull();
+      expect(absent.querySelector('[aria-label]')).toBeNull();
+      expect(absent.textContent).not.toContain('Price unknown');
+      expect(absent.textContent).not.toContain('$0.00');
+      if (state === 'unknown') {
+        expect(
+          principal.querySelectorAll('[title="Price unknown"]'),
+        ).toHaveLength(2);
+      }
     },
   );
+
+  it('keeps unclassified zero rows and both footer totals unknown', () => {
+    const bucket: UsageBucket = {
+      bucket_start_unix_secs: 0,
+      request_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      error_count: 0,
+      virtual_cost_micros: 0,
+      latency_ms_sum: 0,
+      latency_count: 0,
+      priced_request_count: 0,
+      unpriced_request_count: 0,
+      unmetered_request_count: 0,
+    };
+    const usage: DashboardUsageResponse = {
+      range: '24h',
+      step: 'hour',
+      group_by: 'principal',
+      window_start_unix_secs: 0,
+      window_end_unix_secs: 3600,
+      observed: true,
+      series: [{ key: 'Legacy principal', buckets: [bucket] }],
+    };
+    const { container } = show(
+      mergePrincipalProviderUsage({ anthropic: usage }, new Map()),
+    );
+    const principal = screen.getByTestId('multi-provider-principal-row');
+    const footer = container.querySelector('tfoot');
+    expect(principal.querySelectorAll('[title="Price unknown"]')).toHaveLength(
+      2,
+    );
+    expect(footer?.querySelectorAll('[title="Price unknown"]')).toHaveLength(2);
+    expect(principal.textContent).not.toContain('$0.00');
+    expect(footer?.textContent).not.toContain('$0.00');
+    expect(footer?.textContent).not.toContain('100%');
+  });
 
   it('puts indeterminate costs last in either sort direction', () => {
     show([

@@ -822,7 +822,6 @@ fn pricing_completeness_wire_and_legacy_derivation() {
             I {
                 request_count: 1,
                 unpriced_event_count: 1,
-                total_tokens: 1,
                 ..I::default()
             },
             Some(P::Unpriced),
@@ -847,17 +846,9 @@ fn pricing_completeness_wire_and_legacy_derivation() {
         (
             I {
                 request_count: 1,
-                total_tokens: 1,
                 ..I::default()
             },
             Some(P::Unknown),
-        ),
-        (
-            I {
-                request_count: 1,
-                ..I::default()
-            },
-            Some(P::Unmetered),
         ),
         (
             I {
@@ -871,6 +862,24 @@ fn pricing_completeness_wire_and_legacy_derivation() {
             I {
                 request_count: 2,
                 unpriced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unknown),
+        ),
+        (
+            I {
+                request_count: 2,
+                unmetered_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unknown),
+        ),
+        (
+            I {
+                request_count: 3,
+                unpriced_event_count: 1,
+                unmetered_event_count: 1,
+                virtual_cost_micros: 7,
                 ..I::default()
             },
             Some(P::Partial),

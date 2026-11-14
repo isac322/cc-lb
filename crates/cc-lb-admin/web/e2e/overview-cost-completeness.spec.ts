@@ -250,3 +250,64 @@ for (const theme of ['dark', 'light'] as const) {
     expect(suffixBox!.x + suffixBox!.width).toBeLessThanOrEqual(tileBox!.x + tileBox!.width);
   });
 }
+
+for (const width of [390, 768, 1440]) {
+  for (const theme of ['dark', 'light'] as const) {
+    for (const [name, overrides, state, figure, caption] of [
+      ['legacy all-zero/native omitted', {}, 'unknown', '—', 'Price unknown'],
+      ['legacy plus unpriced', { request_count: 2, unpriced_request_count: 1 }, 'unknown', '—', 'Price unknown'],
+      ['legacy plus auxiliary', { request_count: 2, unmetered_request_count: 1 }, 'unknown', '—', 'Price unknown'],
+      ['legacy plus priced zero', { request_count: 2, priced_request_count: 1 }, 'partial', '$0.00+', 'Partly priced'],
+      ['positive legacy', { virtual_cost_micros: 2_500_000 }, 'partial', '$2.50+', 'Partly priced'],
+    ] as const) {
+      test(`Forward-only ${name} at ${width}px in ${theme}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+        await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+        const buckets: UsageBucket[] = [{
+          bucket_start_unix_secs: NOW - 3600,
+          request_count: 1,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          error_count: 0,
+          latency_ms_sum: 10,
+          latency_count: 1,
+          virtual_cost_micros: 0,
+          priced_request_count: 0,
+          unpriced_request_count: 0,
+          unmetered_request_count: 0,
+          ...overrides,
+        }];
+        const amount = await installPricingFixtures(page, state, theme, buckets);
+        await page.goto('/providers/anthropic?range=24h');
+        const tile = page.getByTestId('overview-kpi-cost');
+        await expect(tile.locator('[data-slot="value"]')).toContainText(figure);
+        await expect(tile.getByText(caption, { exact: true })).toBeVisible();
+        const row = page.getByTestId('top-principal-row');
+        await expect(row.locator('[data-slot="cost"]')).toHaveText(figure);
+        await expect(page.getByRole('columnheader', { name: 'Known-cost share' })).toBeVisible();
+        if (state === 'unknown') {
+          await expect(tile).not.toContainText('$0.00');
+          await expect(tile).not.toContainText('No billable usage');
+          await expect(row.locator('td').last()).toHaveText('—');
+        }
+        await expectFits(page, tile);
+        await expectFits(page, row);
+
+        await page.goto('/?range=24h');
+        const merged = page.getByTestId('multi-provider-principal-row');
+        await expect(merged.locator('td').nth(1)).toContainText(
+          state === 'unknown' ? '—' : `$${(amount * 2 / 1_000_000).toFixed(2)}+`,
+        );
+        await expect(page.getByRole('columnheader', { name: 'Known-cost share' })).toBeVisible();
+        if (state === 'unknown') {
+          await expect(merged.locator('td').nth(2)).toHaveText('—');
+          await expect(page.locator('tfoot')).not.toContainText('$0.00');
+          await expect(page.locator('tfoot')).not.toContainText('100%');
+        }
+        await expectFits(page, merged.locator('td').nth(1));
+      });
+    }
+  }
+}

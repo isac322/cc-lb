@@ -58,7 +58,7 @@ pub(crate) async fn handle_dashboard_summary(
     let (_, window_end_unix_secs) = build_window_for_step(range, auto_step(range), now_unix_secs);
     let etag = dashboard_revision(storage.as_ref()).await.map(|revision| {
         format!(
-            "W/\"dashboard:summary:v2:{}:{}:{revision}:{window_end_unix_secs}\"",
+            "W/\"dashboard:summary:v3:{}:{}:{revision}:{window_end_unix_secs}\"",
             range.as_str(),
             query.providers.as_deref().unwrap_or("all")
         )
@@ -232,7 +232,7 @@ pub(crate) async fn handle_dashboard_usage(
             .await
             .map(|revision| {
                 format!(
-                    "W/\"dashboard:usage:v2:{}:{}:{}:{}:{}:{}:{projection_name}:{revision}:{window_end_unix_secs}\"",
+                    "W/\"dashboard:usage:v3:{}:{}:{}:{}:{}:{}:{projection_name}:{revision}:{window_end_unix_secs}\"",
                     range.as_str(),
                     step.as_str(),
                     group_by.as_str(),

@@ -228,7 +228,7 @@ impl CrashFixture {
 
     async fn reset_iteration(&self) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(
-            "TRUNCATE TABLE request_events_v1, usage_rollups_v2, usage_rollup_pricing_backfill_stage_v1, usage_rollup_checkpoints_v1 RESTART IDENTITY CASCADE",
+            "TRUNCATE TABLE request_events_v1, usage_rollups_v2, usage_rollup_checkpoints_v1 RESTART IDENTITY CASCADE",
         )
         .execute(&self.pool)
         .await?;
@@ -523,7 +523,7 @@ fn storage_result_label<T, E>(result: &Result<T, E>) -> &'static str {
 }
 
 #[test]
-fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
+fn live_classification_checkpoint_failure_rolls_back_counts_and_resumes() {
     let Some(url) = get_postgres_url() else {
         eprintln!("skipped: CI_POSTGRES_URL unset; pricing crash recovery did not run");
         return;
@@ -534,59 +534,19 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
             .await
             .unwrap();
         fixture.wait_for_events_eligible().await.unwrap();
-        fixture.storage.rollup_usage_once().await.unwrap();
         let checkpoint = fixture.storage.usage_rollup_checkpoint().await.unwrap();
-        let (high_seq, high_xid): (i64, String) = sqlx::query_as(
-            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
-        )
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
         sqlx::raw_sql(
-            "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0;
-             DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%';",
-        )
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid)
-             VALUES ('pricing_completeness_backfill_upper', $1, $2::xid8),
-                    ('pricing_completeness_backfill_cursor', $3, $2::xid8)",
-        )
-        .bind(high_seq)
-        .bind(&high_xid)
-        .bind(high_seq + 1)
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
-        // The first pass only stages and initializes bounded verification.
-        fixture.storage.rollup_usage_once().await.unwrap();
-        let staged_before_fault: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
-        )
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        let cursor_before_fault: (i64, String) = sqlx::query_as(
-            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 \
-             WHERE id = 'pricing_completeness_backfill_cursor'",
-        )
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        sqlx::raw_sql(
-            "CREATE FUNCTION fail_pricing_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+            "CREATE FUNCTION fail_live_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN
                  IF (SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)
                      FROM usage_rollups_v2) = 0 THEN
-                     RETURN NEW;
+                     RAISE EXCEPTION 'live classification must accompany the ordinary delta';
                  END IF;
-                 RAISE EXCEPTION 'injected crash after pricing UPDATE before checkpoint commit';
+                 RAISE EXCEPTION 'injected crash after live delta before checkpoint commit';
              END $$;
-             CREATE TRIGGER fail_pricing_checkpoint BEFORE UPDATE ON usage_rollup_checkpoints_v1
-             FOR EACH ROW WHEN (NEW.id = 'pricing_completeness_backfill_cursor')
-             EXECUTE FUNCTION fail_pricing_checkpoint();",
+             CREATE TRIGGER fail_live_checkpoint BEFORE INSERT OR UPDATE ON usage_rollup_checkpoints_v1
+             FOR EACH ROW WHEN (NEW.id = 'high_water')
+             EXECUTE FUNCTION fail_live_checkpoint();",
         )
         .execute(&fixture.pool)
         .await
@@ -599,7 +559,7 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
             .expect_err("trigger must abort commit");
         assert!(
             err.to_string()
-                .contains("injected crash after pricing UPDATE before checkpoint commit"),
+                .contains("injected crash after live delta before checkpoint commit"),
             "unexpected error: {err}"
         );
         assert_eq!(fixture.storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
@@ -612,36 +572,21 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
         .await
         .unwrap();
         assert_eq!(classified, 0, "classification writes must roll back with the cursor");
-        assert!(
-            staged_before_fault > 0,
-            "staged candidates must remain after verification/flush rollback",
-        );
-        let cursor: (i64, String) = sqlx::query_as(
-            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
-             WHERE id = 'pricing_completeness_backfill_cursor'",
-        )
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(cursor, cursor_before_fault);
+        assert!(matches!(fixture.consistency().await.unwrap(), Consistency::AllGone));
         sqlx::raw_sql(
-            "DROP TRIGGER fail_pricing_checkpoint ON usage_rollup_checkpoints_v1;
-             DROP FUNCTION fail_pricing_checkpoint();",
+            "DROP TRIGGER fail_live_checkpoint ON usage_rollup_checkpoints_v1;
+             DROP FUNCTION fail_live_checkpoint();",
         )
         .execute(&fixture.pool)
         .await
         .unwrap();
+        // The fixture's checkpoint observer holds a session-level advisory
+        // lock, which survives the injected transaction rollback. End that
+        // backend before restarting; otherwise the new backend waits on it.
+        fixture.pool.close().await;
         let resumed = fixture.reconnect().await.unwrap();
         resumed.storage.rollup_usage_once().await.unwrap();
         assert!(matches!(resumed.consistency().await.unwrap(), Consistency::AllVisible));
-        let cursor: (i64, String) = sqlx::query_as(
-            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
-             WHERE id = 'pricing_completeness_backfill_cursor'",
-        )
-        .fetch_one(&resumed.pool)
-        .await
-        .unwrap();
-        assert_eq!(cursor, (0, "0".to_owned()));
         let revision = resumed.storage.usage_rollup_revision().await.unwrap();
         resumed.storage.rollup_usage_once().await.unwrap();
         assert_eq!(resumed.storage.usage_rollup_revision().await.unwrap(), revision);

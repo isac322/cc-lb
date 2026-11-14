@@ -34,7 +34,6 @@ import type {
   UsageBucket,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
-import type { NativeWriteTokenFields } from '../lib/pricingCompleteness';
 import * as queries from '../lib/queries';
 import { pendingQuery, successQuery } from '../lib/test-utils/hook-results';
 import type { LiveEventMap } from '../lib/upsertReducer';
@@ -335,6 +334,12 @@ function usageBucket(
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
+    priced_request_count:
+      overrides.priced_request_count === undefined &&
+      overrides.unpriced_request_count === undefined &&
+      overrides.unmetered_request_count === undefined
+        ? (overrides.request_count ?? 0)
+        : 0,
     ...overrides,
   };
 }
@@ -400,6 +405,8 @@ const SUMMARY_FIXTURE: DashboardSummaryResponse = {
     error_rate: 24 / 540,
     virtual_cost_micros: 7_500_000,
     avg_latency_ms: 200,
+    pricing_completeness: 'priced',
+    priced_request_count: 540,
   },
   sparkline: { buckets: SUMMARY_BUCKETS },
   observed: true,
@@ -2456,7 +2463,6 @@ describe('Overview loading geometry', () => {
             requests: 12,
             share_pct: 100,
             tokens: 345,
-            completenessTokens: 345,
           },
         ]}
         rangeWords="last 24h"
@@ -3354,7 +3360,6 @@ const COMPLETE_PRINCIPAL: TopPrincipal = {
   requests: 12,
   share_pct: 62.5,
   tokens: 345,
-  completenessTokens: 345,
 };
 
 /** $0.80 recorded, $0.60 of it attributed: the rest is a legacy remainder. */
@@ -3444,7 +3449,6 @@ describe.each(['single-provider', 'multi-provider'] as const)(
                   cacheHitRatio: 0.87,
                   requests: 12,
                   tokens: 345,
-                  completenessTokens: 345,
                   promptTokens: 300,
                 },
               },
@@ -3922,40 +3926,78 @@ describe('Top principal cost breakdown and cache hit', () => {
 
 describe('Overview list-price completeness', () => {
   it.each([
-    { cache_write_input_tokens: 7 },
-    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
-  ] satisfies NativeWriteTokenFields[])(
-    'keeps legacy native-write-only Top Principals unknown: %j',
-    (nativeWrites) => {
+    ['legacy all-zero/native omitted', {}, '—', 'Price unknown'],
+    [
+      'legacy plus unpriced',
+      { request_count: 2, unpriced_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus auxiliary',
+      { request_count: 2, unmetered_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus priced zero',
+      { request_count: 2, priced_request_count: 1 },
+      '$0.00+',
+      'Partly priced',
+    ],
+    [
+      'positive legacy',
+      { virtual_cost_micros: 2_500_000 },
+      '$2.50+',
+      'Partly priced',
+    ],
+  ] as const)(
+    'keeps %s honest across the KPI, chart and principal',
+    (_name, overrides, figure, caption) => {
       mockResolvedKpiQueries();
-      const bucket: UsageBucket & NativeWriteTokenFields = usageBucket(
-        KPI_TIMESTAMPS[0],
-        {
-          request_count: 1,
-          priced_request_count: 0,
-          unpriced_request_count: 0,
-          unmetered_request_count: 0,
-          ...nativeWrites,
-        },
+      const bucket = usageBucket(KPI_TIMESTAMPS[0], {
+        request_count: 1,
+        priced_request_count: 0,
+        unpriced_request_count: 0,
+        unmetered_request_count: 0,
+        ...overrides,
+      });
+      vi.mocked(queries.useSummary).mockReturnValue(
+        successQuery<DashboardSummaryResponse>({
+          ...SUMMARY_FIXTURE,
+          totals: {
+            ...SUMMARY_FIXTURE.totals,
+            ...bucket,
+            pricing_completeness: undefined,
+          },
+          sparkline: { buckets: [bucket] },
+        }),
       );
       vi.mocked(queries.useUsage).mockReturnValue(
         usageResult([{ key: 'principal-alpha', buckets: [bucket] }]),
       );
       render(<OverviewPage />);
-      const row = screen.getByTestId('top-principal-row');
-      expect(costTrigger('Principal Alpha').textContent).toBe('—');
+      const tile = screen.getByTestId('overview-kpi-cost');
+      expect(tile.textContent).toContain(figure);
+      expect(tile.textContent).toContain(caption);
+      expect(costTrigger('Principal Alpha').textContent).toBe(figure);
       expect(
-        costTrigger('Principal Alpha').getAttribute('aria-label'),
-      ).toContain('Price unknown');
-      expect(row.lastElementChild?.textContent).toBe('—');
-      expect(row.textContent).not.toContain('$0.00');
-      fireEvent.click(costTrigger('Principal Alpha'));
+        screen.getByRole('columnheader', { name: 'Known-cost share' }),
+      ).toBeDefined();
+      fireEvent.mouseMove(screen.getByTestId('overview-kpi-chart-cost'), {
+        clientX: 0,
+      });
       expect(
-        screen.getByTestId('top-principal-cost-details').textContent,
-      ).toContain('Price unknown for this window');
+        screen.getByTestId('overview-kpi-tooltip-cost').textContent,
+      ).toContain(caption);
+      if (figure === '—') {
+        expect(tile.textContent).not.toContain('$0.00');
+        expect(
+          screen.getByTestId('top-principal-row').lastElementChild?.textContent,
+        ).toBe('—');
+      }
     },
   );
-
   it.each([
     ['unpriced', 'List price unavailable'],
     ['unknown', 'Price unknown'],

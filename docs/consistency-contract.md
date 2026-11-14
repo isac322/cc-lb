@@ -232,25 +232,49 @@ are `priced_request_count`, `unpriced_request_count`, and
 existing totals; an unavailable price never becomes a measured zero.
 
 `pricing_completeness` distinguishes `priced`, `known_zero`, `partial`,
-`unpriced`, `unmetered`, and `unknown`. Fully classified requests with a price
-have `priced` or `known_zero`; requests without billable usage are `unmetered`.
-A mix of priced and unpriced requests is `partial`. Retained legacy gaps with
-tokens but no price evidence remain `unknown`; legacy gaps mixed with pricing
-evidence are `partial`. A legacy window with neither tokens nor cost is
-`unmetered`. Classification uses counters and recorded amounts, without
-re-pricing events against the current catalog.
+`unpriced`, `unmetered`, and `unknown`. With complete classification, priced
+requests have `priced` or `known_zero`, requests without billable usage are
+`unmetered`, and a mix of priced and unpriced requests is `partial`.
+
+The unclassified remainder is
+`request_count - (priced_event_count + unpriced_event_count + unmetered_event_count)`,
+saturating at zero. Any positive remainder makes the result `partial` only
+when at least one request has a recorded price or the recorded known cost is
+positive; otherwise it is `unknown`. This rule also applies to legacy windows
+with zero tokens and zero cost, and to gaps mixed only with unpriced or
+unmetered requests. Neither case proves free or unmetered usage. A recorded
+positive subtotal remains visible; a priced zero mixed with a gap remains
+qualified as partial. Classification never re-prices events against the
+current catalog.
 
 Nonempty rollup-backed summaries and buckets return the state and all three
 counters, including explicit zeros. Empty totals and zero-filled buckets omit
 all four fields. Estimated API-key months use the same classification;
 provider-reported organization buckets and months omit these local counters.
 
-SQLite and Postgres upgrade existing rollups in bounded, restart-safe batches
-using retained request-event evidence. Events already removed by retention
-cannot establish missing prices. Reads continue while the backfill advances.
-Dashboard validators include the rollup revision, which covers the ingestion
-checkpoint and cost and pricing backfill cursors. Backfill progress can
-invalidate a cached response even without new traffic.
+SQLite and Postgres add classification counters with zero defaults to
+existing rollups. Only ordinary rollup ingestion adds classification evidence,
+in the same transaction as its request, token, cost and checkpoint delta.
+Existing rollup totals are never retrofitted, even when their original raw
+events remain available. Idle ticks, retention gaps and raw-event pruning
+cannot repair historical classification.
+
+Old rollup workers can still add totals without the new counters, leaving an
+unclassified remainder. Updating every worker prevents new gaps; it does not
+repair existing ones. Old readers do not understand the new completeness
+contract and may still display missing prices as zero. Upgrade readers as well
+as workers before relying on this presentation.
+
+The independent historical category-cost backfill remains in place. Dashboard
+validators include a semantics version and the rollup revision, covering the
+ingestion checkpoint and category-cost backfill cursor. A semantics upgrade
+invalidates older validators even without traffic; there is no pricing
+classification backfill cursor.
+
+Native cache-write counters retain reported-zero versus absent evidence.
+Effective cache-write totals preserve available per-event evidence and raw
+native-write lower bounds during mixed-version writes. Historical rollups
+without that evidence do not promise an exact reconstructed effective total.
 
 The UI shows unavailable prices as a neutral dash and a reason. Partial
 amounts are known subtotals with a plus sign. Unknown prices never appear as

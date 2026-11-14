@@ -265,6 +265,75 @@ async fn summary_derives_completeness_from_counts_across_buckets() {
     }
 }
 
+#[tokio::test]
+async fn residual_pricing_evidence_is_strict_in_summary_and_usage() {
+    let clock = test_clock(ALIGNED_MINUTE_UNIX_SECS);
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    storage
+        .append_request_event(&usage_event(ALIGNED_MINUTE_UNIX_SECS - 60))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock,
+    ));
+    // requests, priced, unpriced, unmetered, tokens, known cost, expected
+    for (requests, priced, unpriced, unmetered, tokens, cost, expected) in [
+        (1_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, "unknown"),
+        (1, 0, 0, 0, 5, 0, "unknown"),
+        (2, 0, 1, 0, 0, 0, "unknown"),
+        (2, 0, 1, 0, 5, 0, "unknown"),
+        (2, 0, 0, 1, 0, 0, "unknown"),
+        (2, 1, 0, 0, 0, 0, "partial"),
+        (1, 0, 0, 0, 0, 7, "partial"),
+        (2, 0, 1, 0, 0, 7, "partial"),
+    ] {
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET request_count=?1, priced_event_count=?2, \
+             unpriced_event_count=?3, unmetered_event_count=?4, input_tokens=?5, \
+             virtual_cost_micros=?6",
+        )
+        .bind(requests)
+        .bind(priced)
+        .bind(unpriced)
+        .bind(unmetered)
+        .bind(tokens)
+        .bind(cost)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            storage.rollup_usage_once().await.unwrap().processed_events,
+            0
+        );
+        for uri in [
+            "/admin/v1/dashboard/summary?range=1h",
+            "/admin/v1/dashboard/usage?range=1h&group_by=model",
+            "/admin/v1/dashboard/usage?range=1h&group_by=model&projection=totals",
+        ] {
+            let (status, _, body, _) = authed_json(admin_app.clone(), "GET", uri, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let bucket = if uri.contains("/summary") {
+                &body["totals"]
+            } else {
+                body["series"][0]["buckets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|bucket| bucket["request_count"] == requests)
+                    .unwrap()
+            };
+            assert_eq!(bucket["pricing_completeness"], expected, "{uri} {bucket}");
+            assert_eq!(bucket["priced_request_count"], priced, "{uri}");
+            assert_eq!(bucket["unpriced_request_count"], unpriced, "{uri}");
+            assert_eq!(bucket["unmetered_request_count"], unmetered, "{uri}");
+            assert_eq!(bucket["virtual_cost_micros"], cost, "{uri}");
+        }
+    }
+}
+
 fn test_clock(now_unix_secs: u64) -> ClockHandle {
     Arc::new(TestClock::new_at_secs(now_unix_secs))
 }

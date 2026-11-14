@@ -3,11 +3,9 @@ import type { UsageBucket } from './api';
 import {
   derivePricingCompleteness,
   isIndeterminatePricing,
-  type NativeWriteTokenFields,
   type PricingCompletenessInput,
   pricingQualifier,
   sumBucketPricing,
-  sumCompletenessTokens,
 } from './pricingCompleteness';
 
 const input: PricingCompletenessInput = {
@@ -15,7 +13,6 @@ const input: PricingCompletenessInput = {
   priced_event_count: 0,
   unpriced_event_count: 0,
   unmetered_event_count: 0,
-  total_tokens: 100,
   virtual_cost_micros: 0,
 };
 
@@ -27,10 +24,9 @@ describe('pricing completeness truth table', () => {
     [{ unpriced_event_count: 1 }, 'unpriced'],
     [{ unmetered_event_count: 1 }, 'unmetered'],
     [{}, 'unknown'],
-    [{ total_tokens: 0 }, 'unmetered'],
     [{ virtual_cost_micros: 1 }, 'partial'],
     [{ request_count: 2, priced_event_count: 1 }, 'partial'],
-    [{ request_count: 2, unpriced_event_count: 1 }, 'partial'],
+    [{ request_count: 2, unpriced_event_count: 1 }, 'unknown'],
     [{ request_count: 2, unmetered_event_count: 1 }, 'unknown'],
     [
       { request_count: 2, priced_event_count: 1, unpriced_event_count: 1 },
@@ -98,49 +94,6 @@ describe('pricing completeness truth table', () => {
     ).toBeUndefined();
   });
 
-  it.each([
-    { cache_write_input_tokens: 7 },
-    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
-    { cache_write_input_tokens_12h: 7 },
-    {
-      cache_write_input_tokens: 7,
-      cache_write_input_tokens_30m: 3,
-      cache_write_input_tokens_12h: 4,
-    },
-  ] satisfies NativeWriteTokenFields[])(
-    'retains unknown pricing for legacy native writes: %j',
-    (nativeWrites) => {
-      const bucket: UsageBucket & NativeWriteTokenFields = {
-        bucket_start_unix_secs: 0,
-        request_count: 1,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        error_count: 0,
-        virtual_cost_micros: 0,
-        latency_ms_sum: 0,
-        latency_count: 0,
-        priced_request_count: 0,
-        unpriced_request_count: 0,
-        unmetered_request_count: 0,
-        ...nativeWrites,
-      };
-      expect(sumCompletenessTokens(bucket)).toBe(7);
-      expect(sumBucketPricing([bucket]).pricing_completeness).toBe('unknown');
-    },
-  );
-
-  it('sums native-write completeness before reconciling aggregate and TTL fields', () => {
-    const buckets = [
-      { cache_write_input_tokens: 7 },
-      { cache_write_input_tokens_30m: 7 },
-    ];
-    expect(
-      buckets.reduce((sum, bucket) => sum + sumCompletenessTokens(bucket), 0),
-    ).toBe(14);
-  });
-
   it('sums counters across buckets, retaining legacy gaps', () => {
     const bucket: UsageBucket = {
       bucket_start_unix_secs: 0,
@@ -154,8 +107,14 @@ describe('pricing completeness truth table', () => {
       latency_ms_sum: 0,
       latency_count: 0,
     };
-    expect(sumBucketPricing([bucket])).toEqual({ request_count: 1 });
-    expect(sumBucketPricing([])).toEqual({ request_count: 0 });
+    expect(sumBucketPricing([bucket])).toMatchObject({
+      request_count: 1,
+      pricing_completeness: 'unknown',
+    });
+    expect(sumBucketPricing([])).toMatchObject({
+      request_count: 0,
+      pricing_completeness: undefined,
+    });
     const result = sumBucketPricing([
       {
         ...bucket,

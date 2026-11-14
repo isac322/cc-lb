@@ -5,6 +5,7 @@ import type {
   KeyUsageProvenance,
   PricingCompleteness,
 } from '../../../lib/api';
+import { derivePricingCompleteness } from '../../../lib/pricingCompleteness';
 import { CreditStrip } from '../CreditStrip';
 
 const provenance: KeyUsageProvenance = {
@@ -29,6 +30,41 @@ const month: KeyUsageMonth = {
 afterEach(cleanup);
 
 describe('CreditStrip pricing availability', () => {
+  it.each([
+    ['legacy all-zero/native omitted', 0, 0, 0, 0, '—', 'Price unknown'],
+    ['legacy plus unpriced', 0, 1, 0, 0, '—', 'Price unknown'],
+    ['legacy plus auxiliary', 0, 0, 1, 0, '—', 'Price unknown'],
+    ['legacy plus priced zero', 1, 0, 0, 0, '$0.00+', 'Partly priced'],
+    ['positive legacy', 0, 0, 0, 2_500_000, '$2.50+', 'Partly priced'],
+  ] as const)(
+    'keeps %s honest in estimated credits',
+    (_name, priced, unpriced, unmetered, cost, figure, caption) => {
+      const { container } = render(
+        <CreditStrip
+          month={{
+            ...month,
+            tokens: 0,
+            cost_usd_micros: cost,
+            pricing_completeness: derivePricingCompleteness({
+              request_count: 2,
+              priced_event_count: priced,
+              unpriced_event_count: unpriced,
+              unmetered_event_count: unmetered,
+              virtual_cost_micros: cost,
+            }),
+          }}
+          provenance={provenance}
+          isLoading={false}
+        />,
+      );
+      expect(
+        container.querySelector('[data-cell="Credits used"]')?.textContent,
+      ).toContain(figure);
+      expect(screen.getByText(caption)).toBeDefined();
+      expect(screen.queryByText('No billable usage')).toBeNull();
+    },
+  );
+
   it.each([
     ['unpriced', 'List price unavailable'],
     ['unknown', 'Price unknown'],

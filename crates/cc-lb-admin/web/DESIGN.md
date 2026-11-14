@@ -469,15 +469,26 @@ bounded KPI figures may truncate oversized digit runs only when the pricing
 qualifier (such as `+`) stays visible inline and the exact qualified amount
 remains in `title` and accessible text. Essential state stays visible without hover.
 
+Rollup classification is forward-only. Existing totals and old-worker deltas
+retain an unclassified remainder, even when raw request events survive.
+There is no historical pricing recovery. A positive remainder is `partial`
+only with at least one priced request or positive recorded cost; otherwise
+it is `unknown`, regardless of token totals or unpriced/unmetered counts.
+Zero tokens and zero cost never prove an incomplete legacy range unmetered.
+Preserve known positive totals, and qualify priced-zero subtotals with gaps.
+Old readers may still render missing prices as zero; this contract requires
+the updated reader as well as updated rollup workers.
+
 - A range with no requests has no cost reading. `unpriced` shows `—` with
   `List price unavailable`; `unknown` shows `—` with `Price unknown`. A null
   request cost is unavailable, never a zero.
-- `partial` shows the known subtotal followed by `+`. When all requests are
-  classified, the caption counts missing prices, such as `1 unpriced`.
-  Otherwise it says `Partly priced`. Exact values and breakdowns retain the
-  qualification.
-- `known_zero` and `unmetered` retain a zero amount. The latter means
-  `No billable usage`. Neither state says a model has no list price.
+- `partial` shows the known subtotal followed by `+`, including a priced-zero
+  subtotal with a legacy gap. When all requests are classified, the caption
+  counts missing prices, such as `1 unpriced`. Otherwise it says
+  `Partly priced`. Exact values and breakdowns retain the qualification.
+- Fully classified `known_zero` and `unmetered` retain a zero amount. The
+  latter means `No billable usage`. Neither state says a model has no list
+  price, and neither applies to an unclassified legacy remainder.
 - Cost plots leave gaps for `unpriced` and `unknown`; empty, known-zero and
   unmetered buckets plot zero. Gaps never connect to adjacent priced intervals.
 - Indeterminate principals sort last in either cost-sort direction and have

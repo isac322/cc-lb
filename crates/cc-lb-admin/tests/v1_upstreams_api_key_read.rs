@@ -1481,6 +1481,65 @@ async fn estimated_month_includes_cache_write_tokens_and_mixed_pricing_counts() 
 }
 
 #[tokio::test]
+async fn estimated_month_never_promotes_unclassified_zero_history() {
+    let h = spawn_api_key_harness().await;
+    let target = h
+        .seed_legacy_api_key_upstream("residual-pricing", ORG)
+        .await;
+    append_and_roll_up(
+        &h,
+        &[usage_event(target.id, NOW - 600, "residual-pricing", 0)],
+    )
+    .await;
+    for (requests, priced, unpriced, unmetered, cost, expected) in [
+        (1_i64, 0_i64, 0_i64, 0_i64, 0_i64, "unknown"),
+        (2, 0, 1, 0, 0, "unknown"),
+        (2, 0, 0, 1, 0, "unknown"),
+        (2, 1, 0, 0, 0, "partial"),
+        (1, 0, 0, 0, 7, "partial"),
+        (2, 0, 1, 0, 7, "partial"),
+    ] {
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET request_count=?1, priced_event_count=?2, \
+             unpriced_event_count=?3, unmetered_event_count=?4, virtual_cost_micros=?5, \
+             cache_write_input_tokens=NULL, cache_write_input_tokens_30m=NULL, \
+             cache_write_input_tokens_12h=NULL, effective_cache_write_input_tokens=NULL",
+        )
+        .bind(requests)
+        .bind(priced)
+        .bind(unpriced)
+        .bind(unmetered)
+        .bind(cost)
+        .execute(h.storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            h.storage
+                .rollup_usage_once()
+                .await
+                .unwrap()
+                .processed_events,
+            0
+        );
+        for query in [
+            "range=1h&step=minute",
+            "range=24h&step=hour",
+            "range=7d&step=hour",
+        ] {
+            let body = usage(&h, target.id, query).await.body;
+            let month = &body["month"];
+            assert_eq!(body["source"], "estimated", "{query}");
+            assert_eq!(month["tokens"], 0, "{query}");
+            assert_eq!(month["cost_usd_micros"], cost, "{query}");
+            assert_eq!(month["pricing_completeness"], expected, "{query}");
+            assert_eq!(month["priced_request_count"], priced, "{query}");
+            assert_eq!(month["unpriced_request_count"], unpriced, "{query}");
+            assert_eq!(month["unmetered_request_count"], unmetered, "{query}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn estimated_month_preserves_legacy_cache_write_fallback_before_folding_rollups() {
     for (aggregate_tokens, ordinary_tokens, separate_rollups) in [
         (0, 0, false),

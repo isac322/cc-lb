@@ -84,7 +84,6 @@ function aggregateProviderMetrics(
       metrics.map((metric) => ({
         ...metric,
         request_count: metric.requests,
-        total_tokens: metric.completenessTokens,
         virtual_cost_micros: metric.costMicros,
       })),
     ),
@@ -99,10 +98,6 @@ function aggregateProviderMetrics(
         : null,
     requests: metrics.reduce((sum, metric) => sum + metric.requests, 0),
     tokens: metrics.reduce((sum, metric) => sum + metric.tokens, 0),
-    completenessTokens: metrics.reduce(
-      (sum, metric) => sum + metric.completenessTokens,
-      0,
-    ),
     promptTokens,
   };
 }
@@ -161,12 +156,16 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
     activeProviders.map((provider) => ({
       ...providerTotals[provider],
       request_count: providerTotals[provider].requests,
-      total_tokens: providerTotals[provider].completenessTokens,
       virtual_cost_micros: providerTotals[provider].costMicros,
     })),
   );
   const hasDeterminateCost = rows.some(
     (row) => !isIndeterminatePricing(row.pricing_completeness),
+  );
+  const hasIncompleteCost = rows.some(
+    (row) =>
+      isIndeterminatePricing(row.pricing_completeness) ||
+      row.pricing_completeness === 'partial',
   );
   const sort = () => setDescending((value) => !value);
   const header = (label: string, className?: string) => {
@@ -226,7 +225,9 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                 Principal
               </TableHeadCell>
               {header('Total cost')}
-              <TableHeadCell>Provider share</TableHeadCell>
+              <TableHeadCell>
+                {hasIncompleteCost ? 'Known-cost share' : 'Provider share'}
+              </TableHeadCell>
               {activeProviders.map((provider) => (
                 <TableHeadCell key={provider}>
                   {providerLabel[provider]}
@@ -291,20 +292,20 @@ export const PrincipalProviderTable = memo(function PrincipalProviderTable({
                         className={`${PRINCIPAL_BODY_CELL_CLASS} whitespace-nowrap`}
                         key={provider}
                       >
-                        <CostValue
-                          micros={row.providers[provider]?.costMicros ?? 0}
-                          pricing={
-                            row.providers[provider] ?? {
-                              pricing_completeness: 'unknown',
-                            }
-                          }
-                        />
-                        <span className="ml-1 text-caption text-text-muted">
-                          /{' '}
-                          {fmtCache(
-                            row.providers[provider]?.cacheHitRatio ?? null,
-                          )}
-                        </span>
+                        {row.providers[provider] ? (
+                          <>
+                            <CostValue
+                              micros={row.providers[provider].costMicros}
+                              pricing={row.providers[provider]}
+                            />
+                            <span className="ml-1 text-caption text-text-muted">
+                              /{' '}
+                              {fmtCache(row.providers[provider].cacheHitRatio)}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-text-faint">—</span>
+                        )}
                       </TableCell>
                     ))}
                   </PrincipalUsageRow>

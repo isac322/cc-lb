@@ -14,7 +14,6 @@ use super::request_event_row::{REQUEST_EVENT_COLUMNS, row_to_request_event};
 use crate::{SqliteStorage, map_sqlx_error};
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
-const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 
 #[async_trait]
 impl CacheKeepaliveProjectionStore for SqliteStorage {
@@ -91,7 +90,6 @@ impl RequestEventStore for SqliteStorage {
         }
 
         let cutoff_secs = (cutoff_ms_x_1m / KEY_SEQUENCE_SCALE) / 1_000;
-        let mut tx = self.begin_immediate().await?;
         let result = sqlx::query(
             "DELETE FROM request_events_v1 \
              WHERE id IN ( \
@@ -109,21 +107,9 @@ impl RequestEventStore for SqliteStorage {
             batch_size as u64,
             "request event prune before batch size",
         )?)
-        .execute(&mut *tx)
+        .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
-        if result.rows_affected() > 0 {
-            sqlx::query(
-                "INSERT INTO usage_rollup_checkpoints_v1 (id, value) VALUES (?, ?) \
-                 ON CONFLICT (id) DO UPDATE SET value = MAX(usage_rollup_checkpoints_v1.value, excluded.value)",
-            )
-            .bind(RAW_PRUNE_CUTOFF_ID)
-            .bind(u64_to_i64(cutoff_secs, "raw prune cutoff")?)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
 
         Ok(result.rows_affected())
     }

@@ -1,7 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DashboardUsageResponse, UsageBucket } from '../../lib/api';
-import type { NativeWriteTokenFields } from '../../lib/pricingCompleteness';
 import { useUsage } from '../../lib/queries';
 import { successQuery } from '../../lib/test-utils/hook-results';
 import type * as timePresets from '../../lib/timePresets';
@@ -52,28 +51,39 @@ function usage(buckets: UsageBucket[]) {
 
 describe('PrincipalsActivity cost completeness', () => {
   it.each([
-    { cache_write_input_tokens: 7 },
-    { cache_write_input_tokens: 0, cache_write_input_tokens_30m: 7 },
-  ] satisfies NativeWriteTokenFields[])(
-    'keeps legacy native-write-only consumption unknown: %j',
-    (nativeWrites) => {
-      usage([
-        {
-          ...bucket,
-          input_tokens: 0,
-          priced_request_count: 0,
-          unpriced_request_count: 0,
-          unmetered_request_count: 0,
-          ...nativeWrites,
-        },
-      ]);
-      expect(screen.getByText('Price unknown')).toBeDefined();
-      expect(
-        screen.getByText('Est. catalog cost').parentElement?.textContent,
-      ).toContain('—');
-      expect(screen.queryByText('$0.0000')).toBeNull();
-    },
-  );
+    ['legacy all-zero/native omitted', {}, '—', 'Price unknown'],
+    [
+      'legacy plus unpriced',
+      { request_count: 2, unpriced_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus auxiliary',
+      { request_count: 2, unmetered_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus priced zero',
+      { request_count: 2, priced_request_count: 1 },
+      '$0.0000+',
+      'Partly priced',
+    ],
+    [
+      'positive legacy',
+      { virtual_cost_micros: 2_500_000 },
+      '$2.5000+',
+      'Partly priced',
+    ],
+  ] as const)('keeps %s qualified', (_name, overrides, figure, caption) => {
+    usage([{ ...bucket, input_tokens: 0, ...overrides }]);
+    expect(
+      screen.getByText('Est. catalog cost').parentElement?.textContent,
+    ).toContain(figure);
+    expect(screen.getByText(caption)).toBeDefined();
+    expect(screen.queryByText('No billable usage')).toBeNull();
+  });
 
   it.each([
     ['unpriced', 'List price unavailable'],
@@ -113,7 +123,20 @@ describe('PrincipalsActivity cost completeness', () => {
     expect(screen.queryByText('List price unavailable')).toBeNull();
     view.unmount();
     usage([{ ...bucket, virtual_cost_micros: 2_500_000 }]);
-    expect(screen.getByText('$2.5000')).toBeDefined();
-    expect(screen.queryByText('Partly priced')).toBeNull();
+    expect(screen.getByText('$2.5000+')).toBeDefined();
+    expect(screen.getByText('Partly priced')).toBeDefined();
   });
+  it.each([
+    { priced_request_count: 1 },
+    { unmetered_request_count: 1 },
+    { request_count: 0 },
+  ])(
+    'keeps fully classified zero and empty controls numeric: %j',
+    (overrides) => {
+      usage([{ ...bucket, input_tokens: 0, ...overrides }]);
+      expect(screen.getByText('$0.0000')).toBeDefined();
+      expect(screen.queryByText('Price unknown')).toBeNull();
+      expect(screen.queryByText('Partly priced')).toBeNull();
+    },
+  );
 });

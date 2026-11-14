@@ -7,6 +7,7 @@ import type {
   KeyUsageProvenance,
   UsageBucket,
 } from '../../../lib/api';
+import { sumBucketPricing } from '../../../lib/pricingCompleteness';
 import { ApiUsageCard } from '../ApiUsageCard';
 
 type TooltipFormatter = (
@@ -118,6 +119,73 @@ const props = {
 };
 
 describe('ApiUsageCard estimated pricing', () => {
+  it.each([
+    ['legacy all-zero/native omitted', {}, '—', 'Price unknown'],
+    [
+      'legacy plus unpriced',
+      { request_count: 2, unpriced_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus auxiliary',
+      { request_count: 2, unmetered_request_count: 1 },
+      '—',
+      'Price unknown',
+    ],
+    [
+      'legacy plus priced zero',
+      { request_count: 2, priced_request_count: 1 },
+      '$0.0000+',
+      'Partly priced',
+    ],
+    [
+      'positive legacy',
+      { virtual_cost_micros: 2_500_000 },
+      '$2.5000+',
+      'Partly priced',
+    ],
+  ] as const)(
+    'keeps %s honest in the month, legend and chart',
+    (_name, overrides, figure, caption) => {
+      const legacy = { ...bucket, input_tokens: 0, ...overrides };
+      const pricing = sumBucketPricing([legacy]);
+      render(
+        <ApiUsageCard
+          {...props}
+          data={{ ...data, series: [{ key: 'model', buckets: [legacy] }] }}
+          month={{
+            ...month,
+            ...pricing,
+            cost_usd_micros: legacy.virtual_cost_micros,
+          }}
+        />,
+      );
+      expect(
+        screen.getByText('Cost at list price').parentElement?.textContent,
+      ).toContain(figure);
+      expect(screen.getByText(caption)).toBeDefined();
+      expect(screen.getByTestId('api-usage-legend-slot').textContent).toContain(
+        figure,
+      );
+      expect(captured.data).toEqual([
+        figure === '—'
+          ? { ts: 0 }
+          : { ts: 0, model: legacy.virtual_cost_micros / 1_000_000 },
+      ]);
+      if (figure !== '—') {
+        expect(
+          captured.formatter?.(
+            legacy.virtual_cost_micros / 1_000_000,
+            'model',
+            { payload: { ts: 0 } },
+          ),
+        ).toEqual([`${figure} (${caption})`, 'model']);
+      }
+      expect(screen.queryByText('No billable usage')).toBeNull();
+    },
+  );
+
   it('qualifies each partial estimated point in the legend and chart tooltip', () => {
     const partial: UsageBucket = {
       ...bucket,
@@ -260,6 +328,43 @@ describe('ApiUsageCard estimated pricing', () => {
       screen.getByText('Cost at list price').parentElement?.textContent,
     ).toContain('$0.0000');
   });
+  it.each(['known_zero', 'unmetered'] as const)(
+    'preserves the fully classified %s estimated zero',
+    (state) => {
+      render(
+        <ApiUsageCard
+          {...props}
+          data={{
+            ...data,
+            series: [
+              {
+                key: 'model',
+                buckets: [
+                  {
+                    ...bucket,
+                    input_tokens: 0,
+                    pricing_completeness: state,
+                    priced_request_count: state === 'known_zero' ? 1 : 0,
+                    unmetered_request_count: state === 'unmetered' ? 1 : 0,
+                  },
+                ],
+              },
+            ],
+          }}
+          month={{ ...month, pricing_completeness: state }}
+        />,
+      );
+      expect(
+        screen.getByText('Cost at list price').parentElement?.textContent,
+      ).toContain('$0.0000');
+      expect(screen.getByTestId('api-usage-legend-slot').textContent).toContain(
+        '$0.0000',
+      );
+      expect(captured.data).toEqual([{ ts: 0, model: 0 }]);
+      expect(screen.queryByText('Price unknown')).toBeNull();
+      expect(screen.queryByText('Partly priced')).toBeNull();
+    },
+  );
   it('keeps token charts populated when list price is unavailable', () => {
     render(<ApiUsageCard {...props} metric="tokens" month={month} />);
     expect(captured.data.map((point) => point.model)).toEqual([100, 100, 100]);

@@ -348,7 +348,6 @@ pub struct PricingCompletenessInput {
     pub priced_event_count: u64,
     pub unpriced_event_count: u64,
     pub unmetered_event_count: u64,
-    pub total_tokens: u64,
     pub virtual_cost_micros: u64,
 }
 
@@ -361,6 +360,8 @@ pub fn derive_pricing_completeness(input: PricingCompletenessInput) -> Option<Pr
         .saturating_add(input.unpriced_event_count)
         .saturating_add(input.unmetered_event_count);
     let legacy = input.request_count.saturating_sub(classified);
+    // Missing classification is not evidence of zero usage or a free request:
+    // older aggregates may omit token dimensions as well as pricing counters.
     if legacy == 0 {
         if input.unpriced_event_count > 0 && input.priced_event_count > 0 {
             Some(PricingCompleteness::Partial)
@@ -375,19 +376,10 @@ pub fn derive_pricing_completeness(input: PricingCompletenessInput) -> Option<Pr
         } else {
             Some(PricingCompleteness::Unmetered)
         }
-    } else if input.total_tokens == 0
-        && input.priced_event_count == 0
-        && input.unpriced_event_count == 0
-        && input.virtual_cost_micros == 0
-    {
-        Some(PricingCompleteness::Unmetered)
-    } else if input.priced_event_count == 0
-        && input.unpriced_event_count == 0
-        && input.virtual_cost_micros == 0
-    {
-        Some(PricingCompleteness::Unknown)
-    } else {
+    } else if input.priced_event_count > 0 || input.virtual_cost_micros > 0 {
         Some(PricingCompleteness::Partial)
+    } else {
+        Some(PricingCompleteness::Unknown)
     }
 }
 
@@ -562,7 +554,6 @@ mod tests {
                     priced_event_count: 0,
                     unpriced_event_count: 0,
                     unmetered_event_count: row.unmetered_event_count,
-                    total_tokens: row.effective_cache_write_tokens(),
                     virtual_cost_micros: 0,
                 }),
                 Some(super::PricingCompleteness::Unknown)

@@ -20,6 +20,7 @@ import {
   isIndeterminatePricing,
   type PricingCounts,
   pricingQualifier,
+  sumBucketPricing,
 } from '../../lib/pricingCompleteness';
 import { TIME_PRESET_OPTIONS, type TimePreset } from '../../lib/timePresets';
 import {
@@ -131,25 +132,31 @@ export function ApiUsageCard({
     for (const series of data?.series ?? []) {
       const model = modelLabel(series.key);
       for (const bucket of series.buckets) {
+        const pricing = {
+          ...bucket,
+          pricing_completeness:
+            bucket.pricing_completeness ??
+            sumBucketPricing([bucket]).pricing_completeness,
+        };
         const ts = bucket.bucket_start_unix_secs;
         if (!bucketsByTs.has(ts)) {
           bucketsByTs.set(ts, { ts });
         }
         const row = bucketsByTs.get(ts)!;
         if (metric === 'cost' && provenance?.source === 'estimated') {
-          let pricing = pricingByTimestamp.get(ts);
-          if (!pricing) {
-            pricing = new Map();
-            pricingByTimestamp.set(ts, pricing);
+          let byModel = pricingByTimestamp.get(ts);
+          if (!byModel) {
+            byModel = new Map();
+            pricingByTimestamp.set(ts, byModel);
           }
-          pricing.set(model, bucket);
+          byModel.set(model, pricing);
         }
         if (metric === 'tokens') {
           row[model] = sumTokens(bucket);
         } else if (
           !(
             provenance?.source === 'estimated' &&
-            isIndeterminatePricing(bucket.pricing_completeness)
+            isIndeterminatePricing(pricing.pricing_completeness)
           )
         ) {
           row[model] = bucket.virtual_cost_micros / 1_000_000;

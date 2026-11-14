@@ -99,7 +99,7 @@ import {
   type PricingCounts,
   pricingQualifier,
   sumBucketPricing,
-  sumCompletenessTokens,
+  sumPricingCounts,
 } from '../../lib/pricingCompleteness';
 import {
   PROVIDER_FAMILIES,
@@ -559,7 +559,6 @@ export type TopPrincipal = PricingCounts & {
    */
   cost_components_micros: CostComponentMicros | null;
   tokens: number;
-  completenessTokens: number;
   /**
    * Cache read over every prompt token (cache read + cache create + uncached
    * input), 0-1 (`cacheHitRatio`); null when the principal sent no prompt
@@ -864,6 +863,11 @@ export function TopPrincipalsSection({
   const [direction, setDirection] = useState<SortDirection>('desc');
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState('');
+  const hasIncompleteCost = principals.some(
+    (principal) =>
+      isIndeterminatePricing(principal.pricing_completeness) ||
+      principal.pricing_completeness === 'partial',
+  );
 
   // Keep the reference over the whole active dataset: sorting, expanding and
   // filtering change the visible rows, never the meaning of their bar width.
@@ -946,7 +950,7 @@ export function TopPrincipalsSection({
             sortKey="cost"
           />
           <TableHeadCell className="@4xl/principals:w-24" numeric>
-            Share
+            {hasIncompleteCost ? 'Known-cost share' : 'Share'}
           </TableHeadCell>
         </tr>
       </TableHead>
@@ -1913,9 +1917,17 @@ export function ProviderOverviewPage({
   const kpiRate = fmtRateKpi(reqPerSec);
   // With zero requests, averages and ratios are undefined, not zero.
   const noTraffic = totals?.request_count === 0;
-  const costState = totals?.pricing_completeness;
+  const costPricing = totals
+    ? {
+        ...totals,
+        pricing_completeness:
+          totals.pricing_completeness ??
+          sumPricingCounts([totals]).pricing_completeness,
+      }
+    : undefined;
+  const costState = costPricing?.pricing_completeness;
   const costIndeterminate = isIndeterminatePricing(costState);
-  const costQualifier = totals ? pricingQualifier(totals) : undefined;
+  const costQualifier = costPricing ? pricingQualifier(costPricing) : undefined;
   const costPartial = costState === 'partial';
   const costValue = costIndeterminate ? '—' : fmtCostKpi(totalCostMicros);
   const costExact = costIndeterminate
@@ -1953,6 +1965,11 @@ export function ProviderOverviewPage({
     for (const b of buckets) {
       const timestamp = b.bucket_start_unix_secs;
       const miss = cacheMissRatio(b);
+      const pricing = {
+        ...b,
+        pricing_completeness:
+          b.pricing_completeness ?? sumBucketPricing([b]).pricing_completeness,
+      };
       series.rate.push({ timestamp, value: b.request_count / stepSecs });
       // Total tokens, with the bucket's cache miss ratio (0-100) as the
       // second series; a bucket with no prompt tokens has no ratio.
@@ -1965,16 +1982,16 @@ export function ProviderOverviewPage({
         timestamp,
         value:
           b.request_count === 0 ||
-          b.pricing_completeness === 'known_zero' ||
-          b.pricing_completeness === 'unmetered'
+          pricing.pricing_completeness === 'known_zero' ||
+          pricing.pricing_completeness === 'unmetered'
             ? 0
-            : isIndeterminatePricing(b.pricing_completeness)
+            : isIndeterminatePricing(pricing.pricing_completeness)
               ? null
               : b.virtual_cost_micros / 1_000_000,
-        valueLabel: isIndeterminatePricing(b.pricing_completeness)
-          ? pricingQualifier(b)
-          : b.pricing_completeness === 'partial'
-            ? `Cost ${fmtCostKpi(b.virtual_cost_micros)} (${pricingQualifier(b)})`
+        valueLabel: isIndeterminatePricing(pricing.pricing_completeness)
+          ? pricingQualifier(pricing)
+          : pricing.pricing_completeness === 'partial'
+            ? `Cost ${fmtCostKpi(b.virtual_cost_micros)} (${pricingQualifier(pricing)})`
             : undefined,
       });
       series.latency.push({
@@ -2176,7 +2193,6 @@ export function ProviderOverviewPage({
       if (!s.key) continue;
       let costMicros = 0;
       let requests = 0;
-      let completenessTokens = 0;
       // Window token totals per component: the cache hit is taken over the
       // whole window (cache read over every prompt token), not averaged
       // over buckets.
@@ -2191,7 +2207,6 @@ export function ProviderOverviewPage({
       for (const b of s.buckets) {
         costMicros += b.virtual_cost_micros ?? 0;
         requests += b.request_count ?? 0;
-        completenessTokens += sumCompletenessTokens(b);
         tokenTotals.input_tokens += b.input_tokens ?? 0;
         tokenTotals.output_tokens += b.output_tokens ?? 0;
         tokenTotals.cache_creation_input_tokens +=
@@ -2212,7 +2227,6 @@ export function ProviderOverviewPage({
         cost_micros: costMicros,
         cost_components_micros: recordedComponents ? components : null,
         tokens: sumTokens(tokenTotals),
-        completenessTokens,
         cache_hit_ratio: cacheHitRatio(tokenTotals),
         requests,
       });
