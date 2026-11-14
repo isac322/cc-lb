@@ -643,7 +643,7 @@ async fn insert_request_event_in_tx(
         "ping_count, stream_inter_output_avg_ms, provider_session_id, provider_connection_id, upstream_http_version, upstream_request_id, upstream_content_encoding, ",
         "upstream_content_length, upstream_body_bytes, upstream_body_end, ",
         "upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
-        "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level",
+        "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level, funding",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -653,7 +653,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -906,6 +906,7 @@ async fn insert_request_event_in_tx(
     .bind(event.upstream_stream_warning_type.as_deref())
     .bind(event.upstream_stream_warning_message.as_deref())
     .bind(event.thinking_level.as_deref())
+    .bind(event.funding.map(|value| value.as_str()))
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)

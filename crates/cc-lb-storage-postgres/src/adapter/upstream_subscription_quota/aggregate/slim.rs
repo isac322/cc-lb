@@ -3,7 +3,7 @@ use cc_lb_storage_api::{
 };
 use sqlx::{Row, postgres::PgRow};
 
-use super::super::{parse_source, parse_status, parse_window};
+use super::super::{decode_credits, parse_sample_kind, parse_source, parse_status, parse_window};
 use crate::{
     adapter::{PostgresStorage, i64_to_u64, u64_to_i64},
     error_map::map_sqlx_error,
@@ -29,13 +29,13 @@ pub(in super::super) async fn list_slim_checkpoints(
     let rows = sqlx::query(
         "WITH anchors AS ( \
              SELECT c.upstream_id, c.\"window\", c.source, c.changed_at_unix_millis, c.sample_id, \
-                    c.utilization, c.status, c.resets_at_unix_secs \
+                    c.utilization, c.status, c.resets_at_unix_secs, c.sample_kind, c.credits_json \
              FROM UNNEST($1::uuid[]) AS u(upstream_id) \
              CROSS JOIN UNNEST($2::text[]) AS w(\"window\") \
              CROSS JOIN UNNEST($3::text[]) AS s(source) \
              CROSS JOIN LATERAL ( \
                  SELECT upstream_id, \"window\", source, changed_at_unix_millis, sample_id, \
-                        utilization, status, resets_at_unix_secs \
+                        utilization, status, resets_at_unix_secs, sample_kind, credits_json \
                  FROM upstream_subscription_quota_checkpoints_v1 \
                  WHERE upstream_id = u.upstream_id \
                    AND \"window\" = w.\"window\" \
@@ -46,7 +46,7 @@ pub(in super::super) async fn list_slim_checkpoints(
              ) c \
          ), ranged AS ( \
              SELECT upstream_id, \"window\", source, changed_at_unix_millis, sample_id, \
-                    utilization, status, resets_at_unix_secs \
+                    utilization, status, resets_at_unix_secs, sample_kind, credits_json \
              FROM upstream_subscription_quota_checkpoints_v1 \
              WHERE upstream_id = ANY($1::uuid[]) \
                AND \"window\" = ANY($2::text[]) \
@@ -110,5 +110,10 @@ fn row_to_slim_checkpoint(row: PgRow) -> StorageResult<SubscriptionQuotaSlimChec
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "subscription quota slim resets_at_unix_secs"))
             .transpose()?,
+        sample_kind: parse_sample_kind(
+            &row.try_get::<String, _>("sample_kind")
+                .map_err(map_sqlx_error)?,
+        )?,
+        credits: decode_credits(row.try_get("credits_json").map_err(map_sqlx_error)?)?,
     })
 }
