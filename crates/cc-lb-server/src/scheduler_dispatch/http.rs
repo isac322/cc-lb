@@ -1,4 +1,6 @@
-use super::usage::{GeminiQuotaGroup, classify_gemini_summary_bucket};
+use super::usage::{
+    GeminiQuotaGroup, classify_gemini_summary_bucket, gemini_summary_bucket_usable,
+};
 use bytes::{Bytes, BytesMut};
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
@@ -542,26 +544,12 @@ pub(super) fn gemini_summary_groups(body: &[u8]) -> Option<(bool, bool)> {
         let Some(buckets) = group.get("buckets").and_then(serde_json::Value::as_array) else {
             continue;
         };
-        let usable = |bucket: &serde_json::Value| {
-            !bucket
-                .get("disabled")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                && bucket
-                    .get("remainingFraction")
-                    .and_then(serde_json::Value::as_f64)
-                    .is_some_and(|value| value.is_finite())
-                && bucket
-                    .get("resetTime")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                    .is_some()
-        };
         for bucket in buckets {
-            if !usable(bucket) {
+            let group_kind = classify_gemini_summary_bucket(&display_name, bucket);
+            if !gemini_summary_bucket_usable(group_kind, bucket) {
                 continue;
             }
-            match classify_gemini_summary_bucket(&display_name, bucket) {
+            match group_kind {
                 GeminiQuotaGroup::Gemini => gemini = true,
                 GeminiQuotaGroup::ThirdParty => third_party = true,
                 GeminiQuotaGroup::Unknown => {}

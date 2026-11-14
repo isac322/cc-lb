@@ -185,7 +185,7 @@ jobs:
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
       - name: Verify and capture credit and provider pool views
         run: |
-          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts --retries=0 \
+          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts e2e/upstream-quota-settled-states.spec.ts e2e/overview-shared-quota-columns.spec.ts --retries=0 \
             --output="$RUNNER_TEMP/codex-credit-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
       - name: Run keepalive and plugin catalog Playwright E2E
@@ -233,6 +233,24 @@ jobs:
           name: provider-pool-visuals-${{ github.sha }}
           path: |
             ${{ steps.container-setup.outputs.visual-root }}/after/**/provider-pool.png
+            ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish settled quota visual evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: settled-quota-visuals-${{ github.sha }}
+          path: |
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/settled-quota.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-placeholder.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-pool-placeholder.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/gemini-retained.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/provider-gemini-placeholders-1440.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-shared-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-stale-absent-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-weekly-only-*.png
+            ${{ steps.container-setup.outputs.visual-root }}/after/**/retained-*.png
             ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
           retention-days: 14
           if-no-files-found: error

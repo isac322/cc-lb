@@ -237,9 +237,15 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 
 | Read | Source | Shows a new observation |
 |---|---|---|
-| `GET /admin/v1/subscription-quotas/latest` | In-process cache | On the serving replica, after the subscriber processes the event; never if the event was dropped |
+| `GET /admin/v1/subscription-quotas/latest` | In-process cache for canonical windows; `meta_v1` for Gemini period-unknown raw meters | Canonical windows after cache publication; raw meters across replicas as soon as the usage poll's compare-and-put commits |
 | `GET /admin/v1/subscription-quotas/series` | Storage | After the batch flush |
-| `GET /admin/v1/subscription-quotas/aggregate` | Cache for the latest values, storage for history | Latest after the subscriber processes the event; history after the flush |
+| `GET /admin/v1/subscription-quotas/aggregate` | Newest whole observation per upstream and window across cache, durable `latest`, and raw checkpoints | Cache observations after publication; durable observations after commit; history after the flush |
+
+Gemini usage polls persist period-unknown raw meters under `gemini_period_unknown_quota:<upstream_id>` in `meta_v1`. `/latest` reads both the durable `latest` rows (to suppress a raw group when a newer canonical observation exists) and this meta record, and validates the record binding against the stored account/project credential binding before exposing optional `period_unknown_meters`. Email-bound meters retain continuity across routine OAuth token refreshes; project-only imports require a matching credential generation. Reads use the committed record directly, so peers need no cache hydration to see it. The record survives routine OAuth token refresh when its binding still matches. A group's authoritative canonical or empty bucket response clears that group's raw meters.
+
+`/aggregate`, Anthropic pool snapshots, Anthropic `/pool-history`, and `/api/oauth/usage` compare observation timestamps across the cache, durable `latest`, and raw checkpoints for each `(upstream_id, window)`. They select one newest whole observation. An explicitly `Absent` winner tombstones older numeric checkpoints for current reads without deleting historical checkpoint rows. All providers exclude absent windows from eligible and missing-observation counts; `Unobserved` windows remain eligible with a missing observation.
+
+`/aggregate`, `/api/oauth/usage`, and Anthropic `/pool-history` omit a window when every member is explicitly absent. This includes Anthropic secondary windows exposed by `/api/oauth/usage` as `seven_day_sonnet`, `seven_day_opus`, and `limits`. Equal-weighted OpenAI and Gemini `/pool-history` retains all-absent windows with `eligible_upstreams = 0`.
 
 Codex credit observations use these same delivery and freshness boundaries. Usage polls store the full credit state on `overage`; response headers store their partial credit state on `unified`. Each window keeps the existing whole-observation source selection. The router considers both windows, so a header that omits the usage-poll restriction cannot clear it. Explicit negative credit signals remain conservative blocks until that source reports a replacement; stale positive credit signals cannot establish availability.
 
@@ -266,7 +272,7 @@ before checking persisted display metadata, as the test-scoped
 
 `GET /admin/v1/subscription-quotas/pool-history` reads retained snapshots scoped to the requested provider. The existing snapshot job records state changes and an unchanged-state heartbeat. Historical freshness begins with recorded snapshots; checkpoints are not backfilled into freshness history. Retention keeps the last snapshot at or before the cutoff separately for each provider and quota window.
 
-For equal-weighted provider pools, `latest` is computed at read time from each member's latest successful observation in the cache or storage. An unchanged successful poll refreshes its observation time; a failed poll does not. A reading becomes stale strictly after the configured `subscription_quota.routing_max_staleness_secs`. Only fresh readings contribute to utilization. An all-stale pool has null utilization and zero contributors; a never-observed member remains eligible, while an explicitly absent window is ineligible.
+For equal-weighted provider pools, `latest` is computed at read time from each member's newest whole observation across cache, durable `latest`, and raw checkpoints. An unchanged successful poll refreshes its observation time; a failed poll does not. A reading becomes stale strictly after the configured `subscription_quota.routing_max_staleness_secs`. Only fresh readings contribute to utilization. An all-stale pool has null utilization and zero contributors; a never-observed member remains eligible with a missing observation, while an explicitly absent window is ineligible regardless of age.
 
 The history series contains persisted snapshots only, including null intervals when no fresh contributor was available. Recovery with unchanged utilization restores the current reading without replacing those intervals. Chart projection preserves a null-containing bucket as a gap for equal-weighted pools, including a null left anchor; healthy buckets retain their peak. Plan-weighted pool aggregation and chart sampling are unchanged.
 

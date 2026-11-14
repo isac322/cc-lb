@@ -1,7 +1,11 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { QuotaSnapshot } from '../../lib/api';
-import { QuotaWindowRow, QuotaWindowRows } from './QuotaWindowRows';
+import type { PeriodUnknownQuotaMeter, QuotaSnapshot } from '../../lib/api';
+import {
+  QuotaPeriodUnknownRow,
+  QuotaWindowRow,
+  QuotaWindowRows,
+} from './QuotaWindowRows';
 
 afterEach(() => {
   cleanup();
@@ -375,4 +379,250 @@ describe('QuotaWindowRow', () => {
       'No reading',
     );
   });
+
+  it.each([
+    ['not-reported', 'absent', 'Not reported'],
+    ['no-reading', 'unobserved', 'No reading'],
+  ] as const)(
+    'renders a %s Gemini placeholder with its label and no meter, pace, reset or number',
+    (placeholder, state, text) => {
+      render(
+        <QuotaWindowRows>
+          <QuotaWindowRow
+            snap={snap({
+              window: 'gemini_5h',
+              state,
+              utilization: null,
+              resets_at_unix_secs: null,
+            })}
+            nowUnixSecs={NOW}
+            placeholder={placeholder}
+          />
+          <QuotaWindowRow
+            snap={snap({ window: 'gemini_7d', utilization: 1 })}
+            nowUnixSecs={NOW}
+          />
+        </QuotaWindowRows>,
+      );
+      const [row, weekly] = screen.getAllByRole('listitem');
+      expect(row.getAttribute('data-window')).toBe('gemini_5h');
+      expect(row.getAttribute('data-placeholder')).toBe(placeholder);
+      expect(row.textContent).toBe(`Gemini 5h${text}`);
+      expect(row.textContent).not.toMatch(/%|Resets|Not started|—/);
+      expect(row.querySelector('[role="meter"]')).toBeNull();
+      expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      expect(
+        row.querySelector('[class*="warn"], [class*="danger"]'),
+      ).toBeNull();
+      expect(weekly.textContent).toContain('100% used');
+      expect(screen.getAllByRole('meter')).toHaveLength(1);
+    },
+  );
+
+  it('renders a retained Gemini reading as stale, never current', () => {
+    const s = snap({
+      window: 'gemini_5h',
+      utilization: 0.2,
+      resets_at_unix_secs: NOW + 3600,
+      observed_at_unix_millis: (NOW - 7200) * 1000,
+      age_secs: 7200,
+    });
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow snap={s} nowUnixSecs={NOW} retained />
+      </QuotaWindowRows>,
+    );
+    const row = screen.getByRole('listitem');
+    expect(row.getAttribute('data-state')).toBe('stale');
+    expect(row.querySelector('[data-slot="window-stale"]')?.textContent).toBe(
+      'Stale · 2h ago',
+    );
+    expect(
+      row.querySelector('[data-slot="window-stale"]')?.className,
+    ).toContain('text-warn-text');
+    expect(row.textContent).not.toMatch(/Resets|Not started/);
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    const meter = screen.getByRole('meter');
+    expect(meter.getAttribute('aria-label')).toBe(
+      'Gemini models · 5-hour limit, stale reading',
+    );
+    expect(meter.getAttribute('aria-valuetext')).toBe('20% used');
+    expect(
+      row.querySelector('.text-warn-text, .text-danger-text')?.textContent,
+    ).toBe('Stale · 2h ago');
+    cleanup();
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow snap={s} nowUnixSecs={NOW} />
+      </QuotaWindowRows>,
+    );
+    expect(screen.getByRole('listitem').getAttribute('data-state')).toBeNull();
+    expect(screen.getByRole('listitem').textContent).toContain('Resets');
+  });
+});
+
+describe('QA-18: period-unknown meter row', () => {
+  const identifier = 'gemini-model-with-a-very-long-machine-identifier';
+  function raw(
+    overrides: Partial<PeriodUnknownQuotaMeter> = {},
+  ): PeriodUnknownQuotaMeter {
+    return {
+      group: 'gemini',
+      model_id: identifier,
+      remaining_fraction: 0.4,
+      utilization: 0.6,
+      reset_time_unix_secs: NOW + 3600,
+      source: 'api',
+      state: 'fresh',
+      origin: 'retrieve_user_quota',
+      observed_at_unix_millis: NOW * 1000,
+      age_secs: 0,
+      ...overrides,
+    };
+  }
+  function renderRaw(overrides: Partial<PeriodUnknownQuotaMeter> = {}) {
+    render(
+      <QuotaWindowRows>
+        <QuotaPeriodUnknownRow meter={raw(overrides)} nowUnixSecs={NOW} />
+      </QuotaWindowRows>,
+    );
+    return screen.getByRole('listitem');
+  }
+
+  it.each([0, 0.01, 0.4, 1])(
+    'stays neutral without pace at remaining fraction %s',
+    (remaining_fraction) => {
+      const row = renderRaw({ remaining_fraction });
+      expect(row.textContent).toContain('Period unknown');
+      expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      expect(
+        row.querySelector('[class*="warn"], [class*="danger"]'),
+      ).toBeNull();
+      expect(
+        screen.getByRole('meter').getAttribute('aria-valuetext'),
+      ).not.toContain('pace');
+      expect(
+        row.querySelector<HTMLElement>('[data-slot="window-swatch"]')?.style
+          .backgroundColor,
+      ).toBe('var(--color-neutral)');
+      const name = screen.getByTitle(identifier);
+      expect(name.className).toContain(
+        'font-mono text-data text-text truncate max-w-[22ch]',
+      );
+      expect(screen.getByTestId('quota-snapshot-grid').className).not.toMatch(
+        /gap-x-|20ch/,
+      );
+    },
+  );
+
+  it('labels a provider-reported period when the reset is unavailable', () => {
+    const row = renderRaw({ known_period: '5h', reset_time_unix_secs: null });
+    expect(row.textContent).toContain('5h · Reset unavailable');
+    expect(row.textContent).not.toContain('Period unknown');
+    expect(
+      screen.getByRole('meter', {
+        name: `${identifier} 5h reset unavailable`,
+      }),
+    ).not.toBeNull();
+    expect(
+      screen.getByText('5h · Reset unavailable').getAttribute('title'),
+    ).toContain('window period');
+  });
+
+  it('keeps the unknown-period cue for an empty known period', () => {
+    const row = renderRaw({ known_period: '   ', reset_time_unix_secs: null });
+    expect(row.textContent).toContain('Period unknown');
+    expect(row.textContent).not.toContain('Reset unavailable');
+    expect(
+      screen.getByRole('meter', {
+        name: `${identifier} period unknown`,
+      }),
+    ).not.toBeNull();
+  });
+
+  it.each([NaN, Infinity, -Infinity])(
+    'shows no reading for non-finite remaining %s',
+    (remaining_fraction) => {
+      const row = renderRaw({ remaining_fraction });
+      expect(row.textContent).toContain('—');
+      expect(screen.getByText('No reading').className).toBe('sr-only');
+      expect(screen.getByRole('meter').getAttribute('aria-valuetext')).toBe(
+        'No reading',
+      );
+    },
+  );
+
+  it.each([null, NOW, NOW - 1])(
+    'leaves missing or past reset %s quiet',
+    (reset_time_unix_secs) => {
+      const row = renderRaw({ reset_time_unix_secs });
+      expect(row.textContent).not.toMatch(/Not started|Resets in/);
+      expect(
+        row.querySelector('[data-slot="window-reset-value"]')?.textContent,
+      ).toBe('');
+    },
+  );
+
+  it.each(['en-US', 'ko-KR'])(
+    'shares exact canonical reset classes in %s',
+    (locale) => {
+      window.localStorage.setItem('cclb.locale', locale);
+      render(
+        <QuotaWindowRows>
+          <QuotaWindowRow snap={snap({})} nowUnixSecs={NOW} />
+          <QuotaPeriodUnknownRow meter={raw()} nowUnixSecs={NOW} />
+        </QuotaWindowRows>,
+      );
+      const [canonical, unknown] = screen.getAllByRole('listitem');
+      expect(unknown.className).toBe(canonical.className);
+      for (const part of ['prefix', 'value', 'suffix']) {
+        const selector = `[data-slot="window-reset-${part}"]`;
+        expect(unknown.querySelector(selector)?.className).toBe(
+          canonical.querySelector(selector)?.className,
+        );
+        expect(unknown.querySelector(selector)?.textContent).toBe(
+          canonical.querySelector(selector)?.textContent,
+        );
+      }
+      expect(unknown.textContent).toContain(
+        locale === 'ko-KR' ? '1시간 후 초기화' : 'Resets in 1h',
+      );
+    },
+  );
+
+  it.each([
+    { model_id: null, bucket_id: 'bucket-7', expected: 'bucket-7' },
+    { model_id: null, bucket_id: null, expected: 'gemini' },
+  ])(
+    'uses the available provider identifier: $expected',
+    ({ expected, ...overrides }) => {
+      renderRaw(overrides);
+      expect(screen.getByTitle(expected).textContent).toBe(expected);
+      expect(
+        screen.queryByText(/retrieveUserQuota|retrieve_user_quota/),
+      ).toBeNull();
+    },
+  );
+});
+
+describe('QA-19: quota row and legend share pace eligibility', () => {
+  it.each([
+    { name: 'unobserved reading', overrides: { state: 'unobserved' } },
+    { name: 'missing utilization', overrides: { utilization: null } },
+    { name: 'missing reset', overrides: { resets_at_unix_secs: null } },
+    { name: 'expired reset', overrides: { resets_at_unix_secs: NOW } },
+    {
+      name: 'future unopened window',
+      overrides: { resets_at_unix_secs: NOW + 6 * 3600 },
+    },
+  ] satisfies { name: string; overrides: Partial<QuotaSnapshot> }[])(
+    'never draws a pace tick for $name',
+    ({ overrides }) => {
+      const row = renderRow(snap(overrides));
+      expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+      expect(
+        screen.getByRole('meter').getAttribute('aria-valuetext'),
+      ).not.toContain('even pace');
+    },
+  );
 });

@@ -248,8 +248,16 @@ describe('actual Overview upstream coupon surface', () => {
     const rows = screen.getAllByTestId('upstream-usage-row');
     expect(rows).toHaveLength(4);
     for (const id of ['claude-main', 'claude-duplicate']) {
-      const link = screen.getByRole('link', { name: id });
+      const link = screen.getByRole('link', { name: new RegExp(`^${id}`) });
       expect(link.getAttribute('href')).toBe(`/upstreams?selectedId=${id}`);
+      // The all-provider Overview keeps its shared columns before any reading.
+      expect(
+        Array.from(
+          link.querySelectorAll('[data-testid="usage-cell-status"]'),
+          (cell) =>
+            `${cell.getAttribute('data-window')}:${cell.getAttribute('data-state')}`,
+        ),
+      ).toEqual(['5h:no-reading', '7d:no-reading']);
       expect(
         within(link.closest('li')!).getByRole('button', {
           name: `Coupons for ${id}: 3`,

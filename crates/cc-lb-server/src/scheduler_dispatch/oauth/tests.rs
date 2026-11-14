@@ -49,6 +49,9 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 #[path = "tests/provider_metadata.rs"]
 mod provider_metadata;
 
+#[path = "tests/gemini_quota.rs"]
+mod gemini_quota;
+
 #[path = "tests/scheduled.rs"]
 mod scheduled;
 
@@ -408,7 +411,7 @@ async fn failed_provider_usage_polls_preserve_observation_age_and_stale_snapshot
             "{kind:?}: {http_failure:?}"
         );
         let expected_requests = if kind == UpstreamKind::GeminiOauth {
-            3
+            2
         } else {
             1
         };
