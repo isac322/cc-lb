@@ -408,6 +408,68 @@ describe('Codex credit observations', () => {
     expect(facts?.status).toBe('Available');
   });
 
+  it('keeps an explicit limit restriction until a newer limit field clears it', () => {
+    const facts = selectCodexCredits(
+      [
+        snapshot({
+          observed_at_unix_millis: (NOW - 400) * 1000,
+          credits: credit({
+            limit_reached: true,
+            observations: {
+              limit_reached: {
+                source: 'api',
+                observed_at_unix_millis: (NOW - 400) * 1000,
+              },
+            },
+          }),
+        }),
+        snapshot({
+          window: 'unified',
+          source: 'header',
+          observed_at_unix_millis: (NOW - 100) * 1000,
+          credits: credit({ has_credits: true }),
+        }),
+      ],
+      300,
+      NOW * 1000,
+    );
+    expect(facts?.status).toBe('Blocked');
+  });
+
+  it('uses the restrictive field value for equal-time availability ties', () => {
+    const facts = selectCodexCredits(
+      [
+        snapshot({
+          credits: credit({
+            has_credits: true,
+            observations: {
+              has_credits: {
+                source: 'api',
+                observed_at_unix_millis: NOW * 1000,
+              },
+            },
+          }),
+        }),
+        snapshot({
+          window: 'unified',
+          source: 'header',
+          credits: credit({
+            has_credits: false,
+            observations: {
+              has_credits: {
+                source: 'header',
+                observed_at_unix_millis: NOW * 1000,
+              },
+            },
+          }),
+        }),
+      ],
+      300,
+      NOW * 1000,
+    );
+    expect(facts?.status).toBe('Unavailable');
+  });
+
   it('does not refresh stale availability with a fresh balance-only observation', () => {
     const facts = selectCodexCredits([
       snapshot({

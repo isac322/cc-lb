@@ -262,7 +262,7 @@ pub(super) async fn insert_checkpoint_if_changed(
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let credits_json = encode_credits(record.credits.as_ref())?;
     let unchanged = sqlx::query_scalar::<_, bool>(
-        "SELECT semantic_fingerprint = ?1 OR ( \
+        "SELECT (semantic_fingerprint = ?1 AND credits_json IS ?14) OR ( \
              status IS ?2 AND resets_at_unix_secs IS ?3 \
              AND surpassed_threshold IS ?4 AND fallback_percentage IS ?5 \
              AND fallback_available IS ?6 AND overage_in_use IS ?7 \

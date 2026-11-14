@@ -157,7 +157,6 @@ import {
   poolQuotaResponseLatest,
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
-  poolTooltipRows,
   poolWindowPace,
   poolWindowResets,
   recordedPoolQuotaChartData,
@@ -1581,16 +1580,19 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
             if (!active || !payload?.length) return null;
             const labelUnix = Number(label);
             const creditPoint =
-              creditData?.find((point) => point.unix === labelUnix) ??
+              creditData?.filter((point) => point.unix === labelUnix).at(-1) ??
               creditData?.reduce<CreditPlotRow | undefined>(
                 (nearest, point) =>
                   nearest == null ||
-                  Math.abs(point.unix - labelUnix) <
+                  Math.abs(point.unix - labelUnix) <=
                     Math.abs(nearest.unix - labelUnix)
                     ? point
                     : nearest,
                 undefined,
               );
+            const quotaPoint =
+              creditPoint ??
+              seriesData.find((point) => point.unix === labelUnix);
             const creditRaw = creditPoint?.credit_balance;
             const creditContributing = creditPoint?.credit_contributing ?? 0;
             const creditEligible = creditPoint?.credit_eligible ?? 0;
@@ -1601,32 +1603,31 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                 <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(labelUnix)}
                 </div>
-                {poolTooltipRows(payload)
-                  .filter((p) => String(p.dataKey) !== 'credits')
-                  .map((p) => {
-                    const key = String(p.dataKey);
-                    const shortLabel = windowLabels?.[key] ?? windowLabel(key);
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center justify-between gap-3 py-0.5"
-                        data-slot="pool-tooltip-row"
+                {windows.map((window) => {
+                  const value = quotaPoint?.[window];
+                  const shortLabel =
+                    windowLabels?.[window] ?? windowLabel(window);
+                  return (
+                    <div
+                      key={window}
+                      className="flex items-center justify-between gap-3 py-0.5"
+                      data-slot="pool-tooltip-row"
+                    >
+                      <span
+                        className="inline-flex items-center gap-1.5 text-text-muted"
+                        title={windowLabel(window, { long: true })}
                       >
-                        <span
-                          className="inline-flex items-center gap-1.5 text-text-muted"
-                          title={windowLabel(key, { long: true })}
-                        >
-                          <WindowChip window={key} />
-                          {shortLabel} window
-                        </span>
-                        <span className="font-medium tabular-nums">
-                          {typeof p.value === 'number'
-                            ? `${formatQuotaPercent(p.value)} used`
-                            : '—'}
-                        </span>
-                      </div>
-                    );
-                  })}
+                        <WindowChip window={window} />
+                        {shortLabel} window
+                      </span>
+                      <span className="font-medium tabular-nums">
+                        {typeof value === 'number'
+                          ? `${formatQuotaPercent(value)} used`
+                          : '—'}
+                      </span>
+                    </div>
+                  );
+                })}
                 {creditData ? (
                   <div
                     className="flex items-center justify-between gap-3 py-0.5"

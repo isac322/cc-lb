@@ -124,9 +124,26 @@ function newestCreditField(
           -1,
         requestOrder: observation?.request_order,
       };
-      return latest == null || compareCreditEvidence(candidate, latest) > 0
-        ? candidate
-        : latest;
+      const ordering =
+        latest == null ? 1 : compareCreditEvidence(candidate, latest);
+      if (latest == null || ordering > 0) return candidate;
+      if (ordering < 0) return latest;
+      const candidateValue = snapshot.credits[field];
+      const latestValue = latest.snapshot.credits?.[field];
+      if (
+        (field === 'has_credits' &&
+          candidateValue === false &&
+          latestValue === true) ||
+        (field === 'limit_reached' &&
+          candidateValue === true &&
+          latestValue === false) ||
+        (field === 'unlimited' &&
+          candidateValue === true &&
+          latestValue === false)
+      ) {
+        return candidate;
+      }
+      return latest;
     },
     undefined,
   );
@@ -165,13 +182,7 @@ export function selectCodexCredits(
 
   const limitEvidence = newestCreditField(creditObservations, 'limit_reached');
   const limit =
-    limitEvidence?.snapshot.credits?.limit_reached === true &&
-    creditFieldIsFresh(
-      limitEvidence,
-      'limit_reached',
-      nowUnixMillis,
-      maxStalenessSecs,
-    )
+    limitEvidence?.snapshot.credits?.limit_reached === true
       ? limitEvidence
       : undefined;
   const unavailable = newest(

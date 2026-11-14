@@ -536,13 +536,40 @@ fn bound_points(points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint>
     mandatory.sort_unstable();
     mandatory.dedup();
     if mandatory.len() > max_points {
-        let mut bounded = mandatory
-            .into_iter()
-            .take(max_points.saturating_sub(1))
+        let internal = &mandatory[1..mandatory.len() - 1];
+        let null_boundaries = internal
+            .iter()
+            .copied()
+            .filter(|index| points[*index].balance.is_none())
             .collect::<Vec<_>>();
-        bounded.push(last);
+        let priority = if null_boundaries.is_empty() {
+            internal.to_vec()
+        } else {
+            null_boundaries
+        };
+        let budget = max_points.saturating_sub(2);
+        let mut bounded = vec![0, last];
+        for slot in 0..budget.min(priority.len()) {
+            let candidate = if budget.min(priority.len()) == 1 {
+                priority[0]
+            } else {
+                priority[slot * (priority.len() - 1) / (budget.min(priority.len()) - 1)]
+            };
+            if !bounded.contains(&candidate) {
+                bounded.push(candidate);
+            }
+        }
+        if bounded.len() < max_points {
+            for candidate in internal {
+                if bounded.len() == max_points {
+                    break;
+                }
+                if !bounded.contains(candidate) {
+                    bounded.push(*candidate);
+                }
+            }
+        }
         bounded.sort_unstable();
-        bounded.dedup();
         return bounded
             .into_iter()
             .map(|index| points[index].clone())
@@ -551,6 +578,9 @@ fn bound_points(points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint>
 
     let mut selected = mandatory;
     for slot in 1..max_points.saturating_sub(1) {
+        if selected.len() == max_points {
+            break;
+        }
         let candidate = slot * last / (max_points - 1);
         if !selected.contains(&candidate) {
             selected.push(candidate);
@@ -884,6 +914,25 @@ mod tests {
                 .map(|point| point.balance.as_deref())
                 .collect::<Vec<_>>(),
             vec![Some("100"), None, Some("90")],
+        );
+        let alternating = bound_points(
+            (0..7)
+                .map(|index| {
+                    point(
+                        index,
+                        (index % 2 == 0).then_some(if index == 6 { "60" } else { "100" }),
+                    )
+                })
+                .collect(),
+            4,
+        );
+        assert_eq!(alternating.len(), 4);
+        assert_eq!(
+            alternating
+                .iter()
+                .map(|point| point.balance.is_some())
+                .collect::<Vec<_>>(),
+            vec![true, false, false, true],
         );
     }
 }
