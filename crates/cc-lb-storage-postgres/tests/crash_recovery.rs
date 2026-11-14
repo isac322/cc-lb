@@ -478,6 +478,9 @@ fn expected_rollups_visible(rollups: &[UsageRollup]) -> bool {
                     && rollup.upstream_name == "anthropic_direct"
                     && rollup.model == "claude-sonnet-4-5"
                     && rollup.request_count == EVENTS_PER_ITERATION
+                    && rollup.priced_event_count == 0
+                    && rollup.unpriced_event_count == EVENTS_PER_ITERATION
+                    && rollup.unmetered_event_count == 0
                     && rollup.input_tokens == expected_input
                     && rollup.output_tokens == expected_output
                     && rollup.error_count == 0
@@ -517,4 +520,77 @@ fn storage_result_label<T, E>(result: &Result<T, E>) -> &'static str {
         Ok(_) => "ok",
         Err(_) => "err",
     }
+}
+
+#[test]
+fn live_classification_checkpoint_failure_rolls_back_counts_and_resumes() {
+    let Some(url) = get_postgres_url() else {
+        eprintln!("skipped: CI_POSTGRES_URL unset; pricing crash recovery did not run");
+        return;
+    };
+    let _guard = CRASH_RECOVERY_SCENARIO_LOCK.lock().unwrap();
+    Runtime::new().unwrap().block_on(async {
+        let fixture = CrashFixture::create(&url, &schema_name("pricing", 0), "pricing", 0.0)
+            .await
+            .unwrap();
+        fixture.wait_for_events_eligible().await.unwrap();
+        let checkpoint = fixture.storage.usage_rollup_checkpoint().await.unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_live_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF (SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)
+                     FROM usage_rollups_v2) = 0 THEN
+                     RAISE EXCEPTION 'live classification must accompany the ordinary delta';
+                 END IF;
+                 RAISE EXCEPTION 'injected crash after live delta before checkpoint commit';
+             END $$;
+             CREATE TRIGGER fail_live_checkpoint BEFORE INSERT OR UPDATE ON usage_rollup_checkpoints_v1
+             FOR EACH ROW WHEN (NEW.id = 'high_water')
+             EXECUTE FUNCTION fail_live_checkpoint();",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let revision = fixture.storage.usage_rollup_revision().await.unwrap();
+        let err = fixture
+            .storage
+            .rollup_usage_once()
+            .await
+            .expect_err("trigger must abort commit");
+        assert!(
+            err.to_string()
+                .contains("injected crash after live delta before checkpoint commit"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fixture.storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
+        assert_eq!(fixture.storage.usage_rollup_revision().await.unwrap(), revision);
+        let classified: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)::BIGINT
+             FROM usage_rollups_v2",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(classified, 0, "classification writes must roll back with the cursor");
+        assert!(matches!(fixture.consistency().await.unwrap(), Consistency::AllGone));
+        sqlx::raw_sql(
+            "DROP TRIGGER fail_live_checkpoint ON usage_rollup_checkpoints_v1;
+             DROP FUNCTION fail_live_checkpoint();",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        // The fixture's checkpoint observer holds a session-level advisory
+        // lock, which survives the injected transaction rollback. End that
+        // backend before restarting; otherwise the new backend waits on it.
+        fixture.pool.close().await;
+        let resumed = fixture.reconnect().await.unwrap();
+        resumed.storage.rollup_usage_once().await.unwrap();
+        assert!(matches!(resumed.consistency().await.unwrap(), Consistency::AllVisible));
+        let revision = resumed.storage.usage_rollup_revision().await.unwrap();
+        resumed.storage.rollup_usage_once().await.unwrap();
+        assert_eq!(resumed.storage.usage_rollup_revision().await.unwrap(), revision);
+        resumed.pool.close().await;
+        fixture.drop_database().await.unwrap();
+    });
 }

@@ -6,7 +6,7 @@ use std::fmt;
 
 use cc_lb_storage_api::{
     ApiKeyClass, ApiKeyOrgCapability, ApiKeyResolution, ApiKeyType, ApiKeyWorkspace,
-    ApiUsageAttribution, RemediationCode, UpstreamKind,
+    ApiUsageAttribution, PricingCompleteness, RemediationCode, UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +151,14 @@ pub struct KeyUsageMonth {
     pub tokens: u64,
     pub cost_usd_micros: u64,
     pub billing_stop: Option<KeyBillingStop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_completeness: Option<PricingCompleteness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpriced_request_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmetered_request_count: Option<u64>,
 }
 
 /// Fields `GET /usage` adds to the flattened dashboard usage response.
@@ -411,5 +419,39 @@ mod tests {
         assert!(!rendered.contains("SECRETVALUE"), "{rendered}");
         assert!(rendered.contains("[REDACTED]"), "{rendered}");
         assert!(rendered.contains("wrkspc_1"), "{rendered}");
+    }
+
+    #[test]
+    fn key_usage_month_defaults_legacy_pricing_fields_and_omits_absent_values() {
+        let legacy = serde_json::json!({
+            "start_unix_secs": 1,
+            "end_unix_secs": 2,
+            "tokens": 3,
+            "cost_usd_micros": 0,
+            "billing_stop": null,
+        });
+        let month: KeyUsageMonth = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(month.pricing_completeness, None);
+        assert_eq!(month.priced_request_count, None);
+        assert_eq!(month.unpriced_request_count, None);
+        assert_eq!(month.unmetered_request_count, None);
+        assert_eq!(serde_json::to_value(month).unwrap(), legacy);
+
+        let classified = KeyUsageMonth {
+            pricing_completeness: Some(PricingCompleteness::Unpriced),
+            priced_request_count: Some(0),
+            unpriced_request_count: Some(1),
+            unmetered_request_count: Some(0),
+            ..month
+        };
+        let wire = serde_json::to_value(classified).unwrap();
+        assert_eq!(wire["pricing_completeness"], "unpriced");
+        assert_eq!(wire["priced_request_count"], 0);
+        assert_eq!(wire["unpriced_request_count"], 1);
+        assert_eq!(wire["unmetered_request_count"], 0);
+        assert_eq!(
+            serde_json::from_value::<KeyUsageMonth>(wire).unwrap(),
+            classified
+        );
     }
 }

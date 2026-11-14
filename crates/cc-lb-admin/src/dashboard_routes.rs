@@ -56,15 +56,13 @@ pub(crate) async fn handle_dashboard_summary(
         };
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let (_, window_end_unix_secs) = build_window_for_step(range, auto_step(range), now_unix_secs);
-    let etag = dashboard_checkpoint(storage.as_ref())
-        .await
-        .map(|checkpoint| {
-            format!(
-                "W/\"dashboard:summary:{}:{}:{checkpoint}:{window_end_unix_secs}\"",
-                range.as_str(),
-                query.providers.as_deref().unwrap_or("all")
-            )
-        });
+    let etag = dashboard_revision(storage.as_ref()).await.map(|revision| {
+        format!(
+            "W/\"dashboard:summary:v3:{}:{}:{revision}:{window_end_unix_secs}\"",
+            range.as_str(),
+            query.providers.as_deref().unwrap_or("all")
+        )
+    });
     if let Some(etag) = &etag
         && matches_if_none_match(&headers, etag)
     {
@@ -230,11 +228,11 @@ pub(crate) async fn handle_dashboard_usage(
     let etag = if usage_filter.group_by == crate::dashboard::UsageGroupBy::Principal {
         None
     } else {
-        dashboard_checkpoint(storage.as_ref())
+        dashboard_revision(storage.as_ref())
             .await
-            .map(|checkpoint| {
+            .map(|revision| {
                 format!(
-                    "W/\"dashboard:usage:{}:{}:{}:{}:{}:{}:{projection_name}:{checkpoint}:{window_end_unix_secs}\"",
+                    "W/\"dashboard:usage:v3:{}:{}:{}:{}:{}:{}:{projection_name}:{revision}:{window_end_unix_secs}\"",
                     range.as_str(),
                     step.as_str(),
                     group_by.as_str(),
@@ -279,11 +277,11 @@ fn dashboard_usage_error(error: &DashboardBuildError) -> Response {
     }
 }
 
-async fn dashboard_checkpoint(storage: &dyn cc_lb_storage_api::Storage) -> Option<u64> {
-    match storage.usage_rollup_checkpoint().await {
-        Ok(checkpoint) => checkpoint,
+async fn dashboard_revision(storage: &dyn cc_lb_storage_api::Storage) -> Option<String> {
+    match storage.usage_rollup_revision().await {
+        Ok(revision) => revision,
         Err(error) => {
-            tracing::warn!(%error, "dashboard ETag checkpoint read failed");
+            tracing::warn!(%error, "dashboard ETag revision read failed");
             None
         }
     }

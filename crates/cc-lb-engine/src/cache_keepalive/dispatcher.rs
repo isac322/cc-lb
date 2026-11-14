@@ -506,42 +506,49 @@ fn classify_success_body_with_surface(
         let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
             return DispatchOutcome::Error("invalid OpenAI Responses JSON".to_owned());
         };
-        let usage = value.get("usage").and_then(Value::as_object);
-        let input_tokens = usage
-            .and_then(|usage| usage.get("input_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output_tokens = usage
-            .and_then(|usage| usage.get("output_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let reasoning_tokens = usage
-            .and_then(|usage| usage.get("output_tokens_details"))
-            .and_then(|details| details.get("reasoning_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let details = usage.and_then(|usage| usage.get("input_tokens_details"));
-        let cache_read = details
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let _cache_write = details
-            .and_then(|details| details.get("cache_write_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let usage = crate::usage_parser::observe_non_stream_json_value_for_shape(
+            &value,
+            crate::provider_capability::UsageShape::OpenaiResponses,
+        )
+        .usage;
+        let usage_present = usage.has_billable_usage();
+        let evidence = |value| match value {
+            crate::usage_parser::CacheTokenEvidence::Unreported => {
+                cc_lb_request_log::RequestCacheEvidence::Unreported
+            }
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                cc_lb_request_log::RequestCacheEvidence::Zero
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                cc_lb_request_log::RequestCacheEvidence::Positive
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                cc_lb_request_log::RequestCacheEvidence::Invalid
+            }
+        };
+        let cache_read = usage.cache_read_input_tokens;
         let finalization = RenewalFinalization {
             usage: RenewalUsage {
-                input_tokens,
-                output_tokens,
-                // OpenAI lifetime-specific writes are not Anthropic cache
-                // buckets. Keep the raw response out of those projections and
-                // mark cost unknown until provider pricing is modeled.
-                cache_creation_input_tokens: 0,
-                cache_creation_input_tokens_5m: 0,
-                cache_creation_input_tokens_1h: 0,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                input_image_tokens: usage.input_image_tokens,
+                output_image_tokens: usage.output_image_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
+                cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
                 cache_read_input_tokens: cache_read,
-                reasoning_tokens,
-                provider_cost_unknown: true,
+                cache_write_input_tokens: usage.cache_write_input_tokens,
+                cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
+                cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
+                cache_write_evidence: evidence(usage.cache_write_evidence),
+                cache_read_evidence: evidence(usage.cache_read_evidence),
+                thinking_tokens: usage.thinking_tokens,
+                service_tier: usage.service_tier,
+                usage_present,
+                is_openai_responses: true,
+                provider_cost_unknown: !usage_present
+                    || usage.cache_write_evidence
+                        == crate::usage_parser::CacheTokenEvidence::Invalid,
             },
             status: StatusCode::OK.as_u16(),
             duration,
@@ -572,8 +579,9 @@ fn classify_success_body_with_surface(
                     cache_creation_input_tokens_5m: cache_creation_5m,
                     cache_creation_input_tokens_1h: cache_creation_1h,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
-                    reasoning_tokens: 0,
-                    provider_cost_unknown: false,
+                    usage_present: true,
+                    is_openai_responses: false,
+                    ..RenewalUsage::default()
                 },
                 status: StatusCode::OK.as_u16(),
                 duration,

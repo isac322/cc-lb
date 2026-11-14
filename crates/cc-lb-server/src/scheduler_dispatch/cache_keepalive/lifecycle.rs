@@ -108,17 +108,18 @@ pub(super) fn publish_renewal_lifecycle(
         sign_ms: None,
         upstream_ttfb_ms: None,
     });
-    event_bus.publish_lifecycle(LifecycleEvent::UsageObserved {
-        event_id: input.event_id.to_owned(),
-        usage: usage_snapshot.clone(),
-        source: UsageSource::NonStreamBody,
-    });
+    if input.usage.usage_present {
+        event_bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: input.event_id.to_owned(),
+            usage: usage_snapshot.clone(),
+            source: UsageSource::NonStreamBody,
+        });
+    }
     event_bus.publish_lifecycle(LifecycleEvent::StreamCompleted {
         event_id: input.event_id.to_owned(),
         result: Ok(StreamSuccess {
             usage: usage_snapshot,
-            // Renewals retain their affirmative snapshot contract, including zero counters.
-            usage_present: true,
+            usage_present: input.usage.usage_present,
             sse_event_count: 0,
             body_bytes: None,
             body_chunk_count: None,
@@ -184,14 +185,23 @@ fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
     }
 }
 
-fn usage_snapshot(usage: &RenewalUsage) -> UsageSnapshot {
+pub(super) fn usage_snapshot(usage: &RenewalUsage) -> UsageSnapshot {
     UsageSnapshot {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
+        input_image_tokens: usage.input_image_tokens,
+        output_image_tokens: usage.output_image_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
+        cache_write_evidence: Some(usage.cache_write_evidence),
+        cache_read_evidence: Some(usage.cache_read_evidence),
+        thinking_tokens: usage.thinking_tokens,
+        service_tier: usage.service_tier.clone(),
         ..UsageSnapshot::default()
     }
 }
@@ -236,6 +246,71 @@ mod tests {
     use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
 
+    #[test]
+    fn renewal_snapshot_preserves_every_pricing_component() {
+        let usage = cc_lb_engine::cache_keepalive::RenewalUsage {
+            input_tokens: 1024,
+            output_tokens: 16,
+            input_image_tokens: Some(12),
+            output_image_tokens: Some(3),
+            cache_creation_input_tokens: 5,
+            cache_creation_input_tokens_5m: 2,
+            cache_creation_input_tokens_1h: 3,
+            cache_read_input_tokens: 1024,
+            cache_write_input_tokens: Some(100),
+            cache_write_input_tokens_30m: Some(60),
+            cache_write_input_tokens_12h: Some(40),
+            cache_write_evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+            cache_read_evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+            thinking_tokens: 7,
+            service_tier: Some("priority".to_owned()),
+            is_openai_responses: true,
+            ..Default::default()
+        };
+        let snapshot = super::usage_snapshot(&usage);
+        assert_eq!(snapshot.input_tokens, usage.input_tokens);
+        assert_eq!(snapshot.output_tokens, usage.output_tokens);
+        assert_eq!(snapshot.input_image_tokens, usage.input_image_tokens);
+        assert_eq!(snapshot.output_image_tokens, usage.output_image_tokens);
+        assert_eq!(
+            snapshot.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens
+        );
+        assert_eq!(
+            snapshot.cache_creation_input_tokens_5m,
+            usage.cache_creation_input_tokens_5m
+        );
+        assert_eq!(
+            snapshot.cache_creation_input_tokens_1h,
+            usage.cache_creation_input_tokens_1h
+        );
+        assert_eq!(
+            snapshot.cache_read_input_tokens,
+            usage.cache_read_input_tokens
+        );
+        assert_eq!(
+            snapshot.cache_write_input_tokens,
+            usage.cache_write_input_tokens
+        );
+        assert_eq!(
+            snapshot.cache_write_input_tokens_30m,
+            usage.cache_write_input_tokens_30m
+        );
+        assert_eq!(
+            snapshot.cache_write_input_tokens_12h,
+            usage.cache_write_input_tokens_12h
+        );
+        assert_eq!(
+            snapshot.cache_write_evidence,
+            Some(usage.cache_write_evidence)
+        );
+        assert_eq!(
+            snapshot.cache_read_evidence,
+            Some(usage.cache_read_evidence)
+        );
+        assert_eq!(snapshot.thinking_tokens, usage.thinking_tokens);
+        assert_eq!(snapshot.service_tier, usage.service_tier);
+    }
     #[derive(Clone, Default)]
     struct RenewalSpanLayer {
         values: Arc<Mutex<HashMap<String, String>>>,

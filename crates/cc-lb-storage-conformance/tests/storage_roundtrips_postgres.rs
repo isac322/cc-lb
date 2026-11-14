@@ -385,6 +385,14 @@ fn usage_rollup_principal_cost_components_postgres() {
 }
 
 #[test]
+fn usage_rollup_pricing_completeness_postgres() {
+    run_postgres_usage_rollup_scenario(
+        "usage_rollup_pricing_completeness",
+        cc_lb_storage_conformance::scenarios::usage_rollup_pricing_completeness::run_all,
+    );
+}
+
+#[test]
 fn cache_keepalive_batch_turn_reads_match_per_session_postgres() {
     run_postgres_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",

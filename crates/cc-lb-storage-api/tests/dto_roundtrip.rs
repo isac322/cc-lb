@@ -218,6 +218,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         cache_write_input_tokens: Some(0),
         cache_write_input_tokens_30m: None,
         cache_write_input_tokens_12h: None,
+        effective_cache_write_input_tokens: Some(0),
         error_count: 1,
         latency_count: 4,
         latency_ms_sum: 1_000,
@@ -242,6 +243,9 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         cost_cache_write_30m_micros: 0,
         cost_cache_write_12h_micros: 0,
         cost_components_event_count: 4,
+        priced_event_count: 7,
+        unpriced_event_count: 2,
+        unmetered_event_count: 1,
     });
     assert_json_roundtrip(UsageRollupRun {
         processed_events: 10,
@@ -777,6 +781,146 @@ fn batch_b_wire_snapshots_are_stable() {
             "cache_creation_1h_micros": 444,
             "cache_read_micros": 55
         }),
+    );
+}
+
+#[test]
+fn pricing_completeness_wire_and_legacy_derivation() {
+    use cc_lb_storage_api::{
+        PricingCompleteness as P, PricingCompletenessInput as I, derive_pricing_completeness,
+    };
+    for (value, wire) in [
+        (P::Priced, "priced"),
+        (P::KnownZero, "known_zero"),
+        (P::Partial, "partial"),
+        (P::Unpriced, "unpriced"),
+        (P::Unmetered, "unmetered"),
+        (P::Unknown, "unknown"),
+    ] {
+        assert_wire(value, json!(wire));
+        assert_json_roundtrip(value);
+    }
+    for (input, expected) in [
+        (I::default(), None),
+        (
+            I {
+                request_count: 1,
+                priced_event_count: 1,
+                virtual_cost_micros: 1,
+                ..I::default()
+            },
+            Some(P::Priced),
+        ),
+        (
+            I {
+                request_count: 1,
+                priced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::KnownZero),
+        ),
+        (
+            I {
+                request_count: 1,
+                unpriced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unpriced),
+        ),
+        (
+            I {
+                request_count: 1,
+                unmetered_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unmetered),
+        ),
+        (
+            I {
+                request_count: 2,
+                priced_event_count: 1,
+                unpriced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Partial),
+        ),
+        (
+            I {
+                request_count: 1,
+                ..I::default()
+            },
+            Some(P::Unknown),
+        ),
+        (
+            I {
+                request_count: 2,
+                priced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Partial),
+        ),
+        (
+            I {
+                request_count: 2,
+                unpriced_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unknown),
+        ),
+        (
+            I {
+                request_count: 2,
+                unmetered_event_count: 1,
+                ..I::default()
+            },
+            Some(P::Unknown),
+        ),
+        (
+            I {
+                request_count: 3,
+                unpriced_event_count: 1,
+                unmetered_event_count: 1,
+                virtual_cost_micros: 7,
+                ..I::default()
+            },
+            Some(P::Partial),
+        ),
+        (
+            I {
+                request_count: 1,
+                virtual_cost_micros: 1,
+                ..I::default()
+            },
+            Some(P::Partial),
+        ),
+        (
+            I {
+                request_count: u64::MAX,
+                priced_event_count: u64::MAX,
+                unmetered_event_count: 1,
+                ..I::default()
+            },
+            Some(P::KnownZero),
+        ),
+    ] {
+        assert_eq!(derive_pricing_completeness(input), expected, "{input:?}");
+    }
+    let legacy: UsageRollup = serde_json::from_value(json!({
+        "resolution": "minute", "bucket_start": 0, "principal": "legacy",
+        "upstream_id": Uuid::nil(), "upstream_name": "legacy", "model": "legacy",
+        "request_count": 1, "input_tokens": 1, "output_tokens": 0,
+        "error_count": 0, "latency_count": 1, "latency_ms_sum": 0,
+        "latency_ms_min": null, "latency_ms_max": null,
+        "virtual_cost_micros": 0, "cost_components_event_count": 0
+    }))
+    .unwrap();
+    assert_eq!(
+        (
+            legacy.priced_event_count,
+            legacy.unpriced_event_count,
+            legacy.unmetered_event_count
+        ),
+        (0, 0, 0)
     );
 }
 

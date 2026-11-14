@@ -887,7 +887,50 @@ describe('RequestEventDrawer', () => {
 
     expect(screen.getByRole('heading', { name: 'Tokens' })).toBeDefined();
     expect(screen.getByRole('heading', { name: 'Cost' })).toBeDefined();
+    expect(screen.getByText('List price unavailable')).toBeDefined();
+    expect(screen.queryByText('No cost')).toBeNull();
   });
+
+  it.each([
+    [null, 'List price unavailable'],
+    [0, 'No cost'],
+    [2_500_000, 'Per-category cost not recorded'],
+  ] as const)(
+    'preserves cost truth after fetching full request detail: %s',
+    async (cost_usd_micros, caption) => {
+      const event = {
+        event_id: 'pricing-detail',
+        request_id: 'pricing-detail',
+        ts: 1718553120,
+        status: 200,
+        duration_ms: 10,
+        input_tokens: 100,
+        output_tokens: 10,
+        cost_usd_micros,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(jsonResponse(event))),
+      );
+      render(
+        <RequestEventDrawer
+          event={event}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(screen.getByText(caption)).toBeDefined());
+      expect(screen.getByRole('heading', { name: /^Cost$/ })).toBeDefined();
+      if (cost_usd_micros == null) {
+        expect(screen.queryByText('$0.0000')).toBeNull();
+        expect(screen.queryByText('No cost')).toBeNull();
+      } else if (cost_usd_micros > 0) {
+        expect(screen.getByText('$2.5000')).toBeDefined();
+        expect(screen.queryByText('No cost')).toBeNull();
+      }
+    },
+  );
 
   describe('Badges', () => {
     it('renders reasoning badge when thinking_budget_tokens is set', () => {

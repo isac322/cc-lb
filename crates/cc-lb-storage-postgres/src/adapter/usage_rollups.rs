@@ -56,6 +56,7 @@ struct RollupDelta {
     cache_write_input_tokens: Option<u64>,
     cache_write_input_tokens_30m: Option<u64>,
     cache_write_input_tokens_12h: Option<u64>,
+    effective_cache_write_input_tokens: u64,
     error_count: u64,
     latency_count: u64,
     latency_ms_sum: u64,
@@ -80,6 +81,9 @@ struct RollupDelta {
     cost_cache_write_30m_micros: u64,
     cost_cache_write_12h_micros: u64,
     cost_components_event_count: u64,
+    priced_event_count: u64,
+    unpriced_event_count: u64,
+    unmetered_event_count: u64,
 }
 
 impl RollupDelta {
@@ -109,6 +113,17 @@ impl RollupDelta {
             &mut self.cache_write_input_tokens_12h,
             event.cache_write_input_tokens_12h,
         );
+        let event_ttl_writes = event
+            .cache_write_input_tokens_30m
+            .unwrap_or(0)
+            .saturating_add(event.cache_write_input_tokens_12h.unwrap_or(0));
+        let event_effective_writes = event
+            .cache_write_input_tokens
+            .unwrap_or(0)
+            .max(event_ttl_writes);
+        self.effective_cache_write_input_tokens = self
+            .effective_cache_write_input_tokens
+            .saturating_add(event_effective_writes);
         if event.status >= 400 {
             self.error_count = self.error_count.saturating_add(1);
         }
@@ -140,6 +155,17 @@ impl RollupDelta {
             .virtual_cost_micros
             .saturating_add(event.cost_usd_micros.unwrap_or(0).max(0) as u64);
         self.add_cost_components(event);
+        self.add_pricing_classification(event);
+    }
+
+    fn add_pricing_classification(&mut self, event: &RequestEvent) {
+        if event.cost_usd_micros.is_some() {
+            self.priced_event_count += 1;
+        } else if event_has_positive_tokens(event) {
+            self.unpriced_event_count += 1;
+        } else {
+            self.unmetered_event_count += 1;
+        }
     }
 
     fn add_cost_components(&mut self, event: &RequestEvent) {
@@ -245,7 +271,8 @@ impl UsageRollupStore for PostgresStorage {
               cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
               cost_cache_creation_1h_micros, cost_cache_read_micros, \
               cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, \
+              rollup.effective_cache_write_input_tokens \
               FROM usage_rollups_v2 AS rollup \
               WHERE rollup.resolution = $1 AND rollup.bucket_start_unix_secs >= $2 AND rollup.bucket_start_unix_secs < $3 \
               ORDER BY bucket_start_unix_secs ASC",
@@ -296,6 +323,26 @@ impl UsageRollupStore for PostgresStorage {
                 })
             })
             .collect()
+    }
+
+    async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, value_xid::text || '/' || value::text FROM usage_rollup_checkpoints_v1 WHERE id IN ($1, $2) ORDER BY id ASC",
+        )
+        .bind(CHECKPOINT_ID)
+        .bind(COST_BACKFILL_CURSOR_ID)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            rows.into_iter()
+                .map(|(id, value)| format!("{id}={value}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        ))
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
@@ -394,7 +441,7 @@ async fn merge_stale_gemini_rollups(
               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-              cost_components_event_count, updated_at) \
+              cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at) \
              SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, \
                     substring(model FROM 8), request_count, input_tokens, output_tokens, \
                     cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
@@ -406,7 +453,7 @@ async fn merge_stale_gemini_rollups(
                     cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
                     cost_cache_creation_1h_micros, cost_cache_read_micros, \
                     cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
-                    cost_components_event_count, updated_at \
+                    cost_components_event_count, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at \
              FROM usage_rollups_v2 \
              WHERE resolution = $1 AND bucket_start_unix_secs = $2 AND principal_id = $3 \
                AND upstream_id = $4 AND model = $5 \
@@ -430,6 +477,10 @@ async fn merge_stale_gemini_rollups(
                      WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h \
                      WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h \
                      ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
+                 effective_cache_write_input_tokens = CASE \
+                     WHEN usage_rollups_v2.effective_cache_write_input_tokens IS NULL AND EXCLUDED.effective_cache_write_input_tokens IS NULL THEN NULL \
+                     ELSE GREATEST(COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) \
+                        + GREATEST(COALESCE(EXCLUDED.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(EXCLUDED.cache_write_input_tokens, 0), COALESCE(EXCLUDED.cache_write_input_tokens_30m, 0) + COALESCE(EXCLUDED.cache_write_input_tokens_12h, 0))) END, \
                  error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                  latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                  latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
@@ -460,6 +511,9 @@ async fn merge_stale_gemini_rollups(
                  cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + EXCLUDED.cost_cache_write_30m_micros, \
                  cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + EXCLUDED.cost_cache_write_12h_micros, \
                  cost_components_event_count = usage_rollups_v2.cost_components_event_count + EXCLUDED.cost_components_event_count, \
+                 priced_event_count = usage_rollups_v2.priced_event_count + EXCLUDED.priced_event_count, \
+                 unpriced_event_count = usage_rollups_v2.unpriced_event_count + EXCLUDED.unpriced_event_count, \
+                 unmetered_event_count = usage_rollups_v2.unmetered_event_count + EXCLUDED.unmetered_event_count, \
                  updated_at = GREATEST(usage_rollups_v2.updated_at, EXCLUDED.updated_at)",
         )
         .bind(&resolution)
@@ -1228,6 +1282,68 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
         })?;
 
+    for (key, delta) in backfill_deltas {
+        if delta.cost_components_event_count == 0 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE usage_rollups_v2 \
+             SET cost_input_micros = cost_input_micros + $1, \
+                 cost_output_micros = cost_output_micros + $2, \
+                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
+                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
+                 cost_cache_read_micros = cost_cache_read_micros + $5, \
+                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
+                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
+                 cost_components_event_count = cost_components_event_count + $8, \
+                 updated_at = NOW() \
+             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
+               AND upstream_id = $12 AND model = $13",
+        )
+        .bind(u64_to_i64(
+            delta.cost_input_micros,
+            "backfill cost_input_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_output_micros,
+            "backfill cost_output_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_5m_micros,
+            "backfill cost_cache_creation_5m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_1h_micros,
+            "backfill cost_cache_creation_1h_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_read_micros,
+            "backfill cost_cache_read_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_30m_micros,
+            "backfill cost_cache_write_30m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_12h_micros,
+            "backfill cost_cache_write_12h_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_components_event_count,
+            "backfill cost_components_event_count",
+        )?)
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(
+            key.bucket_start,
+            "backfill rollup bucket_start",
+        )?)
+        .bind(&key.principal)
+        .bind(key.upstream_id)
+        .bind(&key.model)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
     for (key, delta) in deltas {
         sqlx::query(
             "INSERT INTO usage_rollups_v2 \
@@ -1241,10 +1357,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, \
                cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
                cost_components_event_count, cache_write_input_tokens, cache_write_input_tokens_30m, \
-               cache_write_input_tokens_12h, updated_at) \
+               cache_write_input_tokens_12h, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at) \
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
                       $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, \
-                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, NOW()) \
+                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, NOW()) \
               ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
               SET upstream_name = EXCLUDED.upstream_name, \
                   request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
@@ -1255,6 +1371,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   cache_write_input_tokens = CASE WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN EXCLUDED.cache_write_input_tokens WHEN EXCLUDED.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens ELSE usage_rollups_v2.cache_write_input_tokens + EXCLUDED.cache_write_input_tokens END, \
                   cache_write_input_tokens_30m = CASE WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN EXCLUDED.cache_write_input_tokens_30m WHEN EXCLUDED.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m ELSE usage_rollups_v2.cache_write_input_tokens_30m + EXCLUDED.cache_write_input_tokens_30m END, \
                   cache_write_input_tokens_12h = CASE WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
+                  effective_cache_write_input_tokens = GREATEST(COALESCE(usage_rollups_v2.effective_cache_write_input_tokens, 0), GREATEST(COALESCE(usage_rollups_v2.cache_write_input_tokens, 0), COALESCE(usage_rollups_v2.cache_write_input_tokens_30m, 0) + COALESCE(usage_rollups_v2.cache_write_input_tokens_12h, 0))) + EXCLUDED.effective_cache_write_input_tokens, \
                   error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
                   latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
                   latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
@@ -1287,6 +1404,9 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + EXCLUDED.cost_cache_write_30m_micros, \
                   cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + EXCLUDED.cost_cache_write_12h_micros, \
                   cost_components_event_count = usage_rollups_v2.cost_components_event_count + EXCLUDED.cost_components_event_count, \
+                  priced_event_count = usage_rollups_v2.priced_event_count + EXCLUDED.priced_event_count, \
+                  unpriced_event_count = usage_rollups_v2.unpriced_event_count + EXCLUDED.unpriced_event_count, \
+                  unmetered_event_count = usage_rollups_v2.unmetered_event_count + EXCLUDED.unmetered_event_count, \
                   updated_at = NOW()",
         )
         .bind(key.resolution.as_str())
@@ -1351,68 +1471,13 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             delta.cache_write_input_tokens_12h,
             "rollup cache_write_input_tokens_12h",
         )?)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-    for (key, delta) in backfill_deltas {
-        if delta.cost_components_event_count == 0 {
-            continue;
-        }
-        sqlx::query(
-            "UPDATE usage_rollups_v2 \
-             SET cost_input_micros = cost_input_micros + $1, \
-                 cost_output_micros = cost_output_micros + $2, \
-                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
-                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
-                 cost_cache_read_micros = cost_cache_read_micros + $5, \
-                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
-                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
-                 cost_components_event_count = cost_components_event_count + $8, \
-                 updated_at = NOW() \
-             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
-               AND upstream_id = $12 AND model = $13",
-        )
+        .bind(u64_to_i64(delta.priced_event_count, "rollup priced_event_count")?)
+        .bind(u64_to_i64(delta.unpriced_event_count, "rollup unpriced_event_count")?)
+        .bind(u64_to_i64(delta.unmetered_event_count, "rollup unmetered_event_count")?)
         .bind(u64_to_i64(
-            delta.cost_input_micros,
-            "backfill cost_input_micros",
+            delta.effective_cache_write_input_tokens,
+            "rollup effective_cache_write_input_tokens",
         )?)
-        .bind(u64_to_i64(
-            delta.cost_output_micros,
-            "backfill cost_output_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_5m_micros,
-            "backfill cost_cache_creation_5m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_1h_micros,
-            "backfill cost_cache_creation_1h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_read_micros,
-            "backfill cost_cache_read_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_30m_micros,
-            "backfill cost_cache_write_30m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_12h_micros,
-            "backfill cost_cache_write_12h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_components_event_count,
-            "backfill cost_components_event_count",
-        )?)
-        .bind(key.resolution.as_str())
-        .bind(u64_to_i64(
-            key.bucket_start,
-            "backfill rollup bucket_start",
-        )?)
-        .bind(&key.principal)
-        .bind(key.upstream_id)
-        .bind(&key.model)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1472,6 +1537,16 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         updated_rollups,
         checkpoint: Some(i64_to_u64(cursor_seq, "usage rollup checkpoint")?),
     })
+}
+
+fn event_has_positive_tokens(event: &RequestEvent) -> bool {
+    event.input_tokens.unwrap_or(0) > 0
+        || event.output_tokens.unwrap_or(0) > 0
+        || event.cache_creation_input_tokens.unwrap_or(0) > 0
+        || event.cache_read_input_tokens.unwrap_or(0) > 0
+        || event.cache_write_input_tokens.unwrap_or(0) > 0
+        || event.cache_write_input_tokens_30m.unwrap_or(0) > 0
+        || event.cache_write_input_tokens_12h.unwrap_or(0) > 0
 }
 
 fn is_overview_excluded_status(status: u16) -> bool {
@@ -1574,6 +1649,11 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
             .try_get::<Option<i64>, _>("cache_write_input_tokens_12h")
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "rollup cache_write_input_tokens_12h"))
+            .transpose()?,
+        effective_cache_write_input_tokens: row
+            .try_get::<Option<i64>, _>("effective_cache_write_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "rollup effective_cache_write_input_tokens"))
             .transpose()?,
         error_count: i64_to_u64(
             row.try_get("error_count").map_err(map_sqlx_error)?,
@@ -1683,6 +1763,20 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
             row.try_get("cost_components_event_count")
                 .map_err(map_sqlx_error)?,
             "rollup cost_components_event_count",
+        )?,
+        priced_event_count: i64_to_u64(
+            row.try_get("priced_event_count").map_err(map_sqlx_error)?,
+            "rollup priced_event_count",
+        )?,
+        unpriced_event_count: i64_to_u64(
+            row.try_get("unpriced_event_count")
+                .map_err(map_sqlx_error)?,
+            "rollup unpriced_event_count",
+        )?,
+        unmetered_event_count: i64_to_u64(
+            row.try_get("unmetered_event_count")
+                .map_err(map_sqlx_error)?,
+            "rollup unmetered_event_count",
         )?,
     })
 }

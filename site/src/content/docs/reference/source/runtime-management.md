@@ -250,6 +250,44 @@ actual cost is unavailable; their monetary PNL stays unknown. An automatic
 storage upgrade records price availability separately from signed cost values
 and preserves existing renewal costs as known.
 
+Dashboard rollups preserve price completeness separately from cost totals.
+The optional `pricing_completeness` field is one of `priced`, `known_zero`,
+`partial`, `unpriced`, `unmetered`, or `unknown`. Nonempty local summaries and
+buckets also include `priced_request_count`, `unpriced_request_count`, and
+`unmetered_request_count`, with explicit zeros for unused categories.
+Empty summaries and buckets omit all four fields. Estimated API-key month
+totals carry these fields; provider-reported organization usage does not.
+
+`known_zero` means a recorded price produced zero cost. `unmetered` requires
+complete classification with no billable usage. `unpriced` means classified
+billable usage lacks a price. An unclassified remainder makes the result
+`partial` only when there is a priced request or positive recorded cost;
+otherwise it is `unknown`, even with zero recorded tokens and cost or a mix
+of only unpriced and unmetered requests. Known positive subtotals stay visible,
+and a priced zero with an unclassified remainder is still partial.
+The UI displays `unpriced` and `unknown` as a dash with `List price unavailable`
+or `Price unknown`, and partial subtotals with `+`.
+Indeterminate amounts do not contribute a fabricated zero to cost shares.
+
+Storage upgrades add zero-default classification counters; ordinary rollup
+ingestion updates them with the same request, token, cost and checkpoint
+transaction. Existing rollup totals receive no historical pricing
+classification, even when raw events remain. Old workers can add totals
+without classification and leave new gaps. Updating all workers prevents new
+gaps but never repairs existing ones. Old readers may still show unknown
+amounts as zero, so readers also need the upgrade.
+
+The independent historical category-cost backfill remains unchanged.
+Dashboard validators include a semantics version, the ingestion checkpoint
+and that category-cost cursor; old semantics invalidate cached responses
+without new traffic. There is no pricing-classification recovery cursor.
+Gemini model-identity merges preserve available counters and known totals;
+any remaining classification gap stays subject to the same conservative rule.
+Scheduled OpenAI Responses renewals record canonical uncached `input_tokens`
+and `Option` native cache-write counters matching foreground requests.
+Effective-write totals retain available evidence and native-write lower
+bounds, without promising exact reconstruction for historical rollups.
+
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
 `image` block in message content, including images inside `tool_result.content`.
