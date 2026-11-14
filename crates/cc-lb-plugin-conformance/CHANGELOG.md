@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.4.0...cc-lb-plugin-conformance-v0.4.1) - 2026-11-14
+
+### Added
+
+- *(router)* add provider-native prompt-cache locality and pricing ([#1152](https://github.com/isac322/cc-lb/pull/1152))
+- *(plugins)* add provider-qualified conformance coverage
+
+### Fixed
+
+- *(plugins)* select frame-only Shape hooks for native providers ([#1195](https://github.com/isac322/cc-lb/pull/1195))
+
 ### Added
 
 - Typed V2 Realtime/Live frame calls and provider-native frame fixtures, including boundary smoke coverage for frame-only Shape plugins.
