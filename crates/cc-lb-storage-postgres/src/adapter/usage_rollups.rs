@@ -50,6 +50,7 @@ fn pricing_stage_scanned_count_id(slot_id: &str) -> String {
 const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
+const EOF_PROOF_LIMIT: i64 = ROLLUP_BATCH_LIMIT * 2 + 1;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const USAGE_ROLLUP_LOCK_KEY: i64 = 0x_CC1B_0001_0010_0001_u64 as i64;
@@ -1766,14 +1767,19 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         && pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize
     {
         let (source_count, source_min): (i64, Option<i64>) = sqlx::query_as(
-            "SELECT COUNT(*)::BIGINT, MIN(seq) FROM request_events_v1 \
-             WHERE (tx_id, seq) > ($1::xid8, $2) \
-               AND (tx_id, seq) <= ($3::xid8, $4)",
+            "WITH proof_rows AS ( \
+                 SELECT seq FROM request_events_v1 \
+                 WHERE (tx_id, seq) > ($1::xid8, $2) \
+                   AND (tx_id, seq) <= ($3::xid8, $4) \
+                 ORDER BY tx_id ASC, seq ASC LIMIT $5 \
+             ) \
+             SELECT COUNT(*)::BIGINT, MIN(seq) FROM proof_rows",
         )
         .bind(&lower_xid)
         .bind(lower_seq_floor)
         .bind(&source_upper_xid)
         .bind(source_upper_seq)
+        .bind(EOF_PROOF_LIMIT)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
