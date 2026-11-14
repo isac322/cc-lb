@@ -296,6 +296,137 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
+    for post_upper_count in [1_i64, 256] {
+        for intact in [true, false] {
+            let Some(fixture) = Fixture::create(168).await? else {
+                return Ok(());
+            };
+            let result: TestResult = async {
+                const H: u64 = 1_800_003_600;
+                let pool = fixture.storage.pool();
+                sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
+                    .execute(pool).await?;
+                sqlx::query(
+                    "INSERT INTO request_events_v1 \
+                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+                     SELECT 'post-old-'||i,'post-old-'||i,to_timestamp(1799996400),1799996400000,200,0,'post-old',1,1 \
+                     FROM generate_series(1,999) AS i",
+                ).execute(pool).await?;
+                let insert = "INSERT INTO request_events_v1 \
+                    (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,input_tokens,list_cost_usd_micros) \
+                    VALUES ($1,$1,to_timestamp($2::double precision),$3,200,0,$4,10,$5) RETURNING seq";
+                let e_seq: i64 = sqlx::query_scalar(insert)
+                    .bind("post-E").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
+                    .bind("post-other").bind(Some(5_i64)).fetch_one(pool).await?;
+                assert_eq!(e_seq, 1000);
+                let mut conn_a = fixture.connect_standalone().await?;
+                let mut conn_b = fixture.connect_standalone().await?;
+                let mut conn_c = fixture.connect_standalone().await?;
+                let mut conn_d = fixture.connect_standalone().await?;
+                sqlx::query("BEGIN").execute(&mut conn_a).await?;
+                let x_a: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                    .fetch_one(&mut conn_a).await?;
+                // A's xid predates the fillers, but it allocates its seq only after D.
+                sqlx::query(
+                    "INSERT INTO request_events_v1 \
+                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
+                     SELECT 'post-middle-'||i,'post-middle-'||i,to_timestamp(1800007200),1800007200000,200,0,'post-middle',1 \
+                     FROM generate_series(1,18997) AS i",
+                ).execute(pool).await?;
+                sqlx::query("BEGIN").execute(&mut conn_b).await?;
+                let x_b: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                    .fetch_one(&mut conn_b).await?;
+                sqlx::query("BEGIN").execute(&mut conn_c).await?;
+                let x_c: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                    .fetch_one(&mut conn_c).await?;
+                let c_seq: i64 = sqlx::query_scalar(insert)
+                    .bind("post-C").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
+                    .bind("post-other").bind(Some(5_i64)).fetch_one(&mut conn_c).await?;
+                sqlx::query("BEGIN").execute(&mut conn_d).await?;
+                let x_d: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                    .fetch_one(&mut conn_d).await?;
+                sqlx::query(
+                    "INSERT INTO request_events_v1 \
+                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
+                     SELECT 'post-D-'||i,'post-D-'||i,to_timestamp(1800007200),1800007200000,200,0,'post-D',1 \
+                     FROM generate_series(1,$1::bigint) AS i",
+                ).bind(post_upper_count).execute(&mut conn_d).await?;
+                let a_seq: i64 = sqlx::query_scalar(insert)
+                    .bind("post-A").bind((H + 350) as f64).bind(((H + 350) * 1000) as i64)
+                    .bind("post-target").bind(Some(0_i64)).fetch_one(&mut conn_a).await?;
+                let b_seq: i64 = sqlx::query_scalar(insert)
+                    .bind("post-B").bind((H + 340) as f64).bind(((H + 340) * 1000) as i64)
+                    .bind("post-target").bind(None::<i64>).fetch_one(&mut conn_b).await?;
+                assert_eq!(c_seq, 19998);
+                assert_eq!((a_seq, b_seq), (19999 + post_upper_count, 20000 + post_upper_count));
+                assert!(x_a.parse::<u64>()? < x_b.parse::<u64>()?);
+                assert!(x_b.parse::<u64>()? < x_c.parse::<u64>()?);
+                assert!(x_c.parse::<u64>()? < x_d.parse::<u64>()?);
+                sqlx::query("COMMIT").execute(&mut conn_a).await?;
+                wait_until_xid_below_xmin(pool, &x_a).await?;
+                assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 10_000);
+                fixture.storage.prune_usage_rollups_before(H + 360, H + 330, 2000).await?;
+                sqlx::query("COMMIT").execute(&mut conn_b).await?;
+                sqlx::query("COMMIT").execute(&mut conn_c).await?;
+                sqlx::query("COMMIT").execute(&mut conn_d).await?;
+                conn_a.close().await?;
+                conn_b.close().await?;
+                conn_c.close().await?;
+                conn_d.close().await?;
+                wait_until_xid_below_xmin(pool, &x_d).await?;
+                // Exactly 9,998 remaining fillers + B + C fill the next batch;
+                // committed D remains above high_water despite its lower seq.
+                assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 10_000);
+                let high_water: (i64, String) = sqlx::query_as(
+                    "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
+                ).fetch_one(pool).await?;
+                assert_eq!(high_water, (c_seq, x_c));
+                if !intact {
+                    assert_eq!(fixture.storage.prune_request_events_before(
+                        (H + 345) * 1000 * 1_000_000, 1000).await?, 1000);
+                }
+                sqlx::raw_sql(
+                    "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0; \
+                     DELETE FROM usage_rollup_checkpoints_v1 \
+                     WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
+                ).execute(pool).await?;
+                for _ in 0..3 {
+                    fixture.storage.rollup_usage_once().await?;
+                }
+                for (resolution, bucket_start) in [
+                    (UsageRollupResolution::Hour, H),
+                    (UsageRollupResolution::Minute, H + 300),
+                ] {
+                    let rows = fixture.storage.query_usage_rollups_in_range(
+                        resolution, bucket_start, bucket_start + 3600).await?;
+                    let row = rows.iter().find(|row| row.model == "post-target")
+                        .expect("recreated post-upper target bucket");
+                    assert_eq!((row.request_count, row.priced_event_count,
+                        row.unpriced_event_count, row.unmetered_event_count),
+                        if intact { (1, 0, 1, 0) } else { (1, 0, 0, 0) },
+                        "post_upper_count={post_upper_count}, intact={intact}, resolution={resolution:?}");
+                    assert_eq!(derive_pricing_completeness(PricingCompletenessInput {
+                        request_count: row.request_count,
+                        priced_event_count: row.priced_event_count,
+                        unpriced_event_count: row.unpriced_event_count,
+                        unmetered_event_count: row.unmetered_event_count,
+                        total_tokens: row.input_tokens,
+                        virtual_cost_micros: row.virtual_cost_micros,
+                    }), Some(if intact { PricingCompleteness::Unpriced }
+                        else { PricingCompleteness::Unknown }));
+                }
+                Ok(())
+            }.await;
+            let teardown = fixture.drop_schema().await;
+            result?;
+            teardown?;
+        }
+    }
+    Ok(())
+}
+
 async fn wait_until_xid_below_xmin(pool: &PgPool, xid: &str) -> TestResult {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {

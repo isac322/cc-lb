@@ -24,10 +24,24 @@ const PRICING_BACKFILL_UPPER_ID: &str = "pricing_completeness_backfill_upper";
 const PRICING_BACKFILL_CURSOR_ID: &str = "pricing_completeness_backfill_cursor";
 const PRICING_BACKFILL_EXPECTED_SEQ_ID: &str = "pricing_completeness_backfill_expected_seq";
 const PRICING_LIVE_WATERMARK_ID: &str = "pricing_completeness_live_watermark";
-const PRICING_CATCHUP_UPPER_ID: &str = "pricing_completeness_catchup_upper";
-const PRICING_CATCHUP_CURSOR_ID: &str = "pricing_completeness_catchup_cursor";
-const PRICING_CATCHUP_EXPECTED_SEQ_ID: &str = "pricing_completeness_catchup_expected_seq";
-const MAX_SEQ_PERMUTATION_GAP: i64 = 256;
+const PRICING_CATCHUP_DEPTH_ID: &str = "pricing_completeness_catchup_depth";
+const MAX_SEQ_PERMUTATION_GAP: i64 = 512;
+
+fn catchup_lower_id(index: u64) -> String {
+    format!("pricing_completeness_catchup_{index}_lower")
+}
+
+fn catchup_upper_id(index: u64) -> String {
+    format!("pricing_completeness_catchup_{index}_upper")
+}
+
+fn catchup_cursor_id(index: u64) -> String {
+    format!("pricing_completeness_catchup_{index}_cursor")
+}
+
+fn catchup_expected_seq_id(index: u64) -> String {
+    format!("pricing_completeness_catchup_{index}_expected_seq")
+}
 const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
@@ -346,37 +360,22 @@ impl UsageRollupStore for PostgresStorage {
 
     async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, value_xid::text || '/' || value::text FROM usage_rollup_checkpoints_v1 WHERE id IN ($1, $2, $3, $4, $5)",
+            "SELECT id, value_xid::text || '/' || value::text FROM usage_rollup_checkpoints_v1 WHERE id IN ($1, $2) OR id LIKE 'pricing_completeness_%' ORDER BY id ASC",
         )
         .bind(CHECKPOINT_ID)
         .bind(COST_BACKFILL_CURSOR_ID)
-        .bind(PRICING_BACKFILL_CURSOR_ID)
-        .bind(PRICING_LIVE_WATERMARK_ID)
-        .bind(PRICING_CATCHUP_CURSOR_ID)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
         if rows.is_empty() {
             return Ok(None);
         }
-        let mut high_water = String::new();
-        let mut cost_cursor = String::new();
-        let mut pricing_cursor = String::new();
-        let mut live_watermark = String::new();
-        let mut catchup_cursor = String::new();
-        for (id, value) in rows {
-            match id.as_str() {
-                CHECKPOINT_ID => high_water = value,
-                COST_BACKFILL_CURSOR_ID => cost_cursor = value,
-                PRICING_BACKFILL_CURSOR_ID => pricing_cursor = value,
-                PRICING_LIVE_WATERMARK_ID => live_watermark = value,
-                PRICING_CATCHUP_CURSOR_ID => catchup_cursor = value,
-                _ => unreachable!(),
-            }
-        }
-        Ok(Some(format!(
-            "{high_water}:{cost_cursor}:{pricing_cursor}:{live_watermark}:{catchup_cursor}"
-        )))
+        Ok(Some(
+            rows.into_iter()
+                .map(|(id, value)| format!("{id}={value}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        ))
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
@@ -973,6 +972,15 @@ async fn reconcile_gemini_model_identity(
     }))
 }
 
+async fn sequence_last_value(tx: &mut Transaction<'_, Postgres>) -> StorageResult<i64> {
+    sqlx::query_scalar(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM request_events_v1_seq_seq",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)
+}
+
 async fn seq_ceiling_at_xid(
     tx: &mut Transaction<'_, Postgres>,
     upper_xid: &str,
@@ -981,21 +989,21 @@ async fn seq_ceiling_at_xid(
     if upper_seq == 0 && upper_xid == "0" {
         return Ok(0);
     }
-    sqlx::query_scalar(
-        "SELECT GREATEST($2::bigint, COALESCE( \
-            (SELECT MIN(seq) - 1 FROM ( \
-                SELECT seq FROM request_events_v1 WHERE tx_id > $1::xid8 \
-                ORDER BY tx_id ASC, seq ASC LIMIT 256 \
-            ) post), \
-            (SELECT CASE WHEN is_called THEN last_value ELSE 0 END \
-             FROM request_events_v1_seq_seq) \
-        ))",
+    let post_seqs: Vec<i64> = sqlx::query_scalar(
+        "SELECT seq FROM request_events_v1 WHERE tx_id > $1::xid8 \
+         ORDER BY tx_id ASC, seq ASC LIMIT 256",
     )
     .bind(upper_xid)
-    .bind(upper_seq)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await
-    .map_err(map_sqlx_error)
+    .map_err(map_sqlx_error)?;
+    let seq_last = sequence_last_value(tx).await?;
+    if post_seqs.len() < 256 {
+        Ok(upper_seq.max(seq_last))
+    } else {
+        let post_max = post_seqs.into_iter().max().unwrap_or(upper_seq);
+        Ok(upper_seq.max(post_max.saturating_sub(1)))
+    }
 }
 
 async fn pricing_sequence_is_contiguous(
@@ -1003,8 +1011,7 @@ async fn pricing_sequence_is_contiguous(
     seq: i64,
     expected_seq: &mut i64,
     lower_seq_floor: i64,
-    range_upper_xid: &str,
-    range_upper_seq: i64,
+    seq_last_value: i64,
 ) -> StorageResult<bool> {
     if seq == *expected_seq {
         *expected_seq -= 1;
@@ -1014,14 +1021,10 @@ async fn pricing_sequence_is_contiguous(
             return Ok(false);
         }
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM request_events_v1 \
-             WHERE seq >= $1 AND seq <= $2 AND tx_id <= $3::xid8 \
-               AND (tx_id < $3::xid8 OR seq <= $4)",
+            "SELECT COUNT(*) FROM request_events_v1 WHERE seq >= $1 AND seq <= $2",
         )
         .bind(seq)
         .bind(*expected_seq)
-        .bind(range_upper_xid)
-        .bind(range_upper_seq)
         .fetch_one(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1029,19 +1032,28 @@ async fn pricing_sequence_is_contiguous(
             return Ok(false);
         }
         *expected_seq = seq - 1;
-    } else if *expected_seq > lower_seq_floor {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM request_events_v1 WHERE seq = $1 \
-             AND (tx_id, seq) <= ($2::xid8, $3))",
-        )
-        .bind(*expected_seq)
-        .bind(range_upper_xid)
-        .bind(range_upper_seq)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        if !exists {
-            return Ok(false);
+    } else {
+        if *expected_seq > lower_seq_floor {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM request_events_v1 WHERE seq = $1)")
+                    .bind(*expected_seq)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            if !exists {
+                return Ok(false);
+            }
+        }
+        if seq < seq_last_value {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM request_events_v1 WHERE seq = $1)")
+                    .bind(seq + 1)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            if !exists {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
@@ -1242,48 +1254,84 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             .fetch_one(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-    let backfill_has_work = backfill_has_work && !has_old_worker_gap;
-    let mut catchup_upper = (previous_seq, previous_xid.clone());
-    let mut catchup_cursor = (previous_seq.saturating_add(1), previous_xid.clone());
-    let mut catchup_expected_seq = 0;
+    let mut depth = i64_to_u64(
+        read_pricing_checkpoint(&mut tx, PRICING_CATCHUP_DEPTH_ID)
+            .await?
+            .map(|(value, _)| value)
+            .unwrap_or(0),
+        "pricing catchup depth",
+    )?;
     if has_old_worker_gap {
-        let upper = read_pricing_checkpoint(&mut tx, PRICING_CATCHUP_UPPER_ID).await?;
-        let cursor = read_pricing_checkpoint(&mut tx, PRICING_CATCHUP_CURSOR_ID).await?;
-        let expected = read_pricing_checkpoint(&mut tx, PRICING_CATCHUP_EXPECTED_SEQ_ID).await?;
-        match (upper, cursor, expected) {
-            (Some(upper), Some(cursor), Some((expected, _)))
-                if cursor.0 != 0 || cursor.1 != "0" =>
-            {
-                catchup_upper = upper;
-                catchup_cursor = cursor;
-                catchup_expected_seq = expected;
-            }
-            _ => {
-                catchup_expected_seq =
-                    seq_ceiling_at_xid(&mut tx, &previous_xid, previous_seq).await?;
-            }
+        let expected = seq_ceiling_at_xid(&mut tx, &previous_xid, previous_seq).await?;
+        for (id, seq, xid) in [
+            (catchup_lower_id(depth), lw_seq, lw_xid.as_str()),
+            (catchup_upper_id(depth), previous_seq, previous_xid.as_str()),
+            (
+                catchup_cursor_id(depth),
+                previous_seq.saturating_add(1),
+                previous_xid.as_str(),
+            ),
+            (catchup_expected_seq_id(depth), expected, "0"),
+        ] {
+            persist_pricing_checkpoint(&mut tx, &id, seq, xid).await?;
         }
+        depth += 1;
+        persist_pricing_checkpoint(
+            &mut tx,
+            PRICING_CATCHUP_DEPTH_ID,
+            u64_to_i64(depth, "pricing catchup depth")?,
+            "0",
+        )
+        .await?;
+        persist_pricing_checkpoint(
+            &mut tx,
+            PRICING_LIVE_WATERMARK_ID,
+            previous_seq,
+            &previous_xid,
+        )
+        .await?;
     }
-    let (pricing_backfill_seq, pricing_backfill_xid, initial_expected_seq) = if has_old_worker_gap {
-        (catchup_cursor.0, catchup_cursor.1, catchup_expected_seq)
+    let has_catchup = depth > 0;
+    let backfill_has_work = backfill_has_work && !has_catchup;
+    let (
+        pricing_backfill_seq,
+        pricing_backfill_xid,
+        initial_expected_seq,
+        lower_seq_floor,
+        lower_xid,
+    ) = if has_catchup {
+        let top = depth - 1;
+        let lower = read_pricing_checkpoint(&mut tx, &catchup_lower_id(top))
+            .await?
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "missing pricing catchup lower".to_owned(),
+            })?;
+        let _upper = read_pricing_checkpoint(&mut tx, &catchup_upper_id(top))
+            .await?
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "missing pricing catchup upper".to_owned(),
+            })?;
+        let cursor = read_pricing_checkpoint(&mut tx, &catchup_cursor_id(top))
+            .await?
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "missing pricing catchup cursor".to_owned(),
+            })?;
+        let expected = read_pricing_checkpoint(&mut tx, &catchup_expected_seq_id(top))
+            .await?
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "missing pricing catchup expected sequence".to_owned(),
+            })?;
+        (cursor.0, cursor.1, expected.0, lower.0, lower.1)
     } else {
         (
             pricing_backfill_seq,
             pricing_backfill_xid,
             initial_expected_seq,
+            0,
+            "0".to_owned(),
         )
     };
-    let pricing_backfill_has_work = has_old_worker_gap || pricing_backfill_has_work;
-    let (range_upper_seq, range_upper_xid) = if has_old_worker_gap {
-        (catchup_upper.0, catchup_upper.1.as_str())
-    } else {
-        (pricing_upper_seq, pricing_upper_xid.as_str())
-    };
-    let (lower_seq_floor, lower_xid) = if has_old_worker_gap {
-        (lw_seq, lw_xid.as_str())
-    } else {
-        (0, "0")
-    };
+    let pricing_backfill_has_work = has_catchup || pricing_backfill_has_work;
     // Page by the composite (tx_id, seq) cursor below the snapshot xmin horizon,
     // never by seq alone: a lower seq can COMMIT after a higher seq (BIGSERIAL is
     // assigned at INSERT, visible at COMMIT), so a seq high-water-mark would skip
@@ -1297,7 +1345,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     .bind(&previous_xid)
     .bind(previous_seq)
     .bind(ROLLUP_BATCH_LIMIT)
-    .bind(has_old_worker_gap)
+    .bind(has_catchup)
     .fetch_all(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -1568,7 +1616,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .bind(&pricing_backfill_xid)
         .bind(pricing_backfill_seq)
         .bind(ROLLUP_BATCH_LIMIT)
-        .bind(lower_xid)
+        .bind(&lower_xid)
         .bind(lower_seq_floor)
         .fetch_all(&mut *tx)
         .await
@@ -1576,6 +1624,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     } else {
         Vec::new()
     };
+    let seq_last = sequence_last_value(&mut tx).await?;
     let mut expected_seq = initial_expected_seq;
     let mut hole_seen = false;
     for row in &pricing_backfill_rows {
@@ -1585,8 +1634,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             seq,
             &mut expected_seq,
             lower_seq_floor,
-            range_upper_xid,
-            range_upper_seq,
+            seq_last,
         )
         .await?
         {
@@ -1815,40 +1863,36 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .await
         .map_err(map_sqlx_error)?;
     }
-    if has_old_worker_gap {
-        if hole_seen || pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize {
+    if has_catchup {
+        let top = depth - 1;
+        if hole_seen {
+            sqlx::query("DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_catchup_%'")
+                .execute(&mut *tx).await.map_err(map_sqlx_error)?;
+            persist_pricing_checkpoint(&mut tx, PRICING_CATCHUP_DEPTH_ID, 0, "0").await?;
+            persist_pricing_checkpoint(&mut tx, PRICING_BACKFILL_EXPECTED_SEQ_ID, 0, "0").await?;
+            persist_pricing_checkpoint(&mut tx, PRICING_BACKFILL_CURSOR_ID, 0, "0").await?;
+        } else if pricing_backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize {
+            sqlx::query("DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ($1, $2, $3, $4)")
+                .bind(catchup_lower_id(top))
+                .bind(catchup_upper_id(top))
+                .bind(catchup_cursor_id(top))
+                .bind(catchup_expected_seq_id(top))
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
             persist_pricing_checkpoint(
                 &mut tx,
-                PRICING_LIVE_WATERMARK_ID,
-                catchup_upper.0,
-                &catchup_upper.1,
+                PRICING_CATCHUP_DEPTH_ID,
+                u64_to_i64(top, "pricing catchup depth")?,
+                "0",
             )
             .await?;
-            for id in [
-                PRICING_CATCHUP_UPPER_ID,
-                PRICING_CATCHUP_CURSOR_ID,
-                PRICING_CATCHUP_EXPECTED_SEQ_ID,
-            ] {
-                persist_pricing_checkpoint(&mut tx, id, 0, "0").await?;
-            }
-            if hole_seen {
-                persist_pricing_checkpoint(&mut tx, PRICING_BACKFILL_EXPECTED_SEQ_ID, 0, "0")
-                    .await?;
-                persist_pricing_checkpoint(&mut tx, PRICING_BACKFILL_CURSOR_ID, 0, "0").await?;
-            }
         } else {
-            persist_pricing_checkpoint(
-                &mut tx,
-                PRICING_CATCHUP_UPPER_ID,
-                catchup_upper.0,
-                &catchup_upper.1,
-            )
-            .await?;
-            persist_pricing_checkpoint(&mut tx, PRICING_CATCHUP_EXPECTED_SEQ_ID, expected_seq, "0")
+            persist_pricing_checkpoint(&mut tx, &catchup_expected_seq_id(top), expected_seq, "0")
                 .await?;
             persist_pricing_checkpoint(
                 &mut tx,
-                PRICING_CATCHUP_CURSOR_ID,
+                &catchup_cursor_id(top),
                 pricing_backfill_cursor_seq,
                 &pricing_backfill_cursor_xid,
             )

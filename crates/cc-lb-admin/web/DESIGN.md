@@ -462,8 +462,10 @@ The Overview leads with how usage moved, then who is using it. Top to bottom (`r
 
 Unavailable pricing is a neutral instrument state. Use `text-text-faint` or
 `text-text-muted`, never warning or danger colors. Keep the same facts at 390px,
-768px and 1440px in both themes. Values and qualification captions wrap without
-truncation; essential state stays visible without hover.
+768px and 1440px in both themes. Qualification captions wrap without truncation;
+bounded KPI figures may truncate oversized digit runs only when the pricing
+qualifier (such as `+`) stays visible inline and the exact qualified amount
+remains in `title` and accessible text. Essential state stays visible without hover.
 
 - A range with no requests has no cost reading. `unpriced` shows `—` with
   `List price unavailable`; `unknown` shows `—` with `Price unknown`. A null

@@ -17,6 +17,7 @@ where
     pre_upgrade_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     pre_upgrade_interior_hole_backfill(Arc::clone(&backend)).await?;
     frozen_upper_mixed_worker_backfill(Arc::clone(&backend)).await?;
+    nested_catchup_mixed_worker_backfill(Arc::clone(&backend)).await?;
     upstream_rename_recreated_bucket_backfill(Arc::clone(&backend)).await?;
     partial_retention_interrupted_prune_backfill(Arc::clone(&backend)).await?;
     mixed_old_and_new_writer_effective_cache_writes(Arc::clone(&backend)).await?;
@@ -481,6 +482,144 @@ where
         Ok(())
     }
     .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
+async fn nested_catchup_mixed_worker_backfill<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+        let start = 1_800_000_000;
+        storage.append_request_event(&event("nested-seed", start + 7200)).await?;
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        storage.rollup_usage_once().await?;
+        backend.execute_raw_sql(storage.as_ref(),
+            "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_%'").await?;
+        storage.rollup_usage_once().await?;
+
+        let mut b1 = event("nested-B1", start);
+        b1.model = Some("nested-catchup".to_owned());
+        b1.input_tokens = Some(10);
+        b1.cost_usd_micros = Some(0);
+        ensure!(storage.append_request_event(&b1).await? == 2);
+        let fillers = match backend.kind() {
+            BackendKind::Sqlite => {
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) \
+                 INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,model,list_cost_usd_micros) \
+                 SELECT 'nested-filler-'||i,'nested-filler-'||i,1800003600,1800003600000,200,0,'nested-filler',0 FROM n"
+            }
+            BackendKind::Postgres => {
+                "INSERT INTO request_events_v1 \
+                 (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
+                 SELECT 'nested-filler-'||i,'nested-filler-'||i,to_timestamp(1800003600),1800003600000,200,0,'nested-filler',0 \
+                 FROM generate_series(1,10000) AS i"
+            }
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), fillers).await? == 10_000);
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        ensure!(storage.rollup_usage_once().await?.processed_events == 10_000);
+        ensure!(storage.rollup_usage_once().await?.processed_events == 1);
+        // Retain the old worker's aggregates/high-water but remove its unavailable
+        // pricing writes, leaving the frozen historical upper at U0.
+        backend.execute_raw_sql(storage.as_ref(),
+            "UPDATE usage_rollups_v2 SET priced_event_count=0,unpriced_event_count=0,unmetered_event_count=0 \
+             WHERE model IN ('nested-catchup','nested-filler')").await?;
+        let rewind_watermark = match backend.kind() {
+            BackendKind::Sqlite =>
+                "UPDATE usage_rollup_checkpoints_v1 SET value= \
+                 (SELECT value FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_upper') \
+                 WHERE id='pricing_completeness_live_watermark'",
+            BackendKind::Postgres =>
+                "UPDATE usage_rollup_checkpoints_v1 SET (value,value_xid)= \
+                 (SELECT value,value_xid FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_upper') \
+                 WHERE id='pricing_completeness_live_watermark'",
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), rewind_watermark).await? == 1);
+        ensure!(storage.rollup_usage_once().await?.processed_events == 0);
+        let pending_b1 = storage.query_usage_rollups_in_range(
+            UsageRollupResolution::Minute, start, start + 60).await?;
+        ensure!(pending_b1.len() == 1 && pending_b1[0].priced_event_count == 0,
+            "the first catchup batch must leave B1 pending");
+        ensure!(storage.prune_usage_rollups_before(start + 60, start, 100).await? == 1);
+
+        let mut b2 = event("nested-B2", start);
+        b2.model = b1.model.clone();
+        b2.input_tokens = Some(10);
+        ensure!(storage.append_request_event(&b2).await? == 10_003);
+        backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
+        let recreate = match backend.kind() {
+            BackendKind::Sqlite =>
+                "INSERT INTO usage_rollups_v2 \
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,input_tokens,updated_at) \
+                 SELECT 'minute',1800000000,principal_id,upstream_id,upstream_name,model,1,10,unixepoch() \
+                 FROM usage_rollups_v2 WHERE resolution='hour' AND model='nested-catchup'",
+            BackendKind::Postgres =>
+                "INSERT INTO usage_rollups_v2 \
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,input_tokens,updated_at) \
+                 SELECT 'minute',1800000000,principal_id,upstream_id,upstream_name,model,1,10,NOW() \
+                 FROM usage_rollups_v2 WHERE resolution='hour' AND model='nested-catchup'",
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), recreate).await? == 1);
+        ensure!(backend.execute_raw_sql(storage.as_ref(),
+            "UPDATE usage_rollups_v2 SET request_count=request_count+1,input_tokens=input_tokens+10 \
+             WHERE resolution='hour' AND model='nested-catchup'").await? == 1);
+        let advance = match backend.kind() {
+            BackendKind::Sqlite =>
+                "UPDATE usage_rollup_checkpoints_v1 SET value=(SELECT MAX(id) FROM request_events_v1) WHERE id='high_water'",
+            BackendKind::Postgres =>
+                "UPDATE usage_rollup_checkpoints_v1 SET (value,value_xid)= \
+                 (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) WHERE id='high_water'",
+        };
+        ensure!(backend.execute_raw_sql(storage.as_ref(), advance).await? == 1);
+        let high_water = storage.usage_rollup_checkpoint().await?;
+        let mut drained = false;
+        for pass in 0..8 {
+            let before = storage.usage_rollup_revision().await?;
+            ensure!(storage.rollup_usage_once().await?.processed_events == 0);
+            ensure!(storage.usage_rollup_checkpoint().await? == high_water);
+            if pass == 0 {
+                let rows = storage.query_usage_rollups_in_range(
+                    UsageRollupResolution::Minute, start, start + 60).await?;
+                ensure!(rows.len() == 1 && rows[0].unpriced_event_count == 1
+                    && rows[0].priced_event_count == 0,
+                    "nested B2 slot must run before pending B1: {rows:?}");
+            }
+            if storage.usage_rollup_revision().await? == before {
+                drained = true;
+                break;
+            }
+        }
+        ensure!(drained, "nested catchup stack must drain");
+        for (resolution, expected, completeness) in [
+            (UsageRollupResolution::Minute, (1, 0, 1, 0), PricingCompleteness::Unpriced),
+            (UsageRollupResolution::Hour, (2, 1, 1, 0), PricingCompleteness::Partial),
+        ] {
+            let rows = storage.query_usage_rollups_in_range(resolution, start, start + 7200).await?;
+            let row = rows.iter().find(|row| row.model == "nested-catchup").unwrap();
+            ensure!((row.request_count, row.priced_event_count, row.unpriced_event_count,
+                row.unmetered_event_count) == expected, "nested catchup: {row:?}");
+            ensure!(derive_pricing_completeness(PricingCompletenessInput {
+                request_count: row.request_count,
+                priced_event_count: row.priced_event_count,
+                unpriced_event_count: row.unpriced_event_count,
+                unmetered_event_count: row.unmetered_event_count,
+                total_tokens: row.input_tokens,
+                virtual_cost_micros: row.virtual_cost_micros,
+            }) == Some(completeness));
+            let filler = rows.iter().find(|row| row.model == "nested-filler").unwrap();
+            ensure!((filler.request_count, filler.priced_event_count, filler.unpriced_event_count,
+                filler.unmetered_event_count) == (10_000, 10_000, 0, 0),
+                "completed filler batches must not be reapplied: {filler:?}");
+        }
+        Ok(())
+    }.await;
     let teardown = fixture.teardown().await;
     result?;
     teardown
