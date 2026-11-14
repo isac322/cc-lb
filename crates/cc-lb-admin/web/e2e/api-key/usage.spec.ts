@@ -186,6 +186,78 @@ test.describe('API usage card', () => {
     }
   }
 
+  test('estimated ts model stays unavailable beside priced, zero and partial controls', async ({
+    page,
+    seedApiKeyUpstream,
+    routeEnvelope,
+  }) => {
+    const upstream = await seedApiKeyUpstream({ key: apiKey('ts-model-controls') });
+    const points = Array.from({ length: 3 }, (_, index) => ({
+      ...bucket(NOW - (3 - index) * HOUR, 100),
+      request_count: 1,
+    }));
+    await serve(routeEnvelope, upstream, ORG_OK, 200, usage({
+      source: 'estimated',
+      series: [
+        {
+          key: 'ts',
+          buckets: points.map((point) => ({
+            ...point,
+            pricing_completeness: 'unknown',
+          })),
+        },
+        {
+          key: 'ordinary',
+          buckets: points.map((point) => ({
+            ...point,
+            virtual_cost_micros: 1_250_000,
+            pricing_completeness: 'priced',
+            priced_request_count: 1,
+          })),
+        },
+        {
+          key: 'known-zero',
+          buckets: points.map((point) => ({
+            ...point,
+            pricing_completeness: 'known_zero',
+            priced_request_count: 1,
+          })),
+        },
+        {
+          key: 'partial',
+          buckets: points.map((point) => ({
+            ...point,
+            request_count: 2,
+            virtual_cost_micros: 2_500_000,
+            pricing_completeness: 'partial',
+            priced_request_count: 1,
+            unpriced_request_count: 1,
+          })),
+        },
+      ],
+    }));
+    await openUpstream(page, upstream.id);
+    await card(page).getByRole('radiogroup', { name: 'Metric' }).getByRole('radio', { name: 'Cost' }).click();
+    const legend = card(page).getByTestId('api-usage-legend-slot');
+    const reading = (model: string) => legend.getByText(model, { exact: true }).locator('..');
+    await expect(reading('ts')).toHaveText('ts—');
+    await expect(reading('ordinary')).toHaveText('ordinary$1.2500');
+    await expect(reading('known-zero')).toHaveText('known-zero$0.0000');
+    await expect(reading('partial')).toHaveText('partial$2.5000+ (1 unpriced)');
+    await expect(legend).not.toContainText('NaN');
+    const chart = card(page).locator('.recharts-wrapper');
+    const bounds = await chart.boundingBox();
+    if (!bounds) throw new Error('Rendered API usage chart is required');
+    await page.mouse.move(bounds.x + bounds.width * 0.6, bounds.y + bounds.height * 0.5);
+    const tooltip = card(page).locator('.recharts-tooltip-wrapper');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText('ordinary');
+    await expect(tooltip).toContainText('$1.2500');
+    await expect(tooltip).toContainText('$2.5000+ (1 unpriced)');
+    await expect(tooltip.getByText('ts', { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+
   // UI-U-05, UI-U-13: reported key usage, strip cells, "Other" model.
   test('reported: strip cells and attribution caption', async ({
     page,

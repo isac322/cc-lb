@@ -23,14 +23,39 @@ const NOW = Date.parse('2026-11-14T12:00:00Z') / 1000;
 const PRINCIPAL = 'pricing-principal';
 const API_KEY_UPSTREAM_ID = 'api-key-pricing';
 const RESIDUAL_SCENARIOS = [
-  { name: 'legacy-zero', state: 'unknown' as const, overrides: {} },
-  { name: 'legacy-unpriced', state: 'unknown' as const, overrides: { request_count: 2, unpriced_request_count: 1 } },
-  { name: 'legacy-auxiliary', state: 'unknown' as const, overrides: { request_count: 2, unmetered_request_count: 1 } },
-  { name: 'legacy-priced-zero', state: 'partial' as const, overrides: { request_count: 2, priced_request_count: 1 } },
-  { name: 'positive-legacy', state: 'partial' as const, overrides: { virtual_cost_micros: 2_500_000 } },
-  { name: 'known-zero', state: 'known_zero' as const, overrides: { priced_request_count: 1 } },
-  { name: 'auxiliary', state: 'unmetered' as const, overrides: { unmetered_request_count: 1 } },
+  { name: 'legacy-zero', state: 'unknown' as const, caption: 'Price unknown', overrides: {} },
+  { name: 'legacy-unpriced', state: 'unknown' as const, caption: 'Price unknown', overrides: { request_count: 2, unpriced_request_count: 1 } },
+  { name: 'legacy-auxiliary', state: 'unknown' as const, caption: 'Price unknown', overrides: { request_count: 2, unmetered_request_count: 1 } },
+  { name: 'legacy-priced-zero', state: 'partial' as const, caption: 'Partly priced', overrides: { request_count: 2, priced_request_count: 1 } },
+  { name: 'positive-legacy', state: 'partial' as const, caption: 'Partly priced', overrides: { virtual_cost_micros: 2_500_000 } },
+  { name: 'known-zero', state: 'known_zero' as const, caption: null, overrides: { priced_request_count: 1 } },
+  { name: 'auxiliary', state: 'unmetered' as const, caption: 'No billable usage', overrides: { unmetered_request_count: 1 } },
 ] as const;
+const TS_API_SCENARIOS = [
+  {
+    name: 'ts-unknown-unpriced',
+    state: 'unknown' as const,
+    caption: 'Price unknown',
+    modelKey: 'ts',
+    overrides: { request_count: 2, unpriced_request_count: 1 },
+  },
+  {
+    name: 'ts-partial-control',
+    state: 'partial' as const,
+    caption: 'Partly priced',
+    modelKey: 'ts',
+    overrides: {
+      request_count: 2,
+      priced_request_count: 1,
+      unpriced_request_count: 1,
+      virtual_cost_micros: 500_000,
+    },
+  },
+] as const;
+const API_CAPTURE_SCENARIOS = [
+  ...RESIDUAL_SCENARIOS.map((scenario) => ({ ...scenario, modelKey: undefined })),
+  ...TS_API_SCENARIOS,
+];
 async function centerAndAssertUsableViewport(
   page: Page,
   target: Locator,
@@ -143,6 +168,7 @@ async function installApiKeyFixtures(
   state: PricingCompleteness,
   theme: 'dark' | 'light',
   buckets: UsageBucket[],
+  modelKey = 'claude-sonnet-4',
 ) {
   await installPricingFixtures(page, state, theme, buckets);
   const amount = buckets.reduce((sum, bucket) => sum + bucket.virtual_cost_micros, 0);
@@ -177,7 +203,7 @@ async function installApiKeyFixtures(
     group_by: 'model',
     window_start_unix_secs: NOW - 24 * 3600,
     window_end_unix_secs: NOW,
-    series: [{ key: 'claude-sonnet-4', buckets }],
+    series: [{ key: modelKey, buckets }],
     observed: true,
     source: 'estimated',
     provider: 'anthropic',
@@ -303,7 +329,7 @@ try {
           await context.close();
         }
       }
-      for (const scenario of RESIDUAL_SCENARIOS) {
+      for (const scenario of API_CAPTURE_SCENARIOS) {
         const context = await browser.newContext({ viewport, colorScheme: theme, reducedMotion: 'reduce' });
         try {
           const page = await context.newPage();
@@ -324,7 +350,7 @@ try {
             pricing_completeness: scenario.state,
             ...scenario.overrides,
           }];
-          await installApiKeyFixtures(page, scenario.state, theme, buckets);
+          await installApiKeyFixtures(page, scenario.state, theme, buckets, scenario.modelKey);
           const origin = `http://127.0.0.1:${port}`;
           const { width, height } = viewport;
           await page.goto(`${origin}/upstreams?selectedId=${API_KEY_UPSTREAM_ID}`);
@@ -334,10 +360,11 @@ try {
           await page.evaluate(() => document.fonts.ready);
           const credits = usageCard.locator('[data-cell="Credits used"]');
           await expect(credits).toBeVisible();
+          const creditsText = await credits.innerText();
           await centerAndAssertUsableViewport(page, credits, `API credits ${scenario.name} ${width}px ${theme}`);
           const apiKeyFile = `api-key-${scenario.name}-${width}-${theme}.png`;
           await page.screenshot({ path: resolve(outputRoot, apiKeyFile), fullPage: false, animations: 'disabled' });
-          captures.push({ surface: 'api-key-estimated', scenario: scenario.name, width, height, theme, apiKeyFile });
+          captures.push({ surface: 'api-key-estimated', scenario: scenario.name, modelKey: scenario.modelKey ?? 'claude-sonnet-4', expectedCaption: scenario.caption, creditsText, width, height, theme, apiKeyFile });
         } finally {
           await context.close();
         }

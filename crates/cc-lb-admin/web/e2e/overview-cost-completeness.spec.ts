@@ -311,3 +311,46 @@ for (const width of [390, 768, 1440]) {
     }
   }
 }
+
+for (const width of [768, 1024, 1440]) {
+for (const theme of ['dark', 'light'] as const) {
+  test(`Known-cost share header stays inside its cell and card at ${width}px in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+    const buckets = scenarioBuckets('unknown').slice(0, 1).map((bucket) => ({
+      ...bucket,
+      input_tokens: 0,
+      virtual_cost_micros: 2_500_000,
+      pricing_completeness: 'partial' as const,
+    }));
+    await installPricingFixtures(page, 'partial', theme, buckets);
+    await page.goto('/providers/anthropic?range=24h');
+    const principals = page.getByTestId('overview-principal-area');
+    const header = principals.getByRole('columnheader', { name: 'Known-cost share' });
+    await expect(header).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
+    const bounds = await header.evaluate((element) => {
+      const card = element.closest('[data-testid="overview-principal-area"]');
+      if (!card) throw new Error('Principal card boundary is required');
+      const text = document.createRange();
+      text.selectNodeContents(element);
+      const textBounds = text.getBoundingClientRect();
+      const cellBounds = element.getBoundingClientRect();
+      const cardBounds = card.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        text: { left: textBounds.left, right: textBounds.right },
+        cell: { left: cellBounds.left, right: cellBounds.right },
+        card: { left: cardBounds.left, right: cardBounds.right },
+        paddingLeft: Number.parseFloat(style.paddingLeft),
+        paddingRight: Number.parseFloat(style.paddingRight),
+      };
+    });
+    expect(bounds.cell.right).toBeLessThanOrEqual(bounds.card.right + 1);
+    expect(bounds.text.left).toBeGreaterThanOrEqual(bounds.cell.left + bounds.paddingLeft - 1);
+    expect(bounds.text.right).toBeLessThanOrEqual(bounds.cell.right - bounds.paddingRight + 1);
+    expect(bounds.text.right).toBeLessThanOrEqual(bounds.card.right + 1);
+    await expectFits(page, principals);
+  });
+}
+}

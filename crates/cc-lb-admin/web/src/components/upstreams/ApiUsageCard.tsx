@@ -125,12 +125,16 @@ export function ApiUsageCard({
   const showLoading = data === undefined && isLoading;
   const chartId = useChartId();
 
-  const { chartData, pricingByTimestamp } = useMemo(() => {
+  const { chartData, pricingByTimestamp, models } = useMemo(() => {
     const bucketsByTs = new Map<number, Record<string, number>>();
     const pricingByTimestamp = new Map<number, Map<string, PricingCounts>>();
+    const models = (data?.series ?? []).map((series, index) => ({
+      key: `model-${index}`,
+      label: modelLabel(series.key),
+    }));
 
-    for (const series of data?.series ?? []) {
-      const model = modelLabel(series.key);
+    for (const [index, series] of (data?.series ?? []).entries()) {
+      const key = models[index].key;
       for (const bucket of series.buckets) {
         const pricing = {
           ...bucket,
@@ -149,17 +153,17 @@ export function ApiUsageCard({
             byModel = new Map();
             pricingByTimestamp.set(ts, byModel);
           }
-          byModel.set(model, pricing);
+          byModel.set(key, pricing);
         }
         if (metric === 'tokens') {
-          row[model] = sumTokens(bucket);
+          row[key] = sumTokens(bucket);
         } else if (
           !(
             provenance?.source === 'estimated' &&
             isIndeterminatePricing(pricing.pricing_completeness)
           )
         ) {
-          row[model] = bucket.virtual_cost_micros / 1_000_000;
+          row[key] = bucket.virtual_cost_micros / 1_000_000;
         }
       }
     }
@@ -167,13 +171,9 @@ export function ApiUsageCard({
     return {
       chartData: Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts),
       pricingByTimestamp,
+      models,
     };
   }, [data, metric, provenance?.source]);
-
-  const models = useMemo(() => {
-    if (!data?.series) return [];
-    return data.series.map((s) => modelLabel(s.key));
-  }, [data]);
 
   const formatXAxis = (ts: number) => {
     const d = new Date(ts * 1000);
@@ -425,24 +425,30 @@ export function ApiUsageCard({
               {!showLoading && chartData.length > 0
                 ? models.map((model, index) => {
                     const lastBucket = chartData[chartData.length - 1];
-                    const val = lastBucket ? lastBucket[model] || 0 : 0;
+                    const val = lastBucket ? lastBucket[model.key] || 0 : 0;
                     const pricing = lastBucket
-                      ? pricingByTimestamp.get(lastBucket.ts)?.get(model)
+                      ? pricingByTimestamp.get(lastBucket.ts)?.get(model.key)
                       : undefined;
                     const partial = pricing?.pricing_completeness === 'partial';
                     const qualifier = partial
                       ? pricingQualifier(pricing)
                       : undefined;
                     return (
-                      <div key={model} className="flex items-center gap-1.5">
+                      <div
+                        key={model.key}
+                        className="flex items-center gap-1.5"
+                      >
                         <span
                           aria-hidden="true"
                           className="size-2.5 shrink-0 rounded-xs"
                           style={{
-                            backgroundColor: modelSeriesColor(model, index),
+                            backgroundColor: modelSeriesColor(
+                              model.label,
+                              index,
+                            ),
                           }}
                         />
-                        <span className="text-text-muted">{model}</span>
+                        <span className="text-text-muted">{model.label}</span>
                         <span
                           className="tabular-nums text-text"
                           title={qualifier}
@@ -454,7 +460,7 @@ export function ApiUsageCard({
                         >
                           {metric === 'cost' &&
                           provenance?.source === 'estimated' &&
-                          lastBucket?.[model] === undefined
+                          lastBucket?.[model.key] === undefined
                             ? '—'
                             : partial
                               ? `${fmtUsd(val * 1_000_000)}+`
@@ -501,7 +507,7 @@ export function ApiUsageCard({
                           Number(value ?? 0),
                           pricingByTimestamp
                             .get(Number(item.payload?.ts))
-                            ?.get(String(name)),
+                            ?.get(String(item.dataKey)),
                         ),
                         String(name),
                       ]}
@@ -510,19 +516,20 @@ export function ApiUsageCard({
                     <defs>
                       {models.map((model, index) => (
                         <SeriesFillGradient
-                          key={model}
+                          key={model.key}
                           id={`${chartId}-${index}`}
-                          color={modelSeriesColor(model, index)}
+                          color={modelSeriesColor(model.label, index)}
                         />
                       ))}
                     </defs>
                     {models.map((model, index) => (
                       <Area
-                        key={model}
+                        key={model.key}
                         type="monotone"
-                        dataKey={model}
+                        dataKey={model.key}
+                        name={model.label}
                         stackId="1"
-                        stroke={modelSeriesColor(model, index)}
+                        stroke={modelSeriesColor(model.label, index)}
                         fill={`url(#${chartId}-${index})`}
                         fillOpacity={1}
                         strokeWidth={1.5}

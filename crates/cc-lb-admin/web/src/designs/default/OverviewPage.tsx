@@ -949,7 +949,14 @@ export function TopPrincipalsSection({
             onSort={handleSort}
             sortKey="cost"
           />
-          <TableHeadCell className="@4xl/principals:w-24" numeric>
+          <TableHeadCell
+            className={
+              hasIncompleteCost
+                ? '@4xl/principals:w-36'
+                : '@4xl/principals:w-24'
+            }
+            numeric
+          >
             {hasIncompleteCost ? 'Known-cost share' : 'Share'}
           </TableHeadCell>
         </tr>
