@@ -2785,5 +2785,4 @@ mod tests {
         };
         assert!(funding_ambiguous);
     }
-
 }

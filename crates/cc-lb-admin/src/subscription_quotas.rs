@@ -693,7 +693,7 @@ async fn build_pool_history_response(
                 history_now_unix_millis,
                 query
                     .max_points_per_series
-                    .map_or(DEFAULT_SERIES_MAX_POINTS as usize, |value| value as usize),
+                    .unwrap_or(DEFAULT_SERIES_MAX_POINTS as usize),
             )
             .await?
             .pool,
