@@ -186,6 +186,10 @@ struct Partial {
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
     thinking_level: Option<String>,
+    funding: Option<cc_lb_request_log::RequestFunding>,
+    funding_response_id: Option<String>,
+    funding_ambiguous: bool,
+    funding_attempt: u32,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     termination: Option<TerminationInfo>,
 
@@ -513,6 +517,8 @@ impl Partial {
 ///   but not worth a partial publish on its own.
 /// - `UpstreamStreamDiagnosticsObserved`: merged into the upstream body
 ///   attribution fields and published with the final write.
+/// - `UpstreamQuotaFrameObserved` / `RequestFundingObserved`: funding evidence
+///   is merged into the row but published with the final write.
 /// - `Priced` / `CacheObserved`: merged into the row but published only with
 ///   the final write.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
@@ -536,6 +542,8 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::UpstreamAttempt { .. }
         | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
         | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
+        | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
+        | LifecycleEvent::RequestFundingObserved { .. }
         | LifecycleEvent::Priced { .. }
         | LifecycleEvent::CacheObserved { .. } => None,
     }
@@ -1379,6 +1387,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         // rejection reason is committed as the terminal cause by the producer.
         LifecycleEvent::LimitDecision { .. } => {}
         LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
+            partial.funding_attempt = attempt_num;
+            partial.funding = None;
+            partial.funding_response_id = None;
+            partial.funding_ambiguous = false;
             if attempt_num > 1 {
                 partial.upstream_response_status = None;
                 partial.bulkhead_wait_ms = None;
@@ -1390,9 +1402,36 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.upstream_ttfb_ms = None;
             }
         }
+        LifecycleEvent::RequestFundingObserved {
+            funding,
+            response_id,
+            ambiguous,
+            attempt_num,
+            ..
+        } => {
+            if attempt_num == partial.funding_attempt {
+                partial.funding_ambiguous |= ambiguous;
+                partial.funding = funding;
+                partial.funding_response_id = response_id;
+            }
+        }
+        LifecycleEvent::UpstreamQuotaFrameObserved {
+            frame,
+            matched_response_id,
+            ..
+        } => {
+            if matched_response_id.is_none() {
+                partial.funding_ambiguous = true;
+            } else if let Ok(value) = sonic_rs::from_slice::<serde_json::Value>(&frame)
+                && let Some(headers) = crate::codex_quota_observation::websocket_headers(&value)
+            {
+                partial.funding = crate::codex_quota_observation::funding_from_headers(&headers);
+                partial.funding_response_id = matched_response_id;
+            }
+        }
         LifecycleEvent::UpstreamResponseStarted {
             status,
-            headers: _,
+            headers,
             bulkhead_wait_ms,
             dns_ms,
             connect_ms,
@@ -1410,6 +1449,19 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.shape_ms = shape_ms;
             partial.sign_ms = sign_ms;
             partial.upstream_ttfb_ms = upstream_ttfb_ms;
+            if (200..300).contains(&status)
+                && headers
+                    .provider_headers
+                    .keys()
+                    .any(|key| key.starts_with("x-codex-"))
+            {
+                let header_map =
+                    crate::lifecycle_subscription_quota_subscriber::header_map_from_snapshot(
+                        &headers,
+                    );
+                partial.funding = crate::codex_quota_observation::funding_from_headers(&header_map);
+                partial.funding_response_id = None;
+            }
         }
         LifecycleEvent::UsageObserved {
             usage,
@@ -1637,6 +1689,16 @@ fn finalize_base(
         upstream_error_type: partial.stream_error_type.clone(),
         upstream_error_message: partial.stream_error_message.clone(),
         upstream_error_code: partial.stream_error_code.clone(),
+        funding: if !partial.funding_ambiguous
+            && partial
+                .funding_response_id
+                .as_ref()
+                .is_none_or(|id| partial.provider_session_id.as_ref() == Some(id))
+        {
+            partial.funding
+        } else {
+            None
+        },
         upstream_http_version: diagnostics.and_then(|d| d.http_version.clone()),
         upstream_request_id: diagnostics.and_then(|d| d.request_id.clone()),
         upstream_content_encoding: diagnostics.and_then(|d| d.content_encoding.clone()),

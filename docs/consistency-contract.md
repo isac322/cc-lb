@@ -303,7 +303,22 @@ Gemini usage polls persist period-unknown raw meters under `gemini_period_unknow
 
 `/aggregate`, `/api/oauth/usage`, and Anthropic `/pool-history` omit a window when every member is explicitly absent. This includes Anthropic secondary windows exposed by `/api/oauth/usage` as `seven_day_sonnet`, `seven_day_opus`, and `limits`. Equal-weighted OpenAI and Gemini `/pool-history` retains all-absent windows with `eligible_upstreams = 0`.
 
-Codex credit observations use these same delivery and freshness boundaries. Usage polls store the full credit state on `overage`; response headers store their partial credit state on `unified`. Each window keeps the existing whole-observation source selection. The router considers both windows, so a header that omits the usage-poll restriction cannot clear it. Explicit negative credit signals remain conservative blocks until that source reports a replacement; stale positive credit signals cannot establish availability.
+Codex credit observations use these same delivery boundaries. Usage polls store
+the full credit state on `overage`; response headers store partial state on
+`unified`; Responses WebSocket `codex.rate_limits` frames enter the same
+off-path subscriber without changing their forwarded bytes. Cache and storage
+retain field-specific observation time and source for `has_credits`, `unlimited`,
+`limit_reached`, and `balance`. Missing fields do not refresh an older field.
+Routing compares explicit flags by their own newest applicable evidence:
+balance never implies availability, and stale positive flags never admit traffic.
+Checkpoint semantic identity excludes provenance metadata, so an unchanged
+successful poll can refresh latest/cache freshness without adding a checkpoint.
+
+Request events may carry nullable `funding` evidence. `included_estimated` and
+`credits_estimated` require a complete main-limit response matched to the
+request or turn. Connection-only WebSocket frames, incomplete meters, extra
+limit families, balance-only changes, and ambiguous turn ordering remain null.
+The field is an estimate of the response's quota state, not a billing receipt.
 
 **Subscription display metadata.** OpenAI usage polls merge the plan and email
 from the usage response only after its account ID matches the current
@@ -326,15 +341,24 @@ before checking persisted display metadata, as the test-scoped
 
 ### Pool quota history
 
-`GET /admin/v1/subscription-quotas/pool-history` reads retained snapshots scoped to the requested provider. The existing snapshot job records state changes and an unchanged-state heartbeat. Historical freshness begins with recorded snapshots; checkpoints are not backfilled into freshness history. Retention keeps the last snapshot at or before the cutoff separately for each provider and quota window.
+`GET /admin/v1/subscription-quotas/pool-history` keeps the existing quota
+snapshot contract and, for OpenAI, may include a `credits` object. Credit
+history uses persisted balance state for the enabled OpenAI OAuth accounts in
+the same membership set as `pool_quota_upstreams`. Historical points
+step-hold recorded state through the requested range; checkpoint age is not
+historical polling freshness.
 
-For equal-weighted provider pools, `latest` is computed at read time from each member's newest whole observation across cache, durable `latest`, and raw checkpoints. An unchanged successful poll refreshes its observation time; a failed poll does not. A reading becomes stale strictly after the configured `subscription_quota.routing_max_staleness_secs`. Only fresh readings contribute to utilization. An all-stale pool has null utilization and zero contributors; a never-observed member remains eligible with a missing observation, while an explicitly absent window is ineligible regardless of age.
+Only the current tail may extend to `now`, and only while each balance sidecar
+is fresh. A stale sidecar ends the tail at its last successful balance
+observation. Coverage changes create a null gap instead of a fabricated zero
+or continuous drop. The pool sum excludes unlimited, invalid, stale, and
+missing balances, keeps partial contributor counts, and sums decimal strings
+exactly before the display truncates once.
 
-The history series contains persisted snapshots only, including null intervals when no fresh contributor was available. Recovery with unchanged utilization restores the current reading without replacing those intervals. Chart projection preserves a null-containing bucket as a gap for equal-weighted pools, including a null left anchor; healthy buckets retain their peak. Plan-weighted pool aggregation and chart sampling are unchanged.
-
-On PostgreSQL, plan-weighted pools continue reading and writing `pool_subscription_quota_history_v1`. Equal-weighted provider snapshots begin in the empty `pool_subscription_quota_history_v2` table; the upgrade creates its indexes without copying or rebuilding existing plan-weighted history. Each provider reads one table. Retention applies one batch budget across both tables while preserving the anchor for each provider and window. SQLite retains its single provider-scoped history table.
-
-Clients can request server-relative history with `relative_range_secs` and optional `window_quantum_secs`. The server resolves these bounds from the same clock used for `now_unix_secs`; equal-weighted provider cards use this mode so browser clock skew cannot move an old range anchor into the display. The relative range must be positive and cannot be combined with explicit `since_unix_secs` or `until_unix_secs`. An omitted or zero quantum leaves the upper bound unquantized. Existing absolute bounds and default queries remain supported.
+The existing quota history still records provider snapshots and applies its
+documented freshness and retention rules. Clients can request server-relative
+history with `relative_range_secs` and optional `window_quantum_secs`; the
+server resolves those bounds from the same clock used for `now_unix_secs`.
 
 ## Writing tests against this contract
 

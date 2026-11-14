@@ -301,6 +301,8 @@ struct Turn {
     incomplete_reason: Option<Option<String>>,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
     metrics: ResponsesStreamMetrics,
+    funding_ambiguous: bool,
+    response_created: bool,
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -588,6 +590,8 @@ impl ResponsesWebSocketGateway {
                 incomplete_reason: None,
                 plugin_request: None,
                 metrics: ResponsesStreamMetrics::new(),
+                funding_ambiguous: false,
+                response_created: false,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -761,6 +765,8 @@ impl ResponsesWebSocketGateway {
                 incomplete_reason: None,
                 plugin_request: None,
                 metrics: ResponsesStreamMetrics::new(),
+                funding_ambiguous: false,
+                response_created: false,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1126,6 +1132,27 @@ impl ResponsesWebSocketGateway {
     }
 
     pub fn sent(&mut self, turn_id: u64) -> Vec<WebSocketDispatch> {
+        let connection = self.turns.get(&turn_id).and_then(|turn| turn.connection_id);
+        if let Some(connection) = connection
+            && self.turns.iter().any(|(id, turn)| {
+                *id != turn_id && turn.sent && turn.connection_id == Some(connection)
+            })
+        {
+            for (id, turn) in &mut self.turns {
+                if turn.connection_id == Some(connection) && (*id == turn_id || turn.sent) {
+                    turn.funding_ambiguous = true;
+                    if let Some(observer) = turn.prepared.observer.as_ref() {
+                        observer.emit_lifecycle(LifecycleEvent::RequestFundingObserved {
+                            event_id: observer.event_id().to_owned(),
+                            attempt_num: 1,
+                            funding: None,
+                            response_id: turn.response_id.clone(),
+                            ambiguous: true,
+                        });
+                    }
+                }
+            }
+        }
         let Some(turn) = self.turns.get_mut(&turn_id) else {
             return Vec::new();
         };
@@ -1193,7 +1220,7 @@ impl ResponsesWebSocketGateway {
         turn_id
     }
 
-    fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) {
+    fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) -> Option<u64> {
         let bounded = |value: Option<sonic_rs::LazyValue<'_>>, max_len| {
             value.and_then(|value| {
                 let value = value.as_str()?;
@@ -1218,21 +1245,23 @@ impl ResponsesWebSocketGateway {
         });
         let is_error = sonic_rs::get_from_slice(frame, &["type"])
             .is_ok_and(|value| value.as_str() == Some("error"));
-        let Some(turn_id) = self.resolve_provider_turn_id(
+        let turn_id = self.resolve_provider_turn_id(
             connection_id,
             response_id.as_deref(),
             parent_response_id.as_deref(),
             lane.as_deref(),
             is_error,
-        ) else {
-            return;
-        };
+        )?;
         if let Some(turn) = self.turns.get_mut(&turn_id)
             && turn.connection_id == Some(connection_id)
             && turn.sent
         {
             turn.metrics.observe(frame);
+            if response_id.is_some() && response_id == turn.response_id && lane == turn.lane {
+                return Some(turn_id);
+            }
         }
+        None
     }
 
     pub async fn provider_message(
@@ -1240,10 +1269,10 @@ impl ResponsesWebSocketGateway {
         connection_id: u64,
         frame: &Bytes,
     ) -> Result<WebSocketEventResult, WebSocketError> {
-        self.observe_provider_metrics(connection_id, frame);
+        let quota_turn = self.observe_provider_metrics(connection_id, frame);
         let transformed = self.transform_provider_frame(connection_id, frame);
         let mut result = self
-            .observe_provider_message(connection_id, frame, transformed.as_ref().err())
+            .observe_provider_message(connection_id, frame, transformed.as_ref().err(), quota_turn)
             .await?;
         match transformed {
             Ok(Some(frames)) => {
@@ -1323,6 +1352,7 @@ impl ResponsesWebSocketGateway {
         connection_id: u64,
         frame: &Bytes,
         transform_error: Option<&WebSocketError>,
+        quota_turn: Option<u64>,
     ) -> Result<WebSocketEventResult, WebSocketError> {
         // A borrowed lazy discriminator is the only work for deltas. It does
         // not construct a Value, copy payload bytes, or record observations.
@@ -1345,6 +1375,46 @@ impl ResponsesWebSocketGateway {
                 Some("response.steer.accepted") => "response.steer.accepted",
                 Some("response.steer.pending") => "response.steer.pending",
                 Some("response.steer.failed") => "response.steer.failed",
+                Some("codex.rate_limits") => {
+                    if frame.len() <= self.byte_cap
+                        && let Some(upstream_id) = self.connections.get(&connection_id).copied()
+                    {
+                        let matched =
+                            quota_turn
+                                .and_then(|id| self.turns.get(&id))
+                                .filter(|turn| {
+                                    !turn.funding_ambiguous
+                                        && turn.response_created
+                                        && turn.connection_id == Some(connection_id)
+                                        && self
+                                            .turns
+                                            .values()
+                                            .filter(|other| {
+                                                other.sent
+                                                    && other.connection_id == Some(connection_id)
+                                            })
+                                            .take(2)
+                                            .count()
+                                            == 1
+                                });
+                        let evidence = matched.and_then(|turn| {
+                            Some((
+                                turn.prepared.observer.as_ref()?.event_id(),
+                                turn.response_id.as_deref()?,
+                            ))
+                        });
+                        self.lifecycle.observe_websocket_quota_frame(
+                            upstream_id,
+                            frame.clone(),
+                            evidence.map(|(event_id, _)| event_id),
+                            evidence.map(|(_, response_id)| response_id),
+                        );
+                    }
+                    return Ok(WebSocketEventResult {
+                        forward: true,
+                        ..Default::default()
+                    });
+                }
                 Some(_) => {
                     return Ok(WebSocketEventResult {
                         forward: true,
@@ -1527,6 +1597,9 @@ impl ResponsesWebSocketGateway {
                     .get_mut(&turn_id)
                     .expect("admitted turn remains owned during binding");
                 turn.response_id = Some(id.to_owned());
+                if kind == "response.created" {
+                    turn.response_created = true;
+                }
                 turn.prepared.span.record("gen_ai.response.id", id);
                 if let Some(parent) = turn.steer_parent.as_ref() {
                     self.successors.remove(parent);
@@ -1536,6 +1609,11 @@ impl ResponsesWebSocketGateway {
                     }
                 }
             }
+        }
+        if kind == "response.created"
+            && let Some(turn) = self.turns.get_mut(&turn_id)
+        {
+            turn.response_created = true;
         }
         if let Some(response) = response
             && let Some((usage, complete)) = observed_response_usage(response)
@@ -2580,6 +2658,8 @@ pub(crate) mod tests {
                 incomplete_reason: None,
                 plugin_request: None,
                 metrics: ResponsesStreamMetrics::new(),
+                funding_ambiguous: false,
+                response_created: false,
             },
         );
         gateway.lanes.insert(
@@ -2638,7 +2718,7 @@ pub(crate) mod tests {
         );
         assert!(
             gateway
-                .observe_provider_message(1, &delta, None)
+                .observe_provider_message(1, &delta, None, None)
                 .await
                 .unwrap()
                 .forward
@@ -2722,7 +2802,7 @@ pub(crate) mod tests {
         );
         let original_frame = frame.clone();
         let result = gateway
-            .observe_provider_message(1, &frame, None)
+            .observe_provider_message(1, &frame, None, None)
             .await
             .unwrap();
         assert!(result.forward);
@@ -2761,7 +2841,7 @@ pub(crate) mod tests {
         );
         let error = WebSocketError::new(502, "plugin_transform_error", "transform rejected");
         gateway
-            .observe_provider_message(1, &frame, Some(&error))
+            .observe_provider_message(1, &frame, Some(&error), None)
             .await
             .unwrap();
         let mut completions = 0;
@@ -3167,6 +3247,8 @@ pub(crate) mod tests {
                     incomplete_reason: None,
                     plugin_request: None,
                     metrics: ResponsesStreamMetrics::new(),
+                    funding_ambiguous: false,
+                    response_created: false,
                 },
             );
             gateway.finish_turn(1, None);

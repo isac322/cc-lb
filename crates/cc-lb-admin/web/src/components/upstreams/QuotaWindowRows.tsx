@@ -137,6 +137,7 @@ export function QuotaWindowRow({
   nowUnixSecs,
   label,
   creditObservations,
+  maxStalenessSecs,
   placeholder,
   retained = false,
 }: {
@@ -144,6 +145,7 @@ export function QuotaWindowRow({
   nowUnixSecs: number;
   label?: string;
   creditObservations?: readonly QuotaSnapshot[];
+  maxStalenessSecs?: number;
   /** From `geminiGroupPlaceholderState`: render the neutral placeholder. */
   placeholder?: GeminiGroupPlaceholderState | null;
   /** From `geminiRetainedReading`: an earlier poll's reading, never current. */
@@ -170,6 +172,7 @@ export function QuotaWindowRow({
     return (
       <CodexCreditsRow
         observations={creditObservations ?? [snap]}
+        maxStalenessSecs={maxStalenessSecs}
         label={label}
       />
     );
@@ -440,12 +443,14 @@ function QuotaResetCells({ resetTime }: { resetTime: number | null }) {
 
 function CodexCreditsRow({
   observations,
+  maxStalenessSecs,
   label,
 }: {
   observations: readonly QuotaSnapshot[];
+  maxStalenessSecs?: number;
   label?: string;
 }) {
-  const facts = selectCodexCredits(observations);
+  const facts = selectCodexCredits(observations, maxStalenessSecs);
   if (facts == null) return null;
   return (
     <div role="listitem" data-window="unified" className={ROW_CLASS}>

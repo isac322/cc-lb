@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router';
 import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
+import { CodexCreditTotal } from '../components/upstreams/codexCredits';
 import {
   type PoolRetentionSource,
   poolGroupPlaceholders,
@@ -12,6 +13,7 @@ import {
   PoolRetentionNotes,
 } from '../designs/default/OverviewPage';
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
+import { hasCreditHistory, mergeCreditChartRows } from '../lib/creditHistory';
 import { useTimezone } from '../lib/locale';
 import { PROVIDER_LABELS, type ProviderFamily } from '../lib/providers';
 import {
@@ -190,6 +192,15 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
     rangeStartUnix,
     visibleWindows,
   ]);
+  const creditChartData = useMemo(
+    () =>
+      provider === 'openai' &&
+      history.data?.credits &&
+      hasCreditHistory(history.data.credits)
+        ? mergeCreditChartRows(visibleChartData, history.data.credits.series)
+        : undefined,
+    [history.data?.credits, provider, visibleChartData],
+  );
   const latest = useMemo(
     () =>
       poolQuotaResponseLatest(normalizedHistory, visibleChartData, {
@@ -280,6 +291,11 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
           </p>
         ) : (
           <>
+            {provider === 'openai' && history.data?.credits ? (
+              <div className="mb-3 flex justify-end">
+                <CodexCreditTotal history={history.data.credits} />
+              </div>
+            ) : null}
             <div className="mb-3">
               <PoolQuotaLegend
                 latest={latest}
@@ -307,6 +323,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 <Skeleton className="size-full" />
               ) : (
                 <PoolQuotaThemedChart
+                  creditData={creditChartData}
                   rangeEndUnix={rangeEndUnix}
                   rangeStartUnix={rangeStartUnix}
                   seriesData={visibleChartData}

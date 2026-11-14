@@ -498,6 +498,8 @@ fn checkpoint(
         utilization: fixture.utilization,
         status: fixture.status,
         resets_at_unix_secs: fixture.resets_at_unix_secs,
+        sample_kind: cc_lb_storage_api::SubscriptionQuotaSampleKind::Sample,
+        credits: None,
     }
 }
 

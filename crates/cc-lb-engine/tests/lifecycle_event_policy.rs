@@ -180,6 +180,8 @@ fn lifecycle_event_assembler_matches_are_explicit_and_documented() {
             "RequestLogUpstreamErrorObserved",
             "UpstreamStreamDiagnosticsObserved",
             "Priced",
+            "UpstreamQuotaFrameObserved",
+            "RequestFundingObserved",
             "CacheObserved",
         ],
     );

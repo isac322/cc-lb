@@ -499,9 +499,11 @@ fn codex_credits_from_value(value: &serde_json::Value) -> Option<SubscriptionQuo
         balance: object
             .get("balance")
             .and_then(serde_json::Value::as_str)
+            .filter(|value| cc_lb_domain::is_credit_balance(value))
             .map(str::to_owned),
         approx_local_messages: parse_message_estimate(object.get("approx_local_messages")),
         approx_cloud_messages: parse_message_estimate(object.get("approx_cloud_messages")),
+        ..Default::default()
     };
     (credits.has_credits.is_some()
         || credits.unlimited.is_some()

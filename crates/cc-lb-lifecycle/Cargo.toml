@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+bytes = { workspace = true, features = ["serde"] }
 cc-lb-domain.workspace = true
 cc-lb-request-log.workspace = true
 serde = { workspace = true, features = ["derive"] }

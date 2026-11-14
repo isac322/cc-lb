@@ -173,10 +173,55 @@ async fn record_samples_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     records: &[SubscriptionQuotaSample],
 ) -> StorageResult<()> {
-    for record in records {
-        upsert_latest(tx, record).await?;
+    for incoming in records {
+        let mut record = std::borrow::Cow::Borrowed(incoming);
+        if incoming.sample_kind == SubscriptionQuotaSampleKind::Sample
+            && (incoming.credits.is_some()
+                || matches!(
+                    incoming.window,
+                    SubscriptionQuotaWindow::Unified | SubscriptionQuotaWindow::Overage
+                ))
+        {
+            let previous = sqlx::query(
+                "SELECT credits_json, observed_at_unix_millis FROM upstream_subscription_quota_latest_v1 \
+                 WHERE upstream_id = ? AND window = ? AND source = ?",
+            )
+            .bind(record.upstream_id.to_string())
+            .bind(record.window.as_str())
+            .bind(record.source.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            let record = record.to_mut();
+            let source = match record.source {
+                SubscriptionQuotaSource::Header => cc_lb_domain::CreditSource::Header,
+                SubscriptionQuotaSource::Api => cc_lb_domain::CreditSource::Api,
+            };
+            if let Some(credits) = record.credits.as_mut() {
+                credits.stamp_observations(record.observed_at_unix_millis, source);
+            }
+            if let Some(previous) = previous {
+                let previous_at = i64_to_u64(
+                    previous
+                        .try_get("observed_at_unix_millis")
+                        .map_err(map_sqlx_error)?,
+                    "credit previous observation",
+                )?;
+                if previous_at <= record.observed_at_unix_millis
+                    && let Some(mut credits) =
+                        decode_credits(previous.try_get("credits_json").map_err(map_sqlx_error)?)?
+                {
+                    credits.stamp_observations(previous_at, source);
+                    if let Some(incoming) = record.credits.as_ref() {
+                        credits.merge_observations(incoming);
+                    }
+                    record.credits = Some(credits);
+                }
+            }
+        }
+        upsert_latest(tx, &record).await?;
         if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
-            insert_checkpoint_if_changed(tx, &SubscriptionQuotaCheckpointRecord::from(record))
+            insert_checkpoint_if_changed(tx, &SubscriptionQuotaCheckpointRecord::from(&*record))
                 .await?;
         }
     }
@@ -224,7 +269,7 @@ pub(super) async fn insert_checkpoint_if_changed(
              AND overage_period_monthly_utilization IS ?8 AND upgrade_paths IS ?9 \
              AND disabled_reason IS ?10 AND extra_usage_enabled IS ?11 \
              AND extra_usage_monthly_limit IS ?12 AND extra_usage_used_credits IS ?13 \
-             AND credits_json IS ?14 \
+             AND json_remove(credits_json, '$.observations') IS json_remove(?14, '$.observations') \
              AND utilization IS NOT NULL AND ?15 IS NOT NULL AND ABS(utilization - ?15) < 0.001 \
          ) FROM upstream_subscription_quota_checkpoints_v1 \
          WHERE upstream_id = ?16 AND window = ?17 AND source = ?18 \
@@ -324,7 +369,8 @@ async fn list_slim_checkpoints_for_query(
     let source_placeholders = placeholders(sources.len());
     let projection = "checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
                       checkpoint.changed_at_unix_millis, checkpoint.sample_id, \
-                      checkpoint.utilization, checkpoint.status, checkpoint.resets_at_unix_secs";
+                      checkpoint.utilization, checkpoint.status, checkpoint.resets_at_unix_secs, \
+                      checkpoint.sample_kind, checkpoint.credits_json";
     let sql = format!(
         "WITH anchor_ts AS ( \
              SELECT upstream_id, window, source, MAX(changed_at_unix_millis) AS changed_at_unix_millis \
@@ -630,6 +676,11 @@ fn row_to_slim_checkpoint(row: SqliteRow) -> StorageResult<SubscriptionQuotaSlim
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "subscription quota resets_at_unix_secs"))
             .transpose()?,
+        sample_kind: parse_sample_kind(
+            &row.try_get::<String, _>("sample_kind")
+                .map_err(map_sqlx_error)?,
+        )?,
+        credits: decode_credits(row.try_get("credits_json").map_err(map_sqlx_error)?)?,
     })
 }
 

@@ -189,6 +189,24 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_ttfb_ms: Option<u64>,
     },
+    /// Provider quota frame handed to off-path consumers without parsing or
+    /// copying its bytes. A missing matched response remains account-only.
+    UpstreamQuotaFrameObserved {
+        event_id: EventId,
+        upstream_id: Uuid,
+        observed_at_unix_millis: u64,
+        frame: bytes::Bytes,
+        matched_response_id: Option<String>,
+    },
+    /// Off-path estimate from an own-response meter. Ambiguous WebSocket turns
+    /// invalidate earlier estimates and remain unknown.
+    RequestFundingObserved {
+        event_id: EventId,
+        attempt_num: u32,
+        funding: Option<cc_lb_request_log::RequestFunding>,
+        response_id: Option<String>,
+        ambiguous: bool,
+    },
     RequestLogUpstreamErrorObserved {
         event_id: EventId,
         error_type: String,
@@ -288,6 +306,8 @@ impl LifecycleEvent {
             | Self::LimitDecision { event_id, .. }
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
+            | Self::UpstreamQuotaFrameObserved { event_id, .. }
+            | Self::RequestFundingObserved { event_id, .. }
             | Self::RequestLogUpstreamErrorObserved { event_id, .. }
             | Self::UpstreamStreamDiagnosticsObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
@@ -309,6 +329,8 @@ impl LifecycleEvent {
             Self::LimitDecision { .. } => "limit_decision",
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
+            Self::UpstreamQuotaFrameObserved { .. } => "upstream_quota_frame_observed",
+            Self::RequestFundingObserved { .. } => "request_funding_observed",
             Self::RequestLogUpstreamErrorObserved { .. } => "request_log_upstream_error_observed",
             Self::UpstreamStreamDiagnosticsObserved { .. } => {
                 "upstream_stream_diagnostics_observed"

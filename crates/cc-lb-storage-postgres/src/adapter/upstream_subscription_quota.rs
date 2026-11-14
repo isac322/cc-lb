@@ -198,10 +198,67 @@ async fn record_samples_in_tx(
     conn: &mut PgConnection,
     records: &[SubscriptionQuotaSample],
 ) -> StorageResult<()> {
-    for record in records {
-        upsert_latest(conn, record).await?;
+    for incoming in records {
+        let mut record = std::borrow::Cow::Borrowed(incoming);
+        if incoming.sample_kind == SubscriptionQuotaSampleKind::Sample
+            && (incoming.credits.is_some()
+                || matches!(
+                    incoming.window,
+                    SubscriptionQuotaWindow::Unified | SubscriptionQuotaWindow::Overage
+                ))
+        {
+            // Serialize read/merge/write even when this source has no latest
+            // row yet. The transaction lock is off the proxy request path.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "credit:{}:{}:{}",
+                    incoming.upstream_id,
+                    incoming.window.as_str(),
+                    incoming.source.as_str()
+                ))
+                .execute(&mut *conn)
+                .await
+                .map_err(map_sqlx_error)?;
+            let previous = sqlx::query(
+                "SELECT credits_json, observed_at_unix_millis FROM upstream_subscription_quota_latest_v1 \
+                 WHERE upstream_id = $1 AND \"window\" = $2 AND source = $3",
+            )
+            .bind(incoming.upstream_id)
+            .bind(incoming.window.as_str())
+            .bind(incoming.source.as_str())
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(map_sqlx_error)?;
+            let record = record.to_mut();
+            let source = match record.source {
+                SubscriptionQuotaSource::Header => cc_lb_domain::CreditSource::Header,
+                SubscriptionQuotaSource::Api => cc_lb_domain::CreditSource::Api,
+            };
+            if let Some(credits) = record.credits.as_mut() {
+                credits.stamp_observations(record.observed_at_unix_millis, source);
+            }
+            if let Some(previous) = previous {
+                let previous_at = i64_to_u64(
+                    previous
+                        .try_get("observed_at_unix_millis")
+                        .map_err(map_sqlx_error)?,
+                    "credit previous observation",
+                )?;
+                if previous_at <= record.observed_at_unix_millis
+                    && let Some(mut credits) =
+                        decode_credits(previous.try_get("credits_json").map_err(map_sqlx_error)?)?
+                {
+                    credits.stamp_observations(previous_at, source);
+                    if let Some(incoming) = record.credits.as_ref() {
+                        credits.merge_observations(incoming);
+                    }
+                    record.credits = Some(credits);
+                }
+            }
+        }
+        upsert_latest(conn, &record).await?;
         if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
-            insert_checkpoint_if_changed(conn, &SubscriptionQuotaCheckpointRecord::from(record))
+            insert_checkpoint_if_changed(conn, &SubscriptionQuotaCheckpointRecord::from(&*record))
                 .await?;
         }
     }
@@ -239,7 +296,7 @@ async fn insert_checkpoint_if_changed(
                   AND extra_usage_enabled IS NOT DISTINCT FROM $13::boolean
                   AND extra_usage_monthly_limit IS NOT DISTINCT FROM $14::double precision
                   AND extra_usage_used_credits IS NOT DISTINCT FROM $15::double precision
-                  AND credits_json IS NOT DISTINCT FROM $16::text
+                  AND (credits_json::jsonb - 'observations') IS NOT DISTINCT FROM ($16::jsonb - 'observations')
                   AND utilization IS NOT NULL AND $17::double precision IS NOT NULL
                   AND ABS(utilization - $17) < 0.001 AS within_deadband
            FROM upstream_subscription_quota_checkpoints_v1

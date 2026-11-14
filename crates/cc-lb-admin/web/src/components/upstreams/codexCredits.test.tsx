@@ -2,11 +2,13 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  type CreditHistoryResponse,
   getJson,
   type LatestResponse,
   type QuotaCredits,
   type QuotaSnapshot,
 } from '../../lib/api';
+import { formatCreditInteger } from '../../lib/creditHistory';
 import type { Upstream } from '../../lib/queries';
 import { selectCodexCredits } from './codexCredits';
 import { QuotaWindowRow, QuotaWindowRows } from './QuotaWindowRows';
@@ -112,6 +114,55 @@ function renderSurfaces(windows: QuotaSnapshot[]) {
       { upstream_id: upstream.id, upstream_name: upstream.name, windows: base },
     ],
   };
+  const creditFacts = selectCodexCredits(base);
+  const creditState =
+    creditFacts?.status === 'Stale'
+      ? 'stale'
+      : creditFacts?.status === 'Unlimited'
+        ? 'unlimited'
+        : creditFacts?.balance == null
+          ? 'unknown'
+          : 'fresh';
+  const creditHistory: CreditHistoryResponse = {
+    now_unix_secs: NOW,
+    since_unix_secs: NOW - 3600,
+    until_unix_secs: NOW,
+    max_staleness_secs: 300,
+    upstreams: [
+      {
+        upstream_id: upstream.id,
+        latest: {
+          balance: creditFacts?.balance ?? null,
+          observed_at_unix_millis:
+            creditFacts?.balance != null ? NOW * 1000 : null,
+          state: creditState,
+        },
+        series:
+          creditFacts?.balance == null
+            ? []
+            : [
+                {
+                  at_unix_millis: NOW * 1000,
+                  balance: creditFacts.balance,
+                  observed_at_unix_millis: NOW * 1000,
+                  contributing_upstreams: 1,
+                  eligible_upstreams: 1,
+                },
+              ],
+      },
+    ],
+    pool: {
+      latest: {
+        at_unix_millis: NOW * 1000,
+        balance: creditFacts?.balance ?? null,
+        observed_at_unix_millis:
+          creditFacts?.balance != null ? NOW * 1000 : null,
+        contributing_upstreams: 1,
+        eligible_upstreams: 1,
+      },
+      series: [],
+    },
+  };
   render(
     <>
       <section aria-label="Overview test surface">
@@ -123,12 +174,14 @@ function renderSurfaces(windows: QuotaSnapshot[]) {
               status: [],
               nudges: new Map(),
               usageByUpstreamId: new Map(),
+              creditHistory,
             }),
             isLoading: false,
             quotaPending: false,
             statusPending: false,
             usagePending: false,
             quotaError: false,
+            creditHistory,
             reconnectCount: 0,
           }}
         />
@@ -194,20 +247,28 @@ describe('Codex credit observations', () => {
       const surfaces = renderSurfaces([
         snapshot({ credits, state: state ?? 'fresh' }),
       ]);
-      for (const surface of surfaces) {
-        const facts = surface.getByTestId('codex-credit-facts');
-        expect(surface.getAllByTestId('codex-credit-facts')).toHaveLength(1);
-        expect(within(facts).getByText(status, { exact: true })).not.toBeNull();
-        expect(facts.textContent).toContain(
-          credits.balance == null
-            ? 'No balance reported'
-            : `${credits.balance} credits`,
-        );
-        expect(facts.textContent).not.toContain('$');
-        expect(facts.textContent).not.toContain('%');
-        expect(within(facts).queryByRole('meter')).toBeNull();
-        expect(surface.getAllByRole('meter')).toHaveLength(2);
-      }
+      const overview = surfaces[0];
+      const detail = surfaces[1];
+      const mini = overview.getByTestId('codex-credit-mini');
+      expect(mini.textContent).toContain(
+        state === 'stale'
+          ? '—'
+          : credits.balance == null
+            ? '—'
+            : formatCreditInteger(credits.balance),
+      );
+      const facts = detail.getByTestId('codex-credit-facts');
+      expect(detail.getAllByTestId('codex-credit-facts')).toHaveLength(1);
+      expect(within(facts).getByText(status, { exact: true })).not.toBeNull();
+      expect(facts.textContent).toContain(
+        credits.balance == null
+          ? 'No balance reported'
+          : `${credits.balance} credits`,
+      );
+      expect(facts.textContent).not.toContain('$');
+      expect(facts.textContent).not.toContain('%');
+      expect(within(facts).queryByRole('meter')).toBeNull();
+      expect(overview.getAllByRole('meter')).toHaveLength(2);
     },
   );
 
@@ -227,7 +288,7 @@ describe('Codex credit observations', () => {
         credits: credit({ has_credits: true, balance: '11.0000000000' }),
       }),
     ]);
-    for (const surface of surfaces) {
+    for (const surface of [surfaces[1]]) {
       const facts = surface.getByTestId('codex-credit-facts');
       expect(facts.textContent).toContain('Blocked');
       expect(facts.textContent).not.toContain('Available');
@@ -251,7 +312,7 @@ describe('Codex credit observations', () => {
         fallback_available: false,
       }),
     ]);
-    for (const surface of surfaces) {
+    for (const surface of [surfaces[1]]) {
       const facts = surface.getByTestId('codex-credit-facts');
       expect(facts.textContent).toContain('Unavailable');
       expect(facts.textContent).toContain('Status: Response headers · stale');
@@ -280,6 +341,45 @@ describe('Codex credit observations', () => {
     });
   });
 
+  it('uses the balance observation age for balance freshness', () => {
+    const fresh = selectCodexCredits(
+      [
+        snapshot({
+          credits: credit({
+            balance: '2.000',
+            observations: {
+              balance: {
+                source: 'api',
+                observed_at_unix_millis: (NOW - 30) * 1000,
+              },
+            },
+          }),
+        }),
+      ],
+      300,
+      NOW * 1000,
+    );
+    const stale = selectCodexCredits(
+      [
+        snapshot({
+          credits: credit({
+            balance: '2.000',
+            observations: {
+              balance: {
+                source: 'api',
+                observed_at_unix_millis: (NOW - 301) * 1000,
+              },
+            },
+          }),
+        }),
+      ],
+      300,
+      NOW * 1000,
+    );
+    expect(fresh?.balanceSource).toBe('Usage API');
+    expect(stale?.balanceSource).toBe('Usage API · stale');
+  });
+
   it('labels an older balance honestly when a fresh availability observation has none', () => {
     const surfaces = renderSurfaces([
       snapshot({
@@ -293,7 +393,7 @@ describe('Codex credit observations', () => {
         credits: credit({ has_credits: true }),
       }),
     ]);
-    for (const surface of surfaces) {
+    for (const surface of [surfaces[1]]) {
       const facts = surface.getByTestId('codex-credit-facts');
       expect(facts.textContent).toContain('Available');
       expect(facts.textContent).toContain('Balance: Usage API · stale');

@@ -69,6 +69,8 @@ fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimC
         utilization: checkpoint.utilization,
         status: checkpoint.status,
         resets_at_unix_secs: checkpoint.resets_at_unix_secs,
+        sample_kind: checkpoint.sample_kind,
+        credits: checkpoint.credits,
     }
 }
 

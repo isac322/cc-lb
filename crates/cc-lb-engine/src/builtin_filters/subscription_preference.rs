@@ -568,7 +568,7 @@ fn assess_candidate<'a>(
         weekly_smoothmax(shared_weekly_pressure, model_scoped_weekly_pressure);
     let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
 
-    let overage = assess_overage(candidate, config);
+    let overage = assess_overage(candidate, config, now_secs);
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
 
     let (tier, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, overage_urgency) =
@@ -834,7 +834,11 @@ fn utilization_signal(util: Option<f64>) -> BaseSignal {
     }
 }
 
-fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> OverageAssessment {
+fn assess_overage(
+    candidate: &UpstreamCandidate,
+    config: &FilterConfig,
+    now_secs: u64,
+) -> OverageAssessment {
     let overage_snap = find_snapshot(candidate, WINDOW_OVERAGE);
     let unified_snap = find_snapshot(candidate, WINDOW_UNIFIED);
     let fresh_overage_snap =
@@ -843,6 +847,38 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         unified_snap.filter(|snapshot| snapshot.state == SubscriptionQuotaDataState::Fresh);
     let fresh_snapshots = [fresh_overage_snap, fresh_unified_snap];
     let all_snapshots = [overage_snap, unified_snap];
+    let codex = candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth
+        && all_snapshots
+            .iter()
+            .flatten()
+            .any(|snapshot| snapshot.credits.is_some());
+    let credit_flag = |field, restrictive| {
+        select_credit_flag(
+            all_snapshots,
+            field,
+            restrictive,
+            now_secs.saturating_mul(1_000),
+        )
+    };
+    let has_credits = credit_flag(
+        |credits: &cc_lb_domain::SubscriptionQuotaCredits| {
+            (credits.has_credits, credits.observations.has_credits)
+        },
+        false,
+    );
+    let unlimited = credit_flag(
+        |credits: &cc_lb_domain::SubscriptionQuotaCredits| {
+            (credits.unlimited, credits.observations.unlimited)
+        },
+        false,
+    );
+    let limit_reached = credit_flag(
+        |credits: &cc_lb_domain::SubscriptionQuotaCredits| {
+            (credits.limit_reached, credits.observations.limit_reached)
+        },
+        true,
+    );
+    let credit_available = has_credits == Some((true, true)) || unlimited == Some((true, true));
 
     let overage_status = fresh_overage_snap.and_then(|snapshot| snapshot.status.as_deref());
     let overage_util = fresh_overage_snap
@@ -852,10 +888,9 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         .iter()
         .flatten()
         .any(|snapshot| snapshot.overage_in_use == Some(true));
-    let fallback_available = fresh_snapshots
-        .iter()
-        .flatten()
-        .any(|snapshot| snapshot.fallback_available == Some(true));
+    let fallback_available = fresh_snapshots.iter().flatten().any(|snapshot| {
+        snapshot.fallback_available == Some(true) && (!codex || snapshot.credits.is_none())
+    }) || (codex && credit_available);
     let extra_usage_available = fresh_snapshots.iter().flatten().any(|snapshot| {
         snapshot.extra_usage_enabled == Some(true)
             && snapshot_extra_usage_remaining(snapshot).is_some_and(|remaining| remaining > 0.0)
@@ -867,10 +902,10 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         || overage_in_use
         || extra_usage_available;
 
-    let fallback_unavailable = all_snapshots
-        .iter()
-        .flatten()
-        .any(|snapshot| snapshot.fallback_available == Some(false));
+    let fallback_unavailable =
+        all_snapshots.iter().flatten().any(|snapshot| {
+            snapshot.fallback_available == Some(false) && (!codex || snapshot.credits.is_none())
+        }) || (codex && has_credits.is_some_and(|(value, _)| !value) && !credit_available);
     let overage_status_blocked = overage_status == Some("rejected");
     let overage_util_blocked = overage_util.is_some_and(|utilization| utilization >= 1.0);
     let extra_usage_disabled = all_snapshots
@@ -881,12 +916,16 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         snapshot.extra_usage_enabled == Some(true)
             && snapshot_extra_usage_remaining(snapshot).is_some_and(|remaining| remaining <= 0.0)
     });
-    let credits_limit_reached = all_snapshots.iter().flatten().any(|snapshot| {
-        snapshot
-            .credits
-            .as_ref()
-            .is_some_and(|credits| credits.limit_reached == Some(true))
-    });
+    let credits_limit_reached = if codex {
+        limit_reached.is_some_and(|(value, _)| value)
+    } else {
+        all_snapshots.iter().flatten().any(|snapshot| {
+            snapshot
+                .credits
+                .as_ref()
+                .is_some_and(|credits| credits.limit_reached == Some(true))
+        })
+    };
     let blocked = fallback_unavailable
         || credits_limit_reached
         || overage_status_blocked
@@ -905,6 +944,53 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         base_exhausted_hint: overage_in_use,
         fresh_overage_util: overage_util,
     }
+}
+
+// Select explicit flags without cloning credit strings or allocating on routing.
+// Missing legacy clocks tie conservatively; stale positives never admit traffic.
+fn select_credit_flag(
+    snapshots: [Option<&SubscriptionQuotaCandidateSnapshot>; 2],
+    field: fn(
+        &cc_lb_domain::SubscriptionQuotaCredits,
+    ) -> (Option<bool>, Option<cc_lb_domain::CreditObservation>),
+    restrictive: bool,
+    now_unix_millis: u64,
+) -> Option<(bool, bool)> {
+    let mut selected: Option<(bool, cc_lb_domain::CreditObservation, bool)> = None;
+    for snapshot in snapshots.into_iter().flatten() {
+        if matches!(
+            snapshot.state,
+            SubscriptionQuotaDataState::Absent | SubscriptionQuotaDataState::Unobserved
+        ) {
+            continue;
+        }
+        let Some(credits) = snapshot.credits.as_ref() else {
+            continue;
+        };
+        let (Some(value), observation) = field(credits) else {
+            continue;
+        };
+        let evidence = observation.unwrap_or(cc_lb_domain::CreditObservation {
+            observed_at_unix_millis: snapshot.observed_at_unix_millis.unwrap_or(0),
+            source: if snapshot.source.as_deref() == Some("api") {
+                cc_lb_domain::CreditSource::Api
+            } else {
+                cc_lb_domain::CreditSource::Header
+            },
+            request_order: None,
+        });
+        let fresh = observation.map_or(snapshot.state == SubscriptionQuotaDataState::Fresh, |o| {
+            o.is_fresh(now_unix_millis, snapshot.max_staleness_secs)
+        });
+        if selected.is_none_or(|(current, at, _)| {
+            evidence.recency(at).is_gt()
+                || (evidence.recency(at).is_eq()
+                    && (value == restrictive || current != restrictive))
+        }) {
+            selected = Some((value, evidence, fresh));
+        }
+    }
+    selected.map(|(value, _, fresh)| (value, fresh))
 }
 
 fn snapshot_extra_usage_remaining(s: &SubscriptionQuotaCandidateSnapshot) -> Option<f64> {

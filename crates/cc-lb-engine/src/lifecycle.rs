@@ -4339,6 +4339,33 @@ impl Lifecycle {
         (observer, request_id)
     }
 
+    /// Queue an already-received provider frame; this never reads a client body
+    /// or dispatches upstream. Connection ownership is checked by the gateway.
+    pub(crate) fn observe_websocket_quota_frame(
+        &self,
+        upstream_id: Uuid,
+        frame: bytes::Bytes,
+        event_id: Option<&str>,
+        matched_response_id: Option<&str>,
+    ) {
+        if let Some(bus) = self.event_bus.as_ref() {
+            bus.publish_lifecycle(
+                cc_lb_lifecycle::LifecycleEvent::UpstreamQuotaFrameObserved {
+                    event_id: event_id.unwrap_or_default().to_owned(),
+                    upstream_id,
+                    observed_at_unix_millis: self
+                        .clock
+                        .now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_millis() as u64)
+                        .unwrap_or(0),
+                    frame,
+                    matched_response_id: matched_response_id.map(str::to_owned),
+                },
+            );
+        }
+    }
+
     pub fn reject_responses_websocket_authentication(
         &self,
         error: &BuiltinAuthError,

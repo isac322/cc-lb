@@ -137,6 +137,7 @@ fn semantic_checkpoint_distinguishes_each_credit_field_and_unknown_state() {
         balance: Some("62500.0000000000".to_owned()),
         approx_local_messages: Some([10, 20]),
         approx_cloud_messages: Some([30, 40]),
+        ..Default::default()
     });
     let fingerprint = base.semantic_checkpoint_fingerprint();
     assert_ne!(fingerprint, without_credits);

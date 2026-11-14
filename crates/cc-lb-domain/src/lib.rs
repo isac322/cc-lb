@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 mod cache;
+mod credits;
 mod error;
 mod identity;
 mod plan;
@@ -16,6 +17,9 @@ pub use cache::{
     HASH_SCHEMA_VERSION, NativeCachePricing, NativeCachePricingComponent,
     NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
     NativeCachePricingStatus, PrefixBytes, TtlClass, WarmCacheEntry,
+};
+pub use credits::{
+    CreditObservation, CreditObservations, CreditRequestOrder, CreditSource, is_credit_balance,
 };
 pub use error::{InternalError, InternalErrorKind, InternalErrorStage};
 pub use identity::{Principal, PrincipalKind, PrincipalKindLite, ReplicaIdentity};
