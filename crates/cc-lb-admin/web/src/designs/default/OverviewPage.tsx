@@ -70,8 +70,9 @@ import {
   GEMINI_GROUP_PLACEHOLDER_TEXT,
   type GeminiGroupPlaceholderState,
   POOL_RETENTION_UNAVAILABLE_TEXT,
+  type PoolRetentionSource,
   poolGroupPlaceholders,
-  poolRetainedWindows,
+  poolRetainedAccounts,
 } from '../../components/upstreams/quotaWindowVisibility';
 import {
   UpstreamUsageTable,
@@ -1268,8 +1269,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   windows,
   legendWindows,
   placeholders,
-  retained,
-  retentionUnavailable = false,
+  retention,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
@@ -1281,10 +1281,8 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   /** Legend rows: the plotted windows plus Gemini group placeholders. */
   legendWindows?: readonly PoolQuotaWindow[];
   placeholders?: Partial<Record<PoolQuotaWindow, GeminiGroupPlaceholderState>>;
-  /** `poolRetainedWindows`: windows whose current pool figure includes a retained reading. */
-  retained?: ReadonlySet<PoolQuotaWindow>;
-  /** The `/latest` query failed, so retained readings were not checked. */
-  retentionUnavailable?: boolean;
+  /** Gemini only: per-upstream `/latest` rows for `PoolRetentionNotes`. */
+  retention?: PoolRetentionSource;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -1297,9 +1295,6 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   const weighting =
     aggregate && 'weighting' in aggregate ? aggregate.weighting : 'plan';
   const scopedWindows = windows ?? chart.windows ?? POOL_QUOTA_WINDOWS;
-  const retainedStale = scopedWindows.some(
-    (window) => retained?.has(window) === true,
-  );
   const snapshots = chart.snapshots ?? chart.data;
   const first = snapshots[0];
   const last = snapshots.at(-1);
@@ -1322,7 +1317,6 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
           loading={loading}
           windowLabels={windowLabels}
           placeholders={placeholders}
-          retained={retained}
           windows={legendWindows ?? scopedWindows}
         />
         <div
@@ -1379,24 +1373,26 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
                   )}
                 >
                   {`Provider data ${formatAgo(provider.observedAtUnixSecs, serverNow)}`}
-                  {provider.stale || retainedStale ? (
+                  {provider.stale ? (
                     <Badge tone="warn">Stale reading</Badge>
                   ) : null}
                 </span>
               ) : null}
-              {(chart.observation?.stale || retainedStale) &&
+              {chart.observation?.stale &&
               provider.observedAtUnixSecs == null ? (
                 <Badge tone="warn">Stale reading</Badge>
-              ) : null}
-              {retentionUnavailable ? (
-                <span data-slot="pool-retention-unavailable">
-                  {POOL_RETENTION_UNAVAILABLE_TEXT}
-                </span>
               ) : null}
               {proof ? <span>{proof}</span> : null}
             </>
           )}
         </div>
+        {!loading && retention ? (
+          <PoolRetentionNotes
+            retention={retention}
+            windowLabels={windowLabels}
+            windows={legendWindows ?? scopedWindows}
+          />
+        ) : null}
       </UsageBlock>
     </div>
   );
@@ -1559,7 +1555,6 @@ export function PoolQuotaLegend({
   loading = false,
   windowLabels,
   placeholders,
-  retained,
 }: {
   latest?: PoolQuotaLatest;
   resets?: Record<string, number | null>;
@@ -1571,8 +1566,6 @@ export function PoolQuotaLegend({
   windows?: readonly PoolQuotaWindow[];
   /** Gemini group windows shown only as a neutral status beside a reported sibling. */
   placeholders?: Partial<Record<string, GeminiGroupPlaceholderState>>;
-  /** Gemini group windows whose current pool figure includes a retained reading (`poolRetainedWindows`). */
-  retained?: ReadonlySet<string>;
 }) {
   return (
     <div className="min-w-0" data-testid="pool-quota-legend">
@@ -1636,18 +1629,12 @@ export function PoolQuotaLegend({
             reset != null && nowUnixSecs != null
               ? formatResetIn(reset, nowUnixSecs, { compact: true })
               : null;
-          // A retained reading is stale, never current: no pace, neutral ink,
-          // and `Stale` in place of the reset countdown.
-          const stale =
-            !loading && value != null && retained?.has(window) === true;
-          const pace = stale ? null : (paces?.[window] ?? null);
+          const pace = paces?.[window] ?? null;
           const valueText =
             value == null ? 'No reading' : `${formatQuotaPercent(value)} used`;
           const accessibleText = loading
             ? `${longLabel}, loading`
-            : [longLabel, valueText, stale ? 'stale reading' : resetText]
-                .filter(Boolean)
-                .join(', ');
+            : [longLabel, valueText, resetText].filter(Boolean).join(', ');
           return (
             <div
               aria-label={accessibleText}
@@ -1658,7 +1645,6 @@ export function PoolQuotaLegend({
               data-testid="pool-quota-legend-slot"
               data-slot="pool-quota-legend-row"
               data-window={window}
-              data-state={stale ? 'stale' : undefined}
             >
               <span className="inline-flex min-w-0 items-center gap-2 text-text-muted">
                 <WindowChip window={window} />
@@ -1666,7 +1652,7 @@ export function PoolQuotaLegend({
               </span>
               <div aria-hidden="true" data-slot="pool-quota-legend-meter">
                 <UsageMeter
-                  label={stale ? `${longLabel}, stale reading` : longLabel}
+                  label={longLabel}
                   pacePct={loading ? null : pace}
                   usedPct={loading ? null : value}
                 />
@@ -1677,9 +1663,7 @@ export function PoolQuotaLegend({
                 <span
                   className={cx(
                     'text-right whitespace-nowrap text-label',
-                    QUOTA_VALUE_CLASS[
-                      stale ? 'ok' : quotaSeverity(value, pace)
-                    ],
+                    QUOTA_VALUE_CLASS[quotaSeverity(value, pace)],
                   )}
                   data-slot="pool-quota-legend-used"
                 >
@@ -1688,14 +1672,6 @@ export function PoolQuotaLegend({
               )}
               {loading ? (
                 <Skeleton as="span" className="h-4 w-full" />
-              ) : stale ? (
-                <span
-                  className="text-right whitespace-nowrap text-warn-text"
-                  data-slot="pool-quota-legend-reset"
-                  title="Stale reading: an upstream's latest poll did not report this window, so the pool keeps its earlier reading."
-                >
-                  Stale
-                </span>
               ) : (
                 <span
                   className="text-right whitespace-nowrap text-text-muted"
@@ -1714,6 +1690,55 @@ export function PoolQuotaLegend({
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * Gemini pool card lines stating a `/latest` fact: per window, how many
+ * accounts' readings come from an earlier poll (`poolRetainedAccounts`). They
+ * describe the accounts, not the separately polled pool figure, which stays
+ * as reported. A failed `/latest` says so; a pending one says nothing.
+ */
+export function PoolRetentionNotes({
+  windows,
+  windowLabels,
+  retention,
+}: {
+  windows: readonly PoolQuotaWindow[];
+  windowLabels?: Partial<Record<string, string>>;
+  retention: PoolRetentionSource | undefined;
+}) {
+  if (retention?.error) {
+    return (
+      <p
+        className="mt-2 text-caption text-text-muted"
+        data-slot="pool-retention-unavailable"
+      >
+        {POOL_RETENTION_UNAVAILABLE_TEXT}
+      </p>
+    );
+  }
+  const counts = poolRetainedAccounts(retention);
+  const notes = windows.flatMap((window) => {
+    const count = counts.get(window) ?? 0;
+    if (count === 0) return [];
+    const label = windowLabels?.[window] ?? windowLabel(window);
+    return [
+      <li key={window} data-window={window}>
+        {count === 1
+          ? `${label}: 1 account's reading is from an earlier poll`
+          : `${label}: ${formatCount(count)} accounts' readings are from an earlier poll`}
+      </li>,
+    ];
+  });
+  if (notes.length === 0) return null;
+  return (
+    <ul
+      className="mt-2 space-y-0.5 text-caption text-text-muted"
+      data-slot="pool-retention-notes"
+    >
+      {notes}
+    </ul>
   );
 }
 
@@ -1951,24 +1976,24 @@ export function ProviderOverviewPage({
       ),
     [poolChartWindows, poolPlaceholders, visiblePoolWindows],
   );
-  // Gemini group windows whose current pool figure includes a reading retained
-  // from an earlier poll; per-upstream `/latest` rows share the Upstreams
+  // Gemini pool notes read per-upstream `/latest` rows from the Upstreams
   // section's query.
   const poolUpstreamUsage = useUpstreamUsageData(scopedProvider);
-  // Keyed by content so a fresh rows array alone never re-renders the chart.
-  const poolRetainedKey = quotaLoading
-    ? ''
-    : [
-        ...poolRetainedWindows(normalizedPoolAggregate, {
-          rows: poolUpstreamUsage.rows,
-          pending: poolUpstreamUsage.quotaPending,
-          error: poolUpstreamUsage.quotaError,
-        }),
-      ].join(',');
-  const poolRetained = useMemo(
-    (): ReadonlySet<string> =>
-      new Set(poolRetainedKey === '' ? [] : poolRetainedKey.split(',')),
-    [poolRetainedKey],
+  const poolRetention = useMemo(
+    (): PoolRetentionSource | undefined =>
+      scopedProvider === 'gemini'
+        ? {
+            rows: poolUpstreamUsage.rows,
+            pending: poolUpstreamUsage.quotaPending,
+            error: poolUpstreamUsage.quotaError,
+          }
+        : undefined,
+    [
+      scopedProvider,
+      poolUpstreamUsage.rows,
+      poolUpstreamUsage.quotaPending,
+      poolUpstreamUsage.quotaError,
+    ],
   );
   const chartData = useMemo(
     () => buildPoolQuotaChartData(normalizedPoolHistoryWindows),
@@ -2192,10 +2217,7 @@ export function ProviderOverviewPage({
                 windows={visiblePoolWindows}
                 legendWindows={poolLegendWindows}
                 placeholders={poolPlaceholders}
-                retained={poolRetained}
-                retentionUnavailable={
-                  scopedProvider === 'gemini' && poolUpstreamUsage.quotaError
-                }
+                retention={poolRetention}
               />
 
               <UsageBlock

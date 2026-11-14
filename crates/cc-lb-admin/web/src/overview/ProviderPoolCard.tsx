@@ -3,14 +3,13 @@ import { memo, useMemo } from 'react';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { Badge, cx, Skeleton } from '../components/ui/primitives';
 import {
-  POOL_RETENTION_UNAVAILABLE_TEXT,
   type PoolRetentionSource,
   poolGroupPlaceholders,
-  poolRetainedWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import {
   PoolQuotaLegend,
   PoolQuotaThemedChart,
+  PoolRetentionNotes,
 } from '../designs/default/OverviewPage';
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
 import { useTimezone } from '../lib/locale';
@@ -78,8 +77,9 @@ export interface ProviderPoolCardProps {
   rangeSecs: number;
   compact?: boolean;
   /**
-   * The page's per-upstream `/latest` query: with it, a current pool figure
-   * that includes a retained Gemini reading reads stale.
+   * The page's per-upstream `/latest` query. Gemini cards state from it how
+   * many accounts' readings come from an earlier poll; it never changes the
+   * pool figure.
    */
   retention?: PoolRetentionSource;
 }
@@ -149,16 +149,6 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       ),
     [placeholders, providerWindowKeys, visibleWindows],
   );
-  // Gemini group windows whose current pool figure includes a reading
-  // retained from an earlier poll.
-  const retained = useMemo(
-    (): ReadonlySet<PoolQuotaWindow> =>
-      loading ? new Set() : poolRetainedWindows(normalizedAggregate, retention),
-    [loading, normalizedAggregate, retention],
-  );
-  // Gemini pools say so when retained readings could not be checked.
-  const retentionUnavailable =
-    provider === 'gemini' && retention?.error === true;
   const latestSnapshotUnixSecs = useMemo(
     () => latestPoolQuotaSnapshotUnix(normalizedHistory),
     [normalizedHistory],
@@ -209,7 +199,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
   );
   const headline = providerMetricHeadline(
     provider === 'anthropic' ? visibleChartData.at(-1) : latest,
-    visibleWindows.filter((window) => !retained.has(window)),
+    visibleWindows,
   );
   const resets = poolWindowResets(normalizedAggregate);
   const paces = poolWindowPace(normalizedAggregate);
@@ -220,20 +210,13 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       : undefined;
   const nowUnixSecs =
     normalizedAggregate?.now_unix_secs ?? Math.floor(Date.now() / 1000);
-  const observation = useMemo(() => {
-    if (provider === 'anthropic') {
-      return { observedAtUnixSecs: null, stale: false };
-    }
-    const current = poolQuotaResponseObservation(
-      normalizedHistory,
-      visibleWindows,
-    );
-    return {
-      ...current,
-      stale:
-        current.stale || visibleWindows.some((window) => retained.has(window)),
-    };
-  }, [normalizedHistory, provider, retained, visibleWindows]);
+  const observation = useMemo(
+    () =>
+      provider === 'anthropic'
+        ? { observedAtUnixSecs: null, stale: false }
+        : poolQuotaResponseObservation(normalizedHistory, visibleWindows),
+    [normalizedHistory, provider, visibleWindows],
+  );
   const observationNow =
     provider === 'anthropic'
       ? nowUnixSecs
@@ -306,7 +289,6 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 paces={paces}
                 timeZone={timeZone}
                 placeholders={placeholders}
-                retained={retained}
                 windows={legendWindows}
               />
               {weighting === 'equal' ? (
@@ -333,9 +315,7 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
               )}
             </div>
             {!loading &&
-            (observation.observedAtUnixSecs != null ||
-              observation.stale ||
-              retentionUnavailable) ? (
+            (observation.observedAtUnixSecs != null || observation.stale) ? (
               <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-caption tabular-nums text-text-muted">
                 {observation.observedAtUnixSecs != null ? (
                   <span
@@ -350,12 +330,13 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
                 {observation.stale ? (
                   <Badge tone="warn">Stale reading</Badge>
                 ) : null}
-                {retentionUnavailable ? (
-                  <span data-slot="pool-retention-unavailable">
-                    {POOL_RETENTION_UNAVAILABLE_TEXT}
-                  </span>
-                ) : null}
               </div>
+            ) : null}
+            {!loading && provider === 'gemini' ? (
+              <PoolRetentionNotes
+                retention={retention}
+                windows={legendWindows}
+              />
             ) : null}
           </>
         )}

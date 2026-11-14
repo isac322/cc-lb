@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import type {
-  AggregateProviderLotResponse,
   PeriodUnknownQuotaMeter,
   QuotaSnapshot,
   SeriesResponseItem,
@@ -15,7 +14,7 @@ import {
   isObservedAtOrAfter,
   type PoolRetentionRow,
   type PoolRetentionSource,
-  poolRetainedWindows,
+  poolRetainedAccounts,
   quotaCardPacePct,
   selectQuotaCardSnapshots,
   selectQuotaDetailState,
@@ -693,66 +692,16 @@ describe('Gemini retained reading', () => {
     ).toBe(false);
   });
 
-  describe('pool retention (poolRetainedWindows)', () => {
-    const lot = (
-      window: string,
-      upstream: string,
-      { state = 'fresh', at = T2 }: { state?: string; at?: number } = {},
-    ): AggregateProviderLotResponse => ({
-      upstream_id: upstream,
-      upstream_name: upstream,
-      window,
-      source: 'api',
-      state,
-      provider_start_unix_secs: null,
-      provider_reset_unix_secs: null,
-      observed_at_unix_millis: at,
-      utilization: 0.2,
-      capacity_estimate_tokens: null,
-      used_before_cc_window_tokens: 0,
-      capacity_to_now_tokens_estimate: null,
-      projected_capacity_tokens_estimate: null,
-      confidence: 'high',
-      capacity_ratio: 1,
-    });
-    const entry = (window: string, lots: AggregateProviderLotResponse[]) => ({
-      window,
-      cc_window_start_unix_secs: 0,
-      cc_window_reset_unix_secs: 0,
-      pool_pace_fraction: null,
-      next_reset_unix_secs: null,
-      used_tokens: 0,
-      utilization: null,
-      utilization_percent: null,
-      capacity_to_now_tokens_estimate: null,
-      projected_capacity_tokens_estimate: null,
-      remaining_to_now_tokens_estimate: null,
-      confidence: 'high',
-      contributing_upstreams: lots.length,
-      stale_upstreams: 0,
-      missing_capacity_upstreams: 0,
-      provider_lots: lots,
-      caveats: [],
-    });
-    const aggregate = (
-      lots: Record<'gemini_5h' | 'gemini_7d', AggregateProviderLotResponse[]>,
-    ) => ({
-      now_unix_secs: T2 / 1000,
-      window_anchor_unix_secs: 0,
-      max_staleness_secs: 300,
-      upstream_count: 2,
-      caveats: [],
-      windows: [
-        entry('gemini_5h', lots.gemini_5h),
-        entry('gemini_7d', lots.gemini_7d),
-      ],
-    });
+  describe('pool retained accounts (poolRetainedAccounts)', () => {
     const row = (
       id: string,
       [fiveHour, weekly]: readonly [number, number],
-      meters: PeriodUnknownQuotaMeter[] = [],
-    ) => ({
-      upstream: { id },
+      {
+        meters = [],
+        enabled,
+      }: { meters?: PeriodUnknownQuotaMeter[]; enabled?: boolean } = {},
+    ): PoolRetentionRow => ({
+      upstream: { id, enabled },
       windows: [
         snap({ window: 'gemini_5h', observed_at_unix_millis: fiveHour }),
         snap({ window: 'gemini_7d', observed_at_unix_millis: weekly }),
@@ -764,96 +713,47 @@ describe('Gemini retained reading', () => {
       pending: false,
       error: false,
     });
-    // A's lots are its retained t1 readings, as the server serves them.
-    const retainedA = aggregate({
-      gemini_5h: [lot('gemini_5h', 'a', { at: T1 }), lot('gemini_5h', 'b')],
-      gemini_7d: [lot('gemini_7d', 'a'), lot('gemini_7d', 'b')],
-    });
 
-    it('flags a window when a contributing account retains its reading', () => {
+    it('counts accounts whose /latest reading is retained, per window', () => {
       expect([
-        ...poolRetainedWindows(
-          retainedA,
-          source([row('a', [T1, T2]), row('b', [T2, T2])]),
+        ...poolRetainedAccounts(
+          source([row('a', [T1, T2]), row('b', [T1, T2]), row('c', [T2, T2])]),
         ),
-      ]).toEqual(['gemini_5h']);
+      ]).toEqual([['gemini_5h', 2]]);
     });
 
-    it('flags both windows when the later poll returned only raw meters', () => {
-      // t1: 5h 20% and weekly 100%; t2: only unlabeled meters, canonical rows stay t1.
-      const rawOnly = aggregate({
-        gemini_5h: [lot('gemini_5h', 'a', { at: T1 }), lot('gemini_5h', 'b')],
-        gemini_7d: [lot('gemini_7d', 'a', { at: T1 }), lot('gemini_7d', 'b')],
-      });
+    it('counts both windows when the later poll returned only raw meters', () => {
       expect([
-        ...poolRetainedWindows(
-          rawOnly,
-          source([
-            row('a', [T1, T1], [meter('gemini', T2)]),
-            row('b', [T2, T2]),
-          ]),
+        ...poolRetainedAccounts(
+          source([row('a', [T1, T1], { meters: [meter('gemini', T2)] })]),
         ),
-      ]).toEqual(['gemini_5h', 'gemini_7d']);
+      ]).toEqual([
+        ['gemini_5h', 1],
+        ['gemini_7d', 1],
+      ]);
     });
 
-    it('ignores accounts outside the fresh-only current figure', () => {
-      // A's 5h is stale (excluded) beside a newer weekly; B is fresh and current.
-      const cohort = aggregate({
-        gemini_5h: [
-          lot('gemini_5h', 'a', { state: 'stale', at: T1 }),
-          lot('gemini_5h', 'b'),
-        ],
-        gemini_7d: [lot('gemini_7d', 'a'), lot('gemini_7d', 'b')],
-      });
+    it('skips disabled accounts and counts nothing for a healthy pool', () => {
       expect(
-        poolRetainedWindows(
-          cohort,
-          source([row('a', [T1, T2]), row('b', [T2, T2])]),
+        poolRetainedAccounts(source([row('a', [T1, T2], { enabled: false })]))
+          .size,
+      ).toBe(0);
+      expect(
+        poolRetainedAccounts(
+          source([row('a', [T2, T2], { meters: [meter('gemini', T2)] })]),
         ).size,
       ).toBe(0);
     });
 
-    it('treats a lot newer than the cached /latest reading as current', () => {
-      // `/latest` still caches A's retained t1 5h, but `/aggregate` already has
-      // A's recovery poll at t3 with a fresh 5h.
-      const T3 = T2 + 60_000;
-      const recovered = aggregate({
-        gemini_5h: [lot('gemini_5h', 'a', { at: T3 })],
-        gemini_7d: [lot('gemini_7d', 'a', { at: T3 })],
-      });
+    it('counts nothing while /latest is pending or failed', () => {
+      const rows = [row('a', [T1, T2])];
       expect(
-        poolRetainedWindows(recovered, source([row('a', [T1, T2])])).size,
-      ).toBe(0);
-    });
-
-    it('flags nothing while /latest is pending or failed, or without data', () => {
-      const rows = [row('a', [T1, T2]), row('b', [T2, T2])];
-      expect(
-        poolRetainedWindows(retainedA, { rows, pending: true, error: false })
-          .size,
+        poolRetainedAccounts({ rows, pending: true, error: false }).size,
       ).toBe(0);
       expect(
-        poolRetainedWindows(retainedA, { rows, pending: false, error: true })
-          .size,
+        poolRetainedAccounts({ rows, pending: false, error: true }).size,
       ).toBe(0);
-      expect(poolRetainedWindows(retainedA, undefined).size).toBe(0);
-      expect(poolRetainedWindows(undefined, source(rows)).size).toBe(0);
-    });
-
-    it('healthy control flags nothing', () => {
-      const healthy = aggregate({
-        gemini_5h: [lot('gemini_5h', 'a'), lot('gemini_5h', 'b')],
-        gemini_7d: [lot('gemini_7d', 'a'), lot('gemini_7d', 'b')],
-      });
-      expect(
-        poolRetainedWindows(
-          healthy,
-          source([
-            row('a', [T2, T2], [meter('gemini', T2)]),
-            row('b', [T2, T2]),
-          ]),
-        ).size,
-      ).toBe(0);
+      expect(poolRetainedAccounts(undefined).size).toBe(0);
     });
   });
 });

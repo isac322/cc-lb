@@ -218,17 +218,14 @@ export function geminiRetainedReading(
   return own.observed_at_unix_millis < newest;
 }
 
-/** One upstream's `/latest` reading, as the pool's retained-reading check needs it. */
+/** One upstream's `/latest` reading, as the pool's retained-reading count needs it. */
 export interface PoolRetentionRow {
-  upstream: { id: string };
+  upstream: { id: string; enabled?: boolean };
   windows: readonly QuotaSnapshot[];
   periodUnknownMeters: readonly PeriodUnknownQuotaMeter[];
 }
 
-/**
- * Per-upstream `/latest` rows behind a pool card, with that query's state.
- * `/latest` polls independently of `/aggregate`, so either may be newer.
- */
+/** Per-upstream `/latest` rows behind a pool card, with that query's state. */
 export interface PoolRetentionSource {
   rows: readonly PoolRetentionRow[];
   pending: boolean;
@@ -240,53 +237,27 @@ export const POOL_RETENTION_UNAVAILABLE_TEXT =
   "Couldn't check for retained readings";
 
 /**
- * Pool counterpart of `geminiRetainedReading`: Gemini group windows whose
- * displayed current pool figure includes a retained reading. Only accounts in
- * that fresh-only figure count (a `fresh` provider lot with a utilization),
- * and only when the lot is that retained reading: observed no later than the
- * retained `/latest` reading. A newer lot came from a later poll than the
- * cached `/latest` row and is current. Each account's `/latest` row decides
- * retention, so a poll that returned only period-unknown meters is caught as
- * well. Nothing is flagged while `/latest` is pending or failed: provenance is
- * then unknown, never assumed.
+ * How many enabled accounts' `/latest` readings are retained from an earlier
+ * poll (`geminiRetainedReading`), per Gemini group window. It reads `/latest`
+ * alone: a fact about the accounts, not about the separately polled pool
+ * figure. Empty while `/latest` is pending or failed.
  */
-export function poolRetainedWindows(
-  aggregate: AggregateResponse | undefined,
+export function poolRetainedAccounts(
   source: PoolRetentionSource | undefined,
-): ReadonlySet<string> {
-  const retained = new Set<string>();
-  if (!aggregate || !source || source.pending || source.error) return retained;
-  for (const entry of aggregate.windows) {
-    if (geminiGroupSibling(entry.window) == null) continue;
-    for (const lot of entry.provider_lots) {
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  if (!source || source.pending || source.error) return counts;
+  for (const row of source.rows) {
+    if (row.upstream.enabled === false) continue;
+    for (const snap of row.windows) {
       if (
-        lot.state !== 'fresh' ||
-        lot.utilization == null ||
-        !Number.isFinite(lot.utilization) ||
-        lot.observed_at_unix_millis == null
+        geminiRetainedReading(row.windows, row.periodUnknownMeters, snap.window)
       ) {
-        continue;
-      }
-      const row = source.rows.find((r) => r.upstream.id === lot.upstream_id);
-      const readingAt = row?.windows.find(
-        (snap) => snap.window === entry.window,
-      )?.observed_at_unix_millis;
-      if (
-        row != null &&
-        readingAt != null &&
-        lot.observed_at_unix_millis <= readingAt &&
-        geminiRetainedReading(
-          row.windows,
-          row.periodUnknownMeters,
-          entry.window,
-        )
-      ) {
-        retained.add(entry.window);
-        break;
+        counts.set(snap.window, (counts.get(snap.window) ?? 0) + 1);
       }
     }
   }
-  return retained;
+  return counts;
 }
 
 /**

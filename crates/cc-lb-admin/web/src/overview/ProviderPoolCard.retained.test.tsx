@@ -239,167 +239,108 @@ function renderCard({
   return { legend };
 }
 
-function expectStaleLegend(row: HTMLElement | undefined) {
-  expect(row?.dataset.state).toBe('stale');
-  expect(row?.querySelector('[data-slot="pace-marker"]')).toBeNull();
-  expect(
-    row?.querySelector('[data-slot="pool-quota-legend-reset"]')?.textContent,
-  ).toBe('Stale');
-}
-
-describe('Gemini pool card with an account retaining an earlier reading', () => {
-  const freshLots = {
-    gemini_5h: [lot('gemini_5h', 'a', NOW), lot('gemini_5h', 'b', NOW)],
+describe('Gemini pool card notes on accounts retaining an earlier reading', () => {
+  const lots = {
+    gemini_5h: [lot('gemini_5h', 'a', T1), lot('gemini_5h', 'b', NOW)],
     gemini_7d: [lot('gemini_7d', 'a', NOW), lot('gemini_7d', 'b', NOW)],
   };
-  // A's 5h lot is its retained t1 reading, as the server serves it.
-  const retainedLots = {
-    gemini_5h: [lot('gemini_5h', 'a', T1), lot('gemini_5h', 'b', NOW)],
-    gemini_7d: freshLots.gemini_7d,
+  const fiveHour: [number, number][] = [
+    [T1, 20],
+    [NOW - 3600, 35],
+    [NOW - 1800, 90],
+  ];
+  const history = {
+    gemini_5h: fiveHour,
+    gemini_7d: [[NOW - 1800, 10]] as [number, number][],
   };
+  const notes = () =>
+    document.querySelector('[data-slot="pool-retention-notes"]');
 
-  it('keeps plotting other upstreams after the retained reading while the legend marks it stale', () => {
-    // Upstream A's gemini_5h is from t1 (its later poll omitted 5h); upstream B
-    // keeps reporting gemini_5h, so the pool history has valid post-t1 points.
-    const fiveHour: [number, number][] = [
-      [T1, 20],
-      [NOW - 3600, 35],
-      [NOW - 1800, 40],
-    ];
-    const { legend } = renderCard({
-      lots: retainedLots,
-      history: {
-        gemini_5h: fiveHour,
-        gemini_7d: [
-          [T1, 90],
-          [NOW - 1800, 100],
-        ],
-      },
-      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
-    });
+  /** The pool figure presents `/pool-history` exactly as before retention. */
+  function expectPoolUnchanged(
+    legend: (window: string) => HTMLElement | undefined,
+  ) {
+    for (const window of ['gemini_5h', 'gemini_7d']) {
+      expect(legend(window)?.dataset.state).toBeUndefined();
+    }
+    expect(
+      legend('gemini_5h')?.querySelector('[data-slot="pool-quota-legend-used"]')
+        ?.textContent,
+    ).toBe('90%');
+    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(
+      document.querySelector('[data-slot="provider-pool-headline"]')
+        ?.textContent,
+    ).toBe('90%used');
     const plotted = screen
       .getByTestId('pool-stroke-gemini_5h')
       .getAttribute('d')
       ?.split('|')
       .map((point) => Number(point.split(':')[0]));
     for (const [unix] of fiveHour) expect(plotted).toContain(unix);
-    expectStaleLegend(legend('gemini_5h'));
-    expect(legend('gemini_7d')?.dataset.state).toBeUndefined();
-    expect(screen.getByText('Stale reading')).toBeDefined();
-  });
+  }
 
-  it('marks both windows stale when the later poll returned only raw meters', () => {
-    // t1: 5h 20%, weekly 100%; t2 returned only an unlabeled meter, so both
-    // canonical rows (and their aggregate lots) still carry t1.
+  it('states how many accounts have a retained reading, leaving the pool figure as reported', () => {
     const { legend } = renderCard({
-      lots: {
-        gemini_5h: [lot('gemini_5h', 'a', T1)],
-        gemini_7d: [lot('gemini_7d', 'a', T1)],
-      },
-      history: {
-        gemini_5h: [[NOW - 1800, 20]],
-        gemini_7d: [[NOW - 1800, 100]],
-      },
-      rows: [upstreamRow('a', [T1, T1], NOW)],
+      lots,
+      history,
+      rows: [
+        upstreamRow('a', [T1, NOW]),
+        upstreamRow('b', [T1, NOW]),
+        upstreamRow('c', [NOW, NOW]),
+      ],
     });
-    expectStaleLegend(legend('gemini_5h'));
-    expectStaleLegend(legend('gemini_7d'));
-    // No current figure remains for the compact headline.
-    expect(
-      screen.getByLabelText('Current pool usage unavailable').textContent,
-    ).toBe('—');
+    expect(notes()?.textContent).toBe(
+      "Gemini 5h: 2 accounts' readings are from an earlier poll",
+    );
+    expect(notes()?.className).not.toMatch(/warn|danger/);
+    expectPoolUnchanged(legend);
   });
 
-  it('ignores an account excluded from the fresh-only figure', () => {
-    // A's 5h is stale (excluded) beside a newer weekly 10%; B is fresh: 5h 90%, weekly 10%.
-    const { legend } = renderCard({
-      lots: {
-        gemini_5h: [
-          lot('gemini_5h', 'a', T1, 'stale'),
-          lot('gemini_5h', 'b', NOW),
-        ],
-        gemini_7d: [lot('gemini_7d', 'a', NOW), lot('gemini_7d', 'b', NOW)],
-      },
-      history: {
-        gemini_5h: [[NOW - 1800, 90]],
-        gemini_7d: [[NOW - 1800, 10]],
-      },
-      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
-    });
-    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
-    expect(screen.queryByText('Stale reading')).toBeNull();
+  it('notes both windows when the later poll returned only raw meters', () => {
+    renderCard({ lots, history, rows: [upstreamRow('a', [T1, T1], NOW)] });
     expect(
-      document.querySelector('[data-slot="provider-pool-headline"]')
-        ?.textContent,
-    ).toBe('90%used');
+      [...(notes()?.querySelectorAll('li') ?? [])].map((li) => li.textContent),
+    ).toEqual([
+      "Gemini 5h: 1 account's reading is from an earlier poll",
+      "Gemini 7d: 1 account's reading is from an earlier poll",
+    ]);
   });
 
-  it('healthy control: one poll observed together is current', () => {
+  it('healthy control: no note', () => {
     const { legend } = renderCard({
-      lots: freshLots,
-      history: {
-        gemini_5h: [[NOW - 1800, 40]],
-        gemini_7d: [[NOW - 1800, 60]],
-      },
+      lots,
+      history,
       rows: [upstreamRow('a', [NOW, NOW], NOW), upstreamRow('b', [NOW, NOW])],
     });
-    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
-    expect(legend('gemini_7d')?.dataset.state).toBeUndefined();
-    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(notes()).toBeNull();
+    expectPoolUnchanged(legend);
   });
 
-  it('treats a lot newer than the cached /latest reading as current', () => {
-    // `/latest` still caches A's retained t1 5h (weekly at now), while
-    // `/aggregate` already carries A's recovery poll: a fresh 5h of 90%.
+  it('says retained readings went unchecked when /latest failed', () => {
     const { legend } = renderCard({
-      lots: {
-        gemini_5h: [lot('gemini_5h', 'a', NOW)],
-        gemini_7d: [lot('gemini_7d', 'a', NOW)],
-      },
-      history: {
-        gemini_5h: [[NOW - 1800, 90]],
-        gemini_7d: [[NOW - 1800, 10]],
-      },
-      rows: [upstreamRow('a', [T1, NOW - 600])],
-    });
-    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
-    expect(screen.queryByText('Stale reading')).toBeNull();
-    expect(
-      document.querySelector('[data-slot="provider-pool-headline"]')
-        ?.textContent,
-    ).toBe('90%used');
-  });
-
-  it('says retained readings went unchecked when /latest failed, without inventing stale', () => {
-    const { legend } = renderCard({
-      lots: retainedLots,
-      history: {
-        gemini_5h: [[NOW - 1800, 40]],
-        gemini_7d: [[NOW - 1800, 60]],
-      },
-      rows: [upstreamRow('a', [T1, NOW]), upstreamRow('b', [NOW, NOW])],
+      lots,
+      history,
+      rows: [upstreamRow('a', [T1, NOW])],
       error: true,
     });
-    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
-    expect(screen.queryByText('Stale reading')).toBeNull();
     const note = screen.getByText("Couldn't check for retained readings");
-    expect(note.className).not.toMatch(/warn|danger/);
+    expect(note.className).toContain('text-text-muted');
+    expect(notes()).toBeNull();
+    expectPoolUnchanged(legend);
   });
 
-  it('flags nothing and stays quiet while /latest is pending', () => {
+  it('says nothing while /latest is pending', () => {
     const { legend } = renderCard({
-      lots: retainedLots,
-      history: {
-        gemini_5h: [[NOW - 1800, 40]],
-        gemini_7d: [[NOW - 1800, 60]],
-      },
-      rows: [],
+      lots,
+      history,
+      rows: [upstreamRow('a', [T1, NOW])],
       pending: true,
     });
-    expect(legend('gemini_5h')?.dataset.state).toBeUndefined();
-    expect(screen.queryByText('Stale reading')).toBeNull();
+    expect(notes()).toBeNull();
     expect(
       screen.queryByText("Couldn't check for retained readings"),
     ).toBeNull();
+    expectPoolUnchanged(legend);
   });
 });

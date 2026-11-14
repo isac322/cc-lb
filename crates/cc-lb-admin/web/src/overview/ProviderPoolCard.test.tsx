@@ -393,38 +393,3 @@ describe('Gemini group placeholder in the provider pool card', () => {
     ).toEqual({ gemini_5h: 'not-reported' });
   });
 });
-
-describe('Gemini pool legend with a retained reading', () => {
-  it('shows the retained window as stale with neutral ink and no pace', () => {
-    const response = aggregate([
-      { ...aggregateWindow('gemini_5h', 'fresh', 20), pool_pace_fraction: 0.9 },
-      aggregateWindow('gemini_7d', 'fresh', 100),
-    ]);
-    const retained = new Set(['gemini_5h']);
-    render(
-      <PoolQuotaLegend
-        latest={{ gemini_5h: 20, gemini_7d: 100 }}
-        nowUnixSecs={NOW}
-        paces={poolWindowPace(response)}
-        resets={poolWindowResets(response)}
-        retained={retained}
-        windows={['gemini_5h', 'gemini_7d']}
-      />,
-    );
-    const [fiveHour, weekly] = screen.getAllByTestId('pool-quota-legend-slot');
-    expect(fiveHour.dataset.state).toBe('stale');
-    expect(fiveHour.querySelector('[data-slot="pace-marker"]')).toBeNull();
-    expect(
-      fiveHour.querySelector('[data-slot="pool-quota-legend-reset"]')
-        ?.textContent,
-    ).toBe('Stale');
-    expect(
-      fiveHour.querySelector('[data-slot="pool-quota-legend-used"]')?.className,
-    ).not.toMatch(/warn|danger/);
-    expect(fiveHour.getAttribute('aria-label')).toBe(
-      'Gemini models · 5-hour limit window, 20% used, stale reading',
-    );
-    expect(weekly.dataset.state).toBeUndefined();
-    expect(weekly.querySelector('[data-slot="pace-marker"]')).not.toBeNull();
-  });
-});
