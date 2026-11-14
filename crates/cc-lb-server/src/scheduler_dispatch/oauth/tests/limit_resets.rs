@@ -802,7 +802,7 @@ impl cc_lb_clock::Clock for AfterEpochReadClock {
     fn now(&self) -> std::time::SystemTime {
         if self.provider.inventory_calls.load(Ordering::SeqCst) > 0
             && !self.paused_once.load(Ordering::SeqCst)
-            && self.reads_after_inventory.fetch_add(1, Ordering::SeqCst) == 2
+            && self.reads_after_inventory.fetch_add(1, Ordering::SeqCst) == 1
             && !self.paused_once.swap(true, Ordering::SeqCst)
         {
             self.entered.notify_one();
