@@ -282,7 +282,7 @@ async fn insert_checkpoint_if_changed(
 ) -> StorageResult<bool> {
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let credits_json = encode_credits(record.credits.as_ref())?;
-    let latest = sqlx::query_as::<_, (Vec<u8>, bool, Option<String>)>(
+    let latest = sqlx::query_as::<_, (Vec<u8>, Option<String>, bool)>(
         r#"SELECT semantic_fingerprint,
                   credits_json,
                   status IS NOT DISTINCT FROM $4::text
@@ -332,7 +332,7 @@ async fn insert_checkpoint_if_changed(
 
     if latest
         .as_ref()
-        .is_some_and(|(fingerprint, within_deadband, previous_credits)| {
+        .is_some_and(|(fingerprint, previous_credits, within_deadband)| {
             let same_credits = *previous_credits == credits_json;
             (fingerprint.as_slice() == &record.semantic_fingerprint.as_bytes()[..] && same_credits)
                 || (*within_deadband && same_credits)

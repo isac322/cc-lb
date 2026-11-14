@@ -542,6 +542,13 @@ fn bound_points(points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint>
             .copied()
             .filter(|index| points[*index].balance.is_none())
             .collect::<Vec<_>>();
+        if max_points == 2
+            && let Some(&gap) = internal
+                .iter()
+                .find(|index| points[**index].balance.is_none())
+        {
+            return vec![points[gap].clone(), points[last].clone()];
+        }
         let priority = if null_boundaries.is_empty() {
             internal.to_vec()
         } else {
@@ -925,6 +932,18 @@ mod tests {
                 })
                 .collect(),
             4,
+        );
+        let minimum = bound_points(
+            vec![point(0, Some("100")), point(1, None), point(2, Some("90"))],
+            2,
+        );
+        assert_eq!(minimum.len(), 2);
+        assert_eq!(
+            minimum
+                .iter()
+                .map(|point| point.balance.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("90")],
         );
         assert_eq!(alternating.len(), 4);
         assert_eq!(

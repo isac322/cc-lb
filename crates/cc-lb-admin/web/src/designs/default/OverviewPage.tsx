@@ -1576,8 +1576,8 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         />
         <RTooltip
           cursor={CHART_CURSOR}
-          content={({ active, payload, label }) => {
-            if (!active || !payload?.length) return null;
+          content={({ active, label }) => {
+            if (!active) return null;
             const labelUnix = Number(label);
             const creditPoint =
               creditData?.filter((point) => point.unix === labelUnix).at(-1) ??

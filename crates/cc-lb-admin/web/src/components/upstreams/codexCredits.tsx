@@ -138,8 +138,8 @@ function newestCreditField(
           candidateValue === true &&
           latestValue === false) ||
         (field === 'unlimited' &&
-          candidateValue === true &&
-          latestValue === false)
+          candidateValue === false &&
+          latestValue === true)
       ) {
         return candidate;
       }
