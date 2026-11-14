@@ -123,7 +123,145 @@ export async function installFixtures(page: Page, observations: QuotaSnapshot[])
       now_unix_secs: NOW, window_anchor_unix_secs: NOW - 86400, max_staleness_secs: 300,
       upstream_count: 1, windows: [], caveats: [],
     });
-    if (path === '/admin/v1/subscription-quotas/pool-history') return json({ now_unix_secs: NOW, windows: [] });
+    if (path === '/admin/v1/subscription-quotas/pool-history') {
+      const latest = (window: string) => ({
+        window,
+        latest: {
+          snapshot_at_unix_secs: NOW,
+          utilization: 0.25,
+          utilization_percent: 25,
+          contributing_upstreams: 1,
+          eligible_upstreams: 1,
+          stale_upstreams: 0,
+          max_observed_at_unix_millis: NOW * 1000,
+        },
+        series: [
+          { snapshot_at_unix_secs: NOW - 7200, utilization_percent: 0 },
+          { snapshot_at_unix_secs: NOW, utilization_percent: 25 },
+        ],
+      });
+      return json({
+        now_unix_secs: NOW,
+        windows: [latest('5h'), latest('7d')],
+        credits: {
+          latest: {
+            at_unix_millis: NOW * 1000,
+            balance: '8.75',
+            observed_at_unix_millis: NOW * 1000,
+            contributing_upstreams: 1,
+            eligible_upstreams: 1,
+          },
+          series: [
+            {
+              at_unix_millis: (NOW - 7200) * 1000,
+              balance: '10.50',
+              observed_at_unix_millis: (NOW - 7200) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: (NOW - 3600) * 1000,
+              balance: null,
+              observed_at_unix_millis: null,
+              contributing_upstreams: 0,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: (NOW - 3600) * 1000,
+              balance: '9.25',
+              observed_at_unix_millis: (NOW - 3600) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: NOW * 1000,
+              balance: '8.75',
+              observed_at_unix_millis: NOW * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+          ],
+        },
+      });
+    }
+    if (path === '/admin/v1/subscription-quotas/credit-history') {
+      return json({
+        now_unix_secs: NOW,
+        since_unix_secs: NOW - 7200,
+        until_unix_secs: NOW,
+        max_staleness_secs: 300,
+        upstreams: [{
+          upstream_id: ID,
+          latest: {
+            balance: '8.75',
+            observed_at_unix_millis: NOW * 1000,
+            state: 'fresh',
+          },
+          series: [
+            {
+              at_unix_millis: (NOW - 7200) * 1000,
+              balance: '10.50',
+              observed_at_unix_millis: (NOW - 7200) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: (NOW - 3600) * 1000,
+              balance: null,
+              observed_at_unix_millis: null,
+              contributing_upstreams: 0,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: (NOW - 3600) * 1000,
+              balance: '9.25',
+              observed_at_unix_millis: (NOW - 3600) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: NOW * 1000,
+              balance: '8.75',
+              observed_at_unix_millis: NOW * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+          ],
+        }],
+        pool: {
+          latest: {
+            at_unix_millis: NOW * 1000,
+            balance: '8.75',
+            observed_at_unix_millis: NOW * 1000,
+            contributing_upstreams: 1,
+            eligible_upstreams: 1,
+          },
+          series: [
+            {
+              at_unix_millis: (NOW - 7200) * 1000,
+              balance: '10.50',
+              observed_at_unix_millis: (NOW - 7200) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: (NOW - 3600) * 1000,
+              balance: '9.25',
+              observed_at_unix_millis: (NOW - 3600) * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+            {
+              at_unix_millis: NOW * 1000,
+              balance: '8.75',
+              observed_at_unix_millis: NOW * 1000,
+              contributing_upstreams: 1,
+              eligible_upstreams: 1,
+            },
+          ],
+        },
+      });
+    }
     if (path === '/admin/v1/subscription-quotas/series') return json({
       since_unix_secs: Number(url.searchParams.get('since_unix_secs')),
       until_unix_secs: Number(url.searchParams.get('until_unix_secs')),

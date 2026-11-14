@@ -21,6 +21,22 @@ for (const width of [390, 768, 1440]) {
       await expect(overview.getByRole('meter', { name: '5h window used', exact: true })).toHaveAttribute('aria-valuenow', '25');
       await expect(overview.getByRole('meter', { name: '7d window used', exact: true })).toHaveAttribute('aria-valuenow', '50');
       await expectNoOverflow(page, 'codex-credit-mini');
+      const poolCard = page.getByTestId('pool-quota-card');
+      await expect(poolCard).toBeVisible();
+      await expect(poolCard.locator('svg.recharts-surface')).toHaveCount(1);
+      const chartBox = await poolCard.locator('.recharts-wrapper').boundingBox();
+      expect(chartBox).not.toBeNull();
+      if (chartBox != null) {
+        await page.mouse.move(
+          chartBox.x + chartBox.width * 0.7,
+          chartBox.y + chartBox.height * 0.5,
+        );
+      }
+      await expect(
+        poolCard.locator('[data-slot="pool-tooltip-row"]').filter({
+          hasText: 'Credits',
+        }),
+      ).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath('overview.png'), fullPage: true });
       expect(latestRequests.some((url) => {
         const requested = url.searchParams.get('windows')?.split(',') ?? [];
