@@ -269,7 +269,7 @@ pub(super) async fn insert_checkpoint_if_changed(
              AND overage_period_monthly_utilization IS ?8 AND upgrade_paths IS ?9 \
              AND disabled_reason IS ?10 AND extra_usage_enabled IS ?11 \
              AND extra_usage_monthly_limit IS ?12 AND extra_usage_used_credits IS ?13 \
-             AND json_remove(credits_json, '$.observations') IS json_remove(?14, '$.observations') \
+             AND credits_json IS ?14 \
              AND utilization IS NOT NULL AND ?15 IS NOT NULL AND ABS(utilization - ?15) < 0.001 \
          ) FROM upstream_subscription_quota_checkpoints_v1 \
          WHERE upstream_id = ?16 AND window = ?17 AND source = ?18 \

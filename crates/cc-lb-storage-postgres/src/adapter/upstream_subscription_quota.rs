@@ -296,7 +296,7 @@ async fn insert_checkpoint_if_changed(
                   AND extra_usage_enabled IS NOT DISTINCT FROM $13::boolean
                   AND extra_usage_monthly_limit IS NOT DISTINCT FROM $14::double precision
                   AND extra_usage_used_credits IS NOT DISTINCT FROM $15::double precision
-                  AND (credits_json::jsonb - 'observations') IS NOT DISTINCT FROM ($16::jsonb - 'observations')
+                  AND credits_json::jsonb IS NOT DISTINCT FROM $16::jsonb
                   AND utilization IS NOT NULL AND $17::double precision IS NOT NULL
                   AND ABS(utilization - $17) < 0.001 AS within_deadband
            FROM upstream_subscription_quota_checkpoints_v1
