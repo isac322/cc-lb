@@ -1122,7 +1122,7 @@ describe('UpstreamUsageTable shared layout', () => {
       <UpstreamUsageTable data={usageData} layout="shared" />,
     );
     expect(headerLabels(container)).toEqual(['5h', '7d', 'Codex credits']);
-    expect(screen.getByTestId('codex-credit-facts')).toBeTruthy();
+    expect(screen.getByTestId('codex-credit-mini')).toBeTruthy();
   });
 
   it('pends an all-Gemini fleet with only 5h and 7d skeletons', () => {

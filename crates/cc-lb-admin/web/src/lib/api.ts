@@ -1552,6 +1552,16 @@ export interface QuotaCredits {
   balance: string | null;
   approx_local_messages: number[] | null;
   approx_cloud_messages: number[] | null;
+  observations?: Partial<
+    Record<
+      'has_credits' | 'unlimited' | 'limit_reached' | 'balance',
+      {
+        observed_at_unix_millis: number;
+        source: 'header' | 'api';
+        request_order?: { publisher: string; sequence: number };
+      }
+    >
+  >;
 }
 
 export interface QuotaSnapshot {
@@ -1703,9 +1713,42 @@ export interface PoolHistoryWindowResponse {
   series: PoolHistorySeriesPoint[];
 }
 
+export interface CreditHistoryPoint {
+  at_unix_millis: number;
+  balance: string | null;
+  observed_at_unix_millis: number | null;
+  contributing_upstreams: number;
+  eligible_upstreams: number;
+}
+
+export interface CreditUpstreamHistory {
+  upstream_id: string;
+  latest: {
+    balance: string | null;
+    observed_at_unix_millis: number | null;
+    state: 'fresh' | 'stale' | 'unknown' | 'unlimited';
+  };
+  series: CreditHistoryPoint[];
+}
+
+export interface CreditPoolHistory {
+  latest: CreditHistoryPoint;
+  series: CreditHistoryPoint[];
+}
+
+export interface CreditHistoryResponse {
+  now_unix_secs: number;
+  since_unix_secs: number;
+  until_unix_secs: number;
+  max_staleness_secs: number;
+  upstreams: CreditUpstreamHistory[];
+  pool: CreditPoolHistory;
+}
+
 export interface PoolHistoryResponse {
   now_unix_secs: number;
   windows: PoolHistoryWindowResponse[];
+  credits?: CreditPoolHistory;
 }
 export type OAuthProvider = 'anthropic' | 'openai' | 'gemini';
 export type OAuthFlow = 'paste_code' | 'device_code' | 'browser';

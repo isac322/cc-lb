@@ -222,6 +222,9 @@ pub struct RequestEvent {
     pub upstream_error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_error_code: Option<String>,
+    /// Main-limit meter estimate for this response; never proof of billed spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding: Option<crate::RequestFunding>,
     /// whose upstream body ended abnormally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_http_version: Option<String>,

@@ -152,6 +152,7 @@ fn openai_credits_keep_exhausted_base_candidate_in_overage_tier() {
         balance: Some("62500.0000000000".to_owned()),
         approx_local_messages: Some([10, 20]),
         approx_cloud_messages: None,
+        ..Default::default()
     };
     let candidate = provider_oauth(
         1,
@@ -196,6 +197,7 @@ fn openai_credit_limit_reached_still_blocks_overage() {
                     balance: None,
                     approx_local_messages: None,
                     approx_cloud_messages: None,
+                    ..Default::default()
                 })
                 .build(),
         ],
@@ -222,6 +224,7 @@ fn codex_credit_flags_preserve_base_tiers_and_require_fresh_overage_availability
             balance: Some("62500.0000000000".to_owned()),
             approx_local_messages: None,
             approx_cloud_messages: None,
+            ..Default::default()
         };
         let mut credit_snapshot = fresh(WINDOW_OVERAGE).credits(credits.clone()).build();
         credit_snapshot.fallback_available = credits.fallback_available();
@@ -287,6 +290,7 @@ fn openai_credit_header_does_not_clear_usage_poll_limit_restriction() {
                     balance: None,
                     approx_local_messages: None,
                     approx_cloud_messages: None,
+                    ..Default::default()
                 })
                 .build(),
             fresh(WINDOW_UNIFIED)
@@ -298,6 +302,7 @@ fn openai_credit_header_does_not_clear_usage_poll_limit_restriction() {
                     balance: Some("62500.0000000000".to_owned()),
                     approx_local_messages: None,
                     approx_cloud_messages: None,
+                    ..Default::default()
                 })
                 .build(),
         ],
@@ -308,6 +313,58 @@ fn openai_credit_header_does_not_clear_usage_poll_limit_restriction() {
 
     assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
 }
+#[test]
+fn openai_newer_credit_availability_replaces_stale_negative() {
+    let mut old = stale(WINDOW_UNIFIED)
+        .fallback_available(false)
+        .credits(cc_lb_domain::SubscriptionQuotaCredits {
+            has_credits: Some(false),
+            unlimited: Some(false),
+            limit_reached: None,
+            balance: Some("0.0000000000".to_owned()),
+            approx_local_messages: None,
+            approx_cloud_messages: None,
+            ..Default::default()
+        })
+        .build();
+    old.observed_at_unix_millis = Some((T0_SECS - 7_200) * 1_000);
+    old.source = Some("header".to_owned());
+    let mut new = fresh(WINDOW_OVERAGE)
+        .fallback_available(true)
+        .credits(cc_lb_domain::SubscriptionQuotaCredits {
+            has_credits: Some(true),
+            unlimited: Some(false),
+            limit_reached: Some(false),
+            balance: Some("12.9900000000".to_owned()),
+            approx_local_messages: None,
+            approx_cloud_messages: None,
+            ..Default::default()
+        })
+        .build();
+    new.observed_at_unix_millis = Some(T0_SECS * 1_000);
+    new.source = Some("api".to_owned());
+    let candidate = provider_oauth(
+        1,
+        UpstreamKind::OpenaiOauth,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            old,
+            new,
+        ],
+    );
+    let key = other_provider("key", 2, UpstreamKind::OpenaiApiKey);
+    let output = filter_for_model(&[candidate.clone(), key], "gpt-5");
+    assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
+    assert_eq!(
+        output
+            .subscription_preference
+            .expect("credit tier")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::Overage
+    );
+}
+
 #[test]
 fn openai_pro_absent_five_hour_is_known_base_but_unobserved_is_partial() {
     let weekly = fresh(WINDOW_SEVEN_DAY)

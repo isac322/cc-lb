@@ -81,6 +81,7 @@ scenario!(append_then_list_latest_roundtrip, |storage| async move {
         balance: Some("62500.0000000000".to_owned()),
         approx_local_messages: Some([10, 20]),
         approx_cloud_messages: Some([30, 40]),
+        ..Default::default()
     });
     storage
         .record_subscription_quota_samples(std::slice::from_ref(&record))
@@ -112,6 +113,7 @@ scenario!(
             balance: Some("62500.0000000000".to_owned()),
             approx_local_messages: Some([10, 20]),
             approx_cloud_messages: Some([30, 40]),
+            ..Default::default()
         };
         for step in 0..8 {
             match step {
@@ -1310,6 +1312,8 @@ fn slim_checkpoint(record: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuo
         utilization: record.utilization,
         status: record.status,
         resets_at_unix_secs: record.resets_at_unix_secs,
+        sample_kind: record.sample_kind,
+        credits: record.credits,
     }
 }
 

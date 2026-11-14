@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err, clippy::manual_clamp)]
 
+mod credits;
 mod series;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,6 +58,10 @@ pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/v1/subscription-quotas/latest", get(handle_latest))
         .route("/admin/v1/subscription-quotas/series", get(handle_series))
+        .route(
+            "/admin/v1/subscription-quotas/credit-history",
+            get(credits::handle_history),
+        )
         .route(
             "/admin/v1/subscription-quotas/aggregate",
             get(handle_aggregate),
@@ -402,6 +407,8 @@ struct PoolHistoryResponse {
     now_unix_secs: i64,
     weighting: &'static str,
     windows: Vec<PoolHistoryWindowResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credits: Option<credits::CreditPoolHistory>,
 }
 
 #[derive(Debug, Serialize)]
@@ -458,7 +465,8 @@ async fn build_pool_history_response(
                 .into_response());
         }
     };
-    let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
+    let history_now_unix_millis = now_unix_millis(&*state.clock);
+    let now_unix_secs = (history_now_unix_millis / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
     let (since_unix_secs, until_unix_secs) = if let Some(range_secs) = query.relative_range_secs {
         if range_secs <= 0 {
@@ -670,11 +678,32 @@ async fn build_pool_history_response(
             },
         })
         .collect();
+    let credits = if provider == PoolQuotaProvider::Openai {
+        let upstreams = pool_quota_upstreams(
+            list_all_upstreams(storage).await?,
+            None,
+            UpstreamKind::OpenaiOauth,
+        );
+        Some(
+            credits::build_history(
+                state,
+                upstreams,
+                since_unix_secs.max(0) as u64,
+                until_unix_secs.max(0) as u64,
+                history_now_unix_millis,
+            )
+            .await?
+            .pool,
+        )
+    } else {
+        None
+    };
 
     Ok(PoolHistoryResponse {
         now_unix_secs,
         weighting: pool_provider_weighting(provider),
         windows: response_windows,
+        credits,
     })
 }
 
@@ -819,21 +848,31 @@ async fn build_latest_response(
                 )
             }));
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
+    let dynamic_view = state.dynamic_view.load();
     let mut durable_latest_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
-    if include_period_unknown_meters {
-        let gemini_ids = upstreams
+    if source != SubscriptionQuotaSourceMerge::Header {
+        let durable_ids = upstreams
             .iter()
-            .filter(|upstream| upstream.kind == UpstreamKind::GeminiOauth)
+            .filter(|upstream| {
+                matches!(
+                    upstream.kind,
+                    UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+                )
+            })
             .map(|upstream| upstream.id)
             .collect::<Vec<_>>();
-        if !gemini_ids.is_empty() {
-            // A peer replica can have a cold cache after another replica publishes
-            // canonical windows. Batch the durable suppression guard across upstreams.
+        if !durable_ids.is_empty() {
+            // A serving replica may have a cold cache after a restart. Use the
+            // durable latest row as the read-side fallback; cache publication
+            // still applies the existing timestamp fence.
             for sample in storage
-                .list_latest_subscription_quota_for_upstreams(&gemini_ids)
+                .list_latest_subscription_quota_for_upstreams(&durable_ids)
                 .await
                 .map_err(storage_error)?
             {
+                dynamic_view
+                    .subscription_quota_cache
+                    .upsert_observation(&sample);
                 durable_latest_by_upstream
                     .entry(sample.upstream_id)
                     .or_default()
@@ -841,7 +880,6 @@ async fn build_latest_response(
             }
         }
     }
-    let dynamic_view = state.dynamic_view.load();
     let mut response_upstreams = Vec::with_capacity(upstreams.len());
 
     for upstream in upstreams {

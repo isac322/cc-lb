@@ -5,6 +5,9 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceLine,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
@@ -62,6 +65,7 @@ import {
   emptyCostComponents,
   sumCostMicros,
 } from '../../components/ui/usage/costCategories';
+import { CodexCreditTotal } from '../../components/upstreams/codexCredits';
 import {
   OAuthReconnectSummary,
   UpstreamApplyFailureSummary,
@@ -80,11 +84,18 @@ import {
 } from '../../components/upstreams/UpstreamUsageTable';
 import {
   type AggregateResponse,
+  type CreditPoolHistory,
   type PoolHistoryWindowResponse,
   type RequestEventKind,
   windowLabel,
 } from '../../lib/api';
 import { categoricalColor, getWindowColor } from '../../lib/colors';
+import {
+  type CreditPlotRow,
+  formatCreditAxisTick,
+  hasCreditHistory,
+  mergeCreditChartRows,
+} from '../../lib/creditHistory';
 import {
   cacheHitRatio,
   cacheMissRatio,
@@ -1194,6 +1205,7 @@ function ProviderUsageAreas({
 
 type PoolQuotaChartProps = {
   data: PoolQuotaChartRow[];
+  creditData?: CreditPlotRow[];
   snapshots?: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
@@ -1270,6 +1282,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   legendWindows,
   placeholders,
   retention,
+  creditHistory,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
@@ -1283,6 +1296,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   placeholders?: Partial<Record<PoolQuotaWindow, GeminiGroupPlaceholderState>>;
   /** Gemini only: per-upstream `/latest` rows for `PoolRetentionNotes`. */
   retention?: PoolRetentionSource;
+  creditHistory?: CreditPoolHistory;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -1308,6 +1322,14 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
         title="Pool quota usage"
         subtitle={`Used per window across the pool · ${rangeWords}`}
       >
+        {creditHistory ? (
+          <div
+            className="mb-3 flex justify-end"
+            data-testid="pool-credit-total-row"
+          >
+            <CodexCreditTotal history={creditHistory} />
+          </div>
+        ) : null}
         <PoolQuotaLegend
           latest={chart.latest}
           resets={resets}
@@ -1327,6 +1349,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
             <Skeleton className="absolute inset-0 h-full w-full" />
           ) : (
             <PoolQuotaThemedChart
+              creditData={chart.creditData}
               seriesData={chart.data}
               rangeStartUnix={chart.rangeStartUnix}
               rangeEndUnix={chart.rangeEndUnix}
@@ -1400,6 +1423,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
 
 export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
   seriesData,
+  creditData,
   rangeStartUnix,
   rangeEndUnix,
   windows: requestedWindows,
@@ -1407,6 +1431,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
 }: {
   /** Used rows (0-100). */
   seriesData: PoolQuotaChartRow[];
+  creditData?: CreditPlotRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
   windows?: readonly PoolQuotaWindow[];
@@ -1426,7 +1451,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
     : POOL_QUOTA_WINDOWS_DRAW_ORDER;
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
-      {!seriesData.length ? (
+      {!seriesData.length && !creditData?.length ? (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-body text-text-muted">
           No timeline data yet for this range
         </div>
@@ -1435,7 +1460,12 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         responsive
         className="size-full"
         data={seriesData}
-        margin={{ top: 16, right: 8, bottom: 0, left: 0 }}
+        margin={{
+          top: 16,
+          right: creditData ? 52 : 8,
+          bottom: 0,
+          left: 0,
+        }}
       >
         <defs>
           {windows.map((window) => (
@@ -1458,6 +1488,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
           tickMargin={8}
         />
         <YAxis
+          yAxisId="quota"
           {...CHART_AXIS}
           tickFormatter={(v) => `${v}%`}
           width={44}
@@ -1465,6 +1496,13 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
           domain={[0, 100]}
           ticks={[0, 25, 50, 75, 100]}
           allowDataOverflow={false}
+          includeHidden
+        />
+        <ReferenceLine
+          y={0}
+          yAxisId="quota"
+          stroke="none"
+          ifOverflow="extendDomain"
         />
         <RTooltip
           cursor={CHART_CURSOR}
@@ -1477,8 +1515,15 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                 </div>
                 {poolTooltipRows(payload).map((p) => {
                   const key = String(p.dataKey);
-                  const shortLabel = windowLabels?.[key] ?? windowLabel(key);
-                  const longLabel = windowLabel(key, { long: true });
+                  const credit = key === 'credits';
+                  const raw = (p.payload as CreditPlotRow | undefined)
+                    ?.credit_balance;
+                  const shortLabel = credit
+                    ? 'Credits'
+                    : (windowLabels?.[key] ?? windowLabel(key));
+                  const longLabel = credit
+                    ? 'Absolute credit balance'
+                    : windowLabel(key, { long: true });
                   return (
                     <div
                       key={key}
@@ -1489,13 +1534,17 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                         className="inline-flex items-center gap-1.5 text-text-muted"
                         title={longLabel}
                       >
-                        <WindowChip window={key} />
-                        {`${shortLabel} window`}
+                        {credit ? null : <WindowChip window={key} />}
+                        {credit ? shortLabel : `${shortLabel} window`}
                       </span>
                       <span className="font-medium tabular-nums">
-                        {typeof p.value === 'number'
-                          ? `${formatQuotaPercent(p.value)} used`
-                          : '—'}
+                        {credit
+                          ? raw == null
+                            ? '—'
+                            : `${raw} credits`
+                          : typeof p.value === 'number'
+                            ? `${formatQuotaPercent(p.value)} used`
+                            : '—'}
                       </span>
                     </div>
                   );
@@ -1507,6 +1556,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         {windows.map((window) => (
           <Area
             key={`fill-${window}`}
+            yAxisId="quota"
             type="monotone"
             dataKey={window}
             stroke="none"
@@ -1521,6 +1571,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         {windows.map((window) => (
           <Area
             key={`stroke-${window}`}
+            yAxisId="quota"
             type="monotone"
             dataKey={window}
             stroke={getWindowColor(window).stroke}
@@ -1531,6 +1582,106 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
           />
         ))}
       </AreaChart>
+      {creditData ? (
+        <div className="pointer-events-auto absolute inset-0">
+          <LineChart
+            responsive
+            className="size-full"
+            data={creditData}
+            margin={{ top: 16, right: 8, bottom: 0, left: 0 }}
+          >
+            <XAxis
+              dataKey="unix"
+              type="number"
+              domain={[rangeStartUnix, rangeEndUnix]}
+              allowDataOverflow
+              height={30}
+              tick={false}
+              axisLine={false}
+              tickLine={false}
+            />
+            <YAxis
+              yAxisId="quota-space"
+              width={44}
+              domain={[0, 100]}
+              tick={false}
+              axisLine={false}
+              tickLine={false}
+            />
+            <YAxis
+              {...CHART_AXIS}
+              yAxisId="credits"
+              orientation="right"
+              tickFormatter={formatCreditAxisTick}
+              width={44}
+              tickMargin={8}
+              domain={['auto', 'auto']}
+              allowDataOverflow={false}
+            />
+            <RTooltip
+              cursor={CHART_CURSOR}
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                const creditPoint =
+                  creditData.find((point) => point.unix === Number(label)) ??
+                  creditData.reduce<CreditPlotRow | undefined>(
+                    (nearest, point) =>
+                      nearest == null ||
+                      Math.abs(point.unix - Number(label)) <
+                        Math.abs(nearest.unix - Number(label))
+                        ? point
+                        : nearest,
+                    undefined,
+                  );
+                const quotaPoint = seriesData.find(
+                  (point) => point.unix === Number(label),
+                );
+                return (
+                  <div className="glass-strong min-w-40 rounded-md px-3 py-2 text-caption text-text">
+                    <div className="mb-1.5 tabular-nums text-text-muted">
+                      {fmtChartTooltip(Number(label))}
+                    </div>
+                    {windows.map((window) => (
+                      <div
+                        key={window}
+                        className="flex items-center justify-between gap-3 py-0.5"
+                      >
+                        <span className="text-text-muted">
+                          {windowLabels?.[window] ?? windowLabel(window)} window
+                        </span>
+                        <span className="font-medium tabular-nums">
+                          {typeof quotaPoint?.[window] === 'number'
+                            ? `${formatQuotaPercent(quotaPoint[window] as number)} used`
+                            : '—'}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between gap-3 py-0.5">
+                      <span className="text-text-muted">Credits</span>
+                      <span className="font-medium tabular-nums">
+                        {creditPoint?.credit_balance == null
+                          ? '—'
+                          : `${creditPoint.credit_balance} credits`}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }}
+            />
+            <Line
+              dataKey="credits"
+              yAxisId="credits"
+              type="stepAfter"
+              stroke="var(--color-text-muted)"
+              strokeWidth={1.5}
+              dot={false}
+              activeDot={false}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </div>
+      ) : null}
     </div>
   );
 });
@@ -2057,6 +2208,17 @@ export function ProviderOverviewPage({
       visiblePoolWindows,
     ],
   );
+  const creditChartData = useMemo(
+    () =>
+      quotaPoolHistory.data?.credits &&
+      hasCreditHistory(quotaPoolHistory.data.credits)
+        ? mergeCreditChartRows(
+            visibleChartData,
+            quotaPoolHistory.data.credits.series,
+          )
+        : undefined,
+    [quotaPoolHistory.data?.credits, visibleChartData],
+  );
 
   const chartLatest = useMemo(
     () =>
@@ -2068,6 +2230,7 @@ export function ProviderOverviewPage({
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
       data: visibleChartData,
+      creditData: creditChartData,
       snapshots: recordedChartData,
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
@@ -2081,6 +2244,7 @@ export function ProviderOverviewPage({
     }),
     [
       chartLatest,
+      creditChartData,
       displayedPoolHistoryRangeSecs,
       liveProviderHistory,
       normalizedPoolHistoryWindows,
@@ -2218,6 +2382,7 @@ export function ProviderOverviewPage({
                 legendWindows={poolLegendWindows}
                 placeholders={poolPlaceholders}
                 retention={poolRetention}
+                creditHistory={quotaPoolHistory.data?.credits}
               />
 
               <UsageBlock

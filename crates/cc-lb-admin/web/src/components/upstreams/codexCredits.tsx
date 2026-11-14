@@ -1,5 +1,23 @@
-import type { QuotaSnapshot } from '../../lib/api';
-import { StatusBadge } from '../ui/primitives';
+import { memo, useMemo } from 'react';
+import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import type { CreditPoolHistory, QuotaSnapshot } from '../../lib/api';
+import {
+  type CreditMiniData,
+  creditChartCoordinate,
+  formatCreditInteger,
+  hasCreditHistory,
+} from '../../lib/creditHistory';
+import { useTimezone } from '../../lib/locale';
+import { formatInTimezone } from '../../lib/timezone';
+import { CHART_CURSOR } from '../ui/charts';
+import { Hint, Skeleton, StatusBadge } from '../ui/primitives';
 
 export interface CodexCreditFacts {
   status:
@@ -39,9 +57,61 @@ function newest(
   );
 }
 
+function fieldSourceLabel(
+  snapshot: QuotaSnapshot,
+  field: 'balance' | 'has_credits' | 'unlimited' | 'limit_reached',
+  nowUnixMillis: number,
+  maxStalenessSecs: number,
+): string {
+  const observation = snapshot.credits?.observations?.[field];
+  const source =
+    observation?.source === 'header'
+      ? 'Response headers'
+      : observation?.source === 'api'
+        ? 'Usage API'
+        : snapshot.source === 'header'
+          ? 'Response headers'
+          : snapshot.source === 'api'
+            ? 'Usage API'
+            : 'Provider';
+  const stale =
+    observation != null
+      ? Math.max(0, nowUnixMillis - observation.observed_at_unix_millis) >
+        maxStalenessSecs * 1000
+      : snapshot.state === 'stale';
+  return `${source}${stale ? ' · stale' : ''}`;
+}
+
+function newestCreditField(
+  snapshots: readonly QuotaSnapshot[],
+  field: 'balance' | 'has_credits' | 'unlimited' | 'limit_reached',
+): QuotaSnapshot | undefined {
+  return snapshots.reduce<QuotaSnapshot | undefined>((latest, snapshot) => {
+    if (snapshot.credits == null || snapshot.credits[field] == null)
+      return latest;
+    const observation = snapshot.credits.observations?.[field];
+    const at =
+      observation?.observed_at_unix_millis ??
+      snapshot.observed_at_unix_millis ??
+      -1;
+    const latestObservation = latest?.credits?.observations?.[field];
+    const latestAt =
+      latestObservation?.observed_at_unix_millis ??
+      latest?.observed_at_unix_millis ??
+      -1;
+    return latest === undefined ||
+      at > latestAt ||
+      (at === latestAt && snapshot.source === 'api' && latest.source !== 'api')
+      ? snapshot
+      : latest;
+  }, undefined);
+}
+
 /** Keep each fact attached to its own observation; a fresh balance is not a fresh availability flag. */
 export function selectCodexCredits(
   windows: readonly QuotaSnapshot[],
+  maxStalenessSecs = 300,
+  nowUnixMillis = Date.now(),
 ): CodexCreditFacts | null {
   const observations = windows.filter(
     (snapshot) =>
@@ -85,9 +155,7 @@ export function selectCodexCredits(
             : credits?.has_credits === false
               ? 'Unavailable'
               : 'Unknown';
-  const balanceObservation = newest(
-    creditObservations.filter((snapshot) => snapshot.credits?.balance != null),
-  );
+  const balanceObservation = newestCreditField(creditObservations, 'balance');
   return {
     status,
     tone:
@@ -100,7 +168,14 @@ export function selectCodexCredits(
       ? sourceLabel(statusObservation)
       : 'Provider',
     balance: balanceObservation?.credits?.balance ?? null,
-    balanceSource: balanceObservation ? sourceLabel(balanceObservation) : null,
+    balanceSource: balanceObservation
+      ? fieldSourceLabel(
+          balanceObservation,
+          'balance',
+          nowUnixMillis,
+          maxStalenessSecs,
+        )
+      : null,
   };
 }
 
@@ -128,5 +203,132 @@ export function CodexCreditSummary({ facts }: { facts: CodexCreditFacts }) {
         </span>
       ) : null}
     </div>
+  );
+}
+
+/** List-only presentation. The existing detailed credit summary stays intact. */
+export const CodexCreditMini = memo(function CodexCreditMini({
+  data,
+  pending = false,
+  compact = false,
+}: {
+  data?: CreditMiniData;
+  pending?: boolean;
+  compact?: boolean;
+}) {
+  const { effective: timeZone } = useTimezone();
+  const points = useMemo(
+    () =>
+      data?.history.series.map((point) => ({
+        unix: point.at_unix_millis / 1000,
+        value: creditChartCoordinate(point.balance),
+        raw: point.balance,
+        observed: point.observed_at_unix_millis,
+      })) ?? [],
+    [data],
+  );
+  const latest = data?.history.latest;
+  const current = latest?.state === 'fresh' ? latest.balance : null;
+  const value = formatCreditInteger(current);
+  const observed = latest?.observed_at_unix_millis;
+  const title =
+    latest?.balance == null
+      ? 'No credit balance reading'
+      : `Recorded balance: ${latest.balance} credits${observed == null ? '' : ` · ${formatInTimezone(observed, timeZone)}`}`;
+  const numericPoints = points.filter((point) => point.value != null).length;
+  return (
+    <span
+      className="inline-flex max-w-full min-w-0 items-center justify-end gap-2 text-caption tabular-nums text-text-muted"
+      data-testid="codex-credit-mini"
+      title={title}
+    >
+      <span
+        className={
+          compact
+            ? 'inline-block h-6 w-12 shrink-0'
+            : 'inline-block h-7 w-20 shrink-0'
+        }
+      >
+        {numericPoints > 0 ? (
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            minWidth={48}
+            minHeight={24}
+          >
+            <LineChart
+              data={points}
+              margin={{ top: 3, right: 2, bottom: 3, left: 2 }}
+              accessibilityLayer={false}
+            >
+              <XAxis
+                hide
+                dataKey="unix"
+                type="number"
+                domain={[data?.start ?? 0, data?.end ?? 0]}
+                allowDataOverflow
+              />
+              <YAxis hide domain={['auto', 'auto']} />
+              <Tooltip
+                cursor={CHART_CURSOR}
+                content={({ active, payload, label }) =>
+                  active && payload?.length ? (
+                    <span className="glass-strong inline-block whitespace-nowrap rounded-md px-3 py-2 text-caption text-text">
+                      <span className="block text-text-muted">
+                        {formatInTimezone(Number(label) * 1000, timeZone)}
+                      </span>
+                      {formatCreditInteger(payload[0].payload.raw)} credits
+                    </span>
+                  ) : null
+                }
+              />
+              <Line
+                type="stepAfter"
+                dataKey="value"
+                stroke="var(--color-text-muted)"
+                strokeWidth={1.25}
+                dot={numericPoints === 1 ? { r: 1.5 } : false}
+                activeDot={false}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : null}
+      </span>
+      {pending && data == null ? (
+        <Skeleton as="span" className="inline-block h-3 w-8" />
+      ) : (
+        <span
+          className="max-w-[10ch] truncate text-right"
+          aria-label={`${value} credits`}
+        >
+          {value}
+        </span>
+      )}
+    </span>
+  );
+});
+
+/** One exact pool figure, with qualifications confined to the existing hint. */
+export function CodexCreditTotal({ history }: { history?: CreditPoolHistory }) {
+  if (!hasCreditHistory(history) || history == null) return null;
+  const point = history.latest;
+  const partial = point.contributing_upstreams < point.eligible_upstreams;
+  const hint = `${partial ? `Partial balance: ${point.contributing_upstreams} of ${point.eligible_upstreams} accounts. ` : ''}Balances belong to separate accounts and are not transferable.`;
+  return (
+    <Hint label={hint}>
+      <button
+        type="button"
+        className="inline-flex max-w-full items-baseline gap-1 text-body tabular-nums text-text focus-visible:outline-2 focus-visible:outline-accent"
+        data-testid="pool-credit-total"
+        title={point.balance ?? undefined}
+      >
+        <span className="min-w-0 break-all font-medium">
+          {formatCreditInteger(point.balance)}
+        </span>
+        <span className="shrink-0 text-caption text-text-muted">credits</span>
+      </button>
+    </Hint>
   );
 }

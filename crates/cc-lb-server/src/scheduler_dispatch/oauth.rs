@@ -316,7 +316,7 @@ impl SchedulerDispatch {
             .await?;
         self.validate_usage_poll_fence(&upstream, &fence).await?;
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
-        let (records, cedar_ember, affected_main_published, raw_updates) = if is_anthropic {
+        let (mut records, cedar_ember, affected_main_published, raw_updates) = if is_anthropic {
             let (records, cedar_ember) =
                 parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;
             (
@@ -340,6 +340,20 @@ impl SchedulerDispatch {
                 )?;
             (records, None, affected_main_published, raw_updates)
         };
+        if upstream.kind == UpstreamKind::OpenaiOauth {
+            let order = self
+                .subscription_quota_cache
+                .credit_request_order(poll_sequence);
+            for record in &mut records {
+                if let Some(credits) = record.credits.as_mut() {
+                    credits.stamp_observations(
+                        observed_at_unix_millis,
+                        cc_lb_domain::CreditSource::Api,
+                    );
+                    credits.stamp_request_order(order);
+                }
+            }
+        }
         self.publish_usage_poll(&upstream, &fence, poll_sequence, &records)
             .await?;
         if upstream.kind == UpstreamKind::GeminiOauth {

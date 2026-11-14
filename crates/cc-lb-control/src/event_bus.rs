@@ -293,6 +293,8 @@ impl InMemoryBus {
                 | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
                 | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
                 | LifecycleEvent::StreamCompleted { .. }
+                | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
+                | LifecycleEvent::RequestFundingObserved { .. }
                 | LifecycleEvent::UsageObserved {
                     source: cc_lb_lifecycle::UsageSource::Final,
                     ..
@@ -412,6 +414,27 @@ impl RequestEventBus for InMemoryBus {
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
+        if matches!(&event, LifecycleEvent::UpstreamQuotaFrameObserved { .. }) {
+            // The quota subscriber and assembler both receive this off-path
+            // frame. It never enters admin broadcasts or the proxy path.
+            self.send_to_assembler(event.clone());
+            let tx = self
+                .inner
+                .lifecycle_subscription_quota_tx
+                .lock()
+                .expect("lifecycle subscription quota mutex poisoned")
+                .clone();
+            if let Some(tx) = tx
+                && tx.try_send(event).is_err()
+            {
+                record_dropped_events_by("lifecycle_subscription_quota_full", 1);
+            }
+            return;
+        }
+        if matches!(&event, LifecycleEvent::RequestFundingObserved { .. }) {
+            self.send_to_assembler(event);
+            return;
+        }
         if matches!(
             &event,
             LifecycleEvent::RequestLogUpstreamErrorObserved { .. }

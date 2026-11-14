@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::subscription_quota_events::SubscriptionQuotaSink;
-use cc_lb_control::SubscriptionQuotaCacheLike;
+use cc_lb_control::{RequestEventBus, SubscriptionQuotaCacheLike};
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
 pub const DEFAULT_SUBSCRIPTION_QUOTA_TTL: Duration = Duration::from_secs(300);
@@ -48,11 +48,13 @@ pub fn spawn_lifecycle_subscription_quota_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    bus: Option<Arc<dyn RequestEventBus>>,
 ) -> SubscriptionQuotaSubscriberHandle {
     spawn_with_config(
         rx,
         cache,
         sink,
+        bus,
         DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
         DEFAULT_SUBSCRIPTION_QUOTA_TTL,
     )
@@ -62,11 +64,20 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
 ) -> SubscriptionQuotaSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, cache, sink, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        cache,
+        sink,
+        bus,
+        map_cap,
+        ttl,
+        shutdown_rx,
+    ));
     SubscriptionQuotaSubscriberHandle { shutdown_tx, join }
 }
 
@@ -74,6 +85,8 @@ pub fn spawn_with_config(
 struct Partial {
     inserted_at: Option<Instant>,
     upstream_id: Option<Uuid>,
+    websocket: bool,
+    attempt_num: u32,
 }
 
 impl Partial {
@@ -81,6 +94,8 @@ impl Partial {
         Self {
             inserted_at: Some(now),
             upstream_id: None,
+            websocket: false,
+            attempt_num: 0,
         }
     }
 }
@@ -89,6 +104,7 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -103,7 +119,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), &mut partials, map_cap, event),
+                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), bus.as_deref(), &mut partials, map_cap, event),
                     None => break,
                 }
             }
@@ -116,6 +132,7 @@ async fn subscriber_loop(
         handle_event(
             cache.as_deref(),
             sink.as_ref(),
+            bus.as_deref(),
             &mut partials,
             map_cap,
             event,
@@ -126,6 +143,7 @@ async fn subscriber_loop(
 fn handle_event(
     cache: Option<&dyn SubscriptionQuotaCacheLike>,
     sink: Option<&SubscriptionQuotaSink>,
+    bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -134,12 +152,39 @@ fn handle_event(
     let event_id = event.event_id().clone();
 
     match event {
-        LifecycleEvent::UpstreamAttempt { upstream_id, .. } => {
+        LifecycleEvent::ParseCompleted {
+            result: Ok(info), ..
+        } => {
+            partials
+                .entry(event_id)
+                .or_insert_with(|| Partial::new(now))
+                .websocket = info.method == "GET";
+        }
+        LifecycleEvent::UpstreamQuotaFrameObserved {
+            upstream_id,
+            observed_at_unix_millis,
+            frame,
+            ..
+        } => {
+            let Ok(value) = sonic_rs::from_slice::<serde_json::Value>(&frame) else {
+                return;
+            };
+            let Some(headers) = crate::codex_quota_observation::websocket_headers(&value) else {
+                return;
+            };
+            apply_observations(cache, sink, upstream_id, &headers, observed_at_unix_millis);
+        }
+        LifecycleEvent::UpstreamAttempt {
+            upstream_id,
+            attempt_num,
+            ..
+        } => {
             let partial = partials
                 .entry(event_id)
                 .or_insert_with(|| Partial::new(now));
             partial.upstream_id = Some(upstream_id);
             partial.inserted_at = Some(now);
+            partial.attempt_num = attempt_num;
         }
         LifecycleEvent::UpstreamResponseStarted {
             status, headers, ..
@@ -148,7 +193,7 @@ fn handle_event(
             if !is_observable_status {
                 return;
             }
-            if cache.is_none() && sink.is_none() {
+            if cache.is_none() && sink.is_none() && bus.is_none() {
                 return;
             }
             let Some(partial) = partials.get(&event_id) else {
@@ -167,7 +212,14 @@ fn handle_event(
                 .increment(1);
                 return;
             };
-            apply_observations(cache, sink, upstream_id, &headers);
+            let header_map = header_map_from_snapshot(&headers);
+            apply_observations(
+                cache,
+                sink,
+                upstream_id,
+                &header_map,
+                system_time_unix_millis(SystemTime::now()),
+            );
         }
         LifecycleEvent::RequestTerminated { .. } => {
             partials.remove(&event_id);
@@ -184,12 +236,10 @@ fn apply_observations(
     cache: Option<&dyn SubscriptionQuotaCacheLike>,
     sink: Option<&SubscriptionQuotaSink>,
     upstream_id: Uuid,
-    snapshot: &HeaderSnapshot,
+    headers: &HeaderMap,
+    observed_at_unix_millis: u64,
 ) {
-    let observed_at_unix_millis = system_time_unix_millis(SystemTime::now());
-    let header_map = header_map_from_snapshot(snapshot);
-    let records =
-        build_subscription_quota_samples(&header_map, upstream_id, observed_at_unix_millis);
+    let records = build_subscription_quota_samples(headers, upstream_id, observed_at_unix_millis);
     if records.is_empty() {
         metrics::counter!(
             "cc_lb_lifecycle_subscription_quota_events_total",
@@ -215,7 +265,7 @@ fn apply_observations(
     .increment(1);
 }
 
-fn header_map_from_snapshot(snapshot: &HeaderSnapshot) -> HeaderMap {
+pub(crate) fn header_map_from_snapshot(snapshot: &HeaderSnapshot) -> HeaderMap {
     let mut map = HeaderMap::new();
     for (name, value) in snapshot
         .anthropic_headers
@@ -350,8 +400,12 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle =
-            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+        let handle = spawn_lifecycle_subscription_quota_subscriber(
+            rx,
+            Some(subscriber_cache),
+            Some(sink),
+            None,
+        );
 
         tx.send(LifecycleEvent::UpstreamAttempt {
             event_id: eid("quota-a"),
@@ -389,8 +443,12 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle =
-            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+        let handle = spawn_lifecycle_subscription_quota_subscriber(
+            rx,
+            Some(subscriber_cache),
+            Some(sink),
+            None,
+        );
 
         tx.send(response_started("quota-b", quota_headers()))
             .await
