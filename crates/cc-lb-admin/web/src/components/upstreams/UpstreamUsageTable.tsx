@@ -686,7 +686,7 @@ function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
   if (window === 'unified') {
     return (
       row.upstream.kind === 'openai_oauth' &&
-      selectCodexCredits(row.windows) != null
+      (selectCodexCredits(row.windows) != null || row.creditHistory != null)
     );
   }
   const snap = row.windows.find((candidate) => candidate.window === window);
