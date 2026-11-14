@@ -106,6 +106,19 @@ function newestCreditField(
       : latest;
   }, undefined);
 }
+function creditFieldIsFresh(
+  snapshot: QuotaSnapshot | undefined,
+  field: 'has_credits' | 'unlimited' | 'limit_reached',
+  nowUnixMillis: number,
+  maxStalenessSecs: number,
+): boolean {
+  if (snapshot == null) return false;
+  const observation = snapshot.credits?.observations?.[field];
+  return observation != null
+    ? Math.max(0, nowUnixMillis - observation.observed_at_unix_millis) <=
+        maxStalenessSecs * 1000
+    : snapshot.state === 'fresh';
+}
 
 /** Keep each fact attached to its own observation; a fresh balance is not a fresh availability flag. */
 export function selectCodexCredits(
@@ -124,29 +137,51 @@ export function selectCodexCredits(
   );
   if (creditObservations.length === 0) return null;
 
-  // Routing retains explicit restrictions from either window, even when stale.
-  // A later clear from the other source cannot cancel that restriction.
-  const limit = newest(
-    observations.filter((snapshot) => snapshot.credits?.limit_reached === true),
+  const limitObservation = newestCreditField(
+    creditObservations,
+    'limit_reached',
   );
+  const limit =
+    limitObservation?.credits?.limit_reached === true &&
+    creditFieldIsFresh(
+      limitObservation,
+      'limit_reached',
+      nowUnixMillis,
+      maxStalenessSecs,
+    )
+      ? limitObservation
+      : undefined;
   const unavailable = newest(
     observations.filter((snapshot) => snapshot.fallback_available === false),
   );
-  const availability = newest(
-    creditObservations.filter(
-      (snapshot) =>
-        snapshot.credits?.unlimited === true ||
-        snapshot.credits?.has_credits != null,
-    ),
-  );
+  const availabilityObservations = [
+    newestCreditField(creditObservations, 'has_credits'),
+    newestCreditField(creditObservations, 'unlimited'),
+  ]
+    .filter((snapshot): snapshot is QuotaSnapshot => snapshot != null)
+    .sort(
+      (left, right) =>
+        (right.observed_at_unix_millis ?? 0) -
+        (left.observed_at_unix_millis ?? 0),
+    );
+  const availability = availabilityObservations[0];
   const statusObservation =
     limit ?? unavailable ?? availability ?? newest(creditObservations);
   const credits = statusObservation?.credits;
+  const availabilityFresh = availability
+    ? creditFieldIsFresh(
+        availability,
+        availability.credits?.has_credits != null ? 'has_credits' : 'unlimited',
+        nowUnixMillis,
+        maxStalenessSecs,
+      )
+    : false;
   const status = limit
     ? 'Blocked'
     : unavailable
       ? 'Unavailable'
-      : statusObservation?.state === 'stale'
+      : statusObservation?.state === 'stale' ||
+          (availability != null && !availabilityFresh)
         ? 'Stale'
         : credits?.unlimited === true
           ? 'Unlimited'

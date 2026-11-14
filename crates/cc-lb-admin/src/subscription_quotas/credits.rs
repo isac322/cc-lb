@@ -11,6 +11,7 @@ pub(super) struct CreditHistoryQuery {
     since_unix_secs: Option<u64>,
     until_unix_secs: Option<u64>,
     relative_range_secs: Option<u64>,
+    max_points_per_series: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,13 +82,30 @@ pub(super) async fn handle_history(
                 "invalid credit history bounds",
             ));
         }
+        let max_points_per_series = query
+            .max_points_per_series
+            .unwrap_or(DEFAULT_SERIES_MAX_POINTS);
+        if !(2..=MAX_SERIES_MAX_POINTS).contains(&max_points_per_series) {
+            return Err(bad_request(
+                "invalid_max_points_per_series",
+                "max_points_per_series must be between 2 and 10000",
+            ));
+        }
         let upstreams =
             upstreams_for_optional_query(storage(&state)?, query.upstream_ids.as_deref())
                 .await?
                 .into_iter()
                 .filter(|upstream| upstream.kind == UpstreamKind::OpenaiOauth)
                 .collect();
-        build_history(&state, upstreams, since, until, now).await
+        build_history(
+            &state,
+            upstreams,
+            since,
+            until,
+            now,
+            max_points_per_series as usize,
+        )
+        .await
     }
     .await;
     match result {
@@ -102,6 +120,7 @@ pub(super) async fn build_history(
     since: u64,
     until: u64,
     now: u64,
+    max_points_per_series: usize,
 ) -> Result<CreditHistoryResponse, Response> {
     let storage = storage(state)?;
     let ids = upstreams
@@ -163,14 +182,17 @@ pub(super) async fn build_history(
         let durable = latest_by_upstream.remove(&upstream.id).unwrap_or_default();
         let current = current_credit_state(&durable, &cached);
         let latest = latest_balance(current.as_ref(), now, max_staleness);
-        let series = account_history(
-            checkpoints_by_upstream
-                .remove(&upstream.id)
-                .unwrap_or_default(),
-            &latest,
-            since.saturating_mul(1_000),
-            end,
-            now,
+        let series = bound_points(
+            account_history(
+                checkpoints_by_upstream
+                    .remove(&upstream.id)
+                    .unwrap_or_default(),
+                &latest,
+                since.saturating_mul(1_000),
+                end,
+                now,
+            ),
+            max_points_per_series,
         );
         // Match shipped OpenAI Pool quota membership. Disabled accounts can be
         // inspected in lists but never contribute to the current pool lens.
@@ -183,13 +205,14 @@ pub(super) async fn build_history(
             series,
         });
     }
-    let pool = pool_history(
+    let mut pool = pool_history(
         &histories,
         &pool_indices,
         since.saturating_mul(1_000),
         end,
         now,
     );
+    pool.series = bound_points(pool.series, max_points_per_series);
     Ok(CreditHistoryResponse {
         now_unix_secs: now / 1_000,
         since_unix_secs: since,
@@ -492,6 +515,26 @@ fn account_history(
         });
     }
     points
+}
+fn bound_points(mut points: Vec<CreditPoint>, max_points: usize) -> Vec<CreditPoint> {
+    if points.len() <= max_points {
+        return points;
+    }
+    let last = points.len() - 1;
+    let stride = (last as f64 / (max_points.saturating_sub(1) as f64)).ceil() as usize;
+    let mut bounded = Vec::with_capacity(max_points);
+    for index in (0..=last).step_by(stride.max(1)) {
+        bounded.push(points[index].clone());
+        if bounded.len() == max_points.saturating_sub(1) {
+            break;
+        }
+    }
+    if bounded.last().map(|point| point.at_unix_millis)
+        != points.last().map(|point| point.at_unix_millis)
+    {
+        bounded.push(points.pop().expect("non-empty points"));
+    }
+    bounded
 }
 
 fn push_state_point(points: &mut Vec<CreditPoint>, point: CreditPoint) {

@@ -1519,7 +1519,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
       <AreaChart
         responsive
         className="size-full"
-        data={seriesData}
+        data={(creditData ?? seriesData) as CreditPlotRow[]}
         margin={{
           top: 16,
           right: creditData ? 52 : 8,
@@ -1576,13 +1576,22 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                 {poolTooltipRows(payload).map((p) => {
                   const key = String(p.dataKey);
                   const credit = key === 'credits';
-                  const raw = (p.payload as CreditPlotRow | undefined)
-                    ?.credit_balance;
+                  const creditPoint = p.payload as CreditPlotRow | undefined;
+                  const raw = creditPoint?.credit_balance;
+                  const creditContributing =
+                    creditPoint?.credit_contributing ?? 0;
+                  const creditEligible = creditPoint?.credit_eligible ?? 0;
+                  const partialCredit =
+                    credit &&
+                    raw != null &&
+                    creditContributing < creditEligible;
                   const shortLabel = credit
                     ? 'Credits'
                     : (windowLabels?.[key] ?? windowLabel(key));
                   const longLabel = credit
-                    ? 'Absolute credit balance'
+                    ? partialCredit
+                      ? `${creditContributing} of ${creditEligible} eligible accounts reported`
+                      : 'Absolute credit balance'
                     : windowLabel(key, { long: true });
                   return (
                     <div
@@ -1601,7 +1610,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                         {credit
                           ? raw == null
                             ? '—'
-                            : `${raw} credits`
+                            : `${raw} credits${partialCredit ? ` · ${creditContributing}/${creditEligible}` : ''}`
                           : typeof p.value === 'number'
                             ? `${formatQuotaPercent(p.value)} used`
                             : '—'}
@@ -1643,7 +1652,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
         ))}
       </AreaChart>
       {creditData ? (
-        <div className="pointer-events-auto absolute inset-0">
+        <div className="pointer-events-none absolute inset-0">
           <LineChart
             responsive
             className="size-full"
