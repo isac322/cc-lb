@@ -219,7 +219,7 @@ export const CodexCreditMini = memo(function CodexCreditMini({
   const { effective: timeZone } = useTimezone();
   const points = useMemo(
     () =>
-      data?.history.series.map((point) => ({
+      data?.history?.series?.map((point) => ({
         unix: point.at_unix_millis / 1000,
         value: creditChartCoordinate(point.balance),
         raw: point.balance,
@@ -227,7 +227,7 @@ export const CodexCreditMini = memo(function CodexCreditMini({
       })) ?? [],
     [data],
   );
-  const latest = data?.history.latest;
+  const latest = data?.history?.latest;
   const current = latest?.state === 'fresh' ? latest.balance : null;
   const value = formatCreditInteger(current);
   const observed = latest?.observed_at_unix_millis;
