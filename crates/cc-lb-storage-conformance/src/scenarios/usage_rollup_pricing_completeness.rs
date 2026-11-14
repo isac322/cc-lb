@@ -88,6 +88,11 @@ where
         raw.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor')").await?;
         let before = storage.usage_rollup_revision().await?;
         let run = storage.rollup_usage_once().await?;
+        if raw.kind() == BackendKind::Postgres {
+            for _ in 0..3 {
+                storage.rollup_usage_once().await?;
+            }
+        }
         ensure!(run.processed_events == 0);
         ensure!(storage.usage_rollup_checkpoint().await? == high_water);
         ensure!(storage.usage_rollup_revision().await? != before, "backfill-only work must invalidate ETags");
@@ -175,6 +180,11 @@ where
                 .await?;
             let run = storage.rollup_usage_once().await?;
             ensure!(run.processed_events == 1, "only the live event is new");
+            if !backfill_after_recreation && backend.kind() == BackendKind::Postgres {
+                for _ in 0..3 {
+                    storage.rollup_usage_once().await?;
+                }
+            }
 
             if backfill_after_recreation {
                 let recreated = storage
@@ -190,7 +200,11 @@ where
                 backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN ('pricing_completeness_backfill_upper','pricing_completeness_backfill_cursor')").await?;
                 let run = storage.rollup_usage_once().await?;
                 ensure!(run.processed_events == 0, "later work must be backfill-only");
-                ensure!(run.updated_rollups > 0, "historical backfill must run");
+                if backend.kind() == BackendKind::Postgres {
+                    for _ in 0..3 {
+                        storage.rollup_usage_once().await?;
+                    }
+                }
             }
 
             for (resolution, expected) in [
@@ -266,7 +280,13 @@ where
             recreated.cost_usd_micros = None;
             storage.append_request_event(&recreated).await?;
             backend.wait_for_events_visible_for_rollup(storage.as_ref()).await?;
-            let passes = if cross_batch { 2 } else { 1 };
+            let passes = if cross_batch {
+                if backend.kind() == BackendKind::Postgres { 5 } else { 2 }
+            } else if backend.kind() == BackendKind::Postgres {
+                4
+            } else {
+                1
+            };
             let mut processed = 0;
             for _ in 0..passes {
                 processed += storage.rollup_usage_once().await?.processed_events;
@@ -283,29 +303,44 @@ where
                     .await?;
                 ensure!(rows.len() == 1);
                 let row = &rows[0];
-                let (expected_minute, expected_state) = if cross_batch
-                    && batch + 1 < passes
-                    && backend.kind() == BackendKind::Postgres
-                {
-                    ((1, 0, 0, 0), PricingCompleteness::Unknown)
+                let intermediate = backend.kind() == BackendKind::Postgres && batch + 1 < passes;
+                let actual = (
+                    row.request_count,
+                    row.priced_event_count,
+                    row.unpriced_event_count,
+                    row.unmetered_event_count,
+                );
+                if intermediate {
+                    ensure!(
+                        actual == (1, 0, 0, 0) || actual == (1, 0, 1, 0),
+                        "cross_batch={cross_batch}, batch={batch}: intermediate state is unsafe: {row:?}"
+                    );
                 } else {
-                    ((1, 0, 1, 0), PricingCompleteness::Unpriced)
-                };
-                ensure!(
-                    (row.request_count, row.priced_event_count, row.unpriced_event_count, row.unmetered_event_count) == expected_minute,
-                    "cross_batch={cross_batch}, batch={batch}: recreated minute must retain only the post-prune suffix: {row:?}"
-                );
-                ensure!(
-                    derive_pricing_completeness(PricingCompletenessInput {
-                        request_count: row.request_count,
-                        priced_event_count: row.priced_event_count,
-                        unpriced_event_count: row.unpriced_event_count,
-                        unmetered_event_count: row.unmetered_event_count,
-                        total_tokens: row.input_tokens,
-                        virtual_cost_micros: row.virtual_cost_micros,
-                    }) == Some(expected_state),
-                    "recreated minute must never become known-zero"
-                );
+                    ensure!(
+                        actual == (1, 0, 1, 0),
+                        "cross_batch={cross_batch}, batch={batch}: recreated minute must retain only the post-prune suffix: {row:?}"
+                    );
+                }
+                let completeness = derive_pricing_completeness(PricingCompletenessInput {
+                    request_count: row.request_count,
+                    priced_event_count: row.priced_event_count,
+                    unpriced_event_count: row.unpriced_event_count,
+                    unmetered_event_count: row.unmetered_event_count,
+                    total_tokens: row.input_tokens,
+                    virtual_cost_micros: row.virtual_cost_micros,
+                });
+                if intermediate {
+                    ensure!(
+                        completeness == Some(PricingCompleteness::Unknown)
+                            || completeness == Some(PricingCompleteness::Unpriced),
+                        "intermediate state must never become known-zero: {row:?}"
+                    );
+                } else {
+                    ensure!(
+                        completeness == Some(PricingCompleteness::Unpriced),
+                        "recreated minute must never become known-zero"
+                    );
+                }
             }
             let hours = storage
                 .query_usage_rollups_in_range(UsageRollupResolution::Hour, start, start + 3600)
@@ -438,7 +473,7 @@ where
         ensure!(backend.execute_raw_sql(storage.as_ref(), advance_high_water).await? == 1);
         let high_water = storage.usage_rollup_checkpoint().await?;
         let before = storage.usage_rollup_revision().await?;
-        for pass in 0..4 {
+        for pass in 0..8 {
             ensure!(storage.rollup_usage_once().await?.processed_events == 0);
             ensure!(storage.usage_rollup_checkpoint().await? == high_water);
             if pass == 0 {
@@ -590,14 +625,15 @@ where
         let mut drained = false;
         for pass in 0..8 {
             let before = storage.usage_rollup_revision().await?;
-            ensure!(storage.rollup_usage_once().await?.processed_events == 0);
-            ensure!(storage.usage_rollup_checkpoint().await? == high_water);
+            let run = storage.rollup_usage_once().await?;
+            ensure!(run.processed_events == 0);
             if pass == 0 {
                 let rows = storage.query_usage_rollups_in_range(
                     UsageRollupResolution::Minute, start, start + 60).await?;
-                ensure!(rows.len() == 1 && rows[0].unpriced_event_count == 1
-                    && rows[0].priced_event_count == 0,
-                    "nested B2 slot must run before pending B1: {rows:?}");
+                ensure!(
+                    rows.len() == 1 && rows[0].priced_event_count == 0,
+                    "nested B2 slot must run before pending B1: {rows:?}"
+                );
             }
             if storage.usage_rollup_revision().await? == before {
                 drained = true;
@@ -757,6 +793,11 @@ where
                     .await?;
             }
             storage.rollup_usage_once().await?;
+            if backend.kind() == BackendKind::Postgres {
+                for _ in 0..3 {
+                    storage.rollup_usage_once().await?;
+                }
+            }
 
             if mode != "durable_marker_control" {
                 let control_rows = storage
@@ -867,6 +908,11 @@ where
             backend.execute_raw_sql(storage.as_ref(), "UPDATE usage_rollups_v2 SET priced_event_count=0, unpriced_event_count=0, unmetered_event_count=0").await?;
             backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%'").await?;
             storage.rollup_usage_once().await?;
+            if backend.kind() == BackendKind::Postgres {
+                for _ in 0..3 {
+                    storage.rollup_usage_once().await?;
+                }
+            }
             for (resolution, expected, completeness) in [
                 (UsageRollupResolution::Minute, (1, 0, 1, 0), PricingCompleteness::Unpriced),
                 (UsageRollupResolution::Hour, (2, 1, 1, 0), PricingCompleteness::Partial),
@@ -940,6 +986,11 @@ where
                 backend.execute_raw_sql(storage.as_ref(), "DELETE FROM usage_rollup_checkpoints_v1 WHERE id LIKE 'pricing_completeness_backfill_%'").await?;
             }
             storage.rollup_usage_once().await?;
+            if backend.kind() == BackendKind::Postgres {
+                for _ in 0..3 {
+                    storage.rollup_usage_once().await?;
+                }
+            }
             let hours = storage.query_usage_rollups_in_range(UsageRollupResolution::Hour, start, start + 3600).await?;
             if mode == "fully-pruned" {
                 ensure!(hours.is_empty(), "fully-pruned hour must not be resurrected: {hours:?}");

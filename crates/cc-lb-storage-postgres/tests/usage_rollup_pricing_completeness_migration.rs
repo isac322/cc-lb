@@ -84,8 +84,22 @@ async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() ->
         .fetch_one(pool)
         .await?;
         assert_eq!(scanned, 10_000);
-        // A new storage handle resumes from durable checkpoint state instead of repeating the first batch.
         let resumed = PostgresStorage::new(pool.clone(),Arc::new(cc_lb_clock::SystemClock));
+        // The short scan page initializes verification; it does not flush staged counts.
+        resumed.rollup_usage_once().await?;
+        assert_eq!(totals(pool).await?,(0,0,0));
+        let verified: i64 = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 \
+             WHERE id='pricing_completeness_stage_base_verified_count'",
+        ).fetch_optional(pool).await?.unwrap_or(0);
+        assert_eq!(verified, 0);
+        resumed.rollup_usage_once().await?;
+        assert_eq!(totals(pool).await?,(0,0,0));
+        let verified: i64 = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 \
+             WHERE id='pricing_completeness_stage_base_verified_count'",
+        ).fetch_one(pool).await?;
+        assert_eq!(verified, 10_000);
         resumed.rollup_usage_once().await?;
         assert_eq!(totals(pool).await?,(6666,6668,6668));
         let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1")
@@ -94,9 +108,7 @@ async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() ->
         let scan_marker: Option<i64> = sqlx::query_scalar(
             "SELECT value FROM usage_rollup_checkpoints_v1 \
              WHERE id='pricing_completeness_stage_base_scanned_count'",
-        )
-        .fetch_optional(pool)
-        .await?;
+        ).fetch_optional(pool).await?;
         assert_eq!(scan_marker, None);
         let finished: (i64, String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
             .fetch_one(pool).await?;
@@ -270,6 +282,9 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
             .execute(pool)
             .await?;
             fixture.storage.rollup_usage_once().await?;
+            if intact {
+                fixture.storage.rollup_usage_once().await?;
+            }
             for (resolution, bucket_start) in [
                 (UsageRollupResolution::Hour, H),
                 (UsageRollupResolution::Minute, H + 300),
@@ -428,11 +443,23 @@ async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestR
                 wait_until_xid_below_xmin(pool, &last_xid).await?;
                 // Exactly 9,998 remaining fillers + B + C fill the next batch;
                 // committed D remains above high_water despite its lower seq.
-                let second_processed = fixture.storage.rollup_usage_once().await?.processed_events;
-                assert!(second_processed > 0 && second_processed <= 10_000);
+                let mut second_processed = 0;
+                for _ in 0..3 {
+                    second_processed += fixture.storage.rollup_usage_once().await?.processed_events;
+                    let current: (i64, String) = sqlx::query_as(
+                        "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
+                    )
+                    .fetch_one(pool)
+                    .await?;
+                    if current == (c_seq, x_c.clone()) {
+                        break;
+                    }
+                }
+                assert!(second_processed > 0 && second_processed <= 20_000);
                 let high_water: (i64, String) = sqlx::query_as(
                     "SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='high_water'",
-                ).fetch_one(pool).await?;
+                )
+                .fetch_one(pool).await?;
                 assert_eq!(high_water, (c_seq, x_c));
                 if !intact {
                     assert_eq!(fixture.storage.prune_request_events_before(
@@ -443,7 +470,7 @@ async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestR
                      DELETE FROM usage_rollup_checkpoints_v1 \
                      WHERE id LIKE 'pricing_completeness_%' OR id='request_events_prune_cutoff_unix_secs';",
                 ).execute(pool).await?;
-                for _ in 0..3 {
+                for _ in 0..6 {
                     fixture.storage.rollup_usage_once().await?;
                 }
                 for (resolution, bucket_start) in [
@@ -656,6 +683,16 @@ async fn bottom_slot_xid_seq_inversion_single_and_multi_batch_preserves_unknown(
                     assert_eq!(staged, (1, 0, 0), "Batch 1 must reach and stage A");
                 }
                 fixture.storage.rollup_usage_once().await?;
+                for _ in 0..2 {
+                    fixture.storage.rollup_usage_once().await?;
+                }
+                if multi_batch {
+                    // The full scan page, short scan page, full verification
+                    // page, and final short verification/flush are separate
+                    // bounded transactions.
+                    fixture.storage.rollup_usage_once().await?;
+                    fixture.storage.rollup_usage_once().await?;
+                }
                 let staged: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
                 )
