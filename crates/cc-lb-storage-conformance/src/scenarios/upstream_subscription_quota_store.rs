@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_domain::SubscriptionQuotaCredits;
+use cc_lb_domain::{CreditSource, SubscriptionQuotaCredits};
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
@@ -83,6 +83,11 @@ scenario!(append_then_list_latest_roundtrip, |storage| async move {
         approx_cloud_messages: Some([30, 40]),
         ..Default::default()
     });
+    record
+        .credits
+        .as_mut()
+        .expect("credit fixture")
+        .stamp_observations(record.observed_at_unix_millis, CreditSource::Header);
     storage
         .record_subscription_quota_samples(std::slice::from_ref(&record))
         .await?;
@@ -132,11 +137,17 @@ scenario!(
             storage
                 .record_subscription_quota_samples(std::slice::from_ref(&record))
                 .await?;
-            expected.push(checkpoint(&record));
+            let mut expected_record = record.clone();
+            if let Some(credits) = expected_record.credits.as_mut() {
+                credits
+                    .stamp_observations(expected_record.observed_at_unix_millis, CreditSource::Api);
+            }
+            expected.push(checkpoint(&expected_record));
         }
+        let actual = checkpoint_rows(&*storage, &[upstream]).await?;
         ensure!(
-            checkpoint_rows(&*storage, &[upstream]).await? == expected,
-            "every credit-only transition, including removal, must bypass deadband and fingerprint dedup"
+            actual == expected,
+            "every credit-only transition, including removal, must bypass deadband and fingerprint dedup",
         );
         let duplicate = {
             let mut duplicate = record.clone();

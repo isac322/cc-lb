@@ -220,12 +220,7 @@ async fn record_samples_in_tx(
             }
         }
         upsert_latest(tx, &record).await?;
-        if record.sample_kind != SubscriptionQuotaSampleKind::Absent
-            || matches!(
-                record.window,
-                SubscriptionQuotaWindow::Unified | SubscriptionQuotaWindow::Overage
-            )
-        {
+        if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
             insert_checkpoint_if_changed(tx, &SubscriptionQuotaCheckpointRecord::from(&*record))
                 .await?;
         }

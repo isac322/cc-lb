@@ -1245,15 +1245,13 @@ impl ResponsesWebSocketGateway {
         });
         let is_error = sonic_rs::get_from_slice(frame, &["type"])
             .is_ok_and(|value| value.as_str() == Some("error"));
-        let Some(turn_id) = self.resolve_provider_turn_id(
+        let turn_id = self.resolve_provider_turn_id(
             connection_id,
             response_id.as_deref(),
             parent_response_id.as_deref(),
             lane.as_deref(),
             is_error,
-        ) else {
-            return None;
-        };
+        )?;
         if let Some(turn) = self.turns.get_mut(&turn_id)
             && turn.connection_id == Some(connection_id)
             && turn.sent
@@ -1612,10 +1610,10 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
-        if kind == "response.created" {
-            if let Some(turn) = self.turns.get_mut(&turn_id) {
-                turn.response_created = true;
-            }
+        if kind == "response.created"
+            && let Some(turn) = self.turns.get_mut(&turn_id)
+        {
+            turn.response_created = true;
         }
         if let Some(response) = response
             && let Some((usage, complete)) = observed_response_usage(response)
