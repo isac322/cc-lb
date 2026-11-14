@@ -337,66 +337,74 @@ describe('Codex credit observations', () => {
   });
 
   it('uses a fresh unlimited field without stale companion availability', () => {
-    const facts = selectCodexCredits([
-      snapshot({
-        state: 'stale',
-        observed_at_unix_millis: (NOW - 600) * 1000,
-        credits: credit({
-          has_credits: false,
-          observations: {
-            has_credits: {
-              source: 'api',
-              observed_at_unix_millis: (NOW - 600) * 1000,
+    const facts = selectCodexCredits(
+      [
+        snapshot({
+          state: 'stale',
+          observed_at_unix_millis: (NOW - 600) * 1000,
+          credits: credit({
+            has_credits: false,
+            observations: {
+              has_credits: {
+                source: 'api',
+                observed_at_unix_millis: (NOW - 600) * 1000,
+              },
             },
-          },
+          }),
         }),
-      }),
-      snapshot({
-        window: 'unified',
-        credits: credit({
-          unlimited: true,
-          observations: {
-            unlimited: {
-              source: 'api',
-              observed_at_unix_millis: NOW * 1000,
+        snapshot({
+          window: 'unified',
+          credits: credit({
+            unlimited: true,
+            observations: {
+              unlimited: {
+                source: 'api',
+                observed_at_unix_millis: NOW * 1000,
+              },
             },
-          },
+          }),
         }),
-      }),
-    ], 300, NOW * 1000);
+      ],
+      300,
+      NOW * 1000,
+    );
     expect(facts?.status).toBe('Unlimited');
   });
 
   it('uses comparable request order before snapshot timestamps', () => {
-    const facts = selectCodexCredits([
-      snapshot({
-        observed_at_unix_millis: NOW * 1000,
-        credits: credit({
-          has_credits: true,
-          observations: {
-            has_credits: {
-              source: 'header',
-              observed_at_unix_millis: NOW * 1000,
-              request_order: { publisher: 'http', sequence: 2 },
+    const facts = selectCodexCredits(
+      [
+        snapshot({
+          observed_at_unix_millis: NOW * 1000,
+          credits: credit({
+            has_credits: true,
+            observations: {
+              has_credits: {
+                source: 'header',
+                observed_at_unix_millis: NOW * 1000,
+                request_order: { publisher: 'http', sequence: 2 },
+              },
             },
-          },
+          }),
         }),
-      }),
-      snapshot({
-        window: 'unified',
-        observed_at_unix_millis: (NOW + 10) * 1000,
-        credits: credit({
-          has_credits: false,
-          observations: {
-            has_credits: {
-              source: 'api',
-              observed_at_unix_millis: (NOW + 10) * 1000,
-              request_order: { publisher: 'http', sequence: 1 },
+        snapshot({
+          window: 'unified',
+          observed_at_unix_millis: (NOW + 10) * 1000,
+          credits: credit({
+            has_credits: false,
+            observations: {
+              has_credits: {
+                source: 'api',
+                observed_at_unix_millis: (NOW + 10) * 1000,
+                request_order: { publisher: 'http', sequence: 1 },
+              },
             },
-          },
+          }),
         }),
-      }),
-    ], 300, NOW * 1000);
+      ],
+      300,
+      NOW * 1000,
+    );
     expect(facts?.status).toBe('Available');
   });
 

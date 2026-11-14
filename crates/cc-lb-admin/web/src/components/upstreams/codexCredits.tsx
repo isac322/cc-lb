@@ -82,11 +82,7 @@ function fieldSourceLabel(
   return `${source}${stale ? ' · stale' : ''}`;
 }
 
-type CreditField =
-  | 'balance'
-  | 'has_credits'
-  | 'unlimited'
-  | 'limit_reached';
+type CreditField = 'balance' | 'has_credits' | 'unlimited' | 'limit_reached';
 
 interface CreditFieldEvidence {
   snapshot: QuotaSnapshot;
@@ -167,10 +163,7 @@ export function selectCodexCredits(
   );
   if (creditObservations.length === 0) return null;
 
-  const limitEvidence = newestCreditField(
-    creditObservations,
-    'limit_reached',
-  );
+  const limitEvidence = newestCreditField(creditObservations, 'limit_reached');
   const limit =
     limitEvidence?.snapshot.credits?.limit_reached === true &&
     creditFieldIsFresh(

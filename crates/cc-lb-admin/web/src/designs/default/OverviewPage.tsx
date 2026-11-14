@@ -1592,8 +1592,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                 undefined,
               );
             const creditRaw = creditPoint?.credit_balance;
-            const creditContributing =
-              creditPoint?.credit_contributing ?? 0;
+            const creditContributing = creditPoint?.credit_contributing ?? 0;
             const creditEligible = creditPoint?.credit_eligible ?? 0;
             const partialCredit =
               creditRaw != null && creditContributing < creditEligible;
@@ -1606,8 +1605,7 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
                   .filter((p) => String(p.dataKey) !== 'credits')
                   .map((p) => {
                     const key = String(p.dataKey);
-                    const shortLabel =
-                      windowLabels?.[key] ?? windowLabel(key);
+                    const shortLabel = windowLabels?.[key] ?? windowLabel(key);
                     return (
                       <div
                         key={key}
@@ -1685,20 +1683,20 @@ export const PoolQuotaThemedChart = memo(function PoolQuotaThemedChart({
             connectNulls={false}
           />
         ))}
-      {creditData ? (
-        <Line
-          data={creditData}
-          dataKey="credits"
-          yAxisId="credits"
-          type="stepAfter"
-          stroke="var(--color-text-muted)"
-          strokeWidth={1.5}
-          dot={false}
-          activeDot={false}
-          connectNulls={false}
-          isAnimationActive={false}
-        />
-      ) : null}
+        {creditData ? (
+          <Line
+            data={creditData}
+            dataKey="credits"
+            yAxisId="credits"
+            type="stepAfter"
+            stroke="var(--color-text-muted)"
+            strokeWidth={1.5}
+            dot={false}
+            activeDot={false}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        ) : null}
       </AreaChart>
     </div>
   );
