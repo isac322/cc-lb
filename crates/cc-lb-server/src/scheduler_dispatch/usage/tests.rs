@@ -525,10 +525,7 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
             .state,
         SubscriptionQuotaDataState::Stale
     );
-    assert_eq!(
-        evaluate(OBSERVED + 61_000).kept_upstream_ids,
-        vec![key_id]
-    );
+    assert_eq!(evaluate(OBSERVED + 61_000).kept_upstream_ids, vec![key_id]);
 }
 
 #[test]

@@ -378,6 +378,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .execute(storage.pool())
     .await
     .expect("install provider error code column for current writer");
+    sqlx::raw_sql(include_str!(
+        "../migrations/0123_request_events_funding.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install funding column for current writer");
     sqlx::query(
         "UPDATE usage_rollup_reconciliations_v1
          SET status = 'complete'
