@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Theme } from '../src/lib/theme';
 import type { QuotaCredits, QuotaSnapshot } from '../src/lib/api';
 
 export const NOW = Date.parse('2026-11-11T12:00:00Z') / 1000;
@@ -46,7 +46,11 @@ export const scenarios = [
   ] },
 ];
 
-export async function installFixtures(page: Page, observations: QuotaSnapshot[]) {
+export async function installFixtures(
+  page: Page,
+  observations: QuotaSnapshot[],
+  theme: Theme = 'dark',
+) {
   const latestRequests: URL[] = [];
   const windows = [
     snapshot({ window: '5h', utilization: 0.25, resets_at_unix_secs: NOW + 3600 }),
@@ -54,10 +58,11 @@ export async function installFixtures(page: Page, observations: QuotaSnapshot[])
     ...observations,
   ];
   await page.clock.install({ time: new Date(NOW * 1000) });
-  await page.addInitScript(() => {
+  await page.addInitScript((initialTheme: Theme) => {
     localStorage.setItem('cc-lb-admin-token', 'synthetic-e2e-token');
     localStorage.setItem('cclb.locale', 'en-US');
-  });
+    localStorage.setItem('cclb.theme', initialTheme);
+  }, theme);
   await page.route('**/admin/**', async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
