@@ -73,6 +73,7 @@ struct Partial {
     cache_write: Option<u64>,
     cache_write_30m: Option<u64>,
     cache_write_12h: Option<u64>,
+    cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
     usage_seen: bool,
 }
 
@@ -190,6 +191,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_write = usage.cache_write_input_tokens;
             partial.cache_write_30m = usage.cache_write_input_tokens_30m;
             partial.cache_write_12h = usage.cache_write_input_tokens_12h;
+            partial.cache_write_evidence = usage.cache_write_evidence;
             partial.service_tier = usage.service_tier;
             partial.usage_seen = true;
         }
@@ -208,6 +210,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_write = success.usage.cache_write_input_tokens;
             partial.cache_write_30m = success.usage.cache_write_input_tokens_30m;
             partial.cache_write_12h = success.usage.cache_write_input_tokens_12h;
+            partial.cache_write_evidence = success.usage.cache_write_evidence;
             partial.service_tier = success.usage.service_tier;
             partial.usage_seen = true;
         }
@@ -220,12 +223,12 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let breakdown = crate::virtual_cost_micros_full_with_context_and_provider_writes(
+    let breakdown = crate::compute_usage_fields_cost(
         model,
         partial.input_tokens,
         partial.output_tokens,
-        partial.input_image_tokens.unwrap_or_default(),
-        partial.output_image_tokens.unwrap_or_default(),
+        partial.input_image_tokens,
+        partial.output_image_tokens,
         partial.cache_creation_input_tokens,
         partial.cache_creation_5m,
         partial.cache_creation_1h,
@@ -233,9 +236,10 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.cache_write,
         partial.cache_write_30m,
         partial.cache_write_12h,
+        partial.cache_write_evidence,
         partial.service_tier.as_deref(),
-    )
-    .unwrap_or_else(crate::ComputedCostBreakdown::unknown);
+        partial.usage_seen,
+    );
     Some(event_cost_breakdown_from_pricing(breakdown))
 }
 
@@ -325,6 +329,48 @@ mod tests {
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
+    }
+
+    #[test]
+    fn invalid_write_evidence_survives_observed_and_completed_usage() {
+        for streamed in [false, true] {
+            let usage = UsageSnapshot {
+                input_tokens: 100,
+                cache_write_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Invalid),
+                ..UsageSnapshot::default()
+            };
+            let mut partial = Partial {
+                model: Some("gpt-6.1-sol".to_owned()),
+                ..Partial::default()
+            };
+            let event = if streamed {
+                LifecycleEvent::StreamCompleted {
+                    event_id: eid("invalid-native-write"),
+                    result: Ok(StreamSuccess {
+                        usage,
+                        usage_present: true,
+                        ..StreamSuccess::default()
+                    }),
+                }
+            } else {
+                LifecycleEvent::UsageObserved {
+                    event_id: eid("invalid-native-write"),
+                    usage,
+                    source: UsageSource::NonStreamBody,
+                }
+            };
+            merge(&mut partial, event);
+            assert_eq!(
+                partial.cache_write_evidence,
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            );
+            assert_eq!(
+                compute_cost(&partial)
+                    .expect("invalid usage still produces unknown price")
+                    .total_micros,
+                None
+            );
+        }
     }
 
     #[test]

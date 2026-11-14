@@ -601,7 +601,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
         let mut usage = UsageCounts::default();
         for element in elements {
             let Some(usage_value) =
-                usage_value_for_shape(element, shape).filter(|value| !value.is_null())
+                usage_value_for_shape(element, shape).filter(|value| value.is_object())
             else {
                 continue;
             };
@@ -616,7 +616,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
         return usage;
     }
 
-    let Some(usage_value) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
+    let Some(usage_value) = usage_value_for_shape(value, shape).filter(|value| value.is_object())
     else {
         return UsageCounts::default();
     };
@@ -3474,6 +3474,28 @@ mod tests {
             .present,
             "top-level arrays must not change non-Gemini usage shapes"
         );
+    }
+
+    #[test]
+    fn non_object_usage_is_not_billable_or_present() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("invalid"),
+            serde_json::json!(123),
+            serde_json::json!([]),
+        ] {
+            let body = serde_json::json!({ "usage": value });
+            for shape in [None, Some(UsageShape::OpenaiResponses)] {
+                let usage = usage_from_value_for_shape(&body, shape);
+                assert!(!usage.present, "{body}: {shape:?}");
+                assert!(!usage.billable_present, "{body}: {shape:?}");
+            }
+            let array = serde_json::json!([{ "usageMetadata": value }]);
+            let usage = usage_from_value_for_shape(&array, Some(UsageShape::GeminiGenerateContent));
+            assert!(!usage.present, "{array}");
+            assert!(!usage.billable_present, "{array}");
+        }
     }
 
     #[test]

@@ -30,6 +30,73 @@ pub use lifecycle_pricing_subscriber::{
 };
 pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError};
 
+/// Prices normalized usage counters without treating absent or invalid usage as free.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_usage_fields_cost(
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    input_image_tokens: Option<u64>,
+    output_image_tokens: Option<u64>,
+    cache_creation_input_tokens: u64,
+    cache_creation_input_tokens_5m: u64,
+    cache_creation_input_tokens_1h: u64,
+    cache_read_input_tokens: u64,
+    cache_write_input_tokens: Option<u64>,
+    cache_write_input_tokens_30m: Option<u64>,
+    cache_write_input_tokens_12h: Option<u64>,
+    cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
+    service_tier: Option<&str>,
+    usage_present: bool,
+) -> ComputedCostBreakdown {
+    if !usage_present
+        || cache_write_evidence == Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+    {
+        return ComputedCostBreakdown::unknown();
+    }
+    virtual_cost_micros_full_with_context_and_provider_writes(
+        model,
+        input_tokens,
+        output_tokens,
+        input_image_tokens.unwrap_or_default(),
+        output_image_tokens.unwrap_or_default(),
+        cache_creation_input_tokens,
+        cache_creation_input_tokens_5m,
+        cache_creation_input_tokens_1h,
+        cache_read_input_tokens,
+        cache_write_input_tokens,
+        cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h,
+        service_tier,
+    )
+    .unwrap_or_else(ComputedCostBreakdown::unknown)
+}
+
+/// Prices a normalized usage snapshot without treating absent or invalid usage as free.
+pub fn compute_usage_snapshot_cost(
+    model: &str,
+    usage: &cc_lb_lifecycle::UsageSnapshot,
+    usage_present: bool,
+) -> ComputedCostBreakdown {
+    compute_usage_fields_cost(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.input_image_tokens,
+        usage.output_image_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_creation_input_tokens_5m,
+        usage.cache_creation_input_tokens_1h,
+        usage.cache_read_input_tokens,
+        usage.cache_write_input_tokens,
+        usage.cache_write_input_tokens_30m,
+        usage.cache_write_input_tokens_12h,
+        usage.cache_write_evidence,
+        usage.service_tier.as_deref(),
+        usage_present,
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TierRate {
     pub input_per_million_usd: UsdPerMillion,
@@ -208,7 +275,7 @@ pub enum PricingStatus {
 
 /// Per-component cost breakdown of a single request, in micros USD.
 ///
-/// `total_micros == input + output + cache_creation_5m + cache_creation_1h + cache_read`.
+/// `total_micros` is the sum of input, output, creation, cache read, and aggregate native write cost.
 /// When `pricing_status == Unknown`, all numeric fields are 0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ComputedCostBreakdown {

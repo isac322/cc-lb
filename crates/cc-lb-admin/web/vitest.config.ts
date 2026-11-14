@@ -31,6 +31,7 @@ export default defineConfig({
             'src/components/__tests__/**/*.test.tsx',
             'src/components/**/*.test.tsx',
             'src/overview/**/*.test.tsx',
+            'src/designs/**/*.test.tsx',
             // Route-adjacent tests use the TanStack `-` prefix (e.g. `-plugins.test.tsx`).
             'src/routes/**/-*.test.tsx',
           ],

@@ -95,6 +95,13 @@ import {
 } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
 import {
+  isIndeterminatePricing,
+  type PricingCounts,
+  pricingQualifier,
+  sumBucketPricing,
+  sumPricingCounts,
+} from '../../lib/pricingCompleteness';
+import {
   PROVIDER_FAMILIES,
   PROVIDER_LABELS,
   type ProviderFamily,
@@ -227,7 +234,8 @@ function fmtChartTooltip(unix: number): string {
 /** One bucket of a KPI chart: the shared hover index addresses this array. */
 export type KpiChartPoint = {
   timestamp: number;
-  value: number;
+  value: number | null;
+  valueLabel?: string;
   /** Second series value for the bucket; null where it is undefined (gap). */
   secondaryValue?: number | null;
 };
@@ -346,6 +354,7 @@ const KPI_CELL_CLASS = [
 export function ValueTile({
   label,
   value,
+  valueSuffix,
   valueExact,
   legend,
   sub,
@@ -362,6 +371,7 @@ export function ValueTile({
 }: {
   label: string;
   value: React.ReactNode;
+  valueSuffix?: string;
   /**
    * Full-precision rendering of `value`, shown to screen readers and as the
    * hover `title` whenever the visible figure is a compacted form.
@@ -450,10 +460,13 @@ export function ValueTile({
           <Skeleton className="h-8 w-20" />
         ) : (
           <span
-            className="truncate text-display tabular-nums text-text"
+            className="inline-flex min-w-0 max-w-full items-baseline text-display tabular-nums text-text"
             title={valueExact ?? undefined}
           >
-            {value}
+            <span className="min-w-0 truncate">{value}</span>
+            {valueSuffix ? (
+              <span className="shrink-0">{valueSuffix}</span>
+            ) : null}
             {valueExact != null ? (
               <span className="sr-only">{` (${valueExact})`}</span>
             ) : null}
@@ -488,7 +501,7 @@ export function ValueTile({
               <span className="inline-flex min-w-0 items-center gap-1.5 text-caption leading-none tabular-nums text-text">
                 <LegendSwatch stroke={color} strokeWidth={2} />
                 <span className="truncate">
-                  {formatChartValue(activePoint.value)}
+                  {formatChartValue(activePoint.value ?? 0)}
                 </span>
               </span>
               <span className="inline-flex min-w-0 items-center gap-1.5 text-caption leading-none tabular-nums text-text">
@@ -503,8 +516,9 @@ export function ValueTile({
               </span>
             </>
           ) : (
-            <span className="truncate text-caption leading-none tabular-nums text-text">
-              {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
+            <span className="text-caption tabular-nums text-text">
+              {activePoint.valueLabel ??
+                `${chartLabel ?? label} ${formatChartValue(activePoint.value ?? 0)}`}
             </span>
           )}
         </div>
@@ -534,7 +548,7 @@ export function ValueTile({
   );
 }
 
-export type TopPrincipal = {
+export type TopPrincipal = PricingCounts & {
   id: string;
   name: string;
   /** Authoritative rollup cost for the window, in micros. */
@@ -553,7 +567,7 @@ export type TopPrincipal = {
   cache_hit_ratio: number | null;
   requests: number;
   /** Share of every principal's cost in the window, 0-100. */
-  share_pct: number;
+  share_pct: number | null;
 };
 
 /** Rows the ranking shows before "Show all N principals" expands it. */
@@ -569,7 +583,10 @@ const TOP_PRINCIPAL_SORT_VALUE: Record<
   requests: (principal) => principal.requests,
   tokens: (principal) => principal.tokens,
   hit: (principal) => principal.cache_hit_ratio,
-  cost: (principal) => principal.cost_micros,
+  cost: (principal) =>
+    isIndeterminatePricing(principal.pricing_completeness)
+      ? null
+      : principal.cost_micros,
 };
 
 /**
@@ -587,6 +604,7 @@ function sortTopPrincipals(
   return [...principals].sort((a, b) => {
     const left = value(a);
     const right = value(b);
+    if (left == null && right == null) return a.name.localeCompare(b.name);
     const byValue =
       left == null || right == null
         ? Number(left == null) - Number(right == null)
@@ -707,11 +725,15 @@ function PrincipalCostCell({
     : [];
   // Keep the ranking scannable at two decimals; the trigger and breakdown
   // retain the full micros value, up to six fractional digits.
-  const text = fmtPrincipalCost(totalMicros);
-  const exactText =
-    totalMicros > 0
-      ? formatPrincipalCostMicros(totalMicros)
-      : 'No list price for this model';
+  const indeterminate = isIndeterminatePricing(principal.pricing_completeness);
+  const qualifier = pricingQualifier(principal);
+  const partial = principal.pricing_completeness === 'partial';
+  const text = indeterminate
+    ? '—'
+    : `${fmtPrincipalCost(totalMicros)}${partial ? '+' : ''}`;
+  const exactText = indeterminate
+    ? `${qualifier} for this window`
+    : `${formatPrincipalCostMicros(totalMicros)}${partial ? ` (${qualifier})` : ''}`;
 
   return (
     <MetricCell
@@ -721,26 +743,48 @@ function PrincipalCostCell({
         <div data-testid="top-principal-cost-details">
           <BreakdownPopover
             title="Cost"
-            note={components ? undefined : PRINCIPAL_COST_NOTE}
-            rows={segments.map((segment) => ({
+            note={
+              indeterminate
+                ? exactText
+                : [
+                    partial ? qualifier : undefined,
+                    components ? undefined : PRINCIPAL_COST_NOTE,
+                  ]
+                    .filter(Boolean)
+                    .join('. ') || undefined
+            }
+            rows={(indeterminate ? [] : segments).map((segment) => ({
               label: segment.label,
               value: segment.value,
               color: segment.color,
               fmt: formatPrincipalCostMicros,
             }))}
-            footer={{
-              label: 'Total',
-              value: totalMicros,
-              fmt: formatPrincipalCostMicros,
-            }}
+            footer={
+              indeterminate
+                ? undefined
+                : {
+                    label: 'Total',
+                    value: totalMicros,
+                    fmt: formatPrincipalCostMicros,
+                  }
+            }
           />
+          {partial && segments.some((segment) => segment.value > 0) ? (
+            <p className="text-caption text-text-faint">{qualifier}</p>
+          ) : null}
         </div>
       }
-      segments={segments}
+      segments={indeterminate ? [] : segments}
       total={totalMicros}
       maxTotal={maxTotalMicros}
     >
-      <CostFigure text={text} />
+      {indeterminate ? (
+        <span data-slot="cost" className="text-text-faint">
+          —
+        </span>
+      ) : (
+        <CostFigure text={text} />
+      )}
     </MetricCell>
   );
 }
@@ -819,6 +863,11 @@ export function TopPrincipalsSection({
   const [direction, setDirection] = useState<SortDirection>('desc');
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState('');
+  const hasIncompleteCost = principals.some(
+    (principal) =>
+      isIndeterminatePricing(principal.pricing_completeness) ||
+      principal.pricing_completeness === 'partial',
+  );
 
   // Keep the reference over the whole active dataset: sorting, expanding and
   // filtering change the visible rows, never the meaning of their bar width.
@@ -900,8 +949,15 @@ export function TopPrincipalsSection({
             onSort={handleSort}
             sortKey="cost"
           />
-          <TableHeadCell className="@4xl/principals:w-24" numeric>
-            Share
+          <TableHeadCell
+            className={
+              hasIncompleteCost
+                ? '@4xl/principals:w-36'
+                : '@4xl/principals:w-24'
+            }
+            numeric
+          >
+            {hasIncompleteCost ? 'Known-cost share' : 'Share'}
           </TableHeadCell>
         </tr>
       </TableHead>
@@ -965,7 +1021,11 @@ export function TopPrincipalsSection({
                   maxTotalMicros={maxTotalMicros}
                 />
                 <TableCell className="text-text-muted" numeric>
-                  {fmtPercent(principal.share_pct)}
+                  {fmtPercent(
+                    isIndeterminatePricing(principal.pricing_completeness)
+                      ? null
+                      : principal.share_pct,
+                  )}
                 </TableCell>
               </PrincipalUsageRow>
             );
@@ -1864,6 +1924,26 @@ export function ProviderOverviewPage({
   const kpiRate = fmtRateKpi(reqPerSec);
   // With zero requests, averages and ratios are undefined, not zero.
   const noTraffic = totals?.request_count === 0;
+  const costPricing = totals
+    ? {
+        ...totals,
+        pricing_completeness:
+          totals.pricing_completeness ??
+          sumPricingCounts([totals]).pricing_completeness,
+      }
+    : undefined;
+  const costState = costPricing?.pricing_completeness;
+  const costIndeterminate = isIndeterminatePricing(costState);
+  const costQualifier = costPricing ? pricingQualifier(costPricing) : undefined;
+  const costPartial = costState === 'partial';
+  const costValue = costIndeterminate ? '—' : fmtCostKpi(totalCostMicros);
+  const costExact = costIndeterminate
+    ? costQualifier
+    : costPartial
+      ? `${fmtCostKpi(totalCostMicros)} (${costQualifier})`
+      : noTraffic
+        ? undefined
+        : fmtCostKpi(totalCostMicros);
   const requestSeen =
     feed.rows.length > 0 || (totals?.request_count ?? 0) > 0
       ? true
@@ -1892,6 +1972,11 @@ export function ProviderOverviewPage({
     for (const b of buckets) {
       const timestamp = b.bucket_start_unix_secs;
       const miss = cacheMissRatio(b);
+      const pricing = {
+        ...b,
+        pricing_completeness:
+          b.pricing_completeness ?? sumBucketPricing([b]).pricing_completeness,
+      };
       series.rate.push({ timestamp, value: b.request_count / stepSecs });
       // Total tokens, with the bucket's cache miss ratio (0-100) as the
       // second series; a bucket with no prompt tokens has no ratio.
@@ -1902,7 +1987,19 @@ export function ProviderOverviewPage({
       });
       series.cost.push({
         timestamp,
-        value: b.virtual_cost_micros / 1_000_000,
+        value:
+          b.request_count === 0 ||
+          pricing.pricing_completeness === 'known_zero' ||
+          pricing.pricing_completeness === 'unmetered'
+            ? 0
+            : isIndeterminatePricing(pricing.pricing_completeness)
+              ? null
+              : b.virtual_cost_micros / 1_000_000,
+        valueLabel: isIndeterminatePricing(pricing.pricing_completeness)
+          ? pricingQualifier(pricing)
+          : pricing.pricing_completeness === 'partial'
+            ? `Cost ${fmtCostKpi(b.virtual_cost_micros)} (${pricingQualifier(pricing)})`
+            : undefined,
       });
       series.latency.push({
         timestamp,
@@ -2126,9 +2223,12 @@ export function ProviderOverviewPage({
       }
       if (requests <= 0) continue;
 
-      totalCostMicros += costMicros;
+      const pricing = sumBucketPricing(s.buckets);
+      if (!isIndeterminatePricing(pricing.pricing_completeness))
+        totalCostMicros += costMicros;
       listedIds.add(s.key);
       listed.push({
+        ...pricing,
         id: s.key,
         name: principalNameMap.get(s.key) ?? s.key,
         cost_micros: costMicros,
@@ -2139,10 +2239,17 @@ export function ProviderOverviewPage({
       });
     }
 
+    const hasDeterminateCost = listed.some(
+      (row) => !isIndeterminatePricing(row.pricing_completeness),
+    );
     const principals: TopPrincipal[] = listed.map((p) => ({
       ...p,
       share_pct:
-        totalCostMicros > 0 ? (p.cost_micros / totalCostMicros) * 100 : 0,
+        isIndeterminatePricing(p.pricing_completeness) || !hasDeterminateCost
+          ? null
+          : totalCostMicros > 0
+            ? (p.cost_micros / totalCostMicros) * 100
+            : 0,
     }));
     let idleCount = 0;
     for (const id of principalNameMap.keys()) {
@@ -2276,8 +2383,18 @@ export function ProviderOverviewPage({
                         chartId="cost"
                         label="Cost at list price"
                         loading={summary.isPending}
-                        value={fmtCostKpi(totalCostMicros)}
-                        valueExact={fmtCostKpi(totalCostMicros)}
+                        value={costValue}
+                        valueSuffix={
+                          !costIndeterminate && costPartial ? '+' : undefined
+                        }
+                        valueExact={costExact}
+                        legend={
+                          !noTraffic && (costIndeterminate || costPartial) ? (
+                            <p className="text-caption text-text-faint">
+                              {costQualifier}
+                            </p>
+                          ) : undefined
+                        }
                         chartLabel="Cost"
                         spark={kpiPoints.cost}
                         sparkColor={KPI_SERIES_COLOR}

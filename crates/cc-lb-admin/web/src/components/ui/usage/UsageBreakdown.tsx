@@ -124,6 +124,29 @@ export function CostBreakdown({ event }: { event: RequestEventWithPhase }) {
     .map((row) => ({ ...row, formatted: formatCostMicros(row.value) }));
   const totalMicros =
     event.cost_usd_micros ?? rows.reduce((sum, row) => sum + row.value, 0);
+  if (rows.length === 0) {
+    if (event.cost_usd_micros == null) {
+      return (
+        <p className="text-body-sm text-text-muted">List price unavailable</p>
+      );
+    }
+    if (event.cost_usd_micros === 0) {
+      return <p className="text-body-sm text-text-muted">No cost</p>;
+    }
+    return (
+      <div className="min-w-0 space-y-3">
+        <dl className="flex flex-wrap justify-between gap-2 text-body-sm tabular-nums">
+          <dt className="text-text-muted">Total</dt>
+          <dd className="font-medium text-text">
+            {formatCostMicros(event.cost_usd_micros)}
+          </dd>
+        </dl>
+        <p className="text-body-sm text-text-muted">
+          Per-category cost not recorded
+        </p>
+      </div>
+    );
+  }
 
   return (
     <UsageBreakdown

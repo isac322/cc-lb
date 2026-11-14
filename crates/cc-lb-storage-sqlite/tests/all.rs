@@ -42,3 +42,5 @@ mod request_events_thinking_budget_tokens;
 mod request_events_tool_use_prompt_tokens;
 #[path = "upstream_affinity.rs"]
 mod upstream_affinity;
+#[path = "usage_rollup_pricing_completeness_migration.rs"]
+mod usage_rollup_pricing_completeness_migration;

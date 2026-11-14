@@ -378,6 +378,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .execute(storage.pool())
     .await
     .expect("install provider error code column for current writer");
+    sqlx::raw_sql(include_str!(
+        "../migrations/0124_usage_rollups_pricing_completeness.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install pricing completeness columns for current writer");
     sqlx::query(
         "UPDATE usage_rollup_reconciliations_v1
          SET status = 'complete'
@@ -2105,4 +2111,78 @@ async fn relational_migration_preserves_existing_columns_and_cursor_high_water()
             .any(|name| name == "usage_rollups_v2_token_interval_idx"
                 || name == "idx_audit_log_actor_subject")
     );
+}
+
+#[tokio::test]
+async fn gemini_normal_and_nested_merges_preserve_pricing_classification() {
+    for (index, prefix) in ["models_", "models_models_", "models_", "models_models_"]
+        .into_iter()
+        .enumerate()
+    {
+        let (_dir, storage) = storage(&format!("pricing-gemini-{index}.sqlite")).await;
+        let upstream_id = Uuid::from_u128(1280);
+        sqlx::query(
+            "INSERT INTO upstream_spec_v1
+             (id,name,kind,enabled,warmup_enabled,spec_revision,created_at,updated_at)
+             VALUES (?,'pricing-gemini','gemini_api_key',1,0,1,0,0)",
+        )
+        .bind(upstream_id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        let nested = index % 2 == 1;
+        let mixed_legacy = index >= 2;
+        let target = if !nested { "gemini" } else { "models_gemini" };
+        for model in [target, &format!("{prefix}gemini")] {
+            sqlx::query(
+                "INSERT INTO usage_rollups_v2
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,
+                  request_count,priced_event_count,unpriced_event_count,unmetered_event_count,
+                  virtual_cost_micros,cache_write_input_tokens_30m,effective_cache_write_input_tokens,updated_at)
+                 VALUES ('minute',1800000000,'pricing',?,'pricing-gemini',?,?,1,2,3,?,?,?,0)",
+            )
+            .bind(upstream_id.to_string())
+            .bind(model)
+            .bind(if mixed_legacy { 8_i64 } else { 6 })
+            .bind(if mixed_legacy { 17_i64 } else { 0 })
+            .bind(if mixed_legacy { Some(13_i64) } else { None })
+            .bind(if mixed_legacy { Some(5_i64) } else { None })
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        }
+        if nested {
+            sqlx::query("INSERT INTO usage_rollup_reconciliation_markers_v1 (resolution,bucket_start_unix_secs,principal_id,upstream_id,marker_model) VALUES ('minute',1800000000,'pricing',?,'models_gemini')")
+                .bind(upstream_id.to_string()).execute(storage.pool()).await.unwrap();
+        }
+        sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status=?,cursor=0,event_upper_bound=0,rollup_upper_bound=(SELECT MAX(rowid) FROM usage_rollups_v2)")
+            .bind(if nested { "rewriting_nested" } else { "rewriting" })
+            .execute(storage.pool()).await.unwrap();
+        for _ in 0..4 {
+            storage.rollup_usage_once().await.unwrap();
+        }
+        let rows = storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Minute, 1800000000, 1800000060)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{prefix}");
+        assert_eq!(rows[0].model, target);
+        assert_eq!(rows[0].request_count, if mixed_legacy { 16 } else { 12 });
+        assert_eq!(
+            rows[0].virtual_cost_micros,
+            if mixed_legacy { 34 } else { 0 }
+        );
+        assert_eq!(
+            rows[0].effective_cache_write_input_tokens,
+            if mixed_legacy { Some(26) } else { None }
+        );
+        assert_eq!(
+            (
+                rows[0].priced_event_count,
+                rows[0].unpriced_event_count,
+                rows[0].unmetered_event_count
+            ),
+            (2, 4, 6)
+        );
+    }
 }

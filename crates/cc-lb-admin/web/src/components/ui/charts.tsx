@@ -71,7 +71,7 @@ export function Sparkline({
   secondary,
   ariaLabel,
 }: {
-  data: number[];
+  data: Array<number | null>;
   color?: string;
   secondary?: {
     data: readonly (number | null)[];
@@ -82,7 +82,7 @@ export function Sparkline({
   /** Summary read by screen readers; omit when an ancestor already names the chart. */
   ariaLabel?: string;
 }) {
-  if (!data.some((value) => value !== 0)) return null;
+  if (!data.some((value) => value != null && value !== 0)) return null;
   const chartData = data.map((value, i) => ({
     i,
     value,
@@ -110,6 +110,7 @@ export function Sparkline({
             strokeWidth={1.25}
             fill={color}
             fillOpacity={SERIES_FILL_OPACITY}
+            connectNulls={false}
             isAnimationActive={false}
             activeDot={false}
           />

@@ -430,6 +430,106 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
     }
 }
 
+#[tokio::test]
+async fn foreground_and_renewal_roll_up_disjoint_net_input_and_native_write_presence() {
+    for writes in [None, Some(0), Some(100)] {
+        let fixture = OpenAiFixture::start().await;
+        fixture
+            .configure_keepalive_with_duration(true, true, 1795, 8)
+            .await;
+        let mut usage = json!({
+            "input_tokens": 2048,
+            "output_tokens": 16,
+            "input_tokens_details": {"cached_tokens": 1024}
+        });
+        if let Some(writes) = writes {
+            usage["input_tokens"] = json!(2048 + writes);
+            usage["input_tokens_details"]["cache_write_tokens"] = json!(writes);
+            usage["input_tokens_details"]["cache_write_tokens_details"] =
+                json!({"ttl_30m_tokens": writes, "ttl_12h_tokens": 0});
+        }
+        fixture.mock.reply_with_usage(usage.clone());
+        fixture.mock.reply_with_usage(usage);
+        let session = "00000000-0000-7000-8000-000000001280";
+        let response = fixture
+            .post(
+                session,
+                request_body(Some(json!({"ttl": "30m"})), large_input(None), false),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .bytes()
+            .await
+            .expect("foreground response complete");
+        fixture.mock.wait_for_requests(2).await;
+        let pool = pool(&fixture).await;
+        let rows = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let rows = sqlx::query(
+                    "SELECT input_tokens, cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, cache_creation_input_tokens, source_kind FROM request_events_v1 WHERE principal_id = ?",
+                )
+                .bind(&fixture.principal_id)
+                .fetch_all(&pool)
+                .await
+                .expect("request usage rows");
+                if rows.len() == 2 {
+                    break rows;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both foreground and renewal request rows must become durable");
+        for row in &rows {
+            assert_eq!(row.get::<Option<i64>, _>("input_tokens"), Some(1024));
+            assert_eq!(
+                row.get::<Option<i64>, _>("cache_read_input_tokens"),
+                Some(1024)
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("cache_write_input_tokens"),
+                writes
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("cache_write_input_tokens_30m"),
+                writes
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("cache_write_input_tokens_12h"),
+                writes.map(|_| 0)
+            );
+            if row.get::<Option<String>, _>("source_kind").as_deref() == Some("renewal") {
+                assert_eq!(
+                    row.get::<Option<i64>, _>("cache_creation_input_tokens"),
+                    None
+                );
+            }
+        }
+        let rollup_storage = cc_lb_storage_sqlite::open_sqlite_existing(
+            &format!("sqlite://{}", fixture.server.sqlite_path.display()),
+            std::sync::Arc::new(cc_lb_clock::SystemClock),
+        )
+        .await
+        .expect("open fixture sqlite for rollup");
+        cc_lb_storage_api::UsageRollupStore::rollup_usage_once(&rollup_storage)
+            .await
+            .expect("roll up durable foreground and renewal events");
+        let totals: (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(request_count), 0), COALESCE(SUM(input_tokens), 0) FROM usage_rollups_v2 WHERE principal_id = ? AND resolution = 'minute'",
+        )
+        .bind(&fixture.principal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("rollup net input");
+        assert_eq!(totals.0, 2);
+        assert_eq!(
+            totals.1, 2048,
+            "foreground and renewal must both use net input"
+        );
+    }
+}
+
 fn decode_snapshot_headers(
     fixture: &OpenAiFixture,
     session_hash: &str,

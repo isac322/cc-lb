@@ -32,6 +32,18 @@ async fn summary_returns_200_with_empty_storage() {
     assert_eq!(body["range"], "1h");
     assert_eq!(body["totals"]["request_count"], 0);
     assert_eq!(body["observed"], false);
+    for value in std::iter::once(&body["totals"])
+        .chain(body["sparkline"]["buckets"].as_array().unwrap().iter())
+    {
+        for field in [
+            "pricing_completeness",
+            "priced_request_count",
+            "unpriced_request_count",
+            "unmetered_request_count",
+        ] {
+            assert!(value.get(field).is_none(), "{field}: {value}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -191,6 +203,134 @@ async fn summary_exact_boundaries_do_not_advance_or_change_bucket_count() {
             buckets.last().expect("last completed bucket")["bucket_start_unix_secs"],
             now_unix_secs - width
         );
+    }
+}
+
+#[tokio::test]
+async fn summary_derives_completeness_from_counts_across_buckets() {
+    // Each event occupies its own minute: the summary must derive from summed
+    // counts, not select or average a bucket's completeness.
+    let cases = [
+        ("priced", vec![(1, Some(9)), (0, None)], (1, 0, 1)),
+        ("known_zero", vec![(1, Some(0)), (0, None)], (1, 0, 1)),
+        ("partial", vec![(1, Some(9)), (2, None)], (1, 1, 0)),
+        ("unpriced", vec![(1, None), (0, None)], (0, 1, 1)),
+        ("unmetered", vec![(0, None), (0, None)], (0, 0, 2)),
+    ];
+    for (expected, events, (priced, unpriced, unmetered)) in cases {
+        let clock = test_clock(ALIGNED_MINUTE_UNIX_SECS);
+        let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+        for (index, (tokens, cost)) in events.into_iter().enumerate() {
+            let mut event = usage_event(ALIGNED_MINUTE_UNIX_SECS - (index as u64 + 1) * 60);
+            event.event_id = Some(format!("summary-{expected}-{index}"));
+            event.request_id = format!("summary-{expected}-{index}");
+            event.input_tokens = Some(tokens);
+            event.cost_usd_micros = cost;
+            storage.append_request_event(&event).await.unwrap();
+        }
+        storage.rollup_usage_once().await.unwrap();
+        let (status, _, body, _) = authed_json(
+            app(test_state_with_clock(
+                Config::default(),
+                Some(storage),
+                clock,
+            )),
+            "GET",
+            "/admin/v1/dashboard/summary?range=1h",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{expected}");
+        let totals = &body["totals"];
+        assert_eq!(totals["request_count"], 2, "{expected}");
+        assert_eq!(totals["pricing_completeness"], expected);
+        assert_eq!(totals["priced_request_count"], priced);
+        assert_eq!(totals["unpriced_request_count"], unpriced);
+        assert_eq!(totals["unmetered_request_count"], unmetered);
+        let buckets = body["sparkline"]["buckets"].as_array().unwrap();
+        for (field, expected_count) in [
+            ("priced_request_count", priced),
+            ("unpriced_request_count", unpriced),
+            ("unmetered_request_count", unmetered),
+        ] {
+            assert_eq!(
+                buckets
+                    .iter()
+                    .filter_map(|bucket| bucket[field].as_u64())
+                    .sum::<u64>(),
+                expected_count,
+                "{expected} {field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn residual_pricing_evidence_is_strict_in_summary_and_usage() {
+    let clock = test_clock(ALIGNED_MINUTE_UNIX_SECS);
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    storage
+        .append_request_event(&usage_event(ALIGNED_MINUTE_UNIX_SECS - 60))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock,
+    ));
+    // requests, priced, unpriced, unmetered, tokens, known cost, expected
+    for (requests, priced, unpriced, unmetered, tokens, cost, expected) in [
+        (1_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, "unknown"),
+        (1, 0, 0, 0, 5, 0, "unknown"),
+        (2, 0, 1, 0, 0, 0, "unknown"),
+        (2, 0, 1, 0, 5, 0, "unknown"),
+        (2, 0, 0, 1, 0, 0, "unknown"),
+        (2, 1, 0, 0, 0, 0, "partial"),
+        (1, 0, 0, 0, 0, 7, "partial"),
+        (2, 0, 1, 0, 0, 7, "partial"),
+    ] {
+        sqlx::query(
+            "UPDATE usage_rollups_v2 SET request_count=?1, priced_event_count=?2, \
+             unpriced_event_count=?3, unmetered_event_count=?4, input_tokens=?5, \
+             virtual_cost_micros=?6",
+        )
+        .bind(requests)
+        .bind(priced)
+        .bind(unpriced)
+        .bind(unmetered)
+        .bind(tokens)
+        .bind(cost)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            storage.rollup_usage_once().await.unwrap().processed_events,
+            0
+        );
+        for uri in [
+            "/admin/v1/dashboard/summary?range=1h",
+            "/admin/v1/dashboard/usage?range=1h&group_by=model",
+            "/admin/v1/dashboard/usage?range=1h&group_by=model&projection=totals",
+        ] {
+            let (status, _, body, _) = authed_json(admin_app.clone(), "GET", uri, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let bucket = if uri.contains("/summary") {
+                &body["totals"]
+            } else {
+                body["series"][0]["buckets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|bucket| bucket["request_count"] == requests)
+                    .unwrap()
+            };
+            assert_eq!(bucket["pricing_completeness"], expected, "{uri} {bucket}");
+            assert_eq!(bucket["priced_request_count"], priced, "{uri}");
+            assert_eq!(bucket["unpriced_request_count"], unpriced, "{uri}");
+            assert_eq!(bucket["unmetered_request_count"], unmetered, "{uri}");
+            assert_eq!(bucket["virtual_cost_micros"], cost, "{uri}");
+        }
     }
 }
 

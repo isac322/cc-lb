@@ -1567,6 +1567,401 @@ async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
     assert_eq!(inline_cost, Some(140));
 }
 
+#[derive(Default)]
+struct RenewalDiagnosticsCapture {
+    records: Mutex<Vec<cc_lb_request_log::RequestDiagnosticsRecord>>,
+}
+
+#[async_trait]
+impl cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsSink for RenewalDiagnosticsCapture {
+    async fn offer(
+        &self,
+        record: cc_lb_request_log::RequestDiagnosticsRecord,
+        _delivery: cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsDelivery,
+    ) {
+        self.records
+            .lock()
+            .expect("renewal diagnostics lock")
+            .push(record);
+    }
+
+    async fn shutdown(&self) {}
+}
+
+fn enable_openai_responses_keepalive(fixture: &Fixture) {
+    let current = fixture.dynamic_view().load();
+    let principal = cc_lb_storage_api::principal::PrincipalRecord {
+        id: uuid::Uuid::from_u128(1),
+        name: "principal".to_owned(),
+        kind: cc_lb_storage_api::principal::PrincipalKind::Machine,
+        allowed_models: vec!["*".to_owned()],
+        allowed_upstreams: Vec::new(),
+        default_limits: Vec::new(),
+        enabled: true,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+        router_terminal_strategy: Default::default(),
+        cache_keepalive: Some(cc_lb_storage_api::CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 3,
+            max_total_duration_secs: 600,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: cc_lb_storage_api::ClassifierConfig {
+                openai_responses_enabled: true,
+                ..cc_lb_storage_api::ClassifierConfig::default()
+            },
+        }),
+    };
+    let view = cc_lb_control::DynamicViewBuilder::from_view(&current)
+        .principal_view(Arc::new(
+            cc_lb_control::api_keys::principal_view::PrincipalView::from_db(
+                &[principal],
+                std::collections::HashMap::new(),
+            ),
+        ))
+        .build();
+    fixture.dynamic_view().store(view);
+}
+
+#[tokio::test]
+async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
+    use cc_lb_request_log::RequestEventUpdate;
+
+    for (present, response_body, writes, expected_cost, expected_input) in [
+        (
+            true,
+            serde_json::json!({
+                "service_tier": "default",
+                "usage": {
+                    "input_tokens": 2148,
+                    "output_tokens": 16,
+                    "output_tokens_details": { "reasoning_tokens": 7 },
+                    "input_tokens_details": {
+                        "cached_tokens": 1024,
+                        "cache_write_tokens": 100,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 60,
+                            "ttl_12h_tokens": 40
+                        }
+                    }
+                }
+            }),
+            (Some(100), Some(60), Some(40)),
+            Some(2446),
+            1024,
+        ),
+        (
+            true,
+            serde_json::json!({
+                "service_tier": "default",
+                "usage": {
+                    "input_tokens": 2048,
+                    "output_tokens": 16,
+                    "output_tokens_details": { "reasoning_tokens": 7 },
+                    "input_tokens_details": {
+                        "cached_tokens": 1024,
+                        "cache_write_tokens": 0
+                    }
+                }
+            }),
+            (Some(0), None, None),
+            Some(2096),
+            1024,
+        ),
+        (
+            true,
+            serde_json::json!({
+                "service_tier": "default",
+                "usage": {
+                    "input_tokens": 2048,
+                    "output_tokens": 16,
+                    "output_tokens_details": { "reasoning_tokens": 7 },
+                    "input_tokens_details": {
+                        "cached_tokens": 1024,
+                        "cache_write_tokens": "bad"
+                    }
+                }
+            }),
+            (None, None, None),
+            None,
+            1024,
+        ),
+        (
+            true,
+            serde_json::json!({
+                "service_tier": "default",
+                "usage": {
+                    "input_tokens": 2048,
+                    "output_tokens": 16,
+                    "output_tokens_details": { "reasoning_tokens": 7 },
+                    "input_tokens_details": {
+                        "cached_tokens": 1024,
+                        "cache_write_tokens_details": { "ttl_30m_tokens": 60 }
+                    }
+                }
+            }),
+            (None, Some(60), None),
+            None,
+            1024,
+        ),
+        (
+            false,
+            serde_json::json!({ "id": "resp_missing_usage" }),
+            (None, None, None),
+            None,
+            0,
+        ),
+        (
+            false,
+            serde_json::json!({ "usage": true }),
+            (None, None, None),
+            None,
+            0,
+        ),
+        (
+            true,
+            serde_json::json!({ "usage": { "input_tokens": 0, "output_tokens": 0 } }),
+            (None, None, None),
+            Some(0),
+            0,
+        ),
+    ] {
+        install_test_pricing();
+        let fixture =
+            Fixture::new_with_upstream_kind(cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth)
+                .await;
+        enable_openai_responses_keepalive(&fixture);
+        fixture.http.return_status(StatusCode::OK, response_body);
+        let bus = fixture.event_bus();
+        let pricing_rx = bus.attach_lifecycle_pricing(64);
+        let assembler_rx = bus.attach_lifecycle_assembler(64);
+        let mut lifecycle_rx = bus.subscribe_lifecycle();
+        let mut updates_rx = bus.subscribe();
+        let sink = Arc::new(RenewalDiagnosticsCapture::default());
+        let pricing = cc_lb_pricing::spawn_lifecycle_pricing_subscriber(
+            pricing_rx,
+            bus.clone() as Arc<dyn RequestEventBus>,
+        );
+        let assembler =
+            cc_lb_engine::lifecycle_event_assembler::spawn_request_event_assembler_with_diagnostics(
+                assembler_rx,
+                fixture.storage.clone(),
+                Some(bus.clone() as Arc<dyn RequestEventBus>),
+                Arc::new(cc_lb_observability::NoopMetricsHook),
+                cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsOptions {
+                    sink: Some(sink.clone()),
+                },
+            );
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+        let mut request = fixture.enqueue_request();
+        request.snapshot = cc_lb_engine::cache_keepalive::RequestSnapshot::capture_openai(
+            url::Url::parse("https://api.openai.com/v1/responses").expect("openai url"),
+            ::http::Method::POST,
+            ::http::HeaderMap::new(),
+            bytes::Bytes::from_static(
+                br#"{"model":"claude-test","input":"hi","max_output_tokens":32,"stream":true}"#,
+            ),
+            fixture.upstream_id,
+            cc_lb_storage_api::CacheTtl::Ttl30m,
+            524_288,
+        )
+        .expect("capture openai snapshot");
+        fixture
+            .enqueuer(pusher.clone())
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue observe-only OpenAI usage fixture");
+        let job = fixture.pending_keepalive_job(1).await;
+        let dispatch = fixture.dispatch(pusher);
+        assert!(matches!(
+            dispatch
+                .dispatch_cache_keepalive(job)
+                .await
+                .expect("finalize OpenAI usage"),
+            JobOutcome::Done
+        ));
+        let inline = stored_request_events(&fixture).await.remove(0);
+        assert_eq!(
+            inline.key_id, None,
+            "observe-only renewals never acquire a key"
+        );
+        assert_eq!(inline.input_tokens, present.then_some(expected_input));
+        assert_eq!(inline.cost_usd_micros, expected_cost);
+        assert_eq!(inline.cache_creation_input_tokens, None);
+        assert_eq!(inline.cache_creation_input_tokens_5m, None);
+        assert_eq!(inline.cache_creation_input_tokens_1h, None);
+        assert_eq!(inline.cache_write_input_tokens, writes.0);
+        assert_eq!(inline.cache_write_input_tokens_30m, writes.1);
+        assert_eq!(inline.cache_write_input_tokens_12h, writes.2);
+        assert_eq!(
+            inline.cost_cache_write_micros,
+            expected_cost.and(writes.0.map(|tokens| if tokens == 0 { 0 } else { 350 }))
+        );
+        assert_eq!(
+            inline.cost_cache_write_30m_micros,
+            expected_cost.and(writes.1.map(|_| 150))
+        );
+        assert_eq!(
+            inline.cost_cache_write_12h_micros,
+            expected_cost.and(writes.2.map(|_| 200))
+        );
+        let turn: (i64, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT input_tokens, CASE WHEN cost_known != 0 THEN cost_micros END, accounting_key_id FROM cache_keepalive_turns",
+        )
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("native renewal turn");
+        assert_eq!(turn, (expected_input as i64, expected_cost, None));
+        pricing.shutdown().await;
+        assembler.shutdown().await;
+        let priced = std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).find_map(|event| {
+            if let LifecycleEvent::Priced { cost, .. } = event {
+                Some(cost)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            priced.is_some(),
+            present,
+            "missing usage must not emit a synthetic price"
+        );
+        if let Some(cost) = priced {
+            assert_eq!(cost.total_micros, inline.cost_usd_micros);
+            assert_eq!(cost.cache_write_micros, inline.cost_cache_write_micros);
+            assert_eq!(
+                cost.cache_write_30m_micros,
+                inline.cost_cache_write_30m_micros
+            );
+            assert_eq!(
+                cost.cache_write_12h_micros,
+                inline.cost_cache_write_12h_micros
+            );
+        }
+        let finals = std::iter::from_fn(|| updates_rx.try_recv().ok())
+            .filter_map(|update| {
+                if let RequestEventUpdate::Final(final_) = update {
+                    Some(final_.event)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finals.len(), 1);
+        let live = &finals[0];
+        assert_eq!(live.input_tokens, inline.input_tokens);
+        assert_eq!(live.output_tokens, inline.output_tokens);
+        assert_eq!(live.cache_read_input_tokens, inline.cache_read_input_tokens);
+        assert_eq!(
+            live.cache_write_input_tokens,
+            inline.cache_write_input_tokens
+        );
+        assert_eq!(
+            live.cache_write_input_tokens_30m,
+            inline.cache_write_input_tokens_30m
+        );
+        assert_eq!(
+            live.cache_write_input_tokens_12h,
+            inline.cache_write_input_tokens_12h
+        );
+        assert_eq!(live.cost_usd_micros, inline.cost_usd_micros);
+        assert_eq!(live.cost_cache_write_micros, inline.cost_cache_write_micros);
+        assert_eq!(
+            live.cost_cache_write_30m_micros,
+            inline.cost_cache_write_30m_micros
+        );
+        assert_eq!(
+            live.cost_cache_write_12h_micros,
+            inline.cost_cache_write_12h_micros
+        );
+        let records = sink.records.lock().expect("captured diagnostics");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].input_tokens, inline.input_tokens);
+        assert_eq!(records[0].output_tokens, inline.output_tokens);
+        assert_eq!(
+            records[0].cache_read_input_tokens,
+            inline.cache_read_input_tokens
+        );
+        assert_eq!(
+            records[0].cache_write_input_tokens,
+            inline.cache_write_input_tokens
+        );
+        assert_eq!(
+            records[0].cache_write_input_tokens_30m,
+            inline.cache_write_input_tokens_30m
+        );
+        assert_eq!(
+            records[0].cache_write_input_tokens_12h,
+            inline.cache_write_input_tokens_12h
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_renewal_reconciles_net_input_not_gross_prompt_tokens() {
+    let fixture =
+        Fixture::new_with_upstream_kind(cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth)
+            .await;
+    enable_openai_responses_keepalive(&fixture);
+    fixture.http.return_status(
+        StatusCode::OK,
+        serde_json::json!({
+            "usage": {
+                "input_tokens": 2048,
+                "output_tokens": 16,
+                "input_tokens_details": { "cached_tokens": 1024 }
+            }
+        }),
+    );
+    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(SystemClock),
+    );
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some(key_id.clone());
+    request.snapshot = cc_lb_engine::cache_keepalive::RequestSnapshot::capture_openai(
+        url::Url::parse("https://api.openai.com/v1/responses").expect("openai url"),
+        ::http::Method::POST,
+        ::http::HeaderMap::new(),
+        bytes::Bytes::from_static(
+            br#"{"model":"claude-test","input":"hi","max_output_tokens":32,"stream":true}"#,
+        ),
+        fixture.upstream_id,
+        cc_lb_storage_api::CacheTtl::Ttl30m,
+        524_288,
+    )
+    .expect("capture openai snapshot");
+    fixture
+        .enqueuer(pusher.clone())
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue keyed renewal");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch_with_limit_engine(pusher, limit_engine.clone());
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job.clone())
+            .await
+            .expect("settle net input"),
+        JobOutcome::Done
+    ));
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job)
+            .await
+            .expect("duplicate delivery"),
+        JobOutcome::Noop
+    ));
+    assert_input_headroom(&fixture, &limit_engine, &key_id, 2976).await;
+}
+
 #[tokio::test]
 async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
     // Given

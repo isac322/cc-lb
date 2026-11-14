@@ -236,6 +236,13 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         None
     };
 
+    if cache_write_input.is_none()
+        && (cache_write_30m_input.unwrap_or_default() > 0
+            || cache_write_12h_input.unwrap_or_default() > 0)
+    {
+        record_missing_price_field(&normalized, "cache_write_tokens");
+        return None;
+    }
     let write_total = cache_write_input.unwrap_or_default();
     let write_detail_total = cache_write_30m_input
         .unwrap_or_default()
@@ -379,6 +386,126 @@ mod tests {
 
     use super::*;
     use crate::catalog_parser::{FROZEN_NATIVE_CATALOG, parse_litellm_json};
+
+    #[test]
+    fn snapshot_pricing_preserves_components_and_fails_closed_on_incomplete_writes() {
+        use cc_lb_lifecycle::UsageSnapshot;
+        use cc_lb_request_log::RequestCacheEvidence;
+
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        global_catalog().install_snapshot(
+            parse_litellm_json(
+                FROZEN_NATIVE_CATALOG,
+                &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+            )
+            .expect("frozen native catalog"),
+        );
+        for (model, present, writes, evidence, known) in [
+            (
+                "gpt-6.1-sol",
+                true,
+                (None, None, None),
+                RequestCacheEvidence::Unreported,
+                true,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (Some(0), None, None),
+                RequestCacheEvidence::Zero,
+                true,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (Some(100), Some(60), Some(40)),
+                RequestCacheEvidence::Positive,
+                true,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (None, Some(60), None),
+                RequestCacheEvidence::Unreported,
+                false,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (None, None, Some(40)),
+                RequestCacheEvidence::Unreported,
+                false,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (Some(100), Some(60), None),
+                RequestCacheEvidence::Positive,
+                false,
+            ),
+            (
+                "gpt-6.1-sol",
+                true,
+                (Some(100), Some(60), Some(40)),
+                RequestCacheEvidence::Invalid,
+                false,
+            ),
+            (
+                "gpt-6.1-sol",
+                false,
+                (None, None, None),
+                RequestCacheEvidence::Unreported,
+                false,
+            ),
+            (
+                "unlisted-model",
+                true,
+                (None, None, None),
+                RequestCacheEvidence::Unreported,
+                false,
+            ),
+        ] {
+            let usage = UsageSnapshot {
+                input_tokens: 1024,
+                output_tokens: 16,
+                cache_read_input_tokens: 1024,
+                cache_write_input_tokens: writes.0,
+                cache_write_input_tokens_30m: writes.1,
+                cache_write_input_tokens_12h: writes.2,
+                cache_write_evidence: Some(evidence),
+                ..UsageSnapshot::default()
+            };
+            let cost = crate::compute_usage_snapshot_cost(model, &usage, present);
+            assert_eq!(
+                cost.pricing_status == PricingStatus::Known,
+                known,
+                "{model}: {writes:?} {evidence:?}"
+            );
+            assert_eq!(
+                cost.total_micros,
+                cost.input_micros
+                    + cost.output_micros
+                    + cost.cache_creation_5m_micros
+                    + cost.cache_creation_1h_micros
+                    + cost.cache_read_micros
+                    + cost.cache_write_30m_micros.unwrap_or_default()
+                    + cost.cache_write_12h_micros.unwrap_or_default()
+            );
+            if known {
+                assert_eq!(
+                    cost.cache_write_micros,
+                    writes.0.map(|_| {
+                        cost.cache_write_30m_micros.unwrap_or_default()
+                            + cost.cache_write_12h_micros.unwrap_or_default()
+                    })
+                );
+            } else {
+                assert_eq!(cost, ComputedCostBreakdown::unknown());
+            }
+        }
+    }
     use crate::{
         CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, LocalCacheInputEstimate,
         NativePricingProvider, NativePricingRate, NativeResourcePricing, Pricing, ThresholdBand,

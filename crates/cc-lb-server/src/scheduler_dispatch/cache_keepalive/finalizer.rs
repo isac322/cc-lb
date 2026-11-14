@@ -2,7 +2,7 @@ use cc_lb_clock::unix_secs;
 use cc_lb_engine::cache_keepalive::{
     RenewalFinalization, RenewalUsage, RequestSnapshot, SessionKey,
 };
-use cc_lb_pricing::{ComputedCostBreakdown, virtual_cost_micros_full_with_context};
+use cc_lb_pricing::ComputedCostBreakdown;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::UpstreamRecord;
@@ -39,17 +39,11 @@ impl SchedulerDispatch {
         let cost = if finalization.usage.provider_cost_unknown {
             ComputedCostBreakdown::unknown()
         } else {
-            virtual_cost_micros_full_with_context(
+            cc_lb_pricing::compute_usage_snapshot_cost(
                 model,
-                finalization.usage.input_tokens,
-                finalization.usage.output_tokens,
-                finalization.usage.cache_creation_input_tokens,
-                finalization.usage.cache_creation_input_tokens_5m,
-                finalization.usage.cache_creation_input_tokens_1h,
-                finalization.usage.cache_read_input_tokens,
-                None,
+                &super::lifecycle::usage_snapshot(&finalization.usage),
+                finalization.usage.usage_present,
             )
-            .unwrap_or_else(ComputedCostBreakdown::unknown)
         };
         let actual_cost_micros = (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
             .then_some(cost.total_micros);
@@ -184,6 +178,11 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
 
 fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
     let known = input.cost.pricing_status == cc_lb_pricing::PricingStatus::Known;
+    let usage_present = !input.usage.is_openai_responses || input.usage.usage_present;
+    let creation_present = |tokens| {
+        (!input.usage.is_openai_responses || (input.usage.usage_present && tokens > 0))
+            .then_some(tokens)
+    };
     RequestEvent {
         ts: input.ts,
         ts_ms: Some(input.ts.saturating_mul(1_000)),
@@ -199,18 +198,31 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         model: Some(input.model.to_owned()),
         thread_id: input.thread_id.map(ToOwned::to_owned),
         status: input.status,
-        input_tokens: Some(input.usage.input_tokens),
-        output_tokens: Some(input.usage.output_tokens),
-        cache_creation_input_tokens: Some(input.usage.cache_creation_input_tokens),
-        cache_creation_input_tokens_5m: Some(input.usage.cache_creation_input_tokens_5m),
-        cache_creation_input_tokens_1h: Some(input.usage.cache_creation_input_tokens_1h),
-        cache_read_input_tokens: Some(input.usage.cache_read_input_tokens),
+        input_tokens: usage_present.then_some(input.usage.input_tokens),
+        output_tokens: usage_present.then_some(input.usage.output_tokens),
+        cache_creation_input_tokens: creation_present(input.usage.cache_creation_input_tokens),
+        cache_creation_input_tokens_5m: creation_present(
+            input.usage.cache_creation_input_tokens_5m,
+        ),
+        cache_creation_input_tokens_1h: creation_present(
+            input.usage.cache_creation_input_tokens_1h,
+        ),
+        cache_read_input_tokens: usage_present.then_some(input.usage.cache_read_input_tokens),
+        cache_write_input_tokens: input.usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: input.usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: input.usage.cache_write_input_tokens_12h,
+        thinking_tokens: (input.usage.usage_present && input.usage.thinking_tokens > 0)
+            .then_some(input.usage.thinking_tokens),
+        service_tier: input.usage.service_tier.clone(),
         cost_usd_micros: known.then_some(input.cost.total_micros),
         cost_input_micros: known.then_some(input.cost.input_micros),
         cost_output_micros: known.then_some(input.cost.output_micros),
         cost_cache_creation_5m_micros: known.then_some(input.cost.cache_creation_5m_micros),
         cost_cache_creation_1h_micros: known.then_some(input.cost.cache_creation_1h_micros),
         cost_cache_read_micros: known.then_some(input.cost.cache_read_micros),
+        cost_cache_write_micros: known.then_some(input.cost.cache_write_micros).flatten(),
+        cost_cache_write_30m_micros: known.then_some(input.cost.cache_write_30m_micros).flatten(),
+        cost_cache_write_12h_micros: known.then_some(input.cost.cache_write_12h_micros).flatten(),
         request_body_first_chunk_ms: None,
         request_body_receive_ms: None,
         request_body_wait_ms: None,
@@ -286,17 +298,20 @@ fn cache_keepalive_renewal_reason(hit_miss: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use super::{RenewalProjectionInput, cache_keepalive_renewal_reason, renewal_projections};
+    use super::{
+        RenewalProjectionInput, RenewalRequestEventInput, cache_keepalive_renewal_reason,
+        renewal_projections, renewal_request_event,
+    };
     use cc_lb_engine::cache_keepalive::RenewalUsage;
+    use cc_lb_pricing::ComputedCostBreakdown;
     use cc_lb_storage_api::{
         CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
         CacheTtl,
     };
     use uuid::Uuid;
 
-    #[test]
-    fn unknown_pricing_keeps_turn_projection_with_hit_identity() {
-        let record = CacheKeepaliveSessionRecord {
+    fn session_record() -> CacheKeepaliveSessionRecord {
+        CacheKeepaliveSessionRecord {
             session_key_hash: "session".to_owned(),
             principal_id: "principal".to_owned(),
             accounting_key_id: None,
@@ -321,7 +336,12 @@ mod tests {
             expires_at_unix_secs: 3,
             created_at_unix_secs: 1,
             updated_at_unix_secs: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn unknown_pricing_keeps_turn_projection_with_hit_identity() {
+        let record = session_record();
         let projections = renewal_projections(RenewalProjectionInput {
             source_ref_id: "session:1",
             record: &record,
@@ -342,6 +362,74 @@ mod tests {
         assert_eq!(turn.hit_miss, "hit");
         assert_eq!(turn.cost_micros, None);
         assert_eq!(projections.decision.decision, "reschedule");
+    }
+
+    #[test]
+    fn renewal_request_event_preserves_provider_specific_presence_and_components() {
+        let record = session_record();
+        let upstream = cc_lb_storage_api::upstream::UpstreamRecord::default();
+        for (openai, present) in [(true, true), (true, false), (false, true)] {
+            let usage = RenewalUsage {
+                is_openai_responses: openai,
+                usage_present: present,
+                input_tokens: 1024,
+                output_tokens: 16,
+                input_image_tokens: Some(12),
+                output_image_tokens: Some(3),
+                cache_read_input_tokens: 1024,
+                cache_write_input_tokens: Some(0),
+                cache_write_input_tokens_30m: None,
+                cache_write_input_tokens_12h: Some(0),
+                thinking_tokens: 7,
+                service_tier: Some("priority".to_owned()),
+                ..RenewalUsage::default()
+            };
+            for known in [true, false] {
+                let cost = ComputedCostBreakdown {
+                    total_micros: if known { 200 } else { 0 },
+                    input_micros: if known { 200 } else { 0 },
+                    cache_write_micros: known.then_some(0),
+                    cache_write_12h_micros: known.then_some(0),
+                    pricing_status: if known {
+                        cc_lb_pricing::PricingStatus::Known
+                    } else {
+                        cc_lb_pricing::PricingStatus::Unknown
+                    },
+                    ..ComputedCostBreakdown::unknown()
+                };
+                let event = renewal_request_event(RenewalRequestEventInput {
+                    event_id: "renewal:event",
+                    source_ref_id: "source",
+                    record: &record,
+                    thread_id: None,
+                    upstream: &upstream,
+                    model: "gpt-5",
+                    usage: &usage,
+                    cost: &cost,
+                    status: 200,
+                    duration_ms: 7,
+                    ts: 1,
+                });
+                assert_eq!(event.input_tokens, (!openai || present).then_some(1024));
+                assert_eq!(event.output_tokens, (!openai || present).then_some(16));
+                assert_eq!(
+                    event.cache_read_input_tokens,
+                    (!openai || present).then_some(1024)
+                );
+                assert_eq!(event.cache_creation_input_tokens, (!openai).then_some(0));
+                assert_eq!(event.cache_creation_input_tokens_5m, (!openai).then_some(0));
+                assert_eq!(event.cache_creation_input_tokens_1h, (!openai).then_some(0));
+                assert_eq!(event.cache_write_input_tokens, Some(0));
+                assert_eq!(event.cache_write_input_tokens_30m, None);
+                assert_eq!(event.cache_write_input_tokens_12h, Some(0));
+                assert_eq!(event.thinking_tokens, present.then_some(7));
+                assert_eq!(event.service_tier.as_deref(), Some("priority"));
+                assert_eq!(event.cost_usd_micros, known.then_some(200));
+                assert_eq!(event.cost_cache_write_micros, known.then_some(0));
+                assert_eq!(event.cost_cache_write_30m_micros, None);
+                assert_eq!(event.cost_cache_write_12h_micros, known.then_some(0));
+            }
+        }
     }
 
     #[test]

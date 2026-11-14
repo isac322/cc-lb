@@ -14,6 +14,10 @@ import type {
   KeyUsageProvenance,
 } from '../../lib/api';
 import { fmtUsdCents, splitNum } from '../../lib/format';
+import {
+  isIndeterminatePricing,
+  pricingQualifier,
+} from '../../lib/pricingCompleteness';
 import { cx, Skeleton, StatusBadge } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
 import { CONSOLE_BILLING_URL } from './connect/apiKeyCopy';
@@ -204,6 +208,11 @@ export function CreditStrip({
     : null;
   const anthropicStop = stopKind ? isAnthropicStop(stopKind) : false;
   const tokens = month ? splitNum(month.tokens) : null;
+  const pricing =
+    provenance?.source === 'estimated'
+      ? month?.pricing_completeness
+      : undefined;
+  const qualifier = month && pricing ? pricingQualifier(month) : undefined;
   const skeletonValue = (
     <Skeleton as="span" className="inline-block h-5 w-16" />
   );
@@ -254,10 +263,18 @@ export function CreditStrip({
             loading
               ? skeletonValue
               : month
-                ? fmtUsdCents(month.cost_usd_micros)
+                ? isIndeterminatePricing(pricing)
+                  ? '—'
+                  : `${fmtUsdCents(month.cost_usd_micros)}${pricing === 'partial' ? '+' : ''}`
                 : NO_READING
           }
-          sub={loading ? skeletonSub : month ? 'At list price' : null}
+          sub={
+            loading
+              ? skeletonSub
+              : month
+                ? (qualifier ?? 'At list price')
+                : null
+          }
         />
         <Cell
           label="Balance"

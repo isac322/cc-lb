@@ -16,6 +16,12 @@ import type {
 } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
+import {
+  isIndeterminatePricing,
+  type PricingCounts,
+  pricingQualifier,
+  sumBucketPricing,
+} from '../../lib/pricingCompleteness';
 import { TIME_PRESET_OPTIONS, type TimePreset } from '../../lib/timePresets';
 import {
   CHART_AXIS,
@@ -119,34 +125,55 @@ export function ApiUsageCard({
   const showLoading = data === undefined && isLoading;
   const chartId = useChartId();
 
-  const chartData = useMemo(() => {
-    if (!data?.series || data.series.length === 0) return [];
-
+  const { chartData, pricingByTimestamp, models } = useMemo(() => {
     const bucketsByTs = new Map<number, Record<string, number>>();
+    const pricingByTimestamp = new Map<number, Map<string, PricingCounts>>();
+    const models = (data?.series ?? []).map((series, index) => ({
+      key: `model-${index}`,
+      label: modelLabel(series.key),
+    }));
 
-    for (const series of data.series) {
-      const model = modelLabel(series.key);
+    for (const [index, series] of (data?.series ?? []).entries()) {
+      const key = models[index].key;
       for (const bucket of series.buckets) {
+        const pricing = {
+          ...bucket,
+          pricing_completeness:
+            bucket.pricing_completeness ??
+            sumBucketPricing([bucket]).pricing_completeness,
+        };
         const ts = bucket.bucket_start_unix_secs;
         if (!bucketsByTs.has(ts)) {
           bucketsByTs.set(ts, { ts });
         }
         const row = bucketsByTs.get(ts)!;
+        if (metric === 'cost' && provenance?.source === 'estimated') {
+          let byModel = pricingByTimestamp.get(ts);
+          if (!byModel) {
+            byModel = new Map();
+            pricingByTimestamp.set(ts, byModel);
+          }
+          byModel.set(key, pricing);
+        }
         if (metric === 'tokens') {
-          row[model] = sumTokens(bucket);
-        } else {
-          row[model] = bucket.virtual_cost_micros / 1_000_000;
+          row[key] = sumTokens(bucket);
+        } else if (
+          !(
+            provenance?.source === 'estimated' &&
+            isIndeterminatePricing(pricing.pricing_completeness)
+          )
+        ) {
+          row[key] = bucket.virtual_cost_micros / 1_000_000;
         }
       }
     }
 
-    return Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts);
-  }, [data, metric]);
-
-  const models = useMemo(() => {
-    if (!data?.series) return [];
-    return data.series.map((s) => modelLabel(s.key));
-  }, [data]);
+    return {
+      chartData: Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts),
+      pricingByTimestamp,
+      models,
+    };
+  }, [data, metric, provenance?.source]);
 
   const formatXAxis = (ts: number) => {
     const d = new Date(ts * 1000);
@@ -165,9 +192,12 @@ export function ApiUsageCard({
     return `${value}${unit}`;
   };
 
-  const formatTooltip = (val: number) => {
+  const formatTooltip = (val: number, pricing?: PricingCounts) => {
     if (metric === 'cost') {
-      return fmtUsd(val * 1_000_000);
+      const amount = fmtUsd(val * 1_000_000);
+      if (pricing?.pricing_completeness !== 'partial') return amount;
+      const qualifier = pricingQualifier(pricing);
+      return `${amount}+${qualifier ? ` (${qualifier})` : ''}`;
     }
     return val.toLocaleString();
   };
@@ -204,6 +234,12 @@ export function ApiUsageCard({
   // A background refetch failed while the previous answer stays on screen.
   const notRefreshed = month !== undefined && monthError !== null;
   const nativeBillingStop = nativeProvider && month?.billing_stop != null;
+  const monthState =
+    provenance?.source === 'estimated'
+      ? month?.pricing_completeness
+      : undefined;
+  const monthQualifier =
+    monthState && month ? pricingQualifier(month) : undefined;
 
   // The header holds only the provenance badge; chart controls sit in the
   // toolbar row above the chart. While the first report is on its way the
@@ -327,8 +363,18 @@ export function ApiUsageCard({
                     Cost at list price
                   </dt>
                   <dd className="text-body font-medium tabular-nums">
-                    {month ? fmtUsd(month.cost_usd_micros) : 'No reading'}
+                    {month
+                      ? isIndeterminatePricing(monthState)
+                        ? '—'
+                        : `${fmtUsd(month.cost_usd_micros)}${monthState === 'partial' ? '+' : ''}`
+                      : 'No reading'}
                   </dd>
+                  {isIndeterminatePricing(monthState) ||
+                  monthState === 'partial' ? (
+                    <dd className="text-caption text-text-faint">
+                      {monthQualifier}
+                    </dd>
+                  ) : null}
                 </div>
               </dl>
             )}
@@ -379,19 +425,49 @@ export function ApiUsageCard({
               {!showLoading && chartData.length > 0
                 ? models.map((model, index) => {
                     const lastBucket = chartData[chartData.length - 1];
-                    const val = lastBucket ? lastBucket[model] || 0 : 0;
+                    const val = lastBucket ? lastBucket[model.key] || 0 : 0;
+                    const pricing = lastBucket
+                      ? pricingByTimestamp.get(lastBucket.ts)?.get(model.key)
+                      : undefined;
+                    const partial = pricing?.pricing_completeness === 'partial';
+                    const qualifier = partial
+                      ? pricingQualifier(pricing)
+                      : undefined;
                     return (
-                      <div key={model} className="flex items-center gap-1.5">
+                      <div
+                        key={model.key}
+                        className="flex items-center gap-1.5"
+                      >
                         <span
                           aria-hidden="true"
                           className="size-2.5 shrink-0 rounded-xs"
                           style={{
-                            backgroundColor: modelSeriesColor(model, index),
+                            backgroundColor: modelSeriesColor(
+                              model.label,
+                              index,
+                            ),
                           }}
                         />
-                        <span className="text-text-muted">{model}</span>
-                        <span className="tabular-nums text-text">
-                          {formatTooltip(val)}
+                        <span className="text-text-muted">{model.label}</span>
+                        <span
+                          className="tabular-nums text-text"
+                          title={qualifier}
+                          aria-label={
+                            qualifier
+                              ? `${fmtUsd(val * 1_000_000)}+ (${qualifier})`
+                              : undefined
+                          }
+                        >
+                          {metric === 'cost' &&
+                          provenance?.source === 'estimated' &&
+                          lastBucket?.[model.key] === undefined
+                            ? '—'
+                            : partial
+                              ? `${fmtUsd(val * 1_000_000)}+`
+                              : formatTooltip(val)}
+                          {qualifier ? (
+                            <span className="sr-only">{` (${qualifier})`}</span>
+                          ) : null}
                         </span>
                       </div>
                     );
@@ -426,8 +502,13 @@ export function ApiUsageCard({
                     />
                     <Tooltip
                       labelFormatter={(label) => formatXAxis(label as number)}
-                      formatter={(value: unknown, name: unknown) => [
-                        formatTooltip(Number(value ?? 0)),
+                      formatter={(value: unknown, name: unknown, item) => [
+                        formatTooltip(
+                          Number(value ?? 0),
+                          pricingByTimestamp
+                            .get(Number(item.payload?.ts))
+                            ?.get(String(item.dataKey)),
+                        ),
                         String(name),
                       ]}
                       cursor={CHART_CURSOR}
@@ -435,22 +516,24 @@ export function ApiUsageCard({
                     <defs>
                       {models.map((model, index) => (
                         <SeriesFillGradient
-                          key={model}
+                          key={model.key}
                           id={`${chartId}-${index}`}
-                          color={modelSeriesColor(model, index)}
+                          color={modelSeriesColor(model.label, index)}
                         />
                       ))}
                     </defs>
                     {models.map((model, index) => (
                       <Area
-                        key={model}
+                        key={model.key}
                         type="monotone"
-                        dataKey={model}
+                        dataKey={model.key}
+                        name={model.label}
                         stackId="1"
-                        stroke={modelSeriesColor(model, index)}
+                        stroke={modelSeriesColor(model.label, index)}
                         fill={`url(#${chartId}-${index})`}
                         fillOpacity={1}
                         strokeWidth={1.5}
+                        connectNulls={false}
                         isAnimationActive={false}
                       />
                     ))}

@@ -1,8 +1,14 @@
 import type { DashboardUsageResponse } from '../lib/api';
 import { cacheHitRatio, sumTokens } from '../lib/format';
+import {
+  isIndeterminatePricing,
+  type PricingCounts,
+  sumBucketPricing,
+  sumPricingCounts,
+} from '../lib/pricingCompleteness';
 import type { ProviderFamily } from '../lib/providers';
 
-export interface PrincipalProviderMetric {
+export interface PrincipalProviderMetric extends PricingCounts {
   readonly costMicros: number;
   readonly cacheHitRatio: number | null;
   readonly requests: number;
@@ -10,7 +16,7 @@ export interface PrincipalProviderMetric {
   readonly promptTokens: number;
 }
 
-export interface MergedPrincipalUsage {
+export interface MergedPrincipalUsage extends PricingCounts {
   readonly id: string;
   readonly name: string;
   readonly providers: Readonly<
@@ -20,7 +26,7 @@ export interface MergedPrincipalUsage {
   readonly totalRequests: number;
   readonly totalTokens: number;
   readonly totalCacheHitRatio: number | null;
-  readonly sharePct: number;
+  readonly sharePct: number | null;
 }
 
 const EMPTY_TOKENS = {
@@ -51,6 +57,7 @@ function metricsForSeries(
     tokens.cache_creation_input_tokens +
     tokens.cache_read_input_tokens;
   return {
+    ...sumBucketPricing(series.buckets),
     costMicros,
     cacheHitRatio: cacheHitRatio(tokens),
     requests,
@@ -117,6 +124,13 @@ export function mergePrincipalProviderUsage(
           ) / promptTokens
         : null;
     return {
+      ...sumPricingCounts(
+        providerMetrics.map((metric) => ({
+          ...metric,
+          request_count: metric.requests,
+          virtual_cost_micros: metric.costMicros,
+        })),
+      ),
       id,
       name: value.name,
       providers: value.providers,
@@ -124,12 +138,24 @@ export function mergePrincipalProviderUsage(
       totalRequests,
       totalTokens,
       totalCacheHitRatio: weightedCacheHit,
-      sharePct: 0,
+      sharePct: null as number | null,
     } satisfies MergedPrincipalUsage;
   });
-  const totalCost = rows.reduce((total, row) => total + row.totalCostMicros, 0);
+  const determinate = rows.filter(
+    (row) => !isIndeterminatePricing(row.pricing_completeness),
+  );
+  const totalCost = determinate.reduce(
+    (total, row) => total + row.totalCostMicros,
+    0,
+  );
   return rows.map((row) => ({
     ...row,
-    sharePct: totalCost > 0 ? (row.totalCostMicros / totalCost) * 100 : 0,
+    sharePct:
+      isIndeterminatePricing(row.pricing_completeness) ||
+      determinate.length === 0
+        ? null
+        : totalCost > 0
+          ? (row.totalCostMicros / totalCost) * 100
+          : 0,
   }));
 }

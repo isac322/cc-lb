@@ -7,6 +7,8 @@ import type { Page } from '@playwright/test';
 import type {
   ApiKeyAccess,
   Upstream,
+  PricingCompleteness,
+  UsageBucket,
   UpstreamKeyUsageResponse,
 } from '../../src/lib/api';
 import { apiKey, expect, openUpstream, test } from './harness';
@@ -118,6 +120,144 @@ function card(page: Page) {
 }
 
 test.describe('API usage card', () => {
+  for (const width of [390, 768, 1440]) {
+    for (const theme of ['dark', 'light'] as const) {
+      for (const [name, overrides, state, figure, caption] of [
+        ['legacy-zero', {}, 'unknown', '—', 'Price unknown'],
+        ['legacy-unpriced', { request_count: 2, unpriced_request_count: 1 }, 'unknown', '—', 'Price unknown'],
+        ['legacy-auxiliary', { request_count: 2, unmetered_request_count: 1 }, 'unknown', '—', 'Price unknown'],
+        ['legacy-priced-zero', { request_count: 2, priced_request_count: 1 }, 'partial', '$0.00+', 'Partly priced'],
+        ['positive-legacy', { virtual_cost_micros: 2_500_000 }, 'partial', '$2.50+', 'Partly priced'],
+        ['known-zero', { priced_request_count: 1 }, 'known_zero', '$0.00', null],
+        ['auxiliary', { unmetered_request_count: 1 }, 'unmetered', '$0.00', 'No billable usage'],
+      ] satisfies readonly [string, Partial<UsageBucket>, PricingCompleteness, string, string | null][]) {
+        test(`estimated ${name} at ${width}px in ${theme}`, async ({
+          page,
+          seedApiKeyUpstream,
+          routeEnvelope,
+        }) => {
+          await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+          await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+          await page.addInitScript((theme) => {
+            localStorage.setItem('cclb.theme', theme);
+          }, theme);
+          const upstream = await seedApiKeyUpstream({ key: apiKey(`${name}-${width}-${theme}`) });
+          const point: UsageBucket = {
+            ...bucket(NOW - HOUR, 0),
+            request_count: 1,
+            priced_request_count: 0,
+            unpriced_request_count: 0,
+            unmetered_request_count: 0,
+            ...overrides,
+            pricing_completeness: state,
+          };
+          const base = usage();
+          await serve(routeEnvelope, upstream, ORG_OK, 200, usage({
+            source: 'estimated',
+            series: [{ key: 'claude-sonnet-4', buckets: [point] }],
+            month: {
+              ...base.month,
+              tokens: 0,
+              cost_usd_micros: point.virtual_cost_micros,
+              pricing_completeness: state,
+              priced_request_count: point.priced_request_count,
+              unpriced_request_count: point.unpriced_request_count,
+              unmetered_request_count: point.unmetered_request_count,
+            },
+          }));
+          await openUpstream(page, upstream.id);
+          await card(page).getByRole('radiogroup', { name: 'Metric' }).getByRole('radio', { name: 'Cost' }).click();
+          const credit = page.getByTestId('api-key-credits').locator('[data-cell="Credits used"]');
+          await expect(credit).toContainText(figure);
+          if (caption) await expect(credit).toContainText(caption);
+          const legend = card(page).getByTestId('api-usage-legend-slot');
+          await expect(legend).toContainText(
+            state === 'unknown' ? '—' : `$${(point.virtual_cost_micros / 1_000_000).toFixed(4)}${state === 'partial' ? '+' : ''}`,
+          );
+          if (state === 'unknown') {
+            await expect(credit).not.toContainText('$0.00');
+            await expect(credit).not.toContainText('No billable usage');
+            await expect(legend).not.toContainText('$0.0000');
+          }
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+          expect(await credit.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        });
+      }
+    }
+  }
+
+  test('estimated ts model stays unavailable beside priced, zero and partial controls', async ({
+    page,
+    seedApiKeyUpstream,
+    routeEnvelope,
+  }) => {
+    const upstream = await seedApiKeyUpstream({ key: apiKey('ts-model-controls') });
+    const points = Array.from({ length: 3 }, (_, index) => ({
+      ...bucket(NOW - (3 - index) * HOUR, 100),
+      request_count: 1,
+    }));
+    await serve(routeEnvelope, upstream, ORG_OK, 200, usage({
+      source: 'estimated',
+      series: [
+        {
+          key: 'ts',
+          buckets: points.map((point) => ({
+            ...point,
+            pricing_completeness: 'unknown',
+          })),
+        },
+        {
+          key: 'ordinary',
+          buckets: points.map((point) => ({
+            ...point,
+            virtual_cost_micros: 1_250_000,
+            pricing_completeness: 'priced',
+            priced_request_count: 1,
+          })),
+        },
+        {
+          key: 'known-zero',
+          buckets: points.map((point) => ({
+            ...point,
+            pricing_completeness: 'known_zero',
+            priced_request_count: 1,
+          })),
+        },
+        {
+          key: 'partial',
+          buckets: points.map((point) => ({
+            ...point,
+            request_count: 2,
+            virtual_cost_micros: 2_500_000,
+            pricing_completeness: 'partial',
+            priced_request_count: 1,
+            unpriced_request_count: 1,
+          })),
+        },
+      ],
+    }));
+    await openUpstream(page, upstream.id);
+    await card(page).getByRole('radiogroup', { name: 'Metric' }).getByRole('radio', { name: 'Cost' }).click();
+    const legend = card(page).getByTestId('api-usage-legend-slot');
+    const reading = (model: string) => legend.getByText(model, { exact: true }).locator('..');
+    await expect(reading('ts')).toHaveText('ts—');
+    await expect(reading('ordinary')).toHaveText('ordinary$1.2500');
+    await expect(reading('known-zero')).toHaveText('known-zero$0.0000');
+    await expect(reading('partial')).toHaveText('partial$2.5000+ (1 unpriced)');
+    await expect(legend).not.toContainText('NaN');
+    const chart = card(page).locator('.recharts-wrapper');
+    const bounds = await chart.boundingBox();
+    if (!bounds) throw new Error('Rendered API usage chart is required');
+    await page.mouse.move(bounds.x + bounds.width * 0.6, bounds.y + bounds.height * 0.5);
+    const tooltip = card(page).locator('.recharts-tooltip-wrapper');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText('ordinary');
+    await expect(tooltip).toContainText('$1.2500');
+    await expect(tooltip).toContainText('$2.5000+ (1 unpriced)');
+    await expect(tooltip.getByText('ts', { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+
   // UI-U-05, UI-U-13: reported key usage, strip cells, "Other" model.
   test('reported: strip cells and attribution caption', async ({
     page,

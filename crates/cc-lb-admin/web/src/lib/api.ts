@@ -352,6 +352,14 @@ export function downloadConfigDraft(
   return pendingConfigDraftDownload;
 }
 
+export type PricingCompleteness =
+  | 'priced'
+  | 'known_zero'
+  | 'partial'
+  | 'unpriced'
+  | 'unmetered'
+  | 'unknown';
+
 export interface SummaryTotals {
   request_count: number;
   input_tokens: number;
@@ -362,6 +370,10 @@ export interface SummaryTotals {
   error_rate: number;
   virtual_cost_micros: number;
   avg_latency_ms: number;
+  pricing_completeness?: PricingCompleteness;
+  priced_request_count?: number;
+  unpriced_request_count?: number;
+  unmetered_request_count?: number;
 }
 
 export interface UsageBucket {
@@ -390,6 +402,10 @@ export interface UsageBucket {
   cost_cache_write_12h_micros?: number | null;
   latency_ms_sum: number;
   latency_count: number;
+  pricing_completeness?: PricingCompleteness;
+  priced_request_count?: number;
+  unpriced_request_count?: number;
+  unmetered_request_count?: number;
 }
 
 export interface Sparkline {
@@ -664,12 +680,12 @@ export interface RequestEvent {
   tool_use_prompt_tokens?: number | null;
   cache_read_input_tokens?: number;
   native_cache?: RequestNativeCacheObservation | null;
-  cost_usd_micros?: number;
-  cost_input_micros?: number;
-  cost_output_micros?: number;
-  cost_cache_creation_5m_micros?: number;
-  cost_cache_creation_1h_micros?: number;
-  cost_cache_read_micros?: number;
+  cost_usd_micros?: number | null;
+  cost_input_micros?: number | null;
+  cost_output_micros?: number | null;
+  cost_cache_creation_5m_micros?: number | null;
+  cost_cache_creation_1h_micros?: number | null;
+  cost_cache_read_micros?: number | null;
   cost_cache_write_micros?: number | null;
   cost_cache_write_30m_micros?: number | null;
   cost_cache_write_12h_micros?: number | null;
@@ -1194,6 +1210,10 @@ export interface KeyUsageMonth {
   tokens: number;
   /** At list price — always an estimate. */
   cost_usd_micros: number;
+  pricing_completeness?: PricingCompleteness;
+  priced_request_count?: number;
+  unpriced_request_count?: number;
+  unmetered_request_count?: number;
   billing_stop: {
     kind: KeyBillingStopKind;
     observed_at_unix_secs: number;
