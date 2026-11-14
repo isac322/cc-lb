@@ -398,12 +398,12 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
         id: "credit-test".to_owned(),
         kind: PrincipalKind::InternalKey,
     };
-    let candidate = |kind, id, snapshots| UpstreamCandidate {
+    let candidate = |kind, id, snapshots, now| UpstreamCandidate {
         upstream_id: id,
         name: "credit-test".to_owned(),
         kind,
         subscription_quotas: snapshots,
-        observed_at_unix_secs: OBSERVED / 1_000,
+        observed_at_unix_secs: now / 1_000,
         cache_score: None,
         base_url: None,
         plan_capacity_ratio: None,
@@ -421,8 +421,14 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
                         cc_lb_domain::UpstreamKind::OpenaiOauth,
                         upstream_id,
                         cache.snapshot_for_upstream(upstream_id, now, 60),
+                        now,
                     ),
-                    candidate(cc_lb_domain::UpstreamKind::OpenaiApiKey, key_id, vec![]),
+                    candidate(
+                        cc_lb_domain::UpstreamKind::OpenaiApiKey,
+                        key_id,
+                        vec![],
+                        now,
+                    ),
                 ],
             )
             .expect("quota filter")
@@ -510,16 +516,19 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
         output.subscription_preference.unwrap().chosen_tier,
         SubscriptionTier::Overage
     );
-    let stale = cache.snapshot_for_upstream(upstream_id, OBSERVED + 61_000, 60);
+    let stale_snapshots = cache.snapshot_for_upstream(upstream_id, OBSERVED + 61_000, 60);
     assert_eq!(
-        stale
+        stale_snapshots
             .iter()
             .find(|snap| snap.window == "overage")
             .unwrap()
             .state,
         SubscriptionQuotaDataState::Stale
     );
-    assert_eq!(evaluate(OBSERVED + 61_000).kept_upstream_ids, vec![key_id]);
+    assert_eq!(
+        evaluate(OBSERVED + 61_000).kept_upstream_ids,
+        vec![key_id]
+    );
 }
 
 #[test]

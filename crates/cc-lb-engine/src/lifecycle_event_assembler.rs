@@ -517,6 +517,8 @@ impl Partial {
 ///   but not worth a partial publish on its own.
 /// - `UpstreamStreamDiagnosticsObserved`: merged into the upstream body
 ///   attribution fields and published with the final write.
+/// - `UpstreamQuotaFrameObserved` / `RequestFundingObserved`: funding evidence
+///   is merged into the row but published with the final write.
 /// - `Priced` / `CacheObserved`: merged into the row but published only with
 ///   the final write.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
