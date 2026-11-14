@@ -298,8 +298,14 @@ async fn xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
 
 #[tokio::test]
 async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestResult {
-    for post_upper_count in [1_i64, 256] {
-        for intact in [true, false] {
+    for (post_upper_count, intact) in [
+        (1_i64, true),
+        (1, false),
+        (257, true),
+        (257, false),
+        (600, false),
+    ] {
+        {
             let Some(fixture) = Fixture::create(168).await? else {
                 return Ok(());
             };
@@ -352,15 +358,29 @@ async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestR
                      (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,model,list_cost_usd_micros) \
                      SELECT 'post-D-'||i,'post-D-'||i,to_timestamp(1800007200),1800007200000,200,0,'post-D',1 \
                      FROM generate_series(1,$1::bigint) AS i",
-                ).bind(post_upper_count).execute(&mut conn_d).await?;
+                ).bind(if post_upper_count == 257 { 256 } else { post_upper_count }).execute(&mut conn_d).await?;
+                // Split post-upper allocations around A when testing 257 post-upper rows (D1..D256, A, X, B).
+                let mut conn_x = if post_upper_count == 257 {
+                    let mut conn_x = fixture.connect_standalone().await?;
+                    sqlx::query("BEGIN").execute(&mut conn_x).await?;
+                    Some(conn_x)
+                } else {
+                    None
+                };
                 let a_seq: i64 = sqlx::query_scalar(insert)
                     .bind("post-A").bind((H + 350) as f64).bind(((H + 350) * 1000) as i64)
                     .bind("post-target").bind(Some(0_i64)).fetch_one(&mut conn_a).await?;
+                if let Some(conn_x) = conn_x.as_mut() {
+                    let x_seq: i64 = sqlx::query_scalar(insert)
+                        .bind("post-X").bind((H + 400) as f64).bind(((H + 400) * 1000) as i64)
+                        .bind("post-D").bind(Some(1_i64)).fetch_one(&mut *conn_x).await?;
+                    assert_eq!((a_seq, x_seq), (20255, 20256));
+                }
                 let b_seq: i64 = sqlx::query_scalar(insert)
                     .bind("post-B").bind((H + 340) as f64).bind(((H + 340) * 1000) as i64)
                     .bind("post-target").bind(None::<i64>).fetch_one(&mut conn_b).await?;
                 assert_eq!(c_seq, 19998);
-                assert_eq!((a_seq, b_seq), (19999 + post_upper_count, 20000 + post_upper_count));
+                assert_eq!(b_seq, 20000 + post_upper_count);
                 assert!(x_a.parse::<u64>()? < x_b.parse::<u64>()?);
                 assert!(x_b.parse::<u64>()? < x_c.parse::<u64>()?);
                 assert!(x_c.parse::<u64>()? < x_d.parse::<u64>()?);
@@ -371,11 +391,18 @@ async fn post_upper_xid_seq_inversion_interior_hole_preserves_unknown() -> TestR
                 sqlx::query("COMMIT").execute(&mut conn_b).await?;
                 sqlx::query("COMMIT").execute(&mut conn_c).await?;
                 sqlx::query("COMMIT").execute(&mut conn_d).await?;
+                let mut last_xid = x_d;
+                if let Some(mut conn_x) = conn_x {
+                    last_xid = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+                        .fetch_one(&mut conn_x).await?;
+                    sqlx::query("COMMIT").execute(&mut conn_x).await?;
+                    conn_x.close().await?;
+                }
                 conn_a.close().await?;
                 conn_b.close().await?;
                 conn_c.close().await?;
                 conn_d.close().await?;
-                wait_until_xid_below_xmin(pool, &x_d).await?;
+                wait_until_xid_below_xmin(pool, &last_xid).await?;
                 // Exactly 9,998 remaining fillers + B + C fill the next batch;
                 // committed D remains above high_water despite its lower seq.
                 assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 10_000);

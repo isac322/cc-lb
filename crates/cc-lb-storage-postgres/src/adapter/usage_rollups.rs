@@ -989,21 +989,8 @@ async fn seq_ceiling_at_xid(
     if upper_seq == 0 && upper_xid == "0" {
         return Ok(0);
     }
-    let post_seqs: Vec<i64> = sqlx::query_scalar(
-        "SELECT seq FROM request_events_v1 WHERE tx_id > $1::xid8 \
-         ORDER BY tx_id ASC, seq ASC LIMIT 256",
-    )
-    .bind(upper_xid)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)?;
     let seq_last = sequence_last_value(tx).await?;
-    if post_seqs.len() < 256 {
-        Ok(upper_seq.max(seq_last))
-    } else {
-        let post_max = post_seqs.into_iter().max().unwrap_or(upper_seq);
-        Ok(upper_seq.max(post_max.saturating_sub(1)))
-    }
+    Ok(upper_seq.max(seq_last))
 }
 
 async fn pricing_sequence_is_contiguous(
@@ -1013,6 +1000,9 @@ async fn pricing_sequence_is_contiguous(
     lower_seq_floor: i64,
     seq_last_value: i64,
 ) -> StorageResult<bool> {
+    if seq > seq_last_value {
+        return Ok(false);
+    }
     if seq == *expected_seq {
         *expected_seq -= 1;
     } else if seq < *expected_seq {
@@ -1033,25 +1023,23 @@ async fn pricing_sequence_is_contiguous(
         }
         *expected_seq = seq - 1;
     } else {
-        if *expected_seq > lower_seq_floor {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM request_events_v1 WHERE seq = $1)")
-                    .bind(*expected_seq)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(map_sqlx_error)?;
-            if !exists {
-                return Ok(false);
-            }
+        let inversion_span = seq - *expected_seq;
+        if inversion_span > MAX_SEQ_PERMUTATION_GAP {
+            return Ok(false);
         }
-        if seq < seq_last_value {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM request_events_v1 WHERE seq = $1)")
-                    .bind(seq + 1)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(map_sqlx_error)?;
-            if !exists {
+        let low =
+            (*expected_seq - MAX_SEQ_PERMUTATION_GAP + 1).max(lower_seq_floor.saturating_add(1));
+        if low <= *expected_seq {
+            let window = *expected_seq - low + 1;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM request_events_v1 WHERE seq >= $1 AND seq <= $2",
+            )
+            .bind(low)
+            .bind(*expected_seq)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if count < window {
                 return Ok(false);
             }
         }
