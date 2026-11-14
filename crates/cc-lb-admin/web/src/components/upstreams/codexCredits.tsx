@@ -215,12 +215,16 @@ export function selectCodexCredits(
           : latestAvailability != null
             ? 'Stale'
             : 'Unknown';
+  const freshPositiveAvailability =
+    (unlimitedFresh && unlimited?.snapshot.credits?.unlimited === true) ||
+    (hasCreditsFresh && hasCredits?.snapshot.credits?.has_credits === true);
   const fallbackUnavailable =
     unavailable != null &&
     (unavailable.credits == null ||
-      latestAvailability == null ||
-      (unavailable.observed_at_unix_millis ?? -1) >=
-        latestAvailability.observedAt);
+      (!freshPositiveAvailability &&
+        (latestAvailability == null ||
+          (unavailable.observed_at_unix_millis ?? -1) >=
+            latestAvailability.observedAt)));
   const statusEvidence =
     limit ??
     (fallbackUnavailable ? undefined : latestAvailability) ??

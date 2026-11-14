@@ -469,6 +469,33 @@ describe('Codex credit observations', () => {
     );
     expect(facts?.status).toBe('Unavailable');
   });
+  it('lets fresh unlimited evidence override a newer derived fallback restriction', () => {
+    const facts = selectCodexCredits(
+      [
+        snapshot({
+          observed_at_unix_millis: NOW * 1000,
+          fallback_available: false,
+          credits: credit({ has_credits: false }),
+        }),
+        snapshot({
+          window: 'unified',
+          observed_at_unix_millis: (NOW - 100) * 1000,
+          credits: credit({
+            unlimited: true,
+            observations: {
+              unlimited: {
+                source: 'api',
+                observed_at_unix_millis: (NOW - 100) * 1000,
+              },
+            },
+          }),
+        }),
+      ],
+      300,
+      NOW * 1000,
+    );
+    expect(facts?.status).toBe('Unlimited');
+  });
 
   it('does not refresh stale availability with a fresh balance-only observation', () => {
     const facts = selectCodexCredits([
