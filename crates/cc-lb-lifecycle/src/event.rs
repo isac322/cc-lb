@@ -276,6 +276,9 @@ pub enum LifecycleEvent {
         /// classify the request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_kind: Option<cc_lb_request_log::RequestEventKind>,
+        /// Whether late or ambiguous quota evidence invalidated funding.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        funding_ambiguous: bool,
     },
     /// Emitted by the pricing subscriber after cost is computed from usage
     /// counts, model, and upstream kind. The assembler merges these micros

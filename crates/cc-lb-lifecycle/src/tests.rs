@@ -60,6 +60,7 @@ fn request_terminated_preserves_nested_io_timings() {
         finalize_ms: None,
         internal_errors: Vec::new(),
         event_kind: None,
+        funding_ambiguous: false,
     };
 
     let json = serde_json::to_value(&event).expect("serialize terminal setup timings");
@@ -202,6 +203,7 @@ fn kind_labels_cover_every_variant() {
             finalize_ms: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         }
         .kind(),
         LifecycleEvent::Priced {

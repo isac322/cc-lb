@@ -580,6 +580,7 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 event_kind: None,
+                funding_ambiguous: false,
             })
             .await
             .unwrap();
@@ -627,6 +628,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -714,6 +716,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -831,6 +834,7 @@ mod tests {
                             io_timings: Default::default(),
                             upstream_body_ms: None,
                             event_kind: None,
+                            funding_ambiguous: false,
                         },
                     );
                     let LifecycleEvent::Priced {

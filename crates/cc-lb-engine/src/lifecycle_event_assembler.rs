@@ -1151,6 +1151,7 @@ async fn handle_event(
         io_timings,
         internal_errors,
         event_kind,
+        funding_ambiguous,
         ..
     } = &event
     {
@@ -1175,6 +1176,7 @@ async fn handle_event(
             partial.connect_ms = *connect_ms;
             partial.connection_reused = *connection_reused;
             partial.internal_errors = internal_errors.clone();
+            partial.funding_ambiguous = *funding_ambiguous;
             partial.io_timings = *io_timings;
             // Terminal-carried classification is the only metadata left when
             // `RequestStarted` was dropped on the writer channel.
@@ -1213,6 +1215,7 @@ async fn handle_event(
         // from `RequestStarted` (including renewal precedence) stays
         // authoritative.
         partial.event_kind = partial.event_kind.or(*event_kind);
+        partial.funding_ambiguous |= *funding_ambiguous;
         let expects_priced =
             partial.usage_seen && partial.model().is_some() && partial.cost.is_none();
         let expects_cache =
@@ -2293,6 +2296,7 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 event_kind: None,
+                funding_ambiguous: false,
             },
         )
         .await;
@@ -2361,6 +2365,7 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
+                funding_ambiguous: false,
             },
         )
         .await;
@@ -2391,6 +2396,7 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
+                funding_ambiguous: false,
             },
         )
         .await;
@@ -2478,6 +2484,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -2546,6 +2553,7 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
+                funding_ambiguous: false,
             })
             .await
             .expect("send termination");
@@ -2604,6 +2612,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .expect("send request terminated");
@@ -2653,6 +2662,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .expect("send request terminated");
@@ -2702,6 +2712,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .expect("send request terminated");
@@ -2741,6 +2752,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -2783,6 +2795,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -2829,6 +2842,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -2879,6 +2893,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
+            funding_ambiguous: false,
         })
         .await
         .expect("send request terminated");
@@ -2936,6 +2951,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -2997,6 +3013,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3044,6 +3061,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 
@@ -3345,6 +3363,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3382,6 +3401,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3432,6 +3452,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3502,6 +3523,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3546,6 +3568,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: Some(4),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -3845,6 +3868,7 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 event_kind: None,
+                funding_ambiguous: false,
             },
         )
         .await;
@@ -3914,6 +3938,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -4133,6 +4158,7 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 event_kind: None,
+                funding_ambiguous: false,
             })
             .await
             .unwrap();
@@ -4240,6 +4266,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -4484,6 +4511,7 @@ mod tests {
             },
             upstream_body_ms: Some(12),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -4675,6 +4703,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         })
         .await
         .unwrap();
@@ -4800,6 +4829,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         });
 
         handle.shutdown().await;
@@ -5175,6 +5205,7 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 

@@ -873,6 +873,7 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
+            funding_ambiguous: false,
         }
     }
 
@@ -1450,6 +1451,7 @@ mod tests {
                 finalize_ms: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
+                funding_ambiguous: false,
             },
         ]);
 

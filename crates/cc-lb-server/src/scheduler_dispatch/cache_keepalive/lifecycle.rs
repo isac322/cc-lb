@@ -158,6 +158,7 @@ pub(super) fn publish_renewal_lifecycle(
         internal_errors: Vec::new(),
         io_timings: Default::default(),
         event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
+        funding_ambiguous: false,
     });
 }
 

@@ -312,6 +312,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             io_timings: Default::default(),
             upstream_body_ms: Some(profile.token_base() + 10),
             event_kind: None,
+            funding_ambiguous: false,
         },
     }
 }

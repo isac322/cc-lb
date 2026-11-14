@@ -253,6 +253,7 @@ async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
         io_timings: Default::default(),
         upstream_body_ms: None,
         event_kind: Some(RequestEventKind::Renewal),
+        funding_ambiguous: false,
     })
     .await
     .expect("assembler is running");
