@@ -62,6 +62,9 @@ fn pricing_stage_verified_min_id(slot_id: &str) -> String {
 fn pricing_stage_verifying_id(slot_id: &str) -> String {
     format!("pricing_completeness_stage_{slot_id}_verifying")
 }
+fn pricing_stage_verified_max_id(slot_id: &str) -> String {
+    format!("pricing_completeness_stage_{slot_id}_verified_max_seq")
+}
 const RAW_PRUNE_CUTOFF_ID: &str = "request_events_prune_cutoff_unix_secs";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
@@ -1152,6 +1155,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                     OR id LIKE 'pricing_completeness_stage_%_verified_count' \
                     OR id LIKE 'pricing_completeness_stage_%_verify_cursor' \
                     OR id LIKE 'pricing_completeness_stage_%_verified_min_seq' \
+                    OR id LIKE 'pricing_completeness_stage_%_verified_max_seq' \
                     OR id LIKE 'pricing_completeness_stage_%_verifying'",
             )
             .bind(PRICING_STAGE_ABORT_ID)
@@ -1409,6 +1413,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             .unwrap_or((lower_seq_floor, lower_xid.clone()));
     let verified_min_id = pricing_stage_verified_min_id(&slot_id);
     let mut verified_min_seq = read_pricing_checkpoint(&mut tx, &verified_min_id)
+        .await?
+        .and_then(|(value, _)| (value >= 0).then_some(value));
+    let verified_max_id = pricing_stage_verified_max_id(&slot_id);
+    let mut verified_max_seq = read_pricing_checkpoint(&mut tx, &verified_max_id)
         .await?
         .and_then(|(value, _)| (value >= 0).then_some(value));
     // Page by the composite (tx_id, seq) cursor below the snapshot xmin horizon,
@@ -1708,7 +1716,15 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     let mut hole_seen = false;
     for row in &pricing_backfill_rows {
         let seq: i64 = row.try_get("seq").map_err(map_sqlx_error)?;
-        if !pricing_sequence_is_contiguous(&mut tx, seq, &mut expected_seq, 0, seq_last).await? {
+        if !pricing_sequence_is_contiguous(
+            &mut tx,
+            seq,
+            &mut expected_seq,
+            lower_seq_floor,
+            seq_last,
+        )
+        .await?
+        {
             hole_seen = true;
             break;
         }
@@ -1993,9 +2009,11 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         persist_pricing_checkpoint(&mut tx, &verified_count_id, 0, "0").await?;
         persist_pricing_checkpoint(&mut tx, &verify_cursor_id, lower_seq_floor, &lower_xid).await?;
         persist_pricing_checkpoint(&mut tx, &verified_min_id, -1, "0").await?;
+        persist_pricing_checkpoint(&mut tx, &verified_max_id, -1, "0").await?;
         verify_cursor_seq = lower_seq_floor;
         verify_cursor_xid = lower_xid.clone();
         verified_count = 0;
+        verified_max_seq = None;
         verified_min_seq = None;
     }
     if verifying {
@@ -2016,6 +2034,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         for row in &verification_rows {
             let seq: i64 = row.try_get("seq").map_err(map_sqlx_error)?;
             verified_min_seq = Some(verified_min_seq.map_or(seq, |min_seq| min_seq.min(seq)));
+            verified_max_seq = Some(verified_max_seq.map_or(seq, |max_seq| max_seq.max(seq)));
             verify_cursor_seq = seq;
             verify_cursor_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
         }
@@ -2046,15 +2065,30 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 "0",
             )
             .await?;
+            persist_pricing_checkpoint(
+                &mut tx,
+                &verified_max_id,
+                verified_max_seq.unwrap_or(-1),
+                "0",
+            )
+            .await?;
         } else if verified_count != scanned_count {
             hole_seen = true;
         } else if let Some(min_seq) = verified_min_seq {
             let base_slot = lower_xid == "0" && lower_seq_floor == 0;
-            if base_slot && min_seq == 1 {
+            if base_slot
+                && expected_seq == 0
+                && source_upper_seq >= seq_last
+                && min_seq == 1
+                && verified_max_seq.is_some_and(|max_seq| {
+                    max_seq.saturating_sub(min_seq).saturating_add(1) != verified_count
+                })
+            {
+                hole_seen = true;
+            }
+            if !hole_seen && base_slot && min_seq == 1 {
                 // The exact source count and scan-time sequence checks already
                 // establish a complete base range when its minimum is seq 1.
-            } else if base_slot && min_seq > expected_seq.saturating_add(1) {
-                hole_seen = true;
             } else if expected_seq > 0 {
                 if min_seq > expected_seq {
                     if base_slot {
@@ -2099,12 +2133,13 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         if verification_finished {
             sqlx::query(
                 "DELETE FROM usage_rollup_checkpoints_v1 \
-                 WHERE id IN ($1, $2, $3, $4)",
+                 WHERE id IN ($1, $2, $3, $4, $5)",
             )
             .bind(&verifying_id)
             .bind(&verified_count_id)
             .bind(&verify_cursor_id)
             .bind(&verified_min_id)
+            .bind(&verified_max_id)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
@@ -2131,6 +2166,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 OR id LIKE 'pricing_completeness_stage_%_verified_count' \
                 OR id LIKE 'pricing_completeness_stage_%_verify_cursor' \
                 OR id LIKE 'pricing_completeness_stage_%_verified_min_seq' \
+                OR id LIKE 'pricing_completeness_stage_%_verified_max_seq' \
                 OR id LIKE 'pricing_completeness_stage_%_verifying'",
         )
         .execute(&mut *tx)
@@ -2148,17 +2184,20 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     }
     let mut slot_finished = false;
     if (pricing_backfill_has_work || verifying || flushing) && (flushing || verification_finished) {
-        let selected_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ( \
-                 SELECT 1 FROM usage_rollup_pricing_backfill_stage_v1 \
-                 WHERE slot_id = $1 LIMIT $2 \
-             ) AS selected",
+        let selected_rows = sqlx::query(
+            "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, model \
+             FROM usage_rollup_pricing_backfill_stage_v1 \
+             WHERE slot_id = $1 LIMIT $2",
         )
         .bind(&slot_id)
         .bind(ROLLUP_BATCH_LIMIT)
-        .fetch_one(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let selected_count =
+            i64::try_from(selected_rows.len()).map_err(|_| StorageError::Fatal {
+                message: "selected pricing stage count cannot be represented as i64".to_owned(),
+            })?;
         let applied_rows = sqlx::query(
             "WITH selected AS MATERIALIZED ( \
                  SELECT resolution, bucket_start_unix_secs, principal_id, \
@@ -2193,13 +2232,13 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         let applied_count = i64::try_from(applied_rows.len()).map_err(|_| StorageError::Fatal {
             message: "flushed pricing rollup count cannot be represented as i64".to_owned(),
         })?;
-        if applied_count > 0 {
-            let mut resolutions = Vec::with_capacity(applied_rows.len());
-            let mut buckets = Vec::with_capacity(applied_rows.len());
-            let mut principals = Vec::with_capacity(applied_rows.len());
-            let mut upstream_ids = Vec::with_capacity(applied_rows.len());
-            let mut models = Vec::with_capacity(applied_rows.len());
-            for row in &applied_rows {
+        if selected_count > 0 {
+            let mut resolutions = Vec::with_capacity(selected_rows.len());
+            let mut buckets = Vec::with_capacity(selected_rows.len());
+            let mut principals = Vec::with_capacity(selected_rows.len());
+            let mut upstream_ids = Vec::with_capacity(selected_rows.len());
+            let mut models = Vec::with_capacity(selected_rows.len());
+            for row in &selected_rows {
                 resolutions.push(
                     row.try_get::<String, _>("resolution")
                         .map_err(map_sqlx_error)?,
@@ -2221,11 +2260,11 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             sqlx::query(
                 "DELETE FROM usage_rollup_pricing_backfill_stage_v1 AS st \
                  USING UNNEST($2::text[], $3::bigint[], $4::text[], $5::uuid[], $6::text[]) \
-                     AS applied(resolution, bucket_start_unix_secs, principal_id, upstream_id, model) \
-                 WHERE st.slot_id = $1 AND st.resolution = applied.resolution \
-                   AND st.bucket_start_unix_secs = applied.bucket_start_unix_secs \
-                   AND st.principal_id = applied.principal_id \
-                   AND st.upstream_id = applied.upstream_id AND st.model = applied.model",
+                     AS selected(resolution, bucket_start_unix_secs, principal_id, upstream_id, model) \
+                 WHERE st.slot_id = $1 AND st.resolution = selected.resolution \
+                   AND st.bucket_start_unix_secs = selected.bucket_start_unix_secs \
+                   AND st.principal_id = selected.principal_id \
+                   AND st.upstream_id = selected.upstream_id AND st.model = selected.model",
             )
             .bind(&slot_id)
             .bind(resolutions)
@@ -2257,7 +2296,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         } else {
             sqlx::query(
                 "DELETE FROM usage_rollup_checkpoints_v1 \
-                 WHERE id IN ($1, $2, $3, $4, $5, $6)",
+                 WHERE id IN ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(&flushing_id)
             .bind(&scanned_count_id)
@@ -2265,6 +2304,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             .bind(&verified_count_id)
             .bind(&verify_cursor_id)
             .bind(&verified_min_id)
+            .bind(&verified_max_id)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;

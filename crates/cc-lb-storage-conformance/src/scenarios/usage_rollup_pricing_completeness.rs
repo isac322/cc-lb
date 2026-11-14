@@ -627,6 +627,7 @@ where
             let before = storage.usage_rollup_revision().await?;
             let run = storage.rollup_usage_once().await?;
             ensure!(run.processed_events == 0);
+            ensure!(storage.usage_rollup_checkpoint().await? == high_water);
             if pass == 0 {
                 let rows = storage.query_usage_rollups_in_range(
                     UsageRollupResolution::Minute, start, start + 60).await?;

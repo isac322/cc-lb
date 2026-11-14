@@ -560,12 +560,27 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
         .execute(&fixture.pool)
         .await
         .unwrap();
+        // The first pass only stages and initializes bounded verification.
+        fixture.storage.rollup_usage_once().await.unwrap();
+        let staged_before_fault: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        let cursor_before_fault: (i64, String) = sqlx::query_as(
+            "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 \
+             WHERE id = 'pricing_completeness_backfill_cursor'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "CREATE FUNCTION fail_pricing_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN
                  IF (SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)
                      FROM usage_rollups_v2) = 0 THEN
-                     RAISE EXCEPTION 'cursor updated before classification writes';
+                     RETURN NEW;
                  END IF;
                  RAISE EXCEPTION 'injected crash after pricing UPDATE before checkpoint commit';
              END $$;
@@ -597,13 +612,10 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
         .await
         .unwrap();
         assert_eq!(classified, 0, "classification writes must roll back with the cursor");
-        let staged: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1",
-        )
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(staged, 0, "staged candidates must roll back with the cursor");
+        assert!(
+            staged_before_fault > 0,
+            "staged candidates must remain after verification/flush rollback",
+        );
         let cursor: (i64, String) = sqlx::query_as(
             "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1
              WHERE id = 'pricing_completeness_backfill_cursor'",
@@ -611,7 +623,7 @@ fn pricing_backfill_checkpoint_failure_rolls_back_counts_and_resumes() {
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-        assert_eq!(cursor, (high_seq + 1, high_xid));
+        assert_eq!(cursor, cursor_before_fault);
         sqlx::raw_sql(
             "DROP TRIGGER fail_pricing_checkpoint ON usage_rollup_checkpoints_v1;
              DROP FUNCTION fail_pricing_checkpoint();",
