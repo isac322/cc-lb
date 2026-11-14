@@ -77,6 +77,13 @@ async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() ->
              FROM usage_rollup_pricing_backfill_stage_v1",
         ).fetch_one(pool).await?;
         assert_eq!(staged,(6666,6666,6668));
+        let scanned: i64 = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 \
+             WHERE id='pricing_completeness_stage_base_scanned_count'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(scanned, 10_000);
         // A new storage handle resumes from durable checkpoint state instead of repeating the first batch.
         let resumed = PostgresStorage::new(pool.clone(),Arc::new(cc_lb_clock::SystemClock));
         resumed.rollup_usage_once().await?;
@@ -84,6 +91,13 @@ async fn migration_166_to_168_is_metadata_only_bounded_and_backfill_resumes() ->
         let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_rollup_pricing_backfill_stage_v1")
             .fetch_one(pool).await?;
         assert_eq!(staged,0);
+        let scan_marker: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 \
+             WHERE id='pricing_completeness_stage_base_scanned_count'",
+        )
+        .fetch_optional(pool)
+        .await?;
+        assert_eq!(scan_marker, None);
         let finished: (i64, String) = sqlx::query_as("SELECT value,value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id='pricing_completeness_backfill_cursor'")
             .fetch_one(pool).await?;
         assert_eq!(finished, (0, "0".to_owned()));
