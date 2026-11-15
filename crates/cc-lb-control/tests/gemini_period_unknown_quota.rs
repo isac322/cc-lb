@@ -221,12 +221,13 @@ impl MetaStore for ConflictStore {
 async fn persist_remerges_after_cas_conflict() {
     let store = ConflictStore::default();
     let id = Uuid::nil();
-    persist_gemini_period_unknown_quota(
+    persist_gemini_quota_observation(
         &store,
         id,
         GeminiRawQuotaBinding::unscoped(),
         GeminiGroupPollUpdate::Unchanged,
         GeminiGroupPollUpdate::Unchanged,
+        None,
     )
     .await
     .unwrap();
@@ -238,12 +239,13 @@ async fn persist_remerges_after_cas_conflict() {
         &update(GeminiQuotaGroupKind::ThirdParty, 40, 0.3),
     );
     *store.concurrent.lock().unwrap() = Some(serde_json::to_string(&concurrent).unwrap());
-    persist_gemini_period_unknown_quota(
+    persist_gemini_quota_observation(
         &store,
         id,
         GeminiRawQuotaBinding::unscoped(),
         update(GeminiQuotaGroupKind::Gemini, 20, 0.8),
         GeminiGroupPollUpdate::Unchanged,
+        None,
     )
     .await
     .unwrap();
@@ -253,12 +255,13 @@ async fn persist_remerges_after_cas_conflict() {
         Some(concurrent.clone())
     );
     *store.concurrent.lock().unwrap() = Some(serde_json::to_string(&concurrent).unwrap());
-    persist_gemini_period_unknown_quota(
+    persist_gemini_quota_observation(
         &store,
         id,
         GeminiRawQuotaBinding::unscoped(),
         update(GeminiQuotaGroupKind::Gemini, 50, 0.6),
         GeminiGroupPollUpdate::Unchanged,
+        None,
     )
     .await
     .unwrap();
@@ -280,12 +283,13 @@ async fn persist_remerges_after_cas_conflict() {
                 .unwrap()
                 .is_none()
         );
-        persist_gemini_period_unknown_quota(
+        persist_gemini_quota_observation(
             &store,
             id,
             GeminiRawQuotaBinding::unscoped(),
             update(GeminiQuotaGroupKind::Gemini, 60, 0.5),
             GeminiGroupPollUpdate::Unchanged,
+            None,
         )
         .await
         .unwrap();
@@ -392,12 +396,13 @@ async fn persist_rechecks_binding_after_concurrent_credential_replacement() {
         &update(GeminiQuotaGroupKind::ThirdParty, 10, 0.8),
     );
     *store.concurrent.lock().unwrap() = Some(serde_json::to_string(&concurrent).unwrap());
-    persist_gemini_period_unknown_quota(
+    persist_gemini_quota_observation(
         &store,
         Uuid::nil(),
         binding,
         update(GeminiQuotaGroupKind::Gemini, 100, 0.0),
         GeminiGroupPollUpdate::Unchanged,
+        None,
     )
     .await
     .unwrap();
@@ -407,5 +412,87 @@ async fn persist_rechecks_binding_after_concurrent_credential_replacement() {
             .await
             .unwrap(),
         Some(concurrent)
+    );
+}
+
+#[tokio::test]
+async fn raw_quota_cas_conflict_merges_out_of_order_successes_per_response() {
+    use serde_json::json;
+
+    let store = ConflictStore::default();
+    let id = Uuid::nil();
+    let binding =
+        GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 1);
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 100,
+            fallback: Some(json!({"fallback": "initial"})),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut concurrent = load_gemini_period_unknown_quota(&store, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let responses = concurrent.raw_responses.as_mut().unwrap();
+    responses.observed_at_unix_millis = 300;
+    responses.summary = Some(json!({"summary": "newest"}));
+    responses.summary_observed_at_unix_millis = Some(300);
+    *store.concurrent.lock().unwrap() = Some(serde_json::to_string(&concurrent).unwrap());
+    let attempts = store.attempts.load(Ordering::SeqCst);
+
+    // This poll begins before summary300 is published; CAS must remerge fallback200.
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 200,
+            summary: Some(json!({"summary": "older"})),
+            fallback: Some(json!({"fallback": "newest"})),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.attempts.load(Ordering::SeqCst), attempts + 2);
+    let persisted = load_gemini_period_unknown_quota(&store, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let responses = persisted.raw_responses.as_ref().unwrap();
+    assert_eq!(responses.observed_at_unix_millis, 300);
+    assert_eq!(responses.summary, Some(json!({"summary": "newest"})));
+    assert_eq!(responses.summary_observed_at_unix_millis, Some(300));
+    assert_eq!(responses.fallback, Some(json!({"fallback": "newest"})));
+    assert_eq!(responses.fallback_observed_at_unix_millis, Some(200));
+
+    // A still older fallback completing after both successes cannot regress either side.
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding,
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 150,
+            fallback: Some(json!({"fallback": "stale"})),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        load_gemini_period_unknown_quota(&store, id).await.unwrap(),
+        Some(persisted)
     );
 }

@@ -1,7 +1,8 @@
 use cc_lb_control::anthropic_metadata::CedarEmberStatus;
 use cc_lb_control::gemini_period_unknown_quota::{
     GeminiGroupPollUpdate, GeminiPeriodUnknownGroupRecord, GeminiPeriodUnknownMeter,
-    GeminiQuotaGroupKind, GeminiRawMeterOrigin, normalize_gemini_period_unknown_meters,
+    GeminiQuotaGroupKind, GeminiRawMeterOrigin, GeminiRawQuotaResponses,
+    normalize_gemini_period_unknown_meters,
 };
 use cc_lb_domain::SubscriptionQuotaCredits;
 #[cfg(test)]
@@ -304,6 +305,7 @@ pub(super) struct ProviderUsageContext<'a> {
 pub(super) struct GeminiRawUpdates {
     pub(super) gemini: GeminiGroupPollUpdate,
     pub(super) third_party: GeminiGroupPollUpdate,
+    pub(super) responses: Option<GeminiRawQuotaResponses>,
 }
 
 /// Parse provider-native OAuth quota responses into the shared subscription
@@ -329,7 +331,16 @@ pub(super) fn parse_provider_usage_body(
         ),
         UpstreamKind::GeminiOauth => match profile {
             GeminiOAuthProfile::GeminiCli | GeminiOAuthProfile::Antigravity => {
-                records_from_gemini_api(upstream_id, project_id, &value, observed_at_unix_millis)
+                let (records, mut updates) = records_from_gemini_api(
+                    upstream_id,
+                    project_id,
+                    &value,
+                    observed_at_unix_millis,
+                );
+                if let Some(responses) = updates.responses.as_mut() {
+                    responses.oauth_profile = Some(profile);
+                }
+                (records, updates)
             }
         },
         _ => (Vec::new(), GeminiRawUpdates::default()),
@@ -539,7 +550,22 @@ fn records_from_gemini_api(
     let summary = value.get("summary").unwrap_or(&serde_json::Value::Null);
     let summary_groups = summary.get("groups").and_then(serde_json::Value::as_array);
     let mut records = Vec::new();
-    let mut updates = GeminiRawUpdates::default();
+    let mut updates = GeminiRawUpdates {
+        responses: Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis,
+            summary: summary.is_object().then(|| summary.clone()),
+            fallback: if value.get("summary").is_some() {
+                value
+                    .get("fallback")
+                    .filter(|fallback| fallback.is_object())
+                    .cloned()
+            } else {
+                value.is_object().then(|| value.clone())
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     for (group, name, windows, raw_group) in [
         (
             GeminiQuotaGroup::Gemini,
@@ -616,10 +642,12 @@ fn records_from_gemini_api(
             }
         }
         let fallback = if value.get("summary").is_some() {
-            value
-                .get("fallback")
-                .and_then(|fallback| fallback.get(name))
-                .filter(|quota| quota.is_object())
+            value.get("fallback").filter(|quota| {
+                quota.is_object()
+                    && value.get("fallback_groups").is_none_or(|groups| {
+                        groups.get(name).and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+            })
         } else {
             value.is_object().then_some(value)
         };

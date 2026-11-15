@@ -747,14 +747,13 @@ fn gemini_summary_only_disabled_group_keeps_real_absent_and_raw_fallback() {
             }]
         },
         "fallback": {
-            "gemini": {
                 "buckets": [{
                     "modelId": "gemini-2.5-pro",
                     "remainingFraction": 0.7,
                     "resetTime": "2026-11-01T13:00:00Z"
                 }]
-            }
-        }
+        },
+        "fallback_groups": {"gemini": true}
     });
     let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
     assert_eq!(records.len(), 1);
@@ -784,14 +783,13 @@ fn missing_gemini_summary_group_keeps_fallback_period_unknown() {
             }]
         },
         "fallback": {
-            "gemini": {
                 "buckets": [{
                     "modelId": "gemini-2.5-pro",
                     "remainingFraction": 0.7,
                     "resetTime": "2026-11-01T13:00:00Z"
                 }]
-            }
-        }
+        },
+        "fallback_groups": {"gemini": true}
     });
     let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
     assert_eq!(records.len(), 2);
@@ -995,7 +993,7 @@ fn gemini_period_unknown_state_matrix() {
                 serde_json::json!({}),
             ] {
                 let quota = serde_json::json!({"buckets":[{"modelId":model,"remainingFraction":0.4,"resetTime":reset,"remainingAmount":"123"}]});
-                let value = serde_json::json!({"summary":summary,"fallback":{(name):quota}});
+                let value = serde_json::json!({"summary":summary,"fallback":quota,"fallback_groups":{(name):true}});
                 let (records, raw) =
                     records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
                 assert!(records.is_empty(), "{value}");
@@ -1022,17 +1020,17 @@ fn gemini_period_unknown_state_matrix() {
             }
             // Explicit provider identity, never reset distance, chooses the window.
             for (label, expected) in [("5h", windows[0]), ("weekly", windows[1])] {
-                let value = serde_json::json!({"summary":{"groups":[]},"fallback":{(name):{"buckets":[{
+                let value = serde_json::json!({"summary":{"groups":[]},"fallback":{"buckets":[{
                     "modelId":model,"window":label,"remainingFraction":0.4,"resetTime":reset
-                }]}}});
+                }]},"fallback_groups":{(name):true}});
                 let (records, _) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
                 assert_utilization(&records, expected, 0.6);
             }
         }
         for reset in [serde_json::Value::Null, serde_json::json!("invalid")] {
-            let value = serde_json::json!({"summary":null,"fallback":{(name):{"buckets":[{
+            let value = serde_json::json!({"summary":null,"fallback":{"buckets":[{
                 "modelId":model,"window":"5h","remainingFraction":1.5,"resetTime":reset
-            }]}}});
+            }]},"fallback_groups":{(name):true}});
             let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
             assert!(records.is_empty());
             let update = if group == GeminiQuotaGroupKind::Gemini {
@@ -1047,9 +1045,9 @@ fn gemini_period_unknown_state_matrix() {
             assert_eq!(raw.meters[0].reset_time_unix_secs, None);
         }
         for success in [true, false] {
-            let mut value = serde_json::json!({"summary":{"groups":[]},"fallback":{}});
+            let mut value = serde_json::json!({"summary":{"groups":[]},"fallback":null,"fallback_groups":{(name):true}});
             if success {
-                value["fallback"][name] = serde_json::json!({"buckets":[]});
+                value["fallback"] = serde_json::json!({"buckets":[]});
             }
             let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
             let update = if group == GeminiQuotaGroupKind::Gemini {
@@ -1100,7 +1098,7 @@ fn gemini_mixed_period_evidence_preserves_explicit_summary_and_fallback_windows(
         let (records, raw) = records_from_gemini_api(
             Uuid::nil(),
             None,
-            &serde_json::json!({"summary":summary,"fallback":{}}),
+            &serde_json::json!({"summary":summary,"fallback":null}),
             observed_at,
         );
         assert!(records.is_empty());
@@ -1109,10 +1107,11 @@ fn gemini_mixed_period_evidence_preserves_explicit_summary_and_fallback_windows(
     }
     let value = serde_json::json!({
         "summary":{"groups":[]},
-        "fallback":{"gemini":{"buckets":[
+        "fallback":{"buckets":[
             {"modelId":"gemini-pro","window":"5h","remainingFraction":0.8,"resetTime":"2026-11-01T13:00:00Z"},
             {"modelId":"gemini-flash","remainingFraction":0.4,"resetTime":"2026-11-07T13:00:00Z"}
-        ]}}
+        ]},
+        "fallback_groups":{"gemini":true}
     });
     let (records, raw) = records_from_gemini_api(Uuid::nil(), None, &value, observed_at);
     assert_eq!(records.len(), 1);
@@ -1173,7 +1172,8 @@ fn gemini_disabled_labeled_fallback_keeps_absent_beside_raw_meters() {
                     buckets.push(disabled);
                 }
                 let value = serde_json::json!({
-                    "summary":{"groups":[]}, "fallback":{(name):{"buckets":buckets}}
+                    "summary":{"groups":[]}, "fallback":{"buckets":buckets},
+                    "fallback_groups":{(name):true}
                 });
                 let (records, raw) =
                     records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
@@ -1230,7 +1230,7 @@ fn gemini_explicit_period_with_missing_reset_is_retained_as_raw() {
                         serde_json::json!({"summary":{"groups":[{"displayName":group_name,"buckets":[bucket]}]}})
                     } else {
                         bucket["modelId"] = serde_json::json!(model);
-                        serde_json::json!({"summary":{"groups":[]},"fallback":{(name):{"buckets":[bucket]}}})
+                        serde_json::json!({"summary":{"groups":[]},"fallback":{"buckets":[bucket]},"fallback_groups":{(name):true}})
                     };
                     let (records, raw) =
                         records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);

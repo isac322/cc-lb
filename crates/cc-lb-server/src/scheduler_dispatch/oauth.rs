@@ -32,7 +32,7 @@ use cc_lb_control::anthropic_metadata::{
     make_metadata_http_client,
 };
 use cc_lb_control::gemini_period_unknown_quota::{
-    GeminiRawQuotaBinding, persist_gemini_period_unknown_quota,
+    GeminiRawQuotaBinding, persist_gemini_quota_observation,
 };
 
 use crate::scheduler_dispatch::http::{
@@ -365,12 +365,13 @@ impl SchedulerDispatch {
                 upstream.oauth_token_generation,
             );
             self.validate_usage_poll_fence(&upstream, &fence).await?;
-            if let Err(error) = persist_gemini_period_unknown_quota(
+            if let Err(error) = persist_gemini_quota_observation(
                 self.storage.as_ref(),
                 upstream.id,
                 binding,
                 raw_updates.gemini,
                 raw_updates.third_party,
+                raw_updates.responses,
             )
             .await
             {
@@ -721,7 +722,7 @@ impl SchedulerDispatch {
         } else {
             (false, false)
         };
-        let mut fallback = serde_json::Map::new();
+        let mut fallback = None;
         let mut fallback_succeeded = false;
         if !present.0 || !present.1 {
             match fetch_gemini_quota(
@@ -740,12 +741,7 @@ impl SchedulerDispatch {
                 Ok(response) if response.status.is_success() => {
                     match sonic_rs::from_slice::<serde_json::Value>(&response.body) {
                         Ok(value) if value.is_object() => {
-                            if !present.0 {
-                                fallback.insert("gemini".to_owned(), value.clone());
-                            }
-                            if !present.1 {
-                                fallback.insert("third_party".to_owned(), value);
-                            }
+                            fallback = Some(value);
                             fallback_succeeded = true;
                         }
                         Ok(_) => {
@@ -773,6 +769,7 @@ impl SchedulerDispatch {
         let body = match serde_json::to_vec(&serde_json::json!({
             "summary": summary,
             "fallback": fallback,
+            "fallback_groups": {"gemini": !present.0, "third_party": !present.1},
         })) {
             Ok(body) => Bytes::from(body),
             Err(error) => {

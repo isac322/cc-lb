@@ -3037,6 +3037,15 @@ fn period_unknown_record_for_binding(
 ) -> serde_json::Value {
     let mut record = period_unknown_record(observed_at_unix_millis);
     record["binding"] = binding;
+    // Synthetic unknown-retention probes, not captured provider fields.
+    record["raw_responses"] = json!({
+        "oauth_profile": "gemini_cli",
+        "observed_at_unix_millis": observed_at_unix_millis,
+        "summary_observed_at_unix_millis": observed_at_unix_millis,
+        "fallback_observed_at_unix_millis": observed_at_unix_millis - 60_000,
+        "summary": {"description": "synthetic summary", "groups": [{"unknown": true}]},
+        "fallback": {"description": "synthetic fallback", "buckets": [{"opaque": [1, null]}]}
+    });
     record
 }
 
@@ -3271,6 +3280,25 @@ async fn replace_gemini_credential(
     project_id: Option<&str>,
     access_token: &str,
 ) -> cc_lb_storage_api::UpstreamRecord {
+    replace_gemini_credential_with_profile(
+        server,
+        upstream_id,
+        account_id,
+        project_id,
+        access_token,
+        cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+    )
+    .await
+}
+
+async fn replace_gemini_credential_with_profile(
+    server: &admin_test_common::SpawnedAdminServer,
+    upstream_id: Uuid,
+    account_id: Option<&str>,
+    project_id: Option<&str>,
+    access_token: &str,
+    profile: cc_lb_aead::GeminiOAuthProfile,
+) -> cc_lb_storage_api::UpstreamRecord {
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_storage_api::{OAuthTokensCreate, UpstreamStore, UpstreamUpdate};
 
@@ -3285,7 +3313,7 @@ async fn replace_gemini_credential(
         refresh_token_expires_at_unix_secs: None,
         account_id: account_id.map(str::to_owned),
         project_id: project_id.map(str::to_owned),
-        oauth_profile: Default::default(),
+        oauth_profile: profile,
         scopes: Vec::new(),
         never_refresh: false,
     };
@@ -3349,6 +3377,21 @@ async fn latest_meters_survive_credential_rotation() {
     assert_eq!(baseline_meters.as_array().unwrap().len(), 2);
     assert!(!baseline.to_string().contains("identity_sha256"));
     assert!(!baseline.to_string().contains("\"binding\""));
+    let baseline_upstream = period_unknown_upstream(&baseline, gemini);
+    assert_eq!(
+        baseline_upstream["raw_summary"],
+        json!({
+            "observed_at_unix_millis": CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+            "body": {"description": "synthetic summary", "groups": [{"unknown": true}]}
+        })
+    );
+    assert_eq!(
+        baseline_upstream["raw_fallback"],
+        json!({
+            "observed_at_unix_millis": CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000 - 60_000,
+            "body": {"description": "synthetic fallback", "buckets": [{"opaque": [1, null]}]}
+        })
+    );
 
     // (a) Routine refresh with the same email/project keeps the meters.
     let refreshed = replace_gemini_credential(
@@ -3363,6 +3406,14 @@ async fn latest_meters_survive_credential_rotation() {
     assert_eq!(
         period_unknown_upstream(&body, gemini)["period_unknown_meters"],
         baseline_meters
+    );
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["raw_summary"],
+        baseline_upstream["raw_summary"]
+    );
+    assert_eq!(
+        period_unknown_upstream(&body, gemini)["raw_fallback"],
+        baseline_upstream["raw_fallback"]
     );
     assert_eq!(
         refreshed.oauth_token_generation,
@@ -3384,6 +3435,16 @@ async fn latest_meters_survive_credential_rotation() {
             .get("period_unknown_meters")
             .is_none()
     );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
     replace_gemini_credential(
         &server,
         gemini,
@@ -3396,6 +3457,16 @@ async fn latest_meters_survive_credential_rotation() {
     assert!(
         period_unknown_upstream(&body, gemini)
             .get("period_unknown_meters")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_fallback")
             .is_none()
     );
 
@@ -3431,6 +3502,16 @@ async fn latest_meters_survive_credential_rotation() {
             .len(),
         2
     );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_summary")
+            .is_some()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_fallback")
+            .is_some()
+    );
     replace_gemini_credential(
         &server,
         gemini,
@@ -3444,5 +3525,157 @@ async fn latest_meters_survive_credential_rotation() {
         period_unknown_upstream(&body, gemini)
             .get("period_unknown_meters")
             .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
+    replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        None,
+        "projectless-token",
+    )
+    .await;
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&body, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn latest_raw_quota_is_fenced_to_captured_oauth_profile() {
+    use cc_lb_aead::GeminiOAuthProfile;
+    use cc_lb_control::gemini_period_unknown_quota::{
+        GeminiGroupPollUpdate, GeminiRawQuotaBinding, GeminiRawQuotaResponses,
+        persist_gemini_quota_observation,
+    };
+
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "profile-gemini", "gemini_oauth").await;
+    let cli = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("project"),
+        "cli-token",
+    )
+    .await;
+    let binding = GeminiRawQuotaBinding::from_credential(
+        Some("member@example.test"),
+        Some("project"),
+        cli.oauth_token_generation,
+    );
+    let record = period_unknown_record_for_binding(
+        CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000,
+        serde_json::to_value(binding).unwrap(),
+    );
+    period_unknown_seed(&server, gemini, &record.to_string()).await;
+    let before = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&before, gemini)
+            .get("raw_summary")
+            .is_some()
+    );
+    assert!(
+        period_unknown_upstream(&before, gemini)
+            .get("raw_fallback")
+            .is_some()
+    );
+    let meters = period_unknown_upstream(&before, gemini)["period_unknown_meters"].clone();
+
+    // Legacy records without captured profile cannot expose native provider JSON.
+    let mut legacy = record.clone();
+    legacy["raw_responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("oauth_profile");
+    period_unknown_seed(&server, gemini, &legacy.to_string()).await;
+    let hidden = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&hidden, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&hidden, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
+    period_unknown_seed(&server, gemini, &record.to_string()).await;
+
+    let antigravity = replace_gemini_credential_with_profile(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("project"),
+        "ag-token",
+        GeminiOAuthProfile::Antigravity,
+    )
+    .await;
+    assert!(antigravity.oauth_token_generation > cli.oauth_token_generation);
+    let hidden = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert!(
+        period_unknown_upstream(&hidden, gemini)
+            .get("raw_summary")
+            .is_none()
+    );
+    assert!(
+        period_unknown_upstream(&hidden, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
+    assert_eq!(
+        period_unknown_upstream(&hidden, gemini)["period_unknown_meters"],
+        meters
+    );
+
+    persist_gemini_quota_observation(
+        server.storage.as_ref(),
+        gemini,
+        GeminiRawQuotaBinding::from_credential(
+            Some("member@example.test"),
+            Some("project"),
+            antigravity.oauth_token_generation,
+        ),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            oauth_profile: Some(GeminiOAuthProfile::Antigravity),
+            observed_at_unix_millis: CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000 + 1,
+            summary: Some(json!({"description": "synthetic AG summary", "groups": []})),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let current = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    assert_eq!(
+        period_unknown_upstream(&current, gemini)["raw_summary"]["body"],
+        json!({"description": "synthetic AG summary", "groups": []})
+    );
+    assert!(
+        period_unknown_upstream(&current, gemini)
+            .get("raw_fallback")
+            .is_none()
+    );
+    assert_eq!(
+        period_unknown_upstream(&current, gemini)["period_unknown_meters"],
+        meters
     );
 }

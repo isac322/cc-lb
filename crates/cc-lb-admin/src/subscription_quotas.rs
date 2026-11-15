@@ -94,6 +94,17 @@ struct LatestUpstreamResponse {
     windows: Vec<LatestWindowResponse>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     period_unknown_meters: Vec<LatestPeriodUnknownMeterResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw_summary: Option<LatestRawQuotaResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw_fallback: Option<LatestRawQuotaResponse>,
+}
+
+/// Opaque provider evidence with its own successful observation time.
+#[derive(Debug, Serialize, Deserialize)]
+struct LatestRawQuotaResponse {
+    observed_at_unix_millis: u64,
+    body: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -892,7 +903,10 @@ async fn build_latest_response(
             max_staleness_secs,
         );
         let mut period_unknown_meters = Vec::new();
+        let mut raw_summary = None;
+        let mut raw_fallback = None;
         if upstream.kind == UpstreamKind::GeminiOauth && include_period_unknown_meters {
+            let mut credential_profile = None;
             let record = load_gemini_period_unknown_quota(storage, upstream.id)
                 .await
                 .map_err(storage_error)?
@@ -900,6 +914,7 @@ async fn build_latest_response(
                     Some(credentials) => credentials
                         .decrypt(&state.aead, upstream.id.as_bytes())
                         .map(|bundle| {
+                            credential_profile = Some(bundle.oauth_profile);
                             record.binding.matches_credential(
                                 bundle.account_id.as_deref(),
                                 bundle.project_id.as_deref(),
@@ -910,6 +925,28 @@ async fn build_latest_response(
                     None => record.binding.is_unscoped(),
                 });
             if let Some(record) = record {
+                // Raw provider bodies require a real owner binding; legacy
+                // unscoped meter records remain displayable, but never raw JSON.
+                if record.binding.identity_sha256.is_some()
+                    && let Some(responses) = record.raw_responses
+                    && responses.oauth_profile.is_some()
+                    && responses.oauth_profile == credential_profile
+                {
+                    raw_summary = responses
+                        .summary
+                        .zip(responses.summary_observed_at_unix_millis)
+                        .map(|(body, observed_at_unix_millis)| LatestRawQuotaResponse {
+                            observed_at_unix_millis,
+                            body,
+                        });
+                    raw_fallback = responses
+                        .fallback
+                        .zip(responses.fallback_observed_at_unix_millis)
+                        .map(|(body, observed_at_unix_millis)| LatestRawQuotaResponse {
+                            observed_at_unix_millis,
+                            body,
+                        });
+                }
                 for (group, group_record, canonical_windows) in [
                     (
                         GeminiQuotaGroupKind::Gemini,
@@ -989,6 +1026,8 @@ async fn build_latest_response(
             upstream_name: upstream.name,
             windows,
             period_unknown_meters,
+            raw_summary,
+            raw_fallback,
         });
     }
 
