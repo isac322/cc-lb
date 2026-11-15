@@ -31,6 +31,11 @@ vi.mock('../lib/api', async () => {
 });
 
 import { toast } from 'sonner';
+import {
+  poolUpstreams,
+  subscriptionPreference,
+  upstreamPools,
+} from '../../e2e/issue1297Fixture';
 import type * as ApiModule from '../lib/api';
 import { ApiError } from '../lib/api';
 import * as queries from '../lib/queries';
@@ -563,3 +568,105 @@ test('shows catalog and opens detail view', async () => {
   expect(screen.getByText(/Updating this plugin/)).toBeDefined();
   expect(screen.getByText(/cc_lb_plugin_call_duration_seconds/)).toBeDefined();
 });
+
+// Render both catalog arrangements and Inspect: the registry, not the current
+// fleet (or availability of its query), owns this plugin's explanation.
+test.each([
+  ...Object.entries(upstreamPools).map(([name, kinds]) => ({
+    name,
+    query: {
+      data: { upstreams: poolUpstreams(kinds) },
+      isPending: false,
+      isLoading: false,
+      isError: false,
+    },
+  })),
+  {
+    name: 'pending',
+    query: {
+      data: undefined,
+      isPending: true,
+      isLoading: true,
+      isError: false,
+    },
+  },
+  {
+    name: 'error',
+    query: {
+      data: undefined,
+      isPending: false,
+      isLoading: false,
+      isError: true,
+      error: new Error('Upstreams unavailable'),
+    },
+  },
+])(
+  'preserves captured registry copy in catalog and Inspect with $name upstreams',
+  async ({ query }) => {
+    mockPluginPage();
+    vi.mocked(queries.usePluginRegistry).mockReturnValue({
+      data: { entries: [subscriptionPreference] },
+      isLoading: false,
+    } as never);
+    vi.mocked(queries.useUpstreams).mockReturnValue(query as never);
+    renderWithProviders();
+
+    // jsdom renders both responsive catalog branches.
+    expect(
+      screen.getAllByText(subscriptionPreference.description, { exact: false }),
+    ).toHaveLength(2);
+    expect(screen.queryByText(/quota health is not checked\./)).toBeNull();
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: `Inspect ${subscriptionPreference.name}`,
+      }),
+    );
+    await screen.findByRole('button', { name: 'Back to plugins' });
+    expect(screen.getByText(subscriptionPreference.description)).toBeDefined();
+    for (const sentence of [
+      subscriptionPreference.metadata.purpose,
+      subscriptionPreference.metadata.keeps,
+      subscriptionPreference.metadata.drops,
+      subscriptionPreference.metadata.empty_behavior,
+      ...subscriptionPreference.metadata.examples,
+    ]) {
+      expect(screen.getByText(sentence)).toBeDefined();
+    }
+    expect(screen.queryByText(/quota health is not checked\./)).toBeNull();
+  },
+);
+
+test.each([
+  { description: null, expected: 'Registry fallback label' },
+  { description: '', expected: 'No description provided.' },
+])(
+  'retains null versus empty registry description semantics: $description',
+  async ({ description, expected }) => {
+    mockPluginPage();
+    vi.mocked(queries.usePluginRegistry).mockReturnValue({
+      data: {
+        entries: [
+          {
+            ...subscriptionPreference,
+            description,
+            label: 'Registry fallback label',
+          },
+        ],
+      },
+      isLoading: false,
+    } as never);
+    renderWithProviders();
+    if (description === null) {
+      expect(screen.getAllByText(/Registry fallback label/)).toHaveLength(2);
+    } else {
+      expect(screen.getAllByText(/Registry fallback label/)).toHaveLength(1);
+    }
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: `Inspect ${subscriptionPreference.name}`,
+      }),
+    );
+    await screen.findByRole('button', { name: 'Back to plugins' });
+    expect(screen.getByText(expected)).toBeDefined();
+  },
+);

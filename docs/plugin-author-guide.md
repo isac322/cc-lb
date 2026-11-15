@@ -494,12 +494,22 @@ handler. `service_tier` is the optional tier requested in the inbound request
 body; a pre-request filter cannot observe the tier ultimately reported by an
 upstream response.
 
-The host maintains supported-version lists per hook:
+The host exposes its supported versions through
+`cc_lb_plugin_wire::schema::host_supported_versions`:
 
-- `HOST_SUPPORTED_FILTER_VERSIONS`
-- `HOST_SUPPORTED_SHAPE_VERSIONS`
-- `HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS`
-- `HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS`
+| Hook | Host-supported wire versions |
+| --- | --- |
+| `filter` | `v1`, `v2`, `v3` |
+| `shape` | `v1`, `v2` |
+| `transform_response` | `v1`, `v2` |
+| `transform_sse_event` | `v1`, `v2` |
+| `transform_realtime_frame` | `v2` |
+| `shape_envelope_gemini` | `v2` |
+
+V2 and V3 require provider-qualified metadata. `shape_envelope_gemini` is
+Gemini-only and requires a declared Gemini `shape` hook. The PDK's `#[handler]`
+macro currently supports V1 and V2 only: `#[handler(..., wire = 3)]` does not
+compile, even though the host admits filter V3.
 
 Admission rejects a plugin when the declared hook version is not in the host's
 supported list. This rejection happens before the plugin is persisted into a

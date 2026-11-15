@@ -11,17 +11,31 @@ the common PDK path.
 
 ## What This Crate Provides
 
-- Hook wire types under `cc_lb_plugin_wire::v1`.
-- `WireVersion::V1`.
-- `HookKind` for `filter` and `shape` hooks.
+- Hook wire types under `cc_lb_plugin_wire::v1`, `v2`, and `v3`.
+- `WireVersion::V1`, `V2`, and `V3`.
+- `HookKind` for request, response, streaming, and Gemini envelope hooks.
 - `WireSchema`, the layout fingerprint of every hook wire type.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
 - `pack_ret` and `unpack_ret` helpers for guest ABI return values.
 
 ## WireVersion, HookKind, and WireSchema
 
-`WireVersion` identifies the wire layout line. All hooks use V1, including
-filter hooks that need `FilterRequest::service_tier`.
+`WireVersion` identifies the wire layout line. Versions are independent per
+hook; `schema::host_supported_versions` defines the host admission matrix:
+
+| Hook | Host-supported wire versions |
+| --- | --- |
+| `filter` | `v1`, `v2`, `v3` |
+| `shape` | `v1`, `v2` |
+| `transform_response` | `v1`, `v2` |
+| `transform_sse_event` | `v1`, `v2` |
+| `transform_realtime_frame` | `v2` |
+| `shape_envelope_gemini` | `v2` |
+
+V2 and V3 require provider-qualified metadata. `shape_envelope_gemini` is
+Gemini-only and requires a declared Gemini `shape` hook. The PDK's `#[handler]`
+macro currently supports V1 and V2 only: `#[handler(..., wire = 3)]` does not
+compile, even though the host admits filter V3.
 
 `HookKind` names the supported plugin hooks, including:
 
@@ -29,6 +43,8 @@ filter hooks that need `FilterRequest::service_tier`.
 - `Shape` maps to the `cc_lb_shape` export.
 - `TransformResponse` maps to `cc_lb_transform_response`.
 - `TransformSseEvent` maps to `cc_lb_transform_sse_event`.
+- `TransformRealtimeFrame` maps to `cc_lb_transform_realtime_frame`.
+- `ShapeEnvelopeGemini` maps to `cc_lb_shape_envelope_gemini`.
 
 `ProviderFamily` names the supported provider selectors:
 `anthropic`, `openai`, and `gemini`. `HookKind::qualified_export_name` maps a

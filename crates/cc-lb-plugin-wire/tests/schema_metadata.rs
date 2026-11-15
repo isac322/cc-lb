@@ -234,3 +234,57 @@ fn plugin_metadata_rejects_unknown_provider_keys() {
         cc_lb_plugin_wire::MetadataError::UnknownHook(name) if name == "shape_unknown"
     ));
 }
+
+#[test]
+fn author_documentation_matches_host_supported_wire_versions() {
+    use std::fmt::Write as _;
+    use std::path::{Path, PathBuf};
+
+    let mut matrix = String::from("| Hook | Host-supported wire versions |\n| --- | --- |\n");
+    // HookKind::ALL omits the Gemini envelope hook.
+    for hook in [
+        HookKind::Filter,
+        HookKind::Shape,
+        HookKind::TransformResponse,
+        HookKind::TransformSseEvent,
+        HookKind::TransformRealtimeFrame,
+        HookKind::ShapeEnvelopeGemini,
+    ] {
+        write!(&mut matrix, "| `{hook}` | ").unwrap();
+        for (index, version) in schema::host_supported_versions(hook).iter().enumerate() {
+            if index > 0 {
+                matrix.push_str(", ");
+            }
+            write!(&mut matrix, "`{version}`").unwrap();
+        }
+        matrix.push_str(" |\n");
+    }
+
+    let assert_matrix = |path: PathBuf| {
+        let document = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        assert!(
+            document
+                .split("\n\n")
+                .any(|block| block.trim_end_matches('\n') == matrix.trim_end_matches('\n')),
+            "{} must contain this exact standalone version matrix:\n{matrix}",
+            path.display(),
+        );
+    };
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_matrix(manifest_dir.join("README.md"));
+
+    // Published crates contain the README, but not the repository's docs/site.
+    // Runtime reads keep package builds independent of files outside the crate.
+    if manifest_dir.ends_with("crates/cc-lb-plugin-wire") {
+        let repository_root = manifest_dir.parent().unwrap().parent().unwrap();
+        for relative_path in [
+            "docs/plugin-author-guide.md",
+            "site/src/content/docs/reference/source/plugin-author-guide.md",
+            "site/src/content/docs/plugins/author-guide.md",
+        ] {
+            assert_matrix(repository_root.join(relative_path));
+        }
+    }
+}

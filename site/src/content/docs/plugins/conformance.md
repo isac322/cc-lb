@@ -13,7 +13,8 @@ The host rejects an upload when:
 - The Wasm magic or module length is invalid.
 - An import is outside the allow-list.
 - Required exports for the declared slot are missing.
-- The `cc_lb.plugin.v1` metadata section is absent or incomplete.
+- The metadata section (`cc_lb.plugin.v1` for legacy-only artifacts or
+  `cc_lb.plugin.v2` for provider-qualified handlers) is absent or incomplete.
 - A hook wire version or schema fingerprint is unsupported.
 - The module exceeds the 32 MiB upload limit.
 - The runtime probe cannot instantiate or call the declared hooks.
