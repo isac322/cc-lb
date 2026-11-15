@@ -1,0 +1,865 @@
+{
+  "schemaVersion": 1,
+  "metadata": {
+    "scope": "family-boundaries-only",
+    "issue": "https://github.com/isac322/cc-lb/issues/1318",
+    "canonicalCoverage": {
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1324",
+      "status": "pending-external-ledger",
+      "reason": "Q-HARNESS owns all 371 canonical endpoint/transport records. This family ledger neither supplies their IDs nor asserts completeness or an integration interface."
+    },
+    "acceptance": {
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1325",
+      "status": "pending-feature-evidence",
+      "reason": "All exact-client acceptance remains pending merged implementation and feature-specific passing client/provider evidence."
+    },
+    "limitations": "Family taxonomy is documentation scope, not a reproduced-defect list or wildcard relay policy. Source presence, binary descriptors, synthetic fixtures and recorder traffic do not prove support. Preserve existing shipped API-key and OAuth routes. Subscription Antigravity is not Vertex; TOS and entitlement restrictions remain in force. Background quota polling is not inbound-client acceptance."
+  },
+  "clients": {
+    "codex": {
+      "version": "0.169.0",
+      "revision": "d32063f96c2dff1dc96af839b3952abb6acfeda4"
+    },
+    "agy": {
+      "version": "1.5.9",
+      "sha256": "fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a"
+    }
+  },
+  "sources": {
+    "runtime": {
+      "kind": "runtime-documentation",
+      "reference": "docs/runtime-management.md#proxy-capability-boundary",
+      "scope": "Shipped native route and credential eligibility only; not pinned-client acceptance."
+    },
+    "parity": {
+      "kind": "issue-handoff",
+      "reference": "https://github.com/isac322/cc-lb/issues/1318",
+      "scope": "Boundary ownership and pending feature acceptance."
+    },
+    "harness": {
+      "kind": "issue-handoff",
+      "reference": "https://github.com/isac322/cc-lb/issues/1324",
+      "scope": "Pinned agy binary and canonical coverage obligations; descriptors and recorder probes are not live subscription success."
+    },
+    "accept": {
+      "kind": "issue-handoff",
+      "reference": "https://github.com/isac322/cc-lb/issues/1325",
+      "scope": "Exact-client feature matrix, healthy entitlement, owner affinity and provider evidence requirements."
+    },
+    "voice": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/core/src/realtime_conversation.rs#L2146-L2169",
+      "scope": "Codex API-key voice gate is distinct from subscription voice acceptance."
+    },
+    "identity": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/features/src/lib.rs#L2424-L2435",
+      "scope": "Default-off agent identity registration and JWKS boundary."
+    },
+    "plugins": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/features/src/lib.rs#L1979-L1996",
+      "scope": "Default plugin flags; authenticated lifecycle stays in feature acceptance."
+    },
+    "externalMcp": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-mcp/src/mcp/mod.rs#L713-L721",
+      "scope": "Separately configured external MCP origins, not an implied cc-lb relay."
+    },
+    "cloudPreview": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/cloud-client/src/lib.rs#L210-L264",
+      "scope": "Account-scoped /v2/models preview catalog, distinct from ordinary REST task workflows and internal ThreadService."
+    },
+    "agyChangelog": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/google-antigravity/antigravity-cli/blob/f51cb8dca4d1b493850accaafde06f8d9fa21764/CHANGELOG.md",
+      "scope": "Release context only; public source does not contain installed Go networking implementation."
+    },
+    "relatedExecutor": {
+      "kind": "pinned-source",
+      "reference": "https://github.com/router-for-me/CLIProxyAPI/tree/43806c865da7d47f9252316e95e315ad9f885b84",
+      "scope": "Related implementation only, never agy consumer execution proof."
+    }
+  },
+  "families": [
+    {
+      "id": "codex-model",
+      "client": "codex",
+      "caller": "ordinary coding, multi-turn, SSE, WS and compaction",
+      "reachability": "ordinary client path; exact pinned-client execution pending",
+      "authBase": "authenticated provider-prefixed OpenAI base",
+      "clientMode": "native Codex subscription",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1307",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "runtime",
+        "accept"
+      ],
+      "status": {
+        "route": "shipped",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "ordinary client path; exact pinned-client execution pending. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-auxiliary",
+      "client": "codex",
+      "caller": "model catalog, search, JSON images and notes",
+      "reachability": "route eligibility is operation-specific, not full auxiliary acceptance",
+      "authBase": "authenticated provider-prefixed OpenAI base",
+      "clientMode": "native Codex subscription",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1309",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "runtime",
+        "accept"
+      ],
+      "status": {
+        "route": "partial",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "route eligibility is operation-specific, not full auxiliary acceptance. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-account-workspace",
+      "client": "codex",
+      "caller": "account, settings, usage, verified access and workspace switching",
+      "reachability": "workspace-switch-token depends on C-AUTH and C-ACCOUNT contracts",
+      "authBase": "approved owner-bound account origin",
+      "clientMode": "account-bound subscription",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1313",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325",
+        "https://github.com/isac322/cc-lb/issues/1311",
+        "https://github.com/isac322/cc-lb/issues/1312"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "workspace-switch-token depends on C-AUTH and C-ACCOUNT contracts. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-apps-hosted-mcp",
+      "client": "codex",
+      "caller": "Apps and hosted MCP sessions",
+      "reachability": "actual initialize, tools and session lifecycle pending",
+      "authBase": "owner-bound vendor service",
+      "clientMode": "authenticated hosted MCP",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1314",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "actual initialize, tools and session lifecycle pending. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-authenticated-plugins",
+      "client": "codex",
+      "caller": "plugin catalog, detail, install and share",
+      "reachability": "not excluded as optional/internal; feature execution pending",
+      "authBase": "authenticated vendor plugin origin",
+      "clientMode": "ordinary enabled-by-default plugin features",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1314",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "plugins",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "not excluded as optional/internal; feature execution pending. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-files",
+      "client": "codex",
+      "caller": "file create, finalize and owner-bound references",
+      "reachability": "create/finalize acceptance separate from signed storage transfer",
+      "authBase": "authenticated vendor file API",
+      "clientMode": "subscription file workflow",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1315",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "create/finalize acceptance separate from signed storage transfer. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-cloud-tasks",
+      "client": "codex",
+      "caller": "cloud tasks and environments, poll, diff and apply",
+      "reachability": "ordinary REST acceptance; not internal ThreadService or preview discovery",
+      "authBase": "authenticated vendor REST service",
+      "clientMode": "ordinary REST cloud task workflow",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1316",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "ordinary REST acceptance; not internal ThreadService or preview discovery. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-remote-enrollment",
+      "client": "codex",
+      "caller": "remote enrollment, pairing, refresh, clients, revoke and WS",
+      "reachability": "ordinary feature call sites remain in acceptance; not configured remote execution",
+      "authBase": "principal-bound translated enrollment and vendor WS origin",
+      "clientMode": "ordinary remote-control feature",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1317",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "ordinary feature call sites remain in acceptance; not configured remote execution. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-vendor-oauth",
+      "client": "codex",
+      "caller": "authorize, token, device and revoke",
+      "reachability": "direct credential-custody boundary; do not trigger real login/logout merely for evidence",
+      "authBase": "vendor OAuth origins; vendor credentials remain vendor-owned",
+      "clientMode": "vendor authentication",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "direct",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "direct credential-custody boundary; do not trigger real login/logout merely for evidence. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-telemetry-feedback-statsig",
+      "client": "codex",
+      "caller": "genuine direct telemetry, feedback and Statsig",
+      "reachability": "separate from configured OTel and model/control routing; no feedback mutation for capture",
+      "authBase": "vendor-owned telemetry origins",
+      "clientMode": "vendor-directed telemetry",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "direct",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "separate from configured OTel and model/control routing; no feedback mutation for capture. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-update-install-pet-assets",
+      "client": "codex",
+      "caller": "update, install and pet asset retrieval",
+      "reachability": "supply-chain boundary; no update/install side effects for documentation QA",
+      "authBase": "vendor or asset distribution origins",
+      "clientMode": "direct supply-chain and asset fetching",
+      "upstreamCredential": "none",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "direct",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "supply-chain boundary; no update/install side effects for documentation QA. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-github-content-archives",
+      "client": "codex",
+      "caller": "external GitHub/content archive retrieval",
+      "reachability": "external content is not provider model traffic or an implied generic relay",
+      "authBase": "external content origin",
+      "clientMode": "direct external content",
+      "upstreamCredential": "none",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "direct",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "external content is not provider model traffic or an implied generic relay. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-signed-storage",
+      "client": "codex",
+      "caller": "signed file transfer",
+      "reachability": "Q-HARNESS must prove credential-free storage; retain no signed URLs",
+      "authBase": "exact signed storage destination without vendor bearer credentials",
+      "clientMode": "credential-free storage transfer",
+      "upstreamCredential": "signed-url",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1315",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "signed-storage",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "Q-HARNESS must prove credential-free storage; retain no signed URLs. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-internal-thread-service",
+      "client": "codex",
+      "caller": "Cloud HTTP/2 ThreadService",
+      "reachability": "internal reachability is distinct from ordinary cloud-task REST acceptance",
+      "authBase": "internal service origin and protocol",
+      "clientMode": "internal Cloud service",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "internal",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "internal reachability is distinct from ordinary cloud-task REST acceptance. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-cloud-model-preview",
+      "client": "codex",
+      "caller": "Cloud discovery and /v2/models preview",
+      "reachability": "preview is separate from task REST and the internal ThreadService",
+      "authBase": "preview discovery origin",
+      "clientMode": "Cloud preview",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "cloudPreview",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "internal",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "preview is separate from task REST and the internal ThreadService. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-agent-identity",
+      "client": "codex",
+      "caller": "agent identity registration and JWKS",
+      "reachability": "default-off identity gate; no inference from enabled-by-default plugins",
+      "authBase": "identity-service origin",
+      "clientMode": "default-off identity feature",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "identity",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "internal",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "default-off identity gate; no inference from enabled-by-default plugins. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-configured-remote-environment",
+      "client": "codex",
+      "caller": "remote-environment registry and Noise WebSocket",
+      "reachability": "configuration and authorized peer evidence pending; not remote enrollment",
+      "authBase": "explicit configured registry/Noise origin",
+      "clientMode": "separately configured remote execution",
+      "upstreamCredential": "configured-service",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "configured",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "configuration and authorized peer evidence pending; not remote enrollment. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-message-board",
+      "client": "codex",
+      "caller": "message-board service families",
+      "reachability": "origin and gate need configured-recorder evidence; no wildcard relay implied",
+      "authBase": "explicit configured message-board origin",
+      "clientMode": "separately configured service",
+      "upstreamCredential": "configured-service",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "configured",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "origin and gate need configured-recorder evidence; no wildcard relay implied. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-external-mcp-oauth",
+      "client": "codex",
+      "caller": "external MCP and its OAuth",
+      "reachability": "external credentials and service custody stay separate from hosted Apps/MCP",
+      "authBase": "configured external MCP/OAuth origins",
+      "clientMode": "separately configured MCP server",
+      "upstreamCredential": "configured-service",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "externalMcp",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "configured",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "external credentials and service custody stay separate from hosted Apps/MCP. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-configured-otel",
+      "client": "codex",
+      "caller": "OTel export",
+      "reachability": "configured analytics is not genuine direct vendor telemetry or model/control traffic",
+      "authBase": "explicit configured OTel collector origin",
+      "clientMode": "configured observability",
+      "upstreamCredential": "configured-service",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "configured",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "configured analytics is not genuine direct vendor telemetry or model/control traffic. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "codex-subscription-voice",
+      "client": "codex",
+      "caller": "subscription voice/realtime client action",
+      "reachability": "source API-key gate is not subscription acceptance; actual voice execution and entitlement pending",
+      "authBase": "subscription entitlement and approved provider origin",
+      "clientMode": "subscription voice distinct from API-key control",
+      "upstreamCredential": "openai_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "voice",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "source API-key gate is not subscription acceptance; actual voice execution and entitlement pending. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-native-api-key",
+      "client": "agy",
+      "caller": "native coding, tools and content generation control",
+      "reachability": "dummy-key recorder ended with invalid stream chunk; not a passing provider turn",
+      "authBase": "authenticated provider-prefixed Gemini base",
+      "clientMode": "agy native API-key mode",
+      "upstreamCredential": "gemini_api_key",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1308",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "runtime",
+        "harness",
+        "agyChangelog"
+      ],
+      "status": {
+        "route": "shipped",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "dummy-key recorder ended with invalid stream chunk; not a passing provider turn. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-native-oauth",
+      "client": "agy",
+      "caller": "native coding, tools, models, count, cache and quota",
+      "reachability": "healthy OAuth/TOS-entitled capture pending; API-key and Vertex proof cannot substitute",
+      "authBase": "authenticated native Gemini ingress with subscription upstream",
+      "clientMode": "agy native client with OAuth upstream",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1308",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325",
+        "https://github.com/isac322/cc-lb/issues/1310",
+        "https://github.com/isac322/cc-lb/issues/1306"
+      ],
+      "sourceEvidence": [
+        "runtime",
+        "accept",
+        "agyChangelog"
+      ],
+      "status": {
+        "route": "partial",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "healthy OAuth/TOS-entitled capture pending; API-key and Vertex proof cannot substitute. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-raw-code-assist",
+      "client": "agy",
+      "caller": "raw Code Assist subscription ingress and enterprise headers",
+      "reachability": "G-AUTH contract approval required; background Code Assist polling is not inbound acceptance",
+      "authBase": "approved authenticated raw Code Assist base",
+      "clientMode": "raw subscription envelope",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1319",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325",
+        "https://github.com/isac322/cc-lb/issues/1306",
+        "https://github.com/isac322/cc-lb/issues/1310",
+        "https://github.com/isac322/cc-lb/issues/1312"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "accept",
+        "relatedExecutor"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "G-AUTH contract approval required; background Code Assist polling is not inbound acceptance. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-code-assist-controls",
+      "client": "agy",
+      "caller": "Code Assist control, discovery, onboard, operations and bundle ACL",
+      "reachability": "all 50 candidate methods remain owned by G-CTRL; no descriptor-only promotion",
+      "authBase": "captured owner-bound Code Assist origin",
+      "clientMode": "subscription control-plane client",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1320",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "all 50 candidate methods remain owned by G-CTRL; no descriptor-only promotion. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-remote-agent",
+      "client": "agy",
+      "caller": "remote resource, file, terminal and event workflows",
+      "reachability": "all 125 remote RPC candidates remain with G-REMOTE; authorized peers and execution pending",
+      "authBase": "captured owner-bound remote RPC origin",
+      "clientMode": "subscription remote agent",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1321",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "all 125 remote RPC candidates remain with G-REMOTE; authorized peers and execution pending. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-remote-control",
+      "client": "agy",
+      "caller": "instances, devices, signaling and command streams",
+      "reachability": "entitlement, authorized peer and actual remote execution pending; analytics classified separately",
+      "authBase": "captured remote-control origin",
+      "clientMode": "subscription remote control",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1323",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "accept"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "entitlement, authorized peer and actual remote execution pending; analytics classified separately. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-subscription-voice",
+      "client": "agy",
+      "caller": "live, dictation and remote voice",
+      "reachability": "unexecuted audio candidates remain pending; API-key Realtime/Live are separate shipped controls",
+      "authBase": "captured provider audio transport origin",
+      "clientMode": "subscription voice",
+      "upstreamCredential": "gemini_oauth",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1322",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "accept",
+        "runtime"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "feature",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "unexecuted audio candidates remain pending; API-key Realtime/Live are separate shipped controls. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-local-microphone",
+      "client": "agy",
+      "caller": "local microphone capture and relay",
+      "reachability": "local capture evidence pending; no new server or runtime behavior implied",
+      "authBase": "local process/device boundary, not a cc-lb microphone server",
+      "clientMode": "local client audio boundary",
+      "upstreamCredential": "none",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1322",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "local",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "local capture evidence pending; no new server or runtime behavior implied. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-configured-analytics",
+      "client": "agy",
+      "caller": "configured analytics export",
+      "reachability": "telemetry ownership and origin require evidence separate from instance/device/control commands",
+      "authBase": "explicit configured analytics origin",
+      "clientMode": "separately configured analytics",
+      "upstreamCredential": "configured-service",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1323",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "configured",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "telemetry ownership and origin require evidence separate from instance/device/control commands. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    },
+    {
+      "id": "agy-vendor-oauth",
+      "client": "agy",
+      "caller": "vendor authorize, token, device and revoke",
+      "reachability": "healthy authorized credentials required; do not retry TOS-blocked accounts or refresh another process credentials",
+      "authBase": "vendor OAuth origins; no copying tokens into client auth",
+      "clientMode": "vendor subscription authentication",
+      "upstreamCredential": "vendor-direct",
+      "ownerIssue": "https://github.com/isac322/cc-lb/issues/1318",
+      "dependencies": [
+        "https://github.com/isac322/cc-lb/issues/1324",
+        "https://github.com/isac322/cc-lb/issues/1325"
+      ],
+      "sourceEvidence": [
+        "harness",
+        "parity"
+      ],
+      "status": {
+        "route": "not-claimed",
+        "boundary": "direct",
+        "clientAcceptance": "pending"
+      },
+      "deferReason": "healthy authorized credentials required; do not retry TOS-blocked accounts or refresh another process credentials. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "acceptanceEvidence": null
+    }
+  ]
+}

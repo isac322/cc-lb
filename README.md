@@ -24,6 +24,8 @@ The current public upstream contract supports six upstream kinds across bounded 
 
 Bedrock, Vertex, and account-bound provider management APIs (files, uploads, model/account catalogs, stored-response or conversation management) are not part of the supported proxy scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 
+Shipped provider route support and credential eligibility do not establish full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients; that acceptance remains unverified. See the [current-mode client boundary](./docs/runtime-management.md#current-mode-client-acceptance) and [client capability ledger](https://github.com/isac322/cc-lb/blob/master/docs/client-capabilities.json) for per-feature evidence and limits.
+
 ## Request flow
 
 1. An operator creates an upstream and principal through the dashboard or the authenticated admin API, then issues a proxy key for that principal.
