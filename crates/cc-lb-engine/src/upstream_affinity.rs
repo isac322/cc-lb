@@ -342,16 +342,14 @@ impl<'a> KeyCollector<'a> {
                 }
             }
             Value::Object(object) => {
-                if object.get("type").and_then(Value::as_str) == Some("reasoning") {
+                if matches!(
+                    object.get("type").and_then(Value::as_str),
+                    Some("reasoning" | "compaction" | "compaction_summary")
+                ) {
                     self.reference(
                         UpstreamAffinityKind::OpenaiResponseId,
                         object.get("encrypted_content"),
                     )?;
-                }
-                for child in object.values() {
-                    if matches!(child, Value::Array(_) | Value::Object(_)) {
-                        self.openai_reasoning_tree(Some(child))?;
-                    }
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}

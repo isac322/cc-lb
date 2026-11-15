@@ -2916,6 +2916,8 @@ async fn proxy_timeout_middleware(
 
 #[path = "app_realtime_websocket.rs"]
 mod realtime_websocket;
+#[path = "app/responses_request_body.rs"]
+mod responses_request_body;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -3824,6 +3826,10 @@ async fn lifecycle_handler(
         }
     };
     let request = Request::from_parts(parts, body);
+    let request = match responses_request_body::normalize(request, cap, &auth, observer.as_ref()) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     match state.lifecycle.handle(request, &auth).await {
         Ok(response) => response,
         Err(source) => {
