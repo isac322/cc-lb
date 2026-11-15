@@ -2308,3 +2308,616 @@ async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(healthy_dispatch.call_count(), 1);
 }
+
+// These fixtures retain the captured Responses event shape; ciphertext and ids
+// are deterministic synthetic values, not provider-owned state from the capture.
+const WS1296_REASONING: &str = "synthetic-ws1296-encrypted-reasoning";
+const WS1296_RESPONSE_ID: &str = "resp_ws1296_unstored";
+
+fn ws1296_openai_key(value: &str) -> UpstreamAffinityKey {
+    UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "openai".to_owned(),
+        kind: UpstreamAffinityKind::OpenaiResponseId,
+        value_sha256: Sha256::digest(value.as_bytes()).into(),
+    }
+}
+
+fn ws1296_reasoning_item(ciphertext: &str) -> Value {
+    json!({
+        "type": "reasoning",
+        "id": "rs_ws1296",
+        "summary": [],
+        "content": [],
+        "encrypted_content": ciphertext,
+    })
+}
+
+fn ws1296_create(previous: Option<&str>, ciphertext: Option<&str>) -> Bytes {
+    let mut input = Vec::new();
+    if let Some(ciphertext) = ciphertext {
+        input.push(ws1296_reasoning_item(ciphertext));
+    }
+    input.push(json!({"role": "user", "content": "continue"}));
+    let mut body = json!({
+        "type": "response.create",
+        "model": "gpt-5-codex",
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": input,
+    });
+    if let Some(previous) = previous {
+        body["previous_response_id"] = json!(previous);
+    }
+    Bytes::from(body.to_string())
+}
+
+fn ws1296_created(id: &str) -> Bytes {
+    Bytes::from(
+        json!({
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": id,
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "in_progress",
+                "store": false,
+                "output": [],
+                "usage": null,
+            },
+        })
+        .to_string(),
+    )
+}
+
+fn ws1296_item_done() -> Bytes {
+    // In particular, the real provider supplied neither response_id nor stream_id.
+    Bytes::from(
+        json!({
+            "type": "response.output_item.done",
+            "sequence_number": 3,
+            "output_index": 0,
+            "item": ws1296_reasoning_item(WS1296_REASONING),
+        })
+        .to_string(),
+    )
+}
+
+fn ws1296_completed(id: &str, output: Vec<Value>) -> Bytes {
+    Bytes::from(
+        json!({
+            "type": "response.completed",
+            "sequence_number": 106,
+            "response": {
+                "id": id,
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "completed",
+                "store": false,
+                "output": output,
+                "usage": null,
+            },
+        })
+        .to_string(),
+    )
+}
+
+async fn ws1296_gateway(
+    lifecycle: Lifecycle,
+) -> cc_lb_engine::responses_websocket::ResponsesWebSocketGateway {
+    let lifecycle = Arc::new(lifecycle);
+    let headers = responses_request(json!({})).headers().clone();
+    let auth = lifecycle
+        .authenticate(&headers)
+        .await
+        .expect("WebSocket upgrade authenticates");
+    cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+        lifecycle,
+        &auth,
+        headers,
+        1 << 20,
+        8,
+    )
+}
+
+async fn ws1296_admit(
+    gateway: &mut cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    frame: Bytes,
+) -> Result<
+    Option<cc_lb_engine::responses_websocket::WebSocketDispatch>,
+    cc_lb_engine::responses_websocket::WebSocketError,
+> {
+    let auth = gateway
+        .authenticate()
+        .await
+        .expect("fresh turn authenticates");
+    gateway.client_message(auth, frame).await
+}
+
+async fn ws1296_send(
+    gateway: &mut cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    dispatch: &cc_lb_engine::responses_websocket::WebSocketDispatch,
+    connection_id: u64,
+) {
+    let owner = dispatch.candidates.first().expect("turn has a route");
+    gateway.assign_connection(
+        dispatch.turn_id,
+        connection_id,
+        owner.upstream_id,
+        &owner.upstream_name,
+    );
+    gateway
+        .validate_send(dispatch.turn_id)
+        .await
+        .expect("owner remains eligible at send");
+    assert!(gateway.sent(dispatch.turn_id).is_empty());
+}
+
+fn ws1296_assert_raw_forward(result: &cc_lb_engine::responses_websocket::WebSocketEventResult) {
+    assert!(
+        result.forward,
+        "the original provider frame must be forwarded"
+    );
+    assert!(
+        result.frames.is_none(),
+        "provider bytes must not be replaced"
+    );
+    assert!(
+        result.errors.is_empty(),
+        "healthy state must not emit an error"
+    );
+    assert!(result.dispatches.is_empty());
+}
+
+async fn ws1296_learn_reasoning(store: Arc<MemoryAffinityStore>, owner: Uuid, terminal_only: bool) {
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![openai_upstream_record(owner, "owner", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let turn = ws1296_admit(&mut gateway, ws1296_create(None, None))
+        .await
+        .expect("first turn admitted")
+        .expect("first turn dispatches");
+    ws1296_send(&mut gateway, &turn, 1).await;
+    let created = gateway
+        .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+        .await
+        .expect("empty created snapshot is accepted");
+    ws1296_assert_raw_forward(&created);
+    assert_eq!(
+        store.len(),
+        0,
+        "an unstored response id is connection-local"
+    );
+    if !terminal_only {
+        let item_done = ws1296_item_done();
+        for _ in 0..2 {
+            let observed = gateway
+                .provider_message(1, &item_done)
+                .await
+                .expect("unattributed item.done belongs to the sole admitted turn");
+            assert_eq!(
+                store.upstream_for(&ws1296_openai_key(WS1296_REASONING)),
+                Some(owner),
+                "reasoning must be durable before item.done can be forwarded",
+            );
+            assert_eq!(store.len(), 1, "duplicate item.done is idempotent");
+            ws1296_assert_raw_forward(&observed);
+        }
+    }
+    let completed = ws1296_completed(
+        WS1296_RESPONSE_ID,
+        vec![ws1296_reasoning_item(WS1296_REASONING)],
+    );
+    let observed = gateway
+        .provider_message(1, &completed)
+        .await
+        .expect("completed snapshot is accepted after created");
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_REASONING)),
+        Some(owner),
+        "terminal-only reasoning must be durable before completion is forwarded",
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_RESPONSE_ID)),
+        None
+    );
+    assert_eq!(
+        store.len(),
+        1,
+        "snapshot and item.done share the legacy digest key"
+    );
+    ws1296_assert_raw_forward(&observed);
+    let duplicate = gateway
+        .provider_message(1, &completed)
+        .await
+        .expect("duplicate completion is harmless");
+    assert!(
+        !duplicate.forward,
+        "a terminal frame is delivered only once"
+    );
+    assert!(duplicate.frames.is_none());
+    assert!(duplicate.errors.is_empty());
+    assert_eq!(store.len(), 1);
+    assert_eq!(
+        dispatch.call_count(),
+        0,
+        "gateway admission does not use HTTP dispatch"
+    );
+    gateway.close();
+}
+
+#[tokio::test]
+async fn ws1296_item_done_binds_reasoning_before_forward_and_deduplicates() {
+    ws1296_learn_reasoning(
+        Arc::new(MemoryAffinityStore::default()),
+        Uuid::from_u128(0x129601),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ws1296_terminal_only_reasoning_binds_after_empty_created_snapshot() {
+    ws1296_learn_reasoning(
+        Arc::new(MemoryAffinityStore::default()),
+        Uuid::from_u128(0x129601),
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ws1296_websocket_learned_reasoning_routes_new_websocket_and_http_to_owner() {
+    let owner = Uuid::from_u128(0x129601);
+    let fallback = Uuid::from_u128(0x129602);
+    let store = Arc::new(MemoryAffinityStore::default());
+    ws1296_learn_reasoning(store.clone(), owner, false).await;
+    let records = vec![
+        openai_upstream_record(fallback, "fallback", true),
+        openai_upstream_record(owner, "owner", true),
+    ];
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_ws1296_http",
+        "object": "response",
+        "output": [],
+    })));
+    let mut gateway = ws1296_gateway(lifecycle(
+        records.clone(),
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let turn = ws1296_admit(&mut gateway, ws1296_create(None, Some(WS1296_REASONING)))
+        .await
+        .expect("reasoning continuation admits on a new WebSocket")
+        .expect("reasoning continuation dispatches");
+    assert_eq!(turn.candidates.len(), 1);
+    assert_eq!(turn.candidates[0].upstream_id, owner);
+    ws1296_send(&mut gateway, &turn, 2).await;
+    gateway.close();
+    let mut body: Value =
+        serde_json::from_slice(&ws1296_create(None, Some(WS1296_REASONING))).unwrap();
+    body.as_object_mut().unwrap().remove("type");
+    let http = lifecycle(records, dispatch.clone(), Some(store));
+    let response = handle_authenticated(&http, responses_request(body))
+        .await
+        .expect("HTTP continuation is handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+        &["http://owner.local/v1/responses".to_owned()],
+    );
+}
+
+#[tokio::test]
+async fn ws1296_legacy_reasoning_owner_disabled_fails_closed_for_websocket_and_http() {
+    let owner = Uuid::from_u128(0x129601);
+    let fallback = Uuid::from_u128(0x129602);
+    let store = Arc::new(MemoryAffinityStore::default());
+    // Existing rows must remain usable without a new kind or a migration.
+    store.insert(ws1296_openai_key(WS1296_REASONING), owner);
+    let records = vec![
+        openai_upstream_record(owner, "owner", false),
+        openai_upstream_record(fallback, "fallback", true),
+    ];
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        records.clone(),
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let error = ws1296_admit(&mut gateway, ws1296_create(None, Some(WS1296_REASONING)))
+        .await
+        .expect_err("disabled reasoning owner must not fall back");
+    assert_eq!(error.status, 503);
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    let mut body: Value =
+        serde_json::from_slice(&ws1296_create(None, Some(WS1296_REASONING))).unwrap();
+    body.as_object_mut().unwrap().remove("type");
+    let http = lifecycle(records, dispatch.clone(), Some(store));
+    let response = handle_authenticated(&http, responses_request(body))
+        .await
+        .expect("disabled owner HTTP continuation is handled");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}
+
+#[tokio::test]
+async fn ws1296_live_previous_response_and_other_reasoning_owner_conflict_before_dispatch() {
+    let reasoning_owner = Uuid::from_u128(0x129601);
+    let live_owner = Uuid::from_u128(0x129602);
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(WS1296_REASONING), reasoning_owner);
+    store.insert(
+        ws1296_openai_key("synthetic-ws1296-live-owner-seed"),
+        live_owner,
+    );
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_upstream_record(reasoning_owner, "reasoning-owner", true),
+            openai_upstream_record(live_owner, "live-owner", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let initial = ws1296_admit(
+        &mut gateway,
+        ws1296_create(None, Some("synthetic-ws1296-live-owner-seed")),
+    )
+    .await
+    .expect("seeded live-owner turn is admitted")
+    .expect("seeded live-owner turn dispatches");
+    assert_eq!(initial.candidates[0].upstream_id, live_owner);
+    ws1296_send(&mut gateway, &initial, 2).await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(2, &ws1296_created("resp_ws1296_live_u2"))
+            .await
+            .expect("U2 response is connection-owned"),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(2, &ws1296_completed("resp_ws1296_live_u2", vec![]))
+            .await
+            .expect("U2 turn completes"),
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key("resp_ws1296_live_u2")),
+        None
+    );
+    let error = ws1296_admit(
+        &mut gateway,
+        ws1296_create(Some("resp_ws1296_live_u2"), Some(WS1296_REASONING)),
+    )
+    .await
+    .expect_err("live U2 response must not hide the durable U1 reasoning constraint");
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}
+
+#[tokio::test]
+async fn ws1296_reasoning_persistence_failure_suppresses_item_and_terminal_frames() {
+    for terminal_only in [false, true] {
+        let owner = Uuid::from_u128(0x129601);
+        let store = Arc::new(MemoryAffinityStore::default());
+        let mut gateway = ws1296_gateway(lifecycle(
+            vec![openai_upstream_record(owner, "owner", true)],
+            Arc::new(RecordingDispatch::default()),
+            Some(store.clone()),
+        ))
+        .await;
+        let turn = ws1296_admit(&mut gateway, ws1296_create(None, None))
+            .await
+            .expect("turn admitted before persistence fails")
+            .expect("turn dispatches");
+        ws1296_send(&mut gateway, &turn, 1).await;
+        ws1296_assert_raw_forward(
+            &gateway
+                .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+                .await
+                .expect("empty snapshot has no durable state"),
+        );
+        store.fail_bind("synthetic persistence outage");
+        let frame = if terminal_only {
+            ws1296_completed(
+                WS1296_RESPONSE_ID,
+                vec![ws1296_reasoning_item(WS1296_REASONING)],
+            )
+        } else {
+            ws1296_item_done()
+        };
+        let error = match gateway.provider_message(1, &frame).await {
+            Err(error) => error,
+            Ok(mut result) => {
+                assert!(
+                    !result.forward,
+                    "unowned reasoning must never reach the client"
+                );
+                assert!(result.frames.as_ref().is_none_or(Vec::is_empty));
+                assert!(result.dispatches.is_empty());
+                assert_eq!(result.errors.len(), 1);
+                result.errors.remove(0)
+            }
+        };
+        assert_eq!(error.status, 503);
+        assert_eq!(error.code, "upstream_affinity_unavailable");
+        assert!(!String::from_utf8_lossy(&error.to_bytes()).contains(WS1296_REASONING));
+        assert_eq!(store.len(), 0);
+        gateway.close();
+    }
+}
+
+#[tokio::test]
+async fn ws1296_terminal_bind_failure_preserves_measured_usage_when_connection_closes() {
+    use cc_lb_lifecycle::LifecycleEvent;
+
+    let owner = Uuid::from_u128(0x129601);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let mut gateway = ws1296_gateway(
+        lifecycle(
+            vec![openai_upstream_record(owner, "owner", true)],
+            Arc::new(RecordingDispatch::default()),
+            Some(store.clone()),
+        )
+        .with_event_bus(bus),
+    )
+    .await;
+    let turn = ws1296_admit(&mut gateway, ws1296_create(None, None))
+        .await
+        .expect("turn is admitted")
+        .expect("turn dispatches");
+    ws1296_send(&mut gateway, &turn, 1).await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+            .await
+            .expect("empty created snapshot is accepted"),
+    );
+    store.fail_bind("synthetic terminal persistence outage");
+    let mut terminal: Value = serde_json::from_slice(&ws1296_completed(
+        WS1296_RESPONSE_ID,
+        vec![ws1296_reasoning_item(WS1296_REASONING)],
+    ))
+    .expect("terminal fixture is JSON");
+    terminal["response"]["usage"] = json!({
+        "input_tokens": 23,
+        "output_tokens": 17,
+        "total_tokens": 40,
+        "input_tokens_details": {"cached_tokens": 7},
+        "output_tokens_details": {"reasoning_tokens": 5},
+    });
+    let error = gateway
+        .provider_message(1, &Bytes::from(terminal.to_string()))
+        .await
+        .err()
+        .expect("terminal persistence failure suppresses the provider frame");
+    assert_eq!(error.status, 503);
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    assert!(!String::from_utf8_lossy(&error.to_bytes()).contains(WS1296_REASONING));
+    assert_eq!(store.len(), 0);
+
+    // The relay retires the provider connection after provider_message fails.
+    // That cleanup must not discard already measured, billable terminal usage.
+    let closed = gateway.connection_closed(1, "terminal affinity persistence failed");
+    assert!(!closed.forward);
+    assert!(closed.frames.is_none());
+    assert!(closed.dispatches.is_empty());
+    gateway.close();
+    drop(gateway);
+
+    let mut starts = Vec::new();
+    let mut usages = Vec::new();
+    let mut completions = Vec::new();
+    let mut terminations = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
+            LifecycleEvent::UsageObserved {
+                event_id, usage, ..
+            } => usages.push((
+                event_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.thinking_tokens,
+            )),
+            LifecycleEvent::StreamCompleted {
+                event_id, result, ..
+            } => {
+                assert!(
+                    result.is_err(),
+                    "suppressed completion is not a successful stream"
+                );
+                completions.push(event_id);
+            }
+            LifecycleEvent::RequestTerminated { event_id, .. } => terminations.push(event_id),
+            _ => {}
+        }
+    }
+    assert_eq!(starts.len(), 1);
+    assert_eq!(
+        usages,
+        vec![(starts[0].clone(), 16, 17, 7, 5)],
+        "affinity failure must retain uncached input, output, cached input, and reasoning usage exactly once",
+    );
+    assert_eq!(
+        completions, starts,
+        "the failed stream settles exactly once"
+    );
+    assert_eq!(
+        terminations, starts,
+        "connection cleanup must not duplicate settlement"
+    );
+}
+
+#[tokio::test]
+async fn ws1296_live_previous_response_accepts_same_reasoning_owner_on_original_connection() {
+    let owner = Uuid::from_u128(0x129601);
+    let fallback = Uuid::from_u128(0x129602);
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(WS1296_REASONING), owner);
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_upstream_record(fallback, "fallback", true),
+            openai_upstream_record(owner, "owner", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let initial = ws1296_admit(&mut gateway, ws1296_create(None, Some(WS1296_REASONING)))
+        .await
+        .expect("owner turn is admitted")
+        .expect("owner turn dispatches");
+    assert_eq!(initial.candidates[0].upstream_id, owner);
+    ws1296_send(&mut gateway, &initial, 1).await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+            .await
+            .expect("owner response is connection-local"),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_completed(WS1296_RESPONSE_ID, vec![]))
+            .await
+            .expect("owner response completes"),
+    );
+    let continuation = ws1296_create(Some(WS1296_RESPONSE_ID), Some(WS1296_REASONING));
+    let turn = ws1296_admit(&mut gateway, continuation.clone())
+        .await
+        .expect("matching durable and live owners are compatible")
+        .expect("same-owner continuation dispatches");
+    assert_eq!(turn.connection_id, Some(1));
+    assert_eq!(turn.candidates.len(), 1);
+    assert_eq!(turn.candidates[0].upstream_id, owner);
+    assert_eq!(
+        turn.frame, continuation,
+        "the continuation remains byte-identical"
+    );
+    ws1296_send(&mut gateway, &turn, 1).await;
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_RESPONSE_ID)),
+        None
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_REASONING)),
+        Some(owner)
+    );
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}

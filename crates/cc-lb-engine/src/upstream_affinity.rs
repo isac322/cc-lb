@@ -26,6 +26,13 @@ pub(crate) enum UpstreamAffinityExtractionError {
     InvalidResponseAffinity,
 }
 
+/// Response references can be connection-local; reusable reasoning never is.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum OpenaiResponseReferenceScope {
+    Durable,
+    ConnectionLocal,
+}
+
 /// Provider label stored with every affinity key derived for `capability`.
 pub(crate) const fn affinity_provider(capability: ProviderCapability) -> &'static str {
     match capability.provider() {
@@ -78,7 +85,22 @@ pub(crate) fn extract_request_affinity_keys(
     value: &Value,
     principal_id: &str,
 ) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
+    extract_request_affinity_keys_with_scope(
+        capability,
+        value,
+        principal_id,
+        OpenaiResponseReferenceScope::Durable,
+    )
+}
+
+pub(crate) fn extract_request_affinity_keys_with_scope(
+    capability: ProviderCapability,
+    value: &Value,
+    principal_id: &str,
+    response_scope: OpenaiResponseReferenceScope,
+) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
     let mut collector = KeyCollector::new(capability, principal_id);
+    collector.response_scope = response_scope;
     match capability {
         ProviderCapability::AnthropicMessages | ProviderCapability::AnthropicCountTokens => {
             collector.anthropic_message(value)?
@@ -87,10 +109,7 @@ pub(crate) fn extract_request_affinity_keys(
         | ProviderCapability::OpenaiResponsesInputTokens
         | ProviderCapability::OpenaiResponsesCompact => {
             if let Some(object) = value.as_object() {
-                collector.reference(
-                    UpstreamAffinityKind::OpenaiResponseId,
-                    object.get("previous_response_id"),
-                )?;
+                collector.openai_response_reference(object.get("previous_response_id"))?;
                 collector.reference(
                     UpstreamAffinityKind::OpenaiConversationId,
                     object.get("conversation"),
@@ -131,6 +150,19 @@ pub(crate) fn extract_response_affinity_keys(
         }
         _ => {}
     }
+    Ok(collector.keys)
+}
+
+pub(crate) fn extract_websocket_response_affinity_keys(
+    response: &Value,
+    output_item: Option<&Value>,
+    principal_id: &str,
+    response_scope: OpenaiResponseReferenceScope,
+) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
+    let mut collector = KeyCollector::new(ProviderCapability::OpenaiResponses, principal_id);
+    collector.response_scope = response_scope;
+    collector.openai_response(response)?;
+    collector.openai_reasoning_tree(output_item)?;
     Ok(collector.keys)
 }
 
@@ -204,6 +236,7 @@ struct KeyCollector<'a> {
     principal_id: &'a str,
     seen: HashSet<(UpstreamAffinityKind, [u8; 32])>,
     keys: Vec<UpstreamAffinityKey>,
+    response_scope: OpenaiResponseReferenceScope,
 }
 
 fn extract_gemini_cached_content(
@@ -229,6 +262,7 @@ impl<'a> KeyCollector<'a> {
             principal_id,
             seen: HashSet::new(),
             keys: Vec::new(),
+            response_scope: OpenaiResponseReferenceScope::Durable,
         }
     }
 
@@ -272,11 +306,21 @@ impl<'a> KeyCollector<'a> {
         }
     }
 
+    fn openai_response_reference(
+        &mut self,
+        value: Option<&Value>,
+    ) -> Result<(), UpstreamAffinityExtractionError> {
+        if self.response_scope == OpenaiResponseReferenceScope::ConnectionLocal {
+            return Ok(());
+        }
+        self.reference(UpstreamAffinityKind::OpenaiResponseId, value)
+    }
+
     fn openai_response(&mut self, response: &Value) -> Result<(), UpstreamAffinityExtractionError> {
         let Some(object) = response.as_object() else {
             return Ok(());
         };
-        self.reference(UpstreamAffinityKind::OpenaiResponseId, object.get("id"))?;
+        self.openai_response_reference(object.get("id"))?;
         self.reference(
             UpstreamAffinityKind::OpenaiConversationId,
             object.get("conversation"),

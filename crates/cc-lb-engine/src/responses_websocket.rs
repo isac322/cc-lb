@@ -1371,6 +1371,7 @@ impl ResponsesWebSocketGateway {
                 Some("response.completed") => "response.completed",
                 Some("response.failed") => "response.failed",
                 Some("response.incomplete") => "response.incomplete",
+                Some("response.output_item.done") => "response.output_item.done",
                 Some("error") => "error",
                 Some("response.steer.accepted") => "response.steer.accepted",
                 Some("response.steer.pending") => "response.steer.pending",
@@ -1494,6 +1495,30 @@ impl ResponsesWebSocketGateway {
             lane.as_deref(),
             kind == "error",
         );
+        let turn = turn_id.and_then(|id| self.turns.get(&id));
+        if turn.is_none()
+            && terminal
+            && response_id
+                .and_then(|id| self.owners.get(id))
+                .is_some_and(|owner| {
+                    Some(owner.turn_id) == turn_id
+                        && owner.connection_id == connection_id
+                        && owner.lane == lane
+                })
+        {
+            return Ok(WebSocketEventResult::default());
+        }
+        if kind == "error"
+            && !turn.is_some_and(|turn| {
+                turn.connection_id == Some(connection_id) && turn.lane == lane && turn.sent
+            })
+        {
+            return Err(WebSocketError::new(
+                502,
+                "unattributed_upstream_error",
+                "The provider reported a connection-level error",
+            ));
+        }
         let Some(turn_id) = turn_id else {
             // Never open a second settlement from an unowned or replayed id.
             return Err(WebSocketError::new(
@@ -1503,18 +1528,7 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         };
-        let Some(turn) = self.turns.get(&turn_id) else {
-            let duplicate = terminal
-                && response_id
-                    .and_then(|id| self.owners.get(id))
-                    .is_some_and(|owner| {
-                        owner.turn_id == turn_id
-                            && owner.connection_id == connection_id
-                            && owner.lane == lane
-                    });
-            if duplicate {
-                return Ok(WebSocketEventResult::default());
-            }
+        let Some(turn) = turn else {
             return Err(WebSocketError::new(
                 502,
                 "invalid_upstream_response",
@@ -1558,21 +1572,13 @@ impl ResponsesWebSocketGateway {
                         "Response upstream is unavailable",
                     )
                 })?;
-                let response = response.ok_or_else(|| {
+                response.ok_or_else(|| {
                     WebSocketError::new(
                         502,
                         "invalid_upstream_response",
                         "Response identity has no response object",
                     )
                 })?;
-                let stored = turn.prepared.store
-                    && response
-                        .get("store")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
-                self.lifecycle
-                    .bind_websocket_response(&turn.auth, upstream_id, response, stored)
-                    .await?;
                 let principal_id = turn.auth.principal_id().to_owned();
                 let body = turn.body.clone();
                 let previous = turn.previous_response_id.clone();
@@ -1610,17 +1616,46 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
-        if kind == "response.created"
-            && let Some(turn) = self.turns.get_mut(&turn_id)
-        {
-            turn.response_created = true;
-        }
         if let Some(response) = response
             && let Some((usage, complete)) = observed_response_usage(response)
         {
             let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
             turn.usage = Some(usage);
             turn.usage_complete = terminal && complete;
+        }
+        // Later snapshots and item.done can introduce reusable reasoning even
+        // when the response id itself belongs only to this live connection.
+        if response.is_some() || kind == "response.output_item.done" {
+            let turn = self.turns.get(&turn_id).expect("admitted turn exists");
+            let upstream_id = turn.upstream_id.ok_or_else(|| {
+                WebSocketError::new(
+                    502,
+                    "upstream_unavailable",
+                    "Response upstream is unavailable",
+                )
+            })?;
+            let stored = turn.prepared.store
+                && response
+                    .and_then(|value| value.get("store"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+            self.lifecycle
+                .bind_websocket_response(
+                    &turn.auth,
+                    upstream_id,
+                    response.unwrap_or(&Value::Null),
+                    (kind == "response.output_item.done")
+                        .then(|| value.get("item"))
+                        .flatten(),
+                    stored,
+                )
+                .await
+                .map_err(|error| error.with_stream(lane.clone()))?;
+        }
+        if kind == "response.created"
+            && let Some(turn) = self.turns.get_mut(&turn_id)
+        {
+            turn.response_created = true;
         }
         let mut result = WebSocketEventResult {
             forward: true,
