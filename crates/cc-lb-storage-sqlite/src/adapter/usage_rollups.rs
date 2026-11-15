@@ -20,6 +20,12 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
 
+// Both keys are global-only. Empty holds unprocessed/unrecoverable old counts;
+// this key records retained legacy events without a captured upstream UUID.
+// Names and surviving aggregates cannot prove ownership after rename/pruning.
+// Keeping the keys distinct makes every retained event consume the old total once.
+pub(super) const LEGACY_UNATTRIBUTED_UPSTREAM_ID: &str = "legacy-unattributed";
+
 async fn cleanup_gemini_reconciliation_markers(
     tx: &mut Transaction<'_, Sqlite>,
 ) -> StorageResult<()> {
@@ -305,8 +311,8 @@ impl UsageRollupStore for SqliteStorage {
         if window_end_unix_secs < window_start_unix_secs {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT bucket_start_unix_secs, error_count \
+        let rows = sqlx::query_as::<_, (i64, String, i64)>(
+            "SELECT bucket_start_unix_secs, upstream_id, error_count \
              FROM overview_excluded_error_rollups_v1 \
              WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? \
              ORDER BY bucket_start_unix_secs ASC",
@@ -325,9 +331,16 @@ impl UsageRollupStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(bucket_start, error_count)| {
+            .map(|(bucket_start, upstream_id, error_count)| {
                 Ok(OverviewExcludedErrorBucket {
                     bucket_start: i64_to_u64(bucket_start, "overview excluded error bucket")?,
+                    upstream_id: if upstream_id.is_empty()
+                        || upstream_id == LEGACY_UNATTRIBUTED_UPSTREAM_ID
+                    {
+                        None
+                    } else {
+                        Some(parse_uuid(&upstream_id, "overview excluded upstream_id")?)
+                    },
                     error_count: i64_to_u64(error_count, "overview excluded error count")?,
                 })
             })
@@ -1043,7 +1056,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
 
     let mut max_id = previous_checkpoint;
     let mut deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
-    let mut overview_excluded_error_deltas: BTreeMap<(UsageRollupResolution, u64), u64> =
+    let mut overview_excluded_error_deltas: BTreeMap<(UsageRollupResolution, u64, Uuid), u64> =
         BTreeMap::new();
     let mut backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
 
@@ -1066,7 +1079,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             let key = rollup_key(&event, &upstream, resolution);
             if is_overview_excluded_status(event.status) {
                 let count = overview_excluded_error_deltas
-                    .entry((resolution, key.bucket_start))
+                    .entry((resolution, key.bucket_start, key.upstream_id))
                     .or_default();
                 *count = count.saturating_add(1);
             }
@@ -1190,12 +1203,12 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     for (key, delta) in deltas {
         upsert_rollup_delta(&mut tx, &key, &delta).await?;
     }
-    for ((resolution, bucket_start), error_count) in overview_excluded_error_deltas {
+    for ((resolution, bucket_start, upstream_id), error_count) in overview_excluded_error_deltas {
         sqlx::query(
             "INSERT INTO overview_excluded_error_rollups_v1 \
-             (resolution, bucket_start_unix_secs, error_count, updated_at) \
-             VALUES (?, ?, ?, unixepoch()) \
-             ON CONFLICT (resolution, bucket_start_unix_secs) DO UPDATE SET \
+             (resolution, bucket_start_unix_secs, upstream_id, error_count, updated_at) \
+             VALUES (?, ?, ?, ?, unixepoch()) \
+             ON CONFLICT (resolution, bucket_start_unix_secs, upstream_id) DO UPDATE SET \
                  error_count = overview_excluded_error_rollups_v1.error_count + excluded.error_count, \
                  updated_at = unixepoch()",
         )
@@ -1204,6 +1217,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             bucket_start,
             "overview excluded error bucket",
         )?)
+        .bind(upstream_id.to_string())
         .bind(u64_to_i64(
             error_count,
             "overview excluded error count",

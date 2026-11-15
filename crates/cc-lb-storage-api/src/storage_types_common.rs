@@ -471,6 +471,8 @@ impl UsageRollup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewExcludedErrorBucket {
     pub bucket_start: u64,
+    /// None is historical global-only residual; Some(nil) is an actual unknown upstream.
+    pub upstream_id: Option<Uuid>,
     pub error_count: u64,
 }
 

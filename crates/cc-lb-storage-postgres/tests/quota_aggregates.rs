@@ -215,7 +215,7 @@ async fn auxiliary_pruners_share_batch_budget_and_pool_ranges_keep_left_anchors(
         let upstream = Uuid::from_u128(800);
         insert_rollup(&fixture.pool, upstream, 10, [1;4]).await?;
         insert_rollup(&fixture.pool, upstream, 20, [1;4]).await?;
-        sqlx::query("INSERT INTO overview_excluded_error_rollups_v1 (resolution, bucket_start_unix_secs, error_count, updated_at) VALUES ('minute', 10, 1, NOW()), ('hour', 10, 1, NOW())")
+        sqlx::query("INSERT INTO overview_excluded_error_rollups_v1 (resolution, bucket_start_unix_secs, upstream_id, error_count, updated_at) VALUES ('minute', 10, '00000000-0000-0000-0000-000000000000', 1, NOW()), ('hour', 10, '00000000-0000-0000-0000-000000000000', 1, NOW())")
             .execute(&fixture.pool).await?;
         assert_eq!(storage.prune_usage_rollups_before(15, 5, 0).await?, 0);
         assert_eq!(storage.prune_usage_rollups_before(15, 5, 1).await?, 1);

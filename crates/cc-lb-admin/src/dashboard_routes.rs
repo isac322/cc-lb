@@ -58,7 +58,7 @@ pub(crate) async fn handle_dashboard_summary(
     let (_, window_end_unix_secs) = build_window_for_step(range, auto_step(range), now_unix_secs);
     let etag = dashboard_revision(storage.as_ref()).await.map(|revision| {
         format!(
-            "W/\"dashboard:summary:v3:{}:{}:{revision}:{window_end_unix_secs}\"",
+            "W/\"dashboard:summary:v4:{}:{}:{revision}:{window_end_unix_secs}\"",
             range.as_str(),
             query.providers.as_deref().unwrap_or("all")
         )

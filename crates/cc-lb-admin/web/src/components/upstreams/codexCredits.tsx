@@ -31,6 +31,10 @@ export interface CodexCreditFacts {
   statusSource: string;
   balance: string | null;
   balanceSource: string | null;
+  freshnessObservations: readonly Pick<
+    QuotaSnapshot,
+    'state' | 'observed_at_unix_millis'
+  >[];
 }
 
 function sourceLabel(snapshot: QuotaSnapshot): string {
@@ -163,6 +167,25 @@ function creditFieldIsFresh(
     : evidence.snapshot.state === 'fresh';
 }
 
+function creditFreshnessObservation(
+  snapshot: QuotaSnapshot,
+  field: CreditField | undefined,
+  nowUnixMillis: number,
+  maxStalenessSecs: number,
+): Pick<QuotaSnapshot, 'state' | 'observed_at_unix_millis'> {
+  const observation =
+    field == null ? undefined : snapshot.credits?.observations?.[field];
+  if (observation == null) return snapshot;
+  return {
+    state:
+      Math.max(0, nowUnixMillis - observation.observed_at_unix_millis) >
+      maxStalenessSecs * 1000
+        ? 'stale'
+        : 'fresh',
+    observed_at_unix_millis: observation.observed_at_unix_millis,
+  };
+}
+
 /** Keep each fact attached to its own observation; a fresh balance is not a fresh availability flag. */
 export function selectCodexCredits(
   windows: readonly QuotaSnapshot[],
@@ -225,10 +248,17 @@ export function selectCodexCredits(
         (latestAvailability == null ||
           (unavailable.observed_at_unix_millis ?? -1) >=
             latestAvailability.observedAt)));
+  // Availability is not simply the newest field: a fresh positive unlimited
+  // or has-credits flag can win over a newer negative sibling.
+  const availabilityEvidence =
+    availabilityStatus === 'Unlimited'
+      ? unlimited
+      : availabilityStatus === 'Available' ||
+          availabilityStatus === 'Unavailable'
+        ? hasCredits
+        : latestAvailability;
   const statusEvidence =
-    limit ??
-    (fallbackUnavailable ? undefined : latestAvailability) ??
-    (availabilityStatus === 'Stale' ? latestAvailability : undefined);
+    limit ?? (fallbackUnavailable ? undefined : availabilityEvidence);
   const statusObservation =
     limit?.snapshot ??
     (fallbackUnavailable ? unavailable : undefined) ??
@@ -264,6 +294,38 @@ export function selectCodexCredits(
             ? sourceLabel(statusObservation)
             : 'Provider';
   const balanceObservation = newestCreditField(creditObservations, 'balance');
+  // The card caption describes the two facts actually displayed, not every
+  // retained API/header envelope that participated in choosing those facts.
+  const statusField: CreditField | undefined = limit
+    ? 'limit_reached'
+    : fallbackUnavailable
+      ? undefined
+      : statusEvidence === unlimited
+        ? 'unlimited'
+        : statusEvidence === hasCredits
+          ? 'has_credits'
+          : undefined;
+  const freshnessObservations = [];
+  if (statusObservation != null) {
+    freshnessObservations.push(
+      creditFreshnessObservation(
+        statusObservation,
+        statusField,
+        nowUnixMillis,
+        maxStalenessSecs,
+      ),
+    );
+  }
+  if (balanceObservation != null) {
+    freshnessObservations.push(
+      creditFreshnessObservation(
+        balanceObservation.snapshot,
+        'balance',
+        nowUnixMillis,
+        maxStalenessSecs,
+      ),
+    );
+  }
   return {
     status,
     tone:
@@ -273,6 +335,7 @@ export function selectCodexCredits(
           ? 'ok'
           : 'neutral',
     statusSource,
+    freshnessObservations,
     balance: balanceObservation?.snapshot.credits?.balance ?? null,
     balanceSource: balanceObservation
       ? fieldSourceLabel(

@@ -81,7 +81,10 @@ import {
   buildQuotaChartData,
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
-import { CodexCreditMini } from '../components/upstreams/codexCredits';
+import {
+  CodexCreditMini,
+  selectCodexCredits,
+} from '../components/upstreams/codexCredits';
 import {
   isAnthropicBaseUrl,
   usageFixLine,
@@ -1385,6 +1388,29 @@ export function DetailView({
         ),
       };
     }, [selectedLatest, upstream.kind, nowUnixSecs]);
+  // Poll responses can rerender between minute ticks. Credit fields and their
+  // caption must evaluate freshness against the same current render clock.
+  const creditNowUnixMillis = Date.now();
+  const quotaFreshnessObservations = useMemo(() => {
+    const credits = selectCodexCredits(
+      selectedLatest?.windows ?? [],
+      quotaLatest.data?.max_staleness_secs,
+      creditNowUnixMillis,
+    );
+    return [
+      ...quotaCards.filter(
+        (snapshot) => snapshot.credits == null && snapshot.window !== 'unified',
+      ),
+      ...(credits?.freshnessObservations ?? []),
+      ...rawMeters,
+    ];
+  }, [
+    selectedLatest,
+    quotaLatest.data?.max_staleness_secs,
+    creditNowUnixMillis,
+    quotaCards,
+    rawMeters,
+  ]);
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
     windows: quotaWindows,
@@ -1686,9 +1712,7 @@ export function DetailView({
         <span className="flex flex-wrap items-center gap-x-2">
           Used per window and when it resets
           {!quotaLatestPending && quotaDetailState === 'rows' ? (
-            <QuotaFreshnessCaption
-              snapshots={[...(selectedLatest?.windows ?? []), ...rawMeters]}
-            />
+            <QuotaFreshnessCaption snapshots={quotaFreshnessObservations} />
           ) : null}
           {!quotaLatestPending &&
           quotaDetailState === 'rows' &&
@@ -1730,7 +1754,9 @@ export function DetailView({
               snap={snap}
               creditObservations={selectedLatest?.windows}
               maxStalenessSecs={quotaLatest.data?.max_staleness_secs}
-              nowUnixSecs={nowUnixSecs}
+              nowUnixSecs={
+                snap.credits != null ? creditNowUnixMillis / 1000 : nowUnixSecs
+              }
               placeholder={geminiGroupPlaceholderState(
                 selectedLatest?.windows,
                 snap.window,

@@ -1,0 +1,62 @@
+{
+  "capture_utc": "2026-11-14T19:17:25.032017+00:00",
+  "sanitization": "Account identifiers removed; balances and message estimates replaced. Observation shape and relative ordering preserved.",
+  "now_unix_secs": 1794683845,
+  "max_staleness_secs": 1800,
+  "windows": [
+    {
+      "window": "5h",
+      "state": "absent",
+      "source": "api",
+      "utilization": null,
+      "observed_at_unix_millis": 1794683808816,
+      "age_secs": 36
+    },
+    {
+      "window": "7d",
+      "state": "fresh",
+      "source": "api",
+      "utilization": 0.6,
+      "status": "allowed",
+      "resets_at_unix_secs": 1795108204,
+      "representative_claim": "Codex primary_window",
+      "observed_at_unix_millis": 1794683808816,
+      "age_secs": 36
+    },
+    {
+      "window": "overage",
+      "state": "fresh",
+      "source": "api",
+      "utilization": null,
+      "credits": {
+        "has_credits": true,
+        "unlimited": false,
+        "limit_reached": false,
+        "balance": "12500.1234000000",
+        "approx_local_messages": [3000, 15000],
+        "approx_cloud_messages": [500, 3000]
+      },
+      "observed_at_unix_millis": 1794683808816,
+      "age_secs": 36,
+      "fallback_available": true
+    },
+    {
+      "window": "unified",
+      "state": "stale",
+      "source": "header",
+      "utilization": null,
+      "representative_claim": "Codex credits",
+      "credits": {
+        "has_credits": true,
+        "unlimited": false,
+        "limit_reached": null,
+        "balance": "12500.1234000000",
+        "approx_local_messages": null,
+        "approx_cloud_messages": null
+      },
+      "observed_at_unix_millis": 1794681978789,
+      "age_secs": 1866,
+      "fallback_available": true
+    }
+  ]
+}
