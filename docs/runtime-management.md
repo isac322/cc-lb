@@ -114,6 +114,8 @@ OAuth model-list requests call FetchAvailableModels with the selected upstream's
 
 For native `streamGenerateContent` requests with an explicit `alt=sse` query pair and a Gemini API-key upstream, a successful upstream `application/json` response produces the existing Gemini SSE `api_error` and records `upstream_response_framing_error`. cc-lb rejects this framing mismatch without reading or parsing the upstream JSON body. OAuth envelopes, native `alt=json` or absent-`alt` JSON arrays, and non-2xx provider errors retain their existing behavior.
 
+For Gemini generation SSE framing failures, cc-lb finalizes the lifecycle error type and message before delivering the terminal error frame. This includes incomplete SSE at upstream EOF for API-key and OAuth upstreams. Request-event diagnostics survive a client dropping the response body immediately after receiving that error frame.
+
 On proxy request timeout, Gemini HTTP routes return HTTP `504` with a Gemini `DEADLINE_EXCEEDED` JSON error. Other HTTP routes return plain `request timed out`.
 
 Realtime and Live WebSockets authenticate the proxy client before upgrade and select one eligible API-key upstream for the connection lifetime; OAuth subscriptions are not eligible. A connection never reconnects or fails over to another credential. Text, binary, ping, and pong frames retain their payloads; client/provider close frames retain their explicit code and reason while propagating tunnel shutdown. A later connection failure closes the tunnel rather than returning a new HTTP response.
