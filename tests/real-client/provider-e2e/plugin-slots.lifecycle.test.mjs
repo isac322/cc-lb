@@ -111,3 +111,64 @@ test('successful harness records literal shell-quoted cleanup paths', async t =>
     assert.deepEqual(argv, ['rm', '-r', '--', result.output]);
   }
 });
+
+for (const target of ['metadata', 'ledger']) {
+  test(`observer ${target} failure terminates child before ownership transfer`, async t => {
+    const blocked = path.join(root, `observer-${target}-directory`);
+    await mkdir(blocked);
+    const program = `
+      import cp from 'node:child_process';
+      import fs from 'node:fs';
+      import { once } from 'node:events';
+      import { syncBuiltinESMExports } from 'node:module';
+      let acquired;
+      const original = cp.spawn;
+      cp.spawn = (...args) => {
+        acquired = original(...args);
+        try {
+          fs.appendFileSync(process.env.OWNER_LEDGER, JSON.stringify({
+            kind: 'process', identifier: 'observer-test child pid=' + acquired.pid,
+            deleteCommand: 'kill -TERM ' + acquired.pid,
+            createdAt: new Date().toISOString()
+          }) + '\\n');
+        } catch (error) {
+          acquired.kill('SIGTERM');
+          throw error;
+        }
+        return acquired;
+      };
+      syncBuiltinESMExports();
+      await import(${JSON.stringify(new URL('./plugin-slots-failure-preload.mjs', import.meta.url).href)});
+      let recordingError;
+      try { cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']); }
+      catch (error) { recordingError = error.code; }
+      const closed = once(acquired, 'close');
+      const signaledBeforeTransfer = acquired.killed;
+      if (!signaledBeforeTransfer) acquired.kill('SIGTERM');
+      const [code, signal] = await closed;
+      console.log(JSON.stringify({ recordingError, signaledBeforeTransfer, code, signal }));
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', program], {
+      env: { ...process.env, OWNER_LEDGER: ledger,
+        CC_LB_QA_FAULT_METADATA: target === 'metadata' ? blocked : path.join(root, 'observer-child.json'),
+        CC_LB_QA_LEDGER: target === 'ledger' ? blocked : ledger },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', data => { stdout += data; });
+    child.stderr.on('data', data => { stderr += data; });
+    const done = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', code => resolve(code));
+    });
+    await appendFile(ledger, `${JSON.stringify({ kind: 'process', identifier: `observer-test harness pid=${child.pid}`,
+      deleteCommand: `kill -TERM ${child.pid}`, createdAt: new Date().toISOString() })}\n`);
+    assert.equal(await done, 0, stderr);
+    const outcome = JSON.parse(stdout);
+    assert.equal(outcome.recordingError, 'EISDIR');
+    assert.equal(outcome.signaledBeforeTransfer, true);
+    assert.equal(outcome.signal, 'SIGTERM');
+  });
+}

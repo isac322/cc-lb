@@ -10,13 +10,25 @@ const originalSpawn = cp.spawn;
 cp.spawn = (...args) => {
   const child = originalSpawn(...args);
   const owned = { harnessPid: process.pid, childPid: child.pid, mode };
-  fs.writeFileSync(metadata, JSON.stringify(owned), { mode: 0o600 });
-  fs.appendFileSync(process.env.CC_LB_QA_LEDGER, `${JSON.stringify({
-    kind: 'process', identifier: `fault-test cc-lb pid=${child.pid}; metadata=${metadata}`,
-    deleteCommand: `kill -TERM ${child.pid}`, createdAt: new Date().toISOString(),
-  })}\n`, { mode: 0o600 });
+  try {
+    fs.writeFileSync(metadata, JSON.stringify(owned), { mode: 0o600 });
+    fs.appendFileSync(process.env.CC_LB_QA_LEDGER, `${JSON.stringify({
+      kind: 'process', identifier: `fault-test cc-lb pid=${child.pid}; metadata=${metadata}`,
+      deleteCommand: `kill -TERM ${child.pid}`, createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+  } catch (error) {
+    // The caller has not received the handle yet, so this wrapper still owns it.
+    child.once('error', () => {});
+    child.kill('SIGTERM');
+    throw error;
+  }
   child.once('exit', (code, signal) => {
-    fs.writeFileSync(metadata, JSON.stringify({ ...owned, exited: true, code, signal }), { mode: 0o600 });
+    try {
+      fs.writeFileSync(metadata, JSON.stringify({ ...owned, exited: true, code, signal }), { mode: 0o600 });
+    } catch (error) {
+      console.error(`Unable to record child exit: ${error.code}`);
+      process.exitCode = 1;
+    }
   });
   return child;
 };
