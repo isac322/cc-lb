@@ -26,9 +26,33 @@ function argumentsOf(argv) {
   return result;
 }
 
+function validateHttp2Headers(headers) {
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(lower) || typeof value !== 'string' ||
+        /^(?:connection|proxy-connection|keep-alive|transfer-encoding|upgrade|http2-settings)$/.test(lower) ||
+        (lower === 'te' && value.trim().toLowerCase() !== 'trailers')) throw new Error('QHARNESS_INVALID_HEADERS');
+  }
+}
+
+function http2RequestHeaders(request) {
+  validateHttp2Headers(request.headers);
+  const headers = Object.create(null);
+  headers[':method'] = request.method;
+  headers[':path'] = localReplayPath(request.path);
+  for (const [name, value] of request.headers) {
+    const lower = name.toLowerCase();
+    if (headers[lower] === undefined) headers[lower] = value;
+    else if (Array.isArray(headers[lower])) headers[lower].push(value);
+    else headers[lower] = [headers[lower], value];
+  }
+  return headers;
+}
+
 async function observeHttp(fixture, replay) {
+  const isGrpc = fixture.response.frames.some((frame) => ['grpc', 'grpc-message'].includes(frame.kind));
+  const requestHeaders = isGrpc ? http2RequestHeaders(fixture.request) : null;
   return new Promise((resolve) => {
-    const isGrpc = fixture.response.frames.some((frame) => ['grpc', 'grpc-message'].includes(frame.kind));
     const client = isGrpc ? connectHttp2(replay.origin) : null;
     const chunks = []; let settled = false; let stream;
     const timer = setTimeout(() => finish(false, true), 5000);
@@ -39,7 +63,7 @@ async function observeHttp(fixture, replay) {
     }
     if (client) {
       client.on('error', () => finish(false));
-      stream = client.request({ ':method': fixture.request.method, ':path': localReplayPath(fixture.request.path) });
+      stream = client.request(requestHeaders);
       stream.on('data', (chunk) => chunks.push(chunk)); stream.on('end', () => finish(true)); stream.on('error', () => finish(false)); stream.on('aborted', () => finish(false));
     } else {
       const headers = fixture.request.headers.some(([name]) => name.toLowerCase() === 'host')
@@ -78,11 +102,12 @@ async function observeWs(fixture, replay) {
   });
 }
 
-export async function runHermeticFixture({ fixture, scratchDir, ledger }) {
+export async function runHermeticFixture({ fixture, scratchDir, ledger, authorize }) {
   validateReplayFixture(fixture);
   const transport = classifyFixtureTransport(fixture);
   if (!transport.replayable) return { fixtureId: fixture.id, ...transport, status: 'DEFERRED', fixtureEvidence: fixture.provenance, consumerAcceptance: 'NOT-RUN', providerAcceptance: 'NOT-RUN', runtimeAcceptance: 'NOT-RUN', fullClientAcceptance: false };
-  const replay = await startReplayServer({ fixture, scratchDir, ledger });
+  if (transport.family === 'grpc') validateHttp2Headers(fixture.request.headers);
+  const replay = await startReplayServer({ fixture, scratchDir, ledger, authorize });
   try {
     const sanitized = replay.fixture;
     const websocket = sanitized.response.frames.some((frame) => frame.kind.startsWith('ws-'));

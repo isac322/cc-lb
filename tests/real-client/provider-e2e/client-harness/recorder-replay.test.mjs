@@ -195,6 +195,89 @@ test('QH-WIRE-002 / QH-GRPC-001: generated gRPC prefix, payload and trailers cro
   } finally { session.destroy(); await replay.close(); }
 });
 
+test('QH-GRPC-001 regression: hermetic HTTP2 requests preserve fixture metadata and require auth before replay', async () => {
+  const owned = await workspace('grpc-request-metadata');
+  const payload = Buffer.from([0, 0, 0, 0, 2, 10, 0]);
+  const value = fixture([{ kind: 'grpc', data: payload.toString('base64'), encoding: 'base64', syntheticContent: true }]);
+  const authSentinel = 'QHARNESS_SYNTHETIC_HTTP2_AUTH_1324';
+  const binaryMetadata = ['AAEC/w==', 'AgM='];
+  value.request.headers = [
+    ['Content-Type', 'application/grpc'],
+    ['TE', 'trailers'],
+    ['X-Order', 'first'],
+    ['x-order', 'second'],
+    ['X-Private-Bin', binaryMetadata[0]],
+    ['x-private-bin', binaryMetadata[1]],
+    ['Authorization', `Bearer ${authSentinel}`],
+  ];
+  value.response.headers = [['content-type', 'application/grpc']];
+  value.response.trailers = [['grpc-status', '0']];
+  let observed;
+  const result = await runHermeticFixture({
+    ...owned, fixture: value,
+    authorize: ({ method, path: target, headers }) => {
+      const values = (name) => headers.filter(([key]) => key.toLowerCase() === name).map(([, entry]) => entry);
+      const authPresent = values('authorization').some((entry) => typeof entry === 'string' && entry.length > 0);
+      observed = {
+        method, target, authPresent,
+        contentType: values('content-type'), te: values('te'),
+        duplicateMetadata: values('x-order'), binaryMetadata: values('x-private-bin'),
+        lowercaseNames: headers.every(([name]) => name === name.toLowerCase()),
+      };
+      return authPresent;
+    },
+  });
+  assert.ok(observed, 'the actual HTTP2 replay server must inspect the harness request');
+  assert.equal(observed.authPresent, true, 'response replay requires an authorization header, not its secret value');
+  assert.equal(observed.method, value.request.method);
+  assert.equal(observed.target, value.request.path);
+  assert.deepEqual(observed.contentType, ['application/grpc']);
+  assert.deepEqual(observed.te, ['trailers']);
+  // HTTP2/gRPC may coalesce repeated metadata fields with commas; value order is unchanged.
+  const metadataValues = (fields) => fields.flatMap((field) => field.split(',').map((entry) => entry.trim()));
+  assert.deepEqual(metadataValues(observed.duplicateMetadata), ['first', 'second']);
+  assert.deepEqual(metadataValues(observed.binaryMetadata), binaryMetadata);
+  assert.equal(observed.lowercaseNames, true);
+  assert.equal(result.replayFidelity, 'PASS');
+  assert.equal(result.complete, true);
+  assert.equal(result.consumerAcceptance, 'NOT-RUN');
+  assert.equal(result.providerAcceptance, 'NOT-RUN');
+  assert.equal(result.runtimeAcceptance, 'NOT-RUN');
+  assert.equal(result.fullClientAcceptance, false);
+  const retained = await readFile(path.join(owned.scratchDir, 'wire.jsonl'), 'utf8');
+  assert.equal(retained.includes(authSentinel), false, 'the synthetic authorization sentinel must not be persisted');
+  const requestRecord = retained.trim().split('\n').map((line) => JSON.parse(line)).find((record) => record.method === 'POST' && Array.isArray(record.headers));
+  assert.ok(requestRecord, 'authorized HTTP2 request metadata must reach the retained sanitized recorder evidence');
+  assert.deepEqual(requestRecord.headers.filter(([name]) => name === 'authorization').map(([, entry]) => entry), ['[REDACTED]']);
+  assert.equal(requestRecord.headers.filter(([name]) => name === 'x-order').length, observed.duplicateMetadata.length, 'each actual wire metadata field must be recorded');
+  assert.deepEqual(requestRecord.headers.filter(([name]) => name === 'x-private-bin').map(([, entry]) => entry),
+    observed.binaryMetadata.map((entry) => ({ kind: 'grpc-metadata-bin', byteLength: Buffer.byteLength(entry) })),
+    'captured binary metadata retains only its safe shape, not authored bytes');
+});
+
+test('QH-GRPC-001 regression: hermetic HTTP2 requests reject connection-specific fixture headers rather than dropping them', async () => {
+  const owned = await workspace('grpc-invalid-headers');
+  for (const [name, headerValue] of [
+    ['Connection', 'keep-alive'], ['Proxy-Connection', 'keep-alive'], ['Keep-Alive', 'timeout=5'],
+    ['Transfer-Encoding', 'chunked'], ['Upgrade', 'h2c'], ['HTTP2-Settings', 'AAEAAAAA'], ['TE', 'gzip'],
+  ]) {
+    const value = fixture([{ kind: 'grpc', data: 'AAAAAAA=', encoding: 'base64', syntheticContent: true }]);
+    value.request.headers = [['content-type', 'application/grpc'], [name, headerValue]];
+    value.response.headers = [['content-type', 'application/grpc']];
+    let admissionCalls = 0; let listenerRegistrations = 0;
+    await assert.rejects(runHermeticFixture({
+      fixture: value, scratchDir: path.join(owned.scratchDir, name.toLowerCase()),
+      ledger: async (entry) => {
+        if (entry.kind === 'listener' && entry.state === 'active') listenerRegistrations++;
+        await owned.ledger(entry);
+      },
+      authorize: () => { admissionCalls++; return true; },
+    }), /QHARNESS_INVALID_HEADERS/);
+    assert.equal(admissionCalls, 0, `${name} must reject before an invalid request reaches replay admission`);
+    assert.equal(listenerRegistrations, 0, `${name} must reject before creating a replay listener`);
+  }
+});
+
 test('QH-WIRE-002 / QH-WS-001: actual websocket text and generated binary preserve payload order', async () => {
   const owned = await workspace('ws'); const value = fixture([
     { kind: 'ws-text', data: { type: 'response.created', safeUnknown: false } },

@@ -392,7 +392,14 @@ export function sanitizeHeaders(entries, context, options = {}) {
       continue;
     }
     if (/-bin$/i.test(name)) {
-      result.push([outputName, opaqueMetadata(value, "grpc-metadata-bin")]);
+      let clean = opaqueMetadata(value, "grpc-metadata-bin");
+      // Only authored synthetic bytes may be replayed; captured metadata stays opaque.
+      if (synthetic && typeof value === "string") {
+        const decoded = Buffer.from(value, "base64");
+        const decodedText = decoded.toString("utf8");
+        if (decoded.toString("base64") === value && replaceSecrets(value, context) === value && replaceSecrets(decodedText, context) === decodedText) clean = value;
+      }
+      result.push([outputName, clean]);
       continue;
     }
     result.push([outputName, sanitizeAny(value, context, { synthetic, known: true, key: name })]);

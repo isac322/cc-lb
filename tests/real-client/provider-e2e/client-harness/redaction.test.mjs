@@ -96,6 +96,43 @@ test("QH-RED-002 ordered duplicates, query capabilities and signed URL userinfo/
   assertRejected(artifact({ provenance: "captured", query: [[privateName, ""]] }));
 });
 
+test("QH-RED-004 authored synthetic canonical base64 metadata survives while captured metadata stays opaque", () => {
+  const headers = [["x-private-bin", "AAEC/w=="], ["x-private-bin", "AgM="]];
+  const authored = sanitizeRecord({ provenance: "synthetic", request: { headers } }, context());
+  assert.deepEqual(authored.request.headers, headers);
+  assert.equal(assertSafeArtifact(artifact(authored)), true);
+  const captured = sanitizeRecord({ request: { headers } }, context());
+  assert.deepEqual(captured.request.headers, headers.map(([name, value]) => [name, { kind: "grpc-metadata-bin", byteLength: Buffer.byteLength(value) }]));
+  assert.equal(assertSafeArtifact(artifact(captured)), true);
+});
+
+test("QH-RED-004 authored binary metadata still honors secret discovery, canonical encoding and sentinel guards", () => {
+  const secret = sentinel("AUTHORED_METADATA");
+  const encodedSecret = Buffer.from(secret).toString("base64");
+  const structuredSecret = Buffer.from(JSON.stringify({ password: secret })).toString("base64");
+  const clean = sanitizeRecord({
+    provenance: "synthetic",
+    headers: [
+      ["x-private-bin", encodedSecret],
+      ["x-private-bin", structuredSecret],
+      ["x-token-bin", "AAEC/w=="],
+      ["authorization", `Bearer ${secret}`],
+      ["x-private-bin", "AgM"],
+      ["x-private-bin", "AgM=\n"],
+      ["x-private-bin", "!!!!"],
+    ],
+  }, context());
+  assert.equal(clean.headers[0][1].kind, "grpc-metadata-bin");
+  assert.equal(clean.headers[1][1].kind, "grpc-metadata-bin");
+  assert.equal(clean.headers[2][1], REDACTED, "secret-key headers stay redacted even when their value is safe base64");
+  assert.equal(clean.headers[3][1], REDACTED);
+  for (const [, value] of clean.headers.slice(4)) assert.equal(value.kind, "grpc-metadata-bin");
+  assert.equal(assertSafeArtifact(artifact(clean), { sentinels: [secret] }), true);
+  const unknown = sentinel("UNKNOWN_METADATA");
+  const guarded = sanitizeRecord({ provenance: "synthetic", headers: [["x-private-bin", Buffer.from(unknown).toString("base64")]] }, context());
+  assertRejected(artifact(guarded), [unknown]);
+});
+
 test("QH-RED-003 complete split SSE/WS logical messages are sanitized and remain consumer-decodable", () => {
   const secret = sentinel("SPLIT_SECRET");
   const first = `event: message\ndata: ${JSON.stringify({ type: "message", extension: "SAFE_SSE_EXTENSION", candidates: [{ content: { role: "model", parts: [{ text: "SAFE_CONSUMER_MARKER" }] } }], access_token: secret })}\n\n`;
