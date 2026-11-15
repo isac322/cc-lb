@@ -702,10 +702,6 @@ fn wrap_gemini_code_assist_request(
     antigravity: Option<&AntigravityRequestProfile>,
     target: &GeminiOAuthTarget,
 ) -> Result<bool, SignerError> {
-    let mut url = shaped.url().clone();
-    scrub_url_query_api_key(&mut url);
-    shaped.set_url(url);
-
     let path = shaped.url().path();
     let is_stream =
         path == "/v1internal:streamGenerateContent" || path.ends_with(":streamGenerateContent");
@@ -874,9 +870,6 @@ impl Signer for GeminiSubscriptionSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
-        let mut url = shaped.url().clone();
-        scrub_url_query_api_key(&mut url);
-        shaped.set_url(url);
         check_access_token_expiry(
             self.expires_at_unix_secs,
             self.never_refresh,
@@ -926,6 +919,11 @@ impl Signer for GeminiSubscriptionSigner {
             self.antigravity.as_ref(),
             &self.content_target,
         )?;
+        if !wrapped {
+            let mut url = shaped.url().clone();
+            scrub_url_query_api_key(&mut url);
+            shaped.set_url(url);
+        }
         if wrapped && let Some(hook) = shaped.take_gemini_envelope_hook() {
             let result = hook.shape_envelope_gemini(GeminiEnvelopeRequest {
                 url: shaped.url(),
