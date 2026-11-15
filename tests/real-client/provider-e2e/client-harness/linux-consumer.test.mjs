@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LINUX_CLIENT, LINUX_IMAGE, LINUX_PROTOCOL, cleanupOwnedLinuxContainer, hashLinuxBinary, linuxHelperFailureReason, parseLinuxProtocol, recoverOwnedLinuxContainer, resolveLinuxDockerEndpoint, runLinuxConsumer, validateLinuxBinaryStat, validateLinuxInspect } from './linux-consumer.mjs';
+import * as linuxConsumer from './linux-consumer.mjs';
 import { main } from './run.mjs';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
@@ -46,9 +47,9 @@ test('Linux protocol rejects malformed and oversized messages', () => {
 });
 
 function inspection() {
-  return [{ Id: 'a'.repeat(64), Image: LINUX_IMAGE, State: { Running: true }, Config: { Labels: { 'qharness.owner': 'owned' }, User: '65534:65534', OpenStdin: true, Tty: false, Entrypoint: ['/opt/qharness/helper'], Cmd: null }, HostConfig: { NetworkMode: 'none', ReadonlyRootfs: true, Privileged: false, LogConfig: { Type: 'none' }, CapAdd: null, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'], PidMode: 'private', IpcMode: 'private', UTSMode: 'private', PidsLimit: 128, Memory: 536870912, NanoCpus: 2000000000, Tmpfs: Object.fromEntries(['/home/qharness', '/tmp', '/var/lib/postgresql'].map((target) => [target, 'rw,noexec,nosuid,nodev,size=67108864,uid=65534,gid=65534,mode=700'])) }, Mounts: [{ Type: 'bind', Source: '/owned/agy', Destination: '/opt/qharness/agy', RW: false }], NetworkSettings: { Networks: { none: {} } } }];
+  return [{ Id: 'a'.repeat(64), Image: `sha256:${'b'.repeat(64)}`, State: { Running: true }, Config: { Labels: { 'qharness.owner': 'owned' }, User: '65534:65534', OpenStdin: true, Tty: false, Entrypoint: ['/opt/qharness/helper'], Cmd: null }, HostConfig: { NetworkMode: 'none', ReadonlyRootfs: true, Privileged: false, LogConfig: { Type: 'none' }, CapAdd: null, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'], PidMode: 'private', IpcMode: 'private', UTSMode: 'private', PidsLimit: 128, Memory: 536870912, NanoCpus: 2000000000, Tmpfs: Object.fromEntries(['/home/qharness', '/tmp', '/var/lib/postgresql'].map((target) => [target, 'rw,noexec,nosuid,nodev,size=67108864,uid=65534,gid=65534,mode=700'])) }, Mounts: [{ Type: 'bind', Source: '/owned/agy', Destination: '/opt/qharness/agy', RW: false }], NetworkSettings: { Networks: { none: {} } } }];
 }
-const expected = { id: 'a'.repeat(64), label: 'owned', mounts: [{ source: '/owned/agy', target: '/opt/qharness/agy' }] };
+const expected = { id: 'a'.repeat(64), label: 'owned', mounts: [{ source: '/owned/agy', target: '/opt/qharness/agy' }], resolvedImageId: `sha256:${'b'.repeat(64)}` };
 
 test('Linux inspect accepts only explicit owned policy', () => assert.equal(validateLinuxInspect(inspection(), expected), true));
 for (const [name, mutate] of [
@@ -65,6 +66,114 @@ for (const [name, mutate] of [
 ]) test(`Linux inspect rejects ${name}`, () => {
   const value = inspection(); mutate(value[0]);
   assert.throws(() => validateLinuxInspect(value, expected), /QHARNESS_LINUX_/);
+});
+
+const pinnedImageReference = 'postgres@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95';
+// Docker container .Image is a config digest, not the OCI index or child manifest.
+const resolvedImageId = `sha256:${'b'.repeat(64)}`;
+const childManifestDigest = 'sha256:aea692538b8982646f587a0dc0263986ac063c043ab28a43076a07d099a0ef53';
+function imageInspection() {
+  return [{ Id: resolvedImageId, RepoDigests: [pinnedImageReference], Os: 'linux', Architecture: 'arm64' }];
+}
+
+test('Linux OCI image pin is an explicit repository digest reference', () => {
+  assert.equal(LINUX_IMAGE, pinnedImageReference);
+});
+
+test('Linux OCI container inspection accepts verified config ID distinct from index and manifest', () => {
+  const value = inspection();
+  value[0].Image = resolvedImageId;
+  assert.notEqual(resolvedImageId, pinnedImageReference.split('@')[1]);
+  assert.notEqual(resolvedImageId, childManifestDigest);
+  assert.equal(validateLinuxInspect(value, { ...expected, resolvedImageId }), true);
+});
+
+test('Linux OCI container inspection requires verified image identity', () => {
+  const { resolvedImageId: omitted, ...withoutImageIdentity } = expected;
+  assert.throws(() => validateLinuxInspect(inspection(), withoutImageIdentity), /QHARNESS_LINUX_/);
+});
+
+test('Linux OCI local image inspection preserves a verified daemon index/config alias', async () => {
+  const value = imageInspection();
+  value[0].Id = pinnedImageReference.split('@')[1];
+  const image = await linuxConsumer.inspectLinuxImage({ invoke: async () => successful(JSON.stringify(value)) });
+  const container = inspection(); container[0].Image = image.resolvedImageId;
+  assert.equal(validateLinuxInspect(container, { ...expected, resolvedImageId: image.resolvedImageId }), true);
+});
+
+for (const wrongId of [pinnedImageReference.split('@')[1], childManifestDigest, `sha256:${'c'.repeat(64)}`]) {
+  test('Linux OCI container inspection rejects an unverified config ID', () => {
+    const value = inspection(); value[0].Image = wrongId;
+    assert.throws(() => validateLinuxInspect(value, { ...expected, resolvedImageId }), /QHARNESS_LINUX_/);
+  });
+}
+
+test('Linux OCI local image inspection resolves config identity without pulling or registry access', async () => {
+  assert.equal(typeof linuxConsumer.inspectLinuxImage, 'function');
+  const calls = [];
+  const result = await linuxConsumer.inspectLinuxImage({
+    invoke: async (args, options) => {
+      calls.push({ args, options });
+      return successful(JSON.stringify(imageInspection()));
+    },
+  });
+  assert.deepEqual(result, { imageReference: pinnedImageReference, resolvedImageId });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['image', 'inspect', pinnedImageReference]);
+  assert.ok(calls[0].options.deadlineMs > 0 && calls[0].options.deadlineMs <= 5000);
+  assert.ok(calls[0].options.maxBytes > 0 && calls[0].options.maxBytes <= 16384);
+});
+
+for (const [name, mutate] of [
+  ['wrong repository', (v) => { v[0].RepoDigests = [pinnedImageReference.replace('postgres@', 'foreign@')]; }],
+  ['wrong index digest', (v) => { v[0].RepoDigests = [`postgres@${childManifestDigest}`]; }],
+  ['missing repository evidence', (v) => { delete v[0].RepoDigests; }],
+  ['wrong OS', (v) => { v[0].Os = 'windows'; }],
+  ['wrong architecture', (v) => { v[0].Architecture = 'amd64'; }],
+  ['missing config ID', (v) => { delete v[0].Id; }],
+  ['malformed config ID', (v) => { v[0].Id = 'b'.repeat(64); }],
+  ['multiple images', (v) => { v.push({ ...v[0] }); }],
+]) test(`Linux OCI local image inspection rejects ${name} before creation`, async () => {
+  assert.equal(typeof linuxConsumer.inspectLinuxImage, 'function');
+  const value = imageInspection(); mutate(value);
+  const calls = [];
+  await assert.rejects(linuxConsumer.inspectLinuxImage({
+    invoke: async (args) => { calls.push(args); return successful(JSON.stringify(value)); },
+  }), /QHARNESS_LINUX_/);
+  assert.deepEqual(calls, [['image', 'inspect', pinnedImageReference]]);
+});
+
+for (const [name, output] of [
+  ['missing local image', () => ({ ...successful(), exitCode: 1 })],
+  ['timeout', () => ({ ...successful(), timedOut: true })],
+  ['overflow', () => ({ ...successful(), overflow: true })],
+  ['malformed JSON', () => successful('not-json')],
+  ['empty image list', () => successful('[]')],
+]) test(`Linux OCI image resolution rejects ${name} without fallback`, async () => {
+  assert.equal(typeof linuxConsumer.inspectLinuxImage, 'function');
+  const calls = [];
+  await assert.rejects(linuxConsumer.inspectLinuxImage({
+    invoke: async (args) => { calls.push(args); return output(); },
+  }), /QHARNESS_LINUX_/);
+  assert.deepEqual(calls, [['image', 'inspect', pinnedImageReference]]);
+});
+
+test('Linux OCI create arguments use only pinned repository reference with offline platform policy', () => {
+  assert.equal(typeof linuxConsumer.buildLinuxCreateArgs, 'function');
+  const args = linuxConsumer.buildLinuxCreateArgs({ name: 'qharness-owned', label: 'owned', mounts: expected.mounts });
+  assert.equal(args[0], 'create');
+  assert.equal(args.at(-1), pinnedImageReference);
+  assert.equal(args[args.indexOf('--pull') + 1], 'never');
+  assert.equal(args[args.indexOf('--platform') + 1], 'linux/arm64');
+  assert.equal(args.includes(resolvedImageId), false);
+  assert.equal(args.includes(pinnedImageReference.split('@')[1]), false);
+});
+
+test('Linux OCI result keeps repository pin separate from unresolved config identity', async () => {
+  const result = await runLinuxConsumer({ fixture: null });
+  assert.equal(result.executionBackend.imageDigest, pinnedImageReference);
+  assert.equal(result.executionBackend.resolvedImageId, null);
+  assert.notEqual(result.status, 'PASS');
 });
 
 function successful(stdout = '') {

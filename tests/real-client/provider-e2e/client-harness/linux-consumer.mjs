@@ -8,7 +8,7 @@ import { boundedProcessSucceeded, buildAgyLaunch, classifyConsumerFailure, findE
 import { assertSafeArtifact, createRedactionContext, sanitizeRecord } from './redaction.mjs';
 
 export const LINUX_CLIENT = Object.freeze({ name: 'agy', version: '1.5.9', platform: 'linux', arch: 'arm64', libc: 'musl', binary_sha256: 'd81a2547df4d29e391725219c1908056885abc6c73fd23819553f622ac9b098d' });
-export const LINUX_IMAGE = 'sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95';
+export const LINUX_IMAGE = 'postgres@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95';
 export const LINUX_PROTOCOL = 'qharness-linux-replay/v1';
 const RAW_CAP = 2097152;
 const PROTOCOL_CAP = Math.ceil(RAW_CAP * 4 / 3) + 262144;
@@ -89,10 +89,28 @@ export function resolveLinuxDockerEndpoint({ inspectedEndpoint, dockerHost, dock
   return endpoint;
 }
 
-export function validateLinuxInspect(value, { id, label, mounts, running = true }) {
+export async function inspectLinuxImage({ invoke }) {
+  const result = await invoke(['image', 'inspect', LINUX_IMAGE], { deadlineMs: 5000, maxBytes: 16384 });
+  if (!boundedProcessSucceeded(result)) throw error('QHARNESS_LINUX_IMAGE_INSPECT_FAILED');
+  let value;
+  try { value = JSON.parse(result.stdout.toString()); } catch { throw error('QHARNESS_LINUX_IMAGE_INSPECT_REJECTED'); }
+  const image = Array.isArray(value) && value.length === 1 ? value[0] : null;
+  if (!image || typeof image.Id !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(image.Id) ||
+      !Array.isArray(image.RepoDigests) || !image.RepoDigests.includes(LINUX_IMAGE) ||
+      image.Os !== 'linux' || image.Architecture !== 'arm64') throw error('QHARNESS_LINUX_IMAGE_INSPECT_REJECTED');
+  return { imageReference: LINUX_IMAGE, resolvedImageId: image.Id };
+}
+
+export function buildLinuxCreateArgs({ name, label, mounts }) {
+  const tmpfs = ['/home/qharness', '/tmp', '/var/lib/postgresql'].flatMap((target) => ['--tmpfs', `${target}:rw,noexec,nosuid,nodev,size=67108864,uid=65534,gid=65534,mode=700`]);
+  return ['create', '-i', '--name', name, '--pull', 'never', '--platform', 'linux/arm64', '--label', `qharness.owner=${label}`, '--log-driver', 'none', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--ipc', 'private', '--pids-limit', '128', '--memory', '512m', '--cpus', '2', '--entrypoint', '/opt/qharness/helper', ...tmpfs, ...mounts.flatMap((mount) => ['--mount', `type=bind,source=${mount.source},target=${mount.target},readonly`]), LINUX_IMAGE];
+}
+
+export function validateLinuxInspect(value, { id, label, mounts, resolvedImageId, running = true }) {
   const c = Array.isArray(value) && value.length === 1 ? value[0] : null;
   const h = c?.HostConfig; const config = c?.Config;
-  if (!c || c.Id !== id || config?.Labels?.['qharness.owner'] !== label || c.Image !== LINUX_IMAGE ||
+  if (typeof resolvedImageId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(resolvedImageId) ||
+      !c || c.Id !== id || config?.Labels?.['qharness.owner'] !== label || c.Image !== resolvedImageId ||
       c.State?.Running !== running || config.User !== '65534:65534' || config.OpenStdin !== true || config.Tty !== false ||
       config.Entrypoint?.join('\0') !== '/opt/qharness/helper' || (config.Cmd?.length ?? 0) !== 0 ||
       h?.NetworkMode !== 'none' || h.ReadonlyRootfs !== true || h.Privileged !== false ||
@@ -170,7 +188,7 @@ export async function cleanupOwnedLinuxContainer({ id, label, invoke, ledger, sc
 }
 
 export async function runLinuxConsumer({ fixture, agyBinaryPath, scratchDir, ledger, deadlineMs = 30000 }) {
-  const base = { fixtureId: fixture?.id, classification: 'synthetic-consumer-replay', client: LINUX_CLIENT, fixtureSourceClient: fixture?.client, providerAcceptance: 'NOT-RUN', runtimeAcceptance: 'NOT-RUN', fullClientAcceptance: false, macosAcceptance: 'BLOCKED', executionBackend: { kind: 'docker', imageDigest: LINUX_IMAGE, network: 'none' } };
+  const base = { fixtureId: fixture?.id, classification: 'synthetic-consumer-replay', client: LINUX_CLIENT, fixtureSourceClient: fixture?.client, providerAcceptance: 'NOT-RUN', runtimeAcceptance: 'NOT-RUN', fullClientAcceptance: false, macosAcceptance: 'BLOCKED', executionBackend: { kind: 'docker', imageDigest: LINUX_IMAGE, resolvedImageId: null, network: 'none' } };
   let summary = { ...base, status: 'BLOCKED', reason: 'QHARNESS_LINUX_SETUP_FAILED' };
   let id; let canary; let canaryEntry; let label; let docker; let invoke; let containerScope; let createAttempted = false;
   try {
@@ -195,6 +213,8 @@ export async function runLinuxConsumer({ fixture, agyBinaryPath, scratchDir, led
     const dockerConfig = await mkdtemp(path.join(scratchDir, 'docker-config-'));
     const dockerEnv = { ...env, DOCKER_CONFIG: dockerConfig, DOCKER_HOST: endpoint };
     invoke = (args, options = {}) => runBoundedProcess(docker, args, { cwd: scratchDir, scratchDir, ledger, env: dockerEnv, deadlineMs: 5000, ...options });
+    const image = await inspectLinuxImage({ invoke });
+    base.executionBackend.resolvedImageId = image.resolvedImageId;
     const source = fileURLToPath(new URL('./linux-helper/', import.meta.url)).replace(/\/$/, '');
     const sourceDigest = await helperSourceDigest(source);
     const helper = path.join(scratchDir, 'linux-helper');
@@ -214,9 +234,8 @@ export async function runLinuxConsumer({ fixture, agyBinaryPath, scratchDir, led
     const name = `qharness-1324-${label}`;
     containerScope = { name, label, owner_pid: process.pid, scratch_dir: scratchDir, fixture_id: fixture.id, created_utc: new Date().toISOString(), delete_command: `id=$(docker inspect --format '{{.Id}}' ${name}) && [ "$(docker inspect --format '{{ index .Config.Labels "qharness.owner" }}' "$id")" = ${quote(label)} ] && docker stop "$id" && docker wait "$id" && docker rm "$id"` };
     await ledger({ ...containerScope, kind: 'docker-container', identifier: name, state: 'planned' });
-    const tmpfs = ['/home/qharness', '/tmp', '/var/lib/postgresql'].flatMap((target) => ['--tmpfs', `${target}:rw,noexec,nosuid,nodev,size=67108864,uid=65534,gid=65534,mode=700`]);
     createAttempted = true;
-    const created = await invoke(['create', '-i', '--name', name, '--pull', 'never', '--platform', 'linux/arm64', '--label', `qharness.owner=${label}`, '--log-driver', 'none', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--ipc', 'private', '--pids-limit', '128', '--memory', '512m', '--cpus', '2', '--entrypoint', '/opt/qharness/helper', ...tmpfs, ...mounts.flatMap((mount) => ['--mount', `type=bind,source=${mount.source},target=${mount.target},readonly`]), LINUX_IMAGE]);
+    const created = await invoke(buildLinuxCreateArgs({ name, label, mounts }));
     const candidate = created.stdout.toString().trim();
     if (!/^[a-f0-9]{64}$/.test(candidate)) throw error('QHARNESS_LINUX_CREATE_FAILED');
     id = candidate;
@@ -225,7 +244,7 @@ export async function runLinuxConsumer({ fixture, agyBinaryPath, scratchDir, led
     if (!boundedProcessSucceeded(await invoke(['start', id]))) throw error('QHARNESS_LINUX_START_FAILED');
     const inspected = await invoke(['inspect', id]);
     if (!boundedProcessSucceeded(inspected)) throw error('QHARNESS_LINUX_INSPECT_FAILED');
-    validateLinuxInspect(JSON.parse(inspected.stdout.toString()), { id, label, mounts });
+    validateLinuxInspect(JSON.parse(inspected.stdout.toString()), { id, label, mounts, resolvedImageId: image.resolvedImageId });
     canary = createServer((socket) => socket.destroy());
     await new Promise((resolve, reject) => { canary.once('error', reject); canary.listen(0, '127.0.0.1', resolve); });
     const port = canary.address().port;
