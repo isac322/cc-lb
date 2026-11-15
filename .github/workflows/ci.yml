@@ -133,6 +133,12 @@ jobs:
         run: node --test scripts/test-wait-coverage-producers.mjs
       - name: Test client capture and coverage harness
         run: node --test tests/real-client/provider-e2e/client-harness/*.test.mjs tests/real-client/provider-e2e/codex169/*.test.mjs tests/real-client/provider-e2e/agy159/*.test.mjs
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.4"
+          cache: false
+      - name: Test isolated Linux replay helper
+        run: GO111MODULE=off go test ./tests/real-client/provider-e2e/client-harness/linux-helper
 
   release-pr-artifacts:
     name: verify server release artifacts

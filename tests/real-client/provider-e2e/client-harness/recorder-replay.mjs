@@ -563,10 +563,11 @@ async function waitForOwnedProcessGroup(group, probe, timeoutMs) {
   }
 }
 
-export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, listenerAudit, deadlineMs = 20_000, maxBytes = MAX_BYTES, groupProbe = (group) => process.kill(-group, 0), groupCleanupTimeoutMs = 1000 }) {
+export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, listenerAudit, input, deadlineMs = 20_000, maxBytes = MAX_BYTES, groupProbe = (group) => process.kill(-group, 0), groupCleanupTimeoutMs = 1000 }) {
   if (typeof groupProbe !== 'function' || !Number.isFinite(groupCleanupTimeoutMs) || groupCleanupTimeoutMs < 1 || groupCleanupTimeoutMs > 3000) throw fail('QHARNESS_PROCESS_GROUP_CLEANUP_BOUND_INVALID');
+  if (input !== undefined && (!Buffer.isBuffer(input) || input.length > MAX_BYTES)) throw fail('QHARNESS_PROCESS_INPUT_INVALID');
   return new Promise((resolve) => {
-    const child = spawn(command, args, { env, cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { env, cwd, detached: true, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     const out = []; const err = []; let bytes = 0; let timedOut = false; let overflow = false; let finished = false;
     const kill = (signal) => { if (child.pid) { try { process.kill(-child.pid, signal); } catch {} } };
     const entry = { kind: 'process-group', identifier: String(child.pid), owner_pid: process.pid, command, argv: args, started_utc: new Date().toISOString(), delete_command: `kill -TERM -- -${child.pid}` };
@@ -582,10 +583,17 @@ export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, l
       else destination.push(chunk);
     };
     child.stdout.on('data', collect(out)); child.stderr.on('data', collect(err));
+    if (input !== undefined) {
+      child.stdin.on('error', (error) => {
+        if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') void finish(null, null, 'QHARNESS_PROCESS_INPUT_FAILED');
+      });
+      child.stdin.end(input);
+    }
     async function finish(exitCode, signal, error = null) {
       if (finished) return; finished = true;
       clearTimeout(timer); clearTimeout(hardTimer); clearTimeout(reap);
       kill('SIGKILL'); child.stdout.destroy(); child.stderr.destroy();
+      child.stdin?.destroy();
       let cleanupError = null;
       // Registration can persist the active entry and then reject. Settle it
       // independently so it cannot prevent either cleanup or the final record.
@@ -681,8 +689,8 @@ export async function preflightIsolation({ scratchDir, recorderPort, ledger, pla
   return other ? { status: 'READY', profilePath, proof: { authStoreDenied: true, externalDenied: true, otherLoopbackDenied: true, recorderAllowed: true, ...bindProof } } : { status: 'BLOCKED', reason: 'QHARNESS_LOOPBACK_SCOPE_NOT_ENFORCED', spawnedClient: false, preflightProof: { ...preflightProof, otherLoopbackDenied: false } };
 }
 
-function findExecutable(name) {
-  for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+export function findExecutable(name, searchPath = process.env.PATH ?? '') {
+  for (const directory of searchPath.split(path.delimiter)) {
     const candidate = path.join(directory, name);
     if (existsSync(candidate)) return realpathSync(candidate);
   }

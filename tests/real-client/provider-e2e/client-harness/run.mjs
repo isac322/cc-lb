@@ -8,6 +8,7 @@ import { fixtures as codexFixtures } from '../codex169/fixtures.mjs';
 import { fixtures as agyFixtures } from '../agy159/fixtures.mjs';
 import { createRedactionContext, sanitizeRecord, assertSafeArtifact } from './redaction.mjs';
 import { classifyFixtureTransport, createResourceLedger, encodeReplayFrames, isInterruptedTermination, localReplayPath, startReplayServer, runPinnedConsumer, preflightIsolation, validateReplayFixture, websocketReplayFrames } from './recorder-replay.mjs';
+import { runLinuxConsumer } from './linux-consumer.mjs';
 
 const ALL_FIXTURES = [...codexFixtures, ...agyFixtures];
 
@@ -15,10 +16,13 @@ function argumentsOf(argv) {
   const result = { mode: 'fixtures', scratch: process.env.CC_LB_QA_OUTPUT, fixture: null, client: null };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]; const value = argv[i + 1];
-    if (!['--mode', '--scratch', '--fixture', '--client'].includes(key) || !value || value.startsWith('--')) throw new Error('QHARNESS_INVALID_ARGUMENT');
+    if (!['--mode', '--scratch', '--fixture', '--client', '--backend', '--agy-binary'].includes(key) || !value || value.startsWith('--')) throw new Error('QHARNESS_INVALID_ARGUMENT');
     result[key.slice(2)] = value;
   }
   if (!['fixtures', 'consumers', 'isolation'].includes(result.mode) || !result.scratch || (result.client && !['codex', 'agy'].includes(result.client))) throw new Error('QHARNESS_INVALID_ARGUMENT');
+  if ((result.backend !== undefined && result.backend !== 'linux-container') ||
+      (result.backend && (result.mode !== 'consumers' || result.client !== 'agy' || !result['agy-binary'])) ||
+      (result['agy-binary'] && !result.backend)) throw new Error('QHARNESS_INVALID_ARGUMENT');
   return result;
 }
 
@@ -119,7 +123,7 @@ export async function main(argv = process.argv.slice(2)) {
   for (const fixture of selected) {
     if (args.mode === 'consumers' && !fixture.expected?.consumer) continue;
     const scratchDir = path.join(root, fixture.id);
-    if (args.mode === 'consumers') cases.push(await runPinnedConsumer({ fixture, scratchDir, ledger }));
+    if (args.mode === 'consumers') cases.push(await (args.backend === 'linux-container' ? runLinuxConsumer({ fixture, agyBinaryPath: args['agy-binary'], scratchDir, ledger }) : runPinnedConsumer({ fixture, scratchDir, ledger })));
     else if (args.mode === 'fixtures') cases.push(await runHermeticFixture({ fixture, scratchDir, ledger }));
     else {
       const replay = await startReplayServer({ fixture, scratchDir, ledger });

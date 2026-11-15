@@ -25,6 +25,34 @@ async function workspace(label) {
   return { scratchDir, ledger };
 }
 
+test('bounded process input rejects non-buffer and oversized payloads before spawning', () => {
+  assert.throws(() => runBoundedProcess('/unused', [], { input: 'raw', cwd: '/' }), /QHARNESS_PROCESS_INPUT_INVALID/);
+  assert.throws(() => runBoundedProcess('/unused', [], { input: Buffer.alloc(2097153), cwd: '/' }), /QHARNESS_PROCESS_INPUT_INVALID/);
+});
+
+test('bounded process accepts bounded stdin without persisting it', async () => {
+  const { scratchDir, ledger } = await workspace('stdin');
+  const entries = [];
+  const observedLedger = async (entry) => { entries.push(entry); await ledger(entry); };
+  const result = await runBoundedProcess(process.execPath, ['-e', 'let n=0;process.stdin.on("data",b=>n+=b.length);process.stdin.on("end",()=>process.stdout.write(String(n)))'], {
+    cwd: scratchDir, scratchDir, ledger: observedLedger, input: Buffer.from('synthetic-input-only'), deadlineMs: 3000,
+  });
+  assert.equal(boundedProcessSucceeded(result), true);
+  assert.equal(result.stdout.toString(), '20');
+  assert.ok(entries.length > 0);
+  assert.equal(JSON.stringify(entries).includes('synthetic-input-only'), false);
+  assert.equal(result.stderr.includes(Buffer.from('synthetic-input-only')), false);
+});
+
+test('bounded stdin handles a child that closes its input early', async () => {
+  const { scratchDir, ledger } = await workspace('stdin-close');
+  const result = await runBoundedProcess(process.execPath, ['-e', 'process.stdin.destroy();process.exit(0)'], {
+    cwd: scratchDir, scratchDir, ledger, input: Buffer.alloc(2097152, 65), deadlineMs: 3000,
+  });
+  assert.equal(result.error, null);
+  assert.equal(boundedProcessSucceeded(result), true);
+});
+
 function fixture(frames = [{ kind: 'json', data: { safeUnknown: { zero: 0, no: false }, message: 'synthetic-ok' } }]) {
   return {
     id: 'qh-synthetic-case', provenance: 'synthetic', client: { name: 'test', version: '1', source_revision: null, binary_sha256: null },
