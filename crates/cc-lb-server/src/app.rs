@@ -3380,6 +3380,16 @@ impl Drop for WsDownstreamReader {
     }
 }
 
+async fn flush_responses_peer_close(
+    sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    stream: futures_util::stream::SplitStream<WebSocket>,
+) {
+    // A cancelled send can leave application data in SplitSink's slot. Reunite
+    // drops that unsent slot so it cannot block the automatically queued reply.
+    let mut socket = sink.reunite(stream).expect("matching downstream halves");
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.flush()).await;
+}
+
 async fn relay_responses_websocket(
     downstream: WebSocket,
     state: ProxyState,
@@ -3569,6 +3579,7 @@ async fn relay_responses_websocket(
                                         error.code,
                                         "websocket_connection_limit_reached" | "unattributed_upstream_error"
                                     );
+                                    let affinity_error = error.code == "upstream_affinity_unavailable";
                                     if native_connection_error {
                                         let message = if text {
                                             Message::Text(bytes.try_into().expect("provider text is UTF-8"))
@@ -3579,18 +3590,26 @@ async fn relay_responses_websocket(
                                             break 'relay;
                                         }
                                     }
+                                    if affinity_error
+                                        && downstream_sink.send(websocket_error_message(&error)).await.is_err()
+                                    {
+                                        break 'relay;
+                                    }
                                     connections.remove(&connection_id);
                                     let result = gateway.connection_closed(connection_id, &error.message);
                                     // A native connection-level error already
                                     // represents all affected turns on the wire.
                                     if !native_connection_error {
                                         if result.errors.is_empty() {
-                                            if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
+                                            if !affinity_error && downstream_sink.send(websocket_error_message(&error)).await.is_err() {
                                                 break 'relay;
                                             }
                                         } else {
-                                            for error in result.errors {
-                                                if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
+                                            for closed_error in result.errors {
+                                                if affinity_error && closed_error.stream_id == error.stream_id {
+                                                    continue;
+                                                }
+                                                if downstream_sink.send(websocket_error_message(&closed_error)).await.is_err() {
                                                     break 'relay;
                                                 }
                                             }
@@ -3643,12 +3662,10 @@ async fn relay_responses_websocket(
     drop(client_rx);
     drop(dispatches);
     if client_closed.is_cancelled() {
-        if let Ok((peer_closed, _stream)) = (&mut client_reader.task).await
+        if let Ok((peer_closed, stream)) = (&mut client_reader.task).await
             && peer_closed
         {
-            // Reading Close queued the matching reply. Another send would
-            // fail with SendAfterClosing instead of flushing that reply.
-            let _ = tokio::time::timeout(Duration::from_secs(1), downstream_sink.flush()).await;
+            flush_responses_peer_close(downstream_sink, stream).await;
         }
     } else {
         let _ = tokio::time::timeout(
@@ -7133,6 +7150,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws1296_peer_close_flush_discards_cancelled_send_slot() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::channel(1);
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel(1);
+        let router = Router::new().route(
+            "/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let queued_tx = queued_tx.clone();
+                let closed_tx = closed_tx.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        let (mut sink, mut stream) = socket.split();
+                        // feed fills the real futures SplitSink slot without
+                        // flushing it, reproducing a cancelled send's state.
+                        sink.feed(Message::Text("must-not-follow-peer-close".into()))
+                            .await
+                            .expect("application message enters the split sink slot");
+                        queued_tx.send(()).await.expect("queued slot is signalled");
+                        let peer_close = stream
+                            .next()
+                            .await
+                            .expect("peer close arrives")
+                            .expect("peer close decodes");
+                        assert!(matches!(
+                            peer_close,
+                            Message::Close(Some(frame)) if frame.code == 1000
+                        ));
+                        flush_responses_peer_close(sink, stream).await;
+                        closed_tx.send(()).await.expect("shutdown is signalled");
+                    })
+                }
+            }),
+        );
+        let (address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(format!("ws://{address}/ws"))
+            .await
+            .expect("downstream handshake succeeds");
+        tokio::time::timeout(Duration::from_secs(5), queued_rx.recv())
+            .await
+            .expect("split sink slot is populated")
+            .expect("slot signal arrives");
+        client
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .expect("client close sends");
+        let reply = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("close acknowledgement arrives")
+            .expect("close acknowledgement must not be EOF")
+            .expect("retained application message must not prevent the close reply");
+        assert_eq!(
+            reply,
+            UpstreamMessage::Close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            })),
+            "flush the queued automatic close reply, not the cancelled application send",
+        );
+        tokio::time::timeout(Duration::from_secs(5), closed_rx.recv())
+            .await
+            .expect("close cleanup completes")
+            .expect("close cleanup signal arrives");
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
     async fn ws1296_eof_and_read_error_do_not_synthesize_normal_close() {
         use tokio::io::AsyncWriteExt as _;
 
@@ -7314,7 +7401,7 @@ mod tests {
 
     #[tokio::test]
     async fn ws1296_attributed_error_keeps_sibling_lane_and_provider_connection_usable() {
-        const ATTRIBUTED_ERROR: &str = r#"{"type":"error","stream_id":"a","status":400,"error":{"type":"invalid_request_error","message":"Invalid input"}}"#;
+        const ATTRIBUTED_ERROR: &str = r#"{"type":"error","stream_id":"a","response_id":"resp-a","status":400,"error":{"type":"invalid_request_error","message":"Invalid input"}}"#;
         const SIBLING_COMPLETED: &str = r#"{"type":"response.completed","stream_id":"b","response":{"id":"resp-b","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
         const RECOVERED: &str = r#"{"type":"response.completed","stream_id":"a","response":{"id":"resp-recovered","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -7353,6 +7440,10 @@ mod tests {
                 .send(UpstreamMessage::Text(ATTRIBUTED_ERROR.into()))
                 .await
                 .expect("attributed error sends");
+            websocket
+                .send(UpstreamMessage::Text(ATTRIBUTED_ERROR.into()))
+                .await
+                .expect("duplicate attributed error sends");
             websocket
                 .send(UpstreamMessage::Text(SIBLING_COMPLETED.into()))
                 .await
@@ -7443,6 +7534,103 @@ mod tests {
             .expect("provider task ends")
             .expect("provider assertions pass");
         proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ws1296_reasoning_bind_failure_preserves_503_on_item_done_and_completed() {
+        const ITEM_DONE: &str = r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"rs-bind-failure","type":"reasoning","summary":[],"encrypted_content":"synthetic-ws1296-bind-failure"}}"#;
+        const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"resp-bind-failure","status":"completed","store":false,"output":[{"id":"rs-bind-failure","type":"reasoning","summary":[],"encrypted_content":"synthetic-ws1296-bind-failure"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+        for unbound_event in [ITEM_DONE, COMPLETED] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("provider listener binds");
+            let address = listener
+                .local_addr()
+                .expect("provider address is available");
+            let provider_task = tokio::spawn(async move {
+                let (socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("provider connection arrives");
+                let mut websocket = accept_async(socket)
+                    .await
+                    .expect("provider handshake succeeds");
+                websocket
+                    .next()
+                    .await
+                    .expect("provider receives create")
+                    .expect("create decodes");
+                websocket
+                    .send(UpstreamMessage::Text(
+                        r#"{"type":"response.created","response":{"id":"resp-bind-failure","store":false,"output":[]}}"#.into(),
+                    ))
+                    .await
+                    .expect("created sends");
+                websocket
+                    .send(UpstreamMessage::Text(unbound_event.into()))
+                    .await
+                    .expect("reasoning event sends");
+                while websocket.next().await.is_some() {}
+            });
+            // This existing fixture deliberately has no affinity store: binding
+            // durable reasoning must fail closed without changing its status.
+            let router = websocket_test_router(
+                vec![websocket_upstream(
+                    1,
+                    "openai",
+                    Url::parse(&format!("http://{address}/")).expect("provider URL parses"),
+                )],
+                TerminalStrategy::FirstPick,
+            )
+            .await;
+            let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+            let (mut client, _) = connect_async(websocket_request(proxy_address))
+                .await
+                .expect("downstream handshake succeeds");
+            client
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#
+                        .into(),
+                ))
+                .await
+                .expect("client create sends");
+            let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("created arrives")
+                .expect("downstream stays open")
+                .expect("created decodes");
+            let created: Value = serde_json::from_str(created.to_text().expect("created is text"))
+                .expect("created is JSON");
+            assert_eq!(created["type"], "response.created");
+            let error = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("binding error arrives")
+                .expect("downstream stays open")
+                .expect("binding error decodes");
+            let error: Value = serde_json::from_str(error.to_text().expect("error is text"))
+                .expect("error is JSON");
+            assert_eq!(
+                error["type"], "error",
+                "unbound reasoning must not be forwarded"
+            );
+            assert_eq!(
+                error["status"], 503,
+                "binding failure is not a provider disconnect"
+            );
+            assert_eq!(error["error"]["code"], "upstream_affinity_unavailable");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), client.next())
+                    .await
+                    .is_err(),
+                "binding failure must not forward unbound data or emit duplicate errors",
+            );
+            let _ = client.close(None).await;
+            tokio::time::timeout(Duration::from_secs(5), provider_task)
+                .await
+                .expect("provider task ends")
+                .expect("provider assertions pass");
+            proxy_task.abort();
+        }
     }
 
     /// A provider close fails the admitted turn without replaying its create

@@ -2757,3 +2757,167 @@ async fn ws1296_reasoning_persistence_failure_suppresses_item_and_terminal_frame
         gateway.close();
     }
 }
+
+#[tokio::test]
+async fn ws1296_terminal_bind_failure_preserves_measured_usage_when_connection_closes() {
+    use cc_lb_lifecycle::LifecycleEvent;
+
+    let owner = Uuid::from_u128(0x129601);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let mut gateway = ws1296_gateway(
+        lifecycle(
+            vec![openai_upstream_record(owner, "owner", true)],
+            Arc::new(RecordingDispatch::default()),
+            Some(store.clone()),
+        )
+        .with_event_bus(bus),
+    )
+    .await;
+    let turn = ws1296_admit(&mut gateway, ws1296_create(None, None))
+        .await
+        .expect("turn is admitted")
+        .expect("turn dispatches");
+    ws1296_send(&mut gateway, &turn, 1).await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+            .await
+            .expect("empty created snapshot is accepted"),
+    );
+    store.fail_bind("synthetic terminal persistence outage");
+    let mut terminal: Value = serde_json::from_slice(&ws1296_completed(
+        WS1296_RESPONSE_ID,
+        vec![ws1296_reasoning_item(WS1296_REASONING)],
+    ))
+    .expect("terminal fixture is JSON");
+    terminal["response"]["usage"] = json!({
+        "input_tokens": 23,
+        "output_tokens": 17,
+        "total_tokens": 40,
+        "input_tokens_details": {"cached_tokens": 7},
+        "output_tokens_details": {"reasoning_tokens": 5},
+    });
+    let error = gateway
+        .provider_message(1, &Bytes::from(terminal.to_string()))
+        .await
+        .err()
+        .expect("terminal persistence failure suppresses the provider frame");
+    assert_eq!(error.status, 503);
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    assert!(!String::from_utf8_lossy(&error.to_bytes()).contains(WS1296_REASONING));
+    assert_eq!(store.len(), 0);
+
+    // The relay retires the provider connection after provider_message fails.
+    // That cleanup must not discard already measured, billable terminal usage.
+    let closed = gateway.connection_closed(1, "terminal affinity persistence failed");
+    assert!(!closed.forward);
+    assert!(closed.frames.is_none());
+    assert!(closed.dispatches.is_empty());
+    gateway.close();
+    drop(gateway);
+
+    let mut starts = Vec::new();
+    let mut usages = Vec::new();
+    let mut completions = Vec::new();
+    let mut terminations = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
+            LifecycleEvent::UsageObserved {
+                event_id, usage, ..
+            } => usages.push((
+                event_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.thinking_tokens,
+            )),
+            LifecycleEvent::StreamCompleted {
+                event_id, result, ..
+            } => {
+                assert!(
+                    result.is_err(),
+                    "suppressed completion is not a successful stream"
+                );
+                completions.push(event_id);
+            }
+            LifecycleEvent::RequestTerminated { event_id, .. } => terminations.push(event_id),
+            _ => {}
+        }
+    }
+    assert_eq!(starts.len(), 1);
+    assert_eq!(
+        usages,
+        vec![(starts[0].clone(), 16, 17, 7, 5)],
+        "affinity failure must retain uncached input, output, cached input, and reasoning usage exactly once",
+    );
+    assert_eq!(
+        completions, starts,
+        "the failed stream settles exactly once"
+    );
+    assert_eq!(
+        terminations, starts,
+        "connection cleanup must not duplicate settlement"
+    );
+}
+
+#[tokio::test]
+async fn ws1296_live_previous_response_accepts_same_reasoning_owner_on_original_connection() {
+    let owner = Uuid::from_u128(0x129601);
+    let fallback = Uuid::from_u128(0x129602);
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(WS1296_REASONING), owner);
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_upstream_record(fallback, "fallback", true),
+            openai_upstream_record(owner, "owner", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    ))
+    .await;
+    let initial = ws1296_admit(&mut gateway, ws1296_create(None, Some(WS1296_REASONING)))
+        .await
+        .expect("owner turn is admitted")
+        .expect("owner turn dispatches");
+    assert_eq!(initial.candidates[0].upstream_id, owner);
+    ws1296_send(&mut gateway, &initial, 1).await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_created(WS1296_RESPONSE_ID))
+            .await
+            .expect("owner response is connection-local"),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &ws1296_completed(WS1296_RESPONSE_ID, vec![]))
+            .await
+            .expect("owner response completes"),
+    );
+    let continuation = ws1296_create(Some(WS1296_RESPONSE_ID), Some(WS1296_REASONING));
+    let turn = ws1296_admit(&mut gateway, continuation.clone())
+        .await
+        .expect("matching durable and live owners are compatible")
+        .expect("same-owner continuation dispatches");
+    assert_eq!(turn.connection_id, Some(1));
+    assert_eq!(turn.candidates.len(), 1);
+    assert_eq!(turn.candidates[0].upstream_id, owner);
+    assert_eq!(
+        turn.frame, continuation,
+        "the continuation remains byte-identical"
+    );
+    ws1296_send(&mut gateway, &turn, 1).await;
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_RESPONSE_ID)),
+        None
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(WS1296_REASONING)),
+        Some(owner)
+    );
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}

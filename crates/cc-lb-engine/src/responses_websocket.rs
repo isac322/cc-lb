@@ -1495,12 +1495,23 @@ impl ResponsesWebSocketGateway {
             lane.as_deref(),
             kind == "error",
         );
-        if kind == "error"
-            && !turn_id
-                .and_then(|id| self.turns.get(&id))
-                .is_some_and(|turn| {
-                    turn.connection_id == Some(connection_id) && turn.lane == lane && turn.sent
+        let turn = turn_id.and_then(|id| self.turns.get(&id));
+        if turn.is_none()
+            && terminal
+            && response_id
+                .and_then(|id| self.owners.get(id))
+                .is_some_and(|owner| {
+                    Some(owner.turn_id) == turn_id
+                        && owner.connection_id == connection_id
+                        && owner.lane == lane
                 })
+        {
+            return Ok(WebSocketEventResult::default());
+        }
+        if kind == "error"
+            && !turn.is_some_and(|turn| {
+                turn.connection_id == Some(connection_id) && turn.lane == lane && turn.sent
+            })
         {
             return Err(WebSocketError::new(
                 502,
@@ -1517,18 +1528,7 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         };
-        let Some(turn) = self.turns.get(&turn_id) else {
-            let duplicate = terminal
-                && response_id
-                    .and_then(|id| self.owners.get(id))
-                    .is_some_and(|owner| {
-                        owner.turn_id == turn_id
-                            && owner.connection_id == connection_id
-                            && owner.lane == lane
-                    });
-            if duplicate {
-                return Ok(WebSocketEventResult::default());
-            }
+        let Some(turn) = turn else {
             return Err(WebSocketError::new(
                 502,
                 "invalid_upstream_response",
@@ -1616,6 +1616,13 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
+        if let Some(response) = response
+            && let Some((usage, complete)) = observed_response_usage(response)
+        {
+            let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
+            turn.usage = Some(usage);
+            turn.usage_complete = terminal && complete;
+        }
         // Later snapshots and item.done can introduce reusable reasoning even
         // when the response id itself belongs only to this live connection.
         if response.is_some() || kind == "response.output_item.done" {
@@ -1642,19 +1649,13 @@ impl ResponsesWebSocketGateway {
                         .flatten(),
                     stored,
                 )
-                .await?;
+                .await
+                .map_err(|error| error.with_stream(lane.clone()))?;
         }
         if kind == "response.created"
             && let Some(turn) = self.turns.get_mut(&turn_id)
         {
             turn.response_created = true;
-        }
-        if let Some(response) = response
-            && let Some((usage, complete)) = observed_response_usage(response)
-        {
-            let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
-            turn.usage = Some(usage);
-            turn.usage_complete = terminal && complete;
         }
         let mut result = WebSocketEventResult {
             forward: true,
