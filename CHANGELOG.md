@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Gemini OAuth model-list routes now use project-scoped `FetchAvailableModels` and expose observed native catalog fields. Per-upstream quota reads retain separate timestamped `raw_summary` and `raw_fallback` provider snapshots, fenced to the current credential binding and OAuth profile. ([#1310](https://github.com/isac322/cc-lb/issues/1310))
 - `GET /admin/v1/subscription-quotas/latest` now includes optional `period_unknown_meters` for Gemini OAuth upstreams when provider buckets omit period labels. ([#1279](https://github.com/isac322/cc-lb/issues/1279))
 - Codex credit observations now retain raw decimal balances and field-specific freshness across response headers, usage API polls, and Responses WebSocket `codex.rate_limits` frames. The admin API exposes per-upstream and OpenAI pool balance history, while the web UI shows a compact integer balance with a small history graph and overlays absolute credit history on the existing quota chart.
 - Request events may include nullable `included_estimated` or `credits_estimated` funding evidence when a complete, request-matched main-limit response supports it. Ambiguous or connection-only observations remain null.
@@ -26,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Upgrade note: on first deploy, each Antigravity upstream gets an immediate third-party warm-up, which starts its Claude/GPT-OSS quota windows. During rolling deploys, older replicas ignore `lane`: a claimed `third_party` job warms Gemini and schedules a primary successor. The new watchdog re-seeds the third-party job on its next tick, so repeated claims by older replicas can keep warming Gemini without warming Claude/GPT-OSS. Finish the rollout quickly, or set `warmup_enabled=false` on Gemini OAuth upstreams during the rollout and re-enable it afterward.
 
 ### Changed
+- Gemini OAuth operations, including `loadCodeAssist`, now honor an explicit upstream base URL and preserve custom prefixes while normalizing root, version, and known-action paths. Operation-specific defaults and profile-configured userinfo endpoints remain unchanged. ([#1306](https://github.com/isac322/cc-lb/issues/1306))
 
 - Clarified the current-mode Codex 0.169.0 and agy 1.5.9 client acceptance boundary, separating shipped route and credential support from per-feature client evidence, vendor services, remote sessions, and local microphone access. Existing supported proxy contracts are unchanged. ([#1318](https://github.com/isac322/cc-lb/issues/1318))
 - `/api/oauth/usage` now omits all-absent Anthropic secondary windows (`seven_day_sonnet`, `seven_day_opus`, `limits`). ([#1279](https://github.com/isac322/cc-lb/issues/1279))

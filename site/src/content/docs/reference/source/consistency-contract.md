@@ -294,11 +294,13 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 
 | Read | Source | Shows a new observation |
 |---|---|---|
-| `GET /admin/v1/subscription-quotas/latest` | In-process cache for canonical windows; `meta_v1` for Gemini period-unknown raw meters | Canonical windows after cache publication; raw meters across replicas as soon as the usage poll's compare-and-put commits |
+| `GET /admin/v1/subscription-quotas/latest` | In-process cache for canonical windows; `meta_v1` for Gemini period-unknown meters and raw quota responses | Canonical windows after cache publication; bound raw observations across replicas after the usage poll's compare-and-put commits |
 | `GET /admin/v1/subscription-quotas/series` | Storage | After the batch flush |
 | `GET /admin/v1/subscription-quotas/aggregate` | Newest whole observation per upstream and window across cache, durable `latest`, and raw checkpoints | Cache observations after publication; durable observations after commit; history after the flush |
 
-Gemini usage polls persist period-unknown raw meters under `gemini_period_unknown_quota:<upstream_id>` in `meta_v1`. `/latest` reads both the durable `latest` rows (to suppress a raw group when a newer canonical observation exists) and this meta record, and validates the record binding against the stored account/project credential binding before exposing optional `period_unknown_meters`. Email-bound meters retain continuity across routine OAuth token refreshes; project-only imports require a matching credential generation. Reads use the committed record directly, so peers need no cache hydration to see it. The record survives routine OAuth token refresh when its binding still matches. A group's authoritative canonical or empty bucket response clears that group's raw meters.
+Gemini usage polls persist period-unknown meters and successful raw quota response bodies under `gemini_period_unknown_quota:<upstream_id>` in `meta_v1`. `/latest` reads both the durable `latest` rows (to suppress a raw group when a newer canonical observation exists) and this meta record. It validates the current account/project binding before exposing optional `period_unknown_meters`; email-bound records retain continuity across routine OAuth token refreshes, while project-only records require a matching credential generation. Raw bodies additionally require an owner-bound record and a matching OAuth profile.
+
+Each entry in `/latest`'s `upstreams` array may include `raw_summary` and `raw_fallback`, each shaped as `{observed_at_unix_millis, body}`. Each body retains unknown provider fields and its own successful observation timestamp; a failed side preserves its previous body and timestamp within the same binding and profile. Poll publication validates the captured credential fence before persistence. These bodies are provider evidence and do not imply a price or quota period. Raw snapshots follow the same source/window filters as `period_unknown_meters`; header-only views omit them. Peers read committed records without cache hydration. A group's authoritative canonical or empty bucket response clears that group's period-unknown meters, independently of the retained raw bodies.
 
 `/aggregate`, Anthropic pool snapshots, Anthropic `/pool-history`, and `/api/oauth/usage` compare observation timestamps across the cache, durable `latest`, and raw checkpoints for each `(upstream_id, window)`. They select one newest whole observation. An explicitly `Absent` winner tombstones older numeric checkpoints for current reads without deleting historical checkpoint rows. All providers exclude absent windows from eligible and missing-observation counts; `Unobserved` windows remain eligible with a missing observation.
 
@@ -312,8 +314,11 @@ retain field-specific observation time and source for `has_credits`, `unlimited`
 `limit_reached`, and `balance`. Missing fields do not refresh an older field.
 Routing compares explicit flags by their own newest applicable evidence:
 balance never implies availability, and stale positive flags never admit traffic.
-Checkpoint semantic identity excludes provenance metadata, so an unchanged
-successful poll can refresh latest/cache freshness without adding a checkpoint.
+Credit checkpoint identity compares effective credit values merged across both
+physical streams, excluding provenance metadata. Unchanged polls update latest
+per-field provenance without adding checkpoints. History records state known at
+commit; older delayed credit observations do not create backdated checkpoints or
+rewrite past states. Non-credit quota fields keep per-source change detection.
 
 Request events may carry nullable `funding` evidence. `included_estimated` and
 `credits_estimated` require a complete main-limit response matched to the
@@ -323,12 +328,23 @@ The field is an estimate of the response's quota state, not a billing receipt.
 
 **Subscription display metadata.** OpenAI usage polls merge the plan and email
 from the usage response only after its account ID matches the current
-credential. Gemini polls collect the selected tier and userinfo through the
-credential profile's configured metadata endpoints when metadata is missing
-or the eight-hour metadata cadence is due. This work runs after successful
-quota observation, outside the proxy path. Metadata errors leave the quota
-outcome and previous valid fields intact. Admin metadata reads see the
-committed record; a proxy response does not guarantee that enrichment has run.
+credential. Gemini polls collect the selected tier and userinfo when metadata
+is missing or the eight-hour metadata cadence is due. `loadCodeAssist` uses
+an explicitly configured upstream `base_url`, including a Cloud Code override
+for the Antigravity profile. Without an upstream override, it keeps the
+profile's configured metadata base and existing default host. Userinfo always
+uses the profile's configured endpoint.
+
+An explicit root base resolves to `/v1internal:loadCodeAssist`; version and
+custom prefixes are preserved, and a known terminal action is replaced.
+An explicit upstream `/metadata` becomes `/metadata:loadCodeAssist`, while a
+profile metadata base `/metadata` keeps `/metadata/v1internal:loadCodeAssist`.
+Operation-specific default hosts are unchanged.
+
+This work runs after successful quota observation, outside the proxy path.
+Metadata errors leave the quota outcome and previous valid fields intact.
+Admin metadata reads see the committed record; a proxy response does not
+guarantee that enrichment has run.
 The metadata write compares both the captured credential generation and the
 metadata record read before collection within one storage transaction.
 A delayed observation for a replaced credential, a newer metadata publication,

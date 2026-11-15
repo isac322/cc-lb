@@ -103,12 +103,15 @@ Not yet supported: files, uploads, batches, vector stores, conversations, contai
 | POST | `/gemini/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens` | API key, OAuth |
 | POST | `/gemini/v1beta/cachedContents` (create only) | API key |
 | POST | `/gemini/v1beta/models/{model}:embedContent`, `:batchEmbedContents`, `:predict` | API key |
-| GET | `/gemini/v1beta/models`, `/gemini/v1beta/models/{model}` (also `/gemini/v1/models` and `/gemini/v1/models/{model}`) | API key |
+| GET | `/gemini/v1beta/models`, `/gemini/v1/models` | API key, OAuth |
+| GET | `/gemini/v1beta/models/{model}`, `/gemini/v1/models/{model}` | API key |
 | POST | `/gemini/v1beta/openai/chat/completions`, `/gemini/v1beta/openai/embeddings`, `/gemini/v1beta/openai/images/generations` | API key |
 | GET | `/gemini/v1beta/openai/models`, `/gemini/v1beta/openai/models/{id}` | API key |
 | WebSocket | `/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` | API key |
 
-OpenAI-compatible Gemini requests retain their `/v1beta/openai/...` path and use the Gemini API key as `Authorization: Bearer`. Native Gemini requests use `x-goog-api-key`; OAuth remains limited to generation and token counting.
+OpenAI-compatible Gemini requests retain their `/v1beta/openai/...` path and use the Gemini API key as `Authorization: Bearer`. Native Gemini API-key requests use `x-goog-api-key`; OAuth supports generation, token counting, and the model-list routes above.
+
+OAuth model-list requests call FetchAvailableModels with the selected upstream's stored project. The native response exposes only `name` from each model-map key and observed string `displayName` and `description` fields. The existing scoped response hook receives the raw metadata before projection; this does not add a durable catalog cache. OAuth single-model lookup is unsupported, and ListModelConfigs consumer support remains unverified. These routes do not establish a new raw Code Assist gateway or actual-client acceptance.
 
 On proxy request timeout, Gemini HTTP routes return HTTP `504` with a Gemini `DEADLINE_EXCEEDED` JSON error. Other HTTP routes return plain `request timed out`.
 
@@ -820,9 +823,11 @@ The same refreshing-mode token and expiry rules apply. A project-id mismatch is 
 
 For an interactive Gemini subscription sign-in, open the returned Google authorization URL in a browser. After approval, the browser lands on `http://localhost:51121/oauth-callback`; the page does not need to load. Copy the full URL from the address bar and paste it into the completion form. A bare authorization code also works. cc-lb validates the state token before exchanging the code.
 
-Antigravity content requests use `https://daily-cloudcode-pa.googleapis.com`. For Antigravity generation requests, the signer qualifies bare tiered `/v1beta` model families on the wire from `generationConfig.thinkingConfig.thinkingLevel` (`low`, `medium`, `high`, `xhigh`), while routing and request events keep the downstream model and `thinking_level` separate. Usage polling calls `POST /v1internal:retrieveUserQuotaSummary` with `{"project":"<project-id>"}` and uses the same parser and fallback behavior as Gemini CLI sign-ins. Labeled `5h` and `weekly` summary buckets map to canonical windows: `gemini_5h` and `gemini_7d` for Gemini models, or `third_party_5h` and `third_party_7d` for Claude and GPT-OSS models.
+Without an explicit upstream base override, Antigravity content requests use the configured Antigravity content origin, defaulting to `https://daily-cloudcode-pa.googleapis.com`. An explicit upstream base override takes precedence. For Antigravity generation requests, the signer qualifies bare tiered `/v1beta` model families on the wire from `generationConfig.thinkingConfig.thinkingLevel` (`low`, `medium`, `high`, `xhigh`), while routing and request events keep the downstream model and `thinking_level` separate. Usage polling calls `POST /v1internal:retrieveUserQuotaSummary` with `{"project":"<project-id>"}` and uses the same parser and fallback behavior as Gemini CLI sign-ins. Labeled `5h` and `weekly` summary buckets map to canonical windows: `gemini_5h` and `gemini_7d` for Gemini models, or `third_party_5h` and `third_party_7d` for Claude and GPT-OSS models.
 
 `retrieveUserQuota` and unlabeled summary buckets retain period-unknown raw meters, exposed as `period_unknown_meters` on `GET /admin/v1/subscription-quotas/latest`. Polling keeps the provider's remaining fraction and reset time without inferring a `5h` or `7d` period from reset distance. Each poll makes at most one fallback fetch, preserves `429` throttling, and leaves prior observations intact when the fallback fails instead of writing false `Absent` records.
+
+Gemini OAuth quota polls retain successful summary and fallback response bodies, including unknown provider fields, without deriving prices or quota periods from them. After credential-fenced publication, `GET /admin/v1/subscription-quotas/latest` exposes optional `upstreams[].raw_summary` and `upstreams[].raw_fallback` objects containing `observed_at_unix_millis` and `body`, subject to the current account/project binding, applicable credential generation, OAuth profile, and source/window filters; each side retains its own successful timestamp, and a failed side preserves its previous observation within the same binding and profile.
 
 OpenAI OAuth credit balances are retained as raw decimal strings in quota
 observations. `GET /admin/v1/subscription-quotas/credit-history` returns
