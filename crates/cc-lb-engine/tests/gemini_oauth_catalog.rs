@@ -1,15 +1,19 @@
-use crate::common::{TestAuthn, TestState, collect_body};
+use crate::common::{TestAuthn, TestLifecycleBus, TestState, collect_body};
 use crate::router_lifecycle_support::api_key_record;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, Provider, TerminalStrategy, Upstream};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProviderScope, UpstreamDispatch};
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_signer_anthropic_key::GeminiSubscriptionSigner;
+use cc_lb_storage_api::{MetaStore, Storage};
 use cc_lb_storage_api::{principal::PrincipalRecord, upstream::UpstreamKind};
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
@@ -20,7 +24,13 @@ use http::{Method, Request, Response, StatusCode};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    convert::Infallible,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
 };
 use url::Url;
 use uuid::Uuid;
@@ -36,6 +46,8 @@ struct Recorder {
     gzip_response: Mutex<bool>,
     api_key: Mutex<bool>,
     raw_response: Mutex<Option<Bytes>>,
+    content_type: Mutex<Option<&'static str>>,
+    body_poll_tripwire: Mutex<Option<Arc<AtomicUsize>>>,
     hook_headers: Mutex<bool>,
     hook_fails: Mutex<bool>,
     catalog_endpoint: Mutex<Option<Url>>,
@@ -147,6 +159,22 @@ struct Dispatch {
     status: StatusCode,
     body: Value,
 }
+
+struct PollTripwireBody(Arc<AtomicUsize>);
+
+impl http_body::Body for PollTripwireBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        panic!("unexpected successful catalog SSE body must never be polled");
+    }
+}
+
 #[async_trait]
 impl UpstreamDispatch for Dispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
@@ -158,9 +186,17 @@ impl UpstreamDispatch for Dispatch {
             .unwrap()
             .as_ref()
             .map_or_else(|| self.body.to_string().into_bytes(), |body| body.to_vec());
-        let mut response = Response::builder()
-            .status(self.status)
-            .header("content-type", "application/json");
+        let mut response = Response::builder().status(self.status).header(
+            "content-type",
+            self.recorder
+                .content_type
+                .lock()
+                .unwrap()
+                .unwrap_or("application/json"),
+        );
+        if let Some(polls) = self.recorder.body_poll_tripwire.lock().unwrap().clone() {
+            return Ok(response.body(Body::new(PollTripwireBody(polls))).unwrap());
+        }
         if *self.recorder.gzip_response.lock().unwrap() {
             use std::io::Write;
             let mut encoder =
@@ -632,4 +668,251 @@ async fn resolved_catalog_query_keeps_tenant_but_strips_api_keys_before_dispatch
         serde_json::from_slice::<Value>(requests[0].body()).unwrap(),
         json!({"project": "stored-project"})
     );
+}
+
+struct CatalogObservation {
+    status: StatusCode,
+    headers: http::HeaderMap,
+    body: Bytes,
+    events: Vec<LifecycleEvent>,
+    recorded: cc_lb_storage_api::RequestEvent,
+}
+
+async fn observe_catalog(recorder: Arc<Recorder>, raw: Value) -> CatalogObservation {
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .unwrap(),
+    );
+    storage.initialize().await.unwrap();
+    let bus = TestLifecycleBus::new().with_assembler(storage as Arc<dyn Storage>);
+    let mut events_rx = bus.bus.subscribe_lifecycle();
+    let mut updates_rx = bus.bus.subscribe();
+    let lifecycle = lifecycle(recorder, Some("stored-project"), StatusCode::OK, raw)
+        .with_event_bus(bus.bus_arc());
+    let request = request("/v1beta/models", Bytes::new());
+    let auth = lifecycle.authenticate(request.headers()).await.unwrap();
+    let (status, headers, body) =
+        collect_body(lifecycle.handle(request, &auth).await.unwrap()).await;
+    let (events, recorded) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        loop {
+            let event = events_rx.recv().await.expect("catalog lifecycle event");
+            let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+            events.push(event);
+            if terminated {
+                break;
+            }
+        }
+        let recorded = loop {
+            if let RequestEventUpdate::Final(update) =
+                updates_rx.recv().await.expect("catalog request log update")
+            {
+                break update.event;
+            }
+        };
+        (events, recorded)
+    })
+    .await
+    .expect("catalog termination and final request log are delivered");
+    CatalogObservation {
+        status,
+        headers,
+        body,
+        events,
+        recorded,
+    }
+}
+
+fn assert_catalog_failure(observation: &CatalogObservation) {
+    let stream_results: Vec<_> = observation
+        .events
+        .iter()
+        .filter_map(|event| {
+            if let LifecycleEvent::StreamCompleted { result, .. } = event {
+                Some(result)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(stream_results.len(), 1, "one catalog stream completion");
+    let error = stream_results[0]
+        .as_ref()
+        .expect_err("invalid catalog is a failed stream");
+    assert!(!error.error_type.is_empty(), "catalog failure has a type");
+    assert!(
+        !error.error_message.is_empty(),
+        "catalog failure has detail"
+    );
+    let terminals: Vec<_> = observation
+        .events
+        .iter()
+        .filter_map(|event| {
+            if let LifecycleEvent::RequestTerminated {
+                client_status,
+                reason,
+                ..
+            } = event
+            {
+                Some((*client_status, reason))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(terminals.len(), 1, "one catalog termination");
+    assert_eq!(terminals[0].0, 502);
+    let TerminationReason::ErrorCode(code) = terminals[0].1 else {
+        panic!(
+            "invalid catalog must not terminate successfully: {:?}",
+            terminals[0].1
+        );
+    };
+    assert!(!code.is_empty());
+    assert_eq!(observation.recorded.status, 502);
+    assert_eq!(
+        observation.recorded.error_code.as_deref(),
+        Some(code.as_str())
+    );
+    assert_eq!(
+        observation.recorded.upstream_error_type.as_deref(),
+        Some(error.error_type.as_str())
+    );
+    assert_eq!(
+        observation.recorded.upstream_error_message.as_deref(),
+        Some(error.error_message.as_str())
+    );
+}
+
+fn sse_catalog_recorder() -> Arc<Recorder> {
+    let recorder = Arc::new(Recorder::default());
+    *recorder.content_type.lock().unwrap() = Some("text/event-stream");
+    *recorder.raw_response.lock().unwrap() = Some(Bytes::from_static(
+        b"data: {\"models\":{\"gemini-test\":{\"displayName\":\"Test\",\"modelExperimentIds\":[\"private-experiment\"]}},\"experimentIds\":[123],\"futureTop\":{\"private\":true}}\n\n",
+    ));
+    recorder
+}
+
+#[tokio::test]
+async fn successful_sse_catalog_is_native_bad_gateway_without_provider_metadata() {
+    let observation = observe_catalog(sse_catalog_recorder(), Value::Null).await;
+    assert_eq!(observation.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(observation.headers["content-type"], "application/json");
+    let error: Value = serde_json::from_slice(&observation.body).expect("native JSON error");
+    assert_eq!(error["error"]["code"], 502);
+    assert_eq!(error["error"]["status"], "UNAVAILABLE");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+    let body = std::str::from_utf8(&observation.body).unwrap();
+    for metadata in ["private-experiment", "experimentIds", "futureTop", "data:"] {
+        assert!(
+            !body.contains(metadata),
+            "raw provider metadata leaked: {metadata}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn successful_sse_catalog_records_failed_stream_and_terminal() {
+    let observation = observe_catalog(sse_catalog_recorder(), Value::Null).await;
+    assert_catalog_failure(&observation);
+}
+
+#[tokio::test]
+async fn successful_sse_catalog_rejects_headers_without_polling_upstream_body() {
+    let recorder = sse_catalog_recorder();
+    let polls = Arc::new(AtomicUsize::new(0));
+    *recorder.body_poll_tripwire.lock().unwrap() = Some(polls.clone());
+    let observation = observe_catalog(recorder.clone(), Value::Null).await;
+    assert_eq!(observation.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert!(recorder.hooks.lock().unwrap().is_empty());
+    assert_catalog_failure(&observation);
+}
+
+#[tokio::test]
+async fn malformed_catalog_records_failed_stream_and_terminal() {
+    let recorder = Arc::new(Recorder::default());
+    *recorder.raw_response.lock().unwrap() = Some(Bytes::from_static(b"{not-json"));
+    let observation = observe_catalog(recorder, Value::Null).await;
+    assert_eq!(observation.status, StatusCode::BAD_GATEWAY);
+    assert_catalog_failure(&observation);
+}
+
+#[tokio::test]
+async fn invalid_catalog_shape_records_failed_stream_and_terminal() {
+    let observation = observe_catalog(
+        Arc::new(Recorder::default()),
+        json!({"allowedModelConfigs": [{"id": "private-model"}]}),
+    )
+    .await;
+    assert_eq!(observation.status, StatusCode::BAD_GATEWAY);
+    assert_catalog_failure(&observation);
+}
+
+#[tokio::test]
+async fn catalog_observation_preserves_json_api_key_and_intentional_transform_controls() {
+    for variant in ["oauth", "api-key", "replacement", "intentional-error"] {
+        let recorder = Arc::new(Recorder::default());
+        let raw = if variant == "api-key" {
+            *recorder.api_key.lock().unwrap() = true;
+            json!({"models": [{"name": "models/native", "inputTokenLimit": 100}]})
+        } else {
+            json!({"models": {"original": {"displayName": "Original"}}, "experimentIds": [123]})
+        };
+        let (expected_status, expected_body) = match variant {
+            "api-key" => (StatusCode::OK, raw.clone()),
+            "replacement" => {
+                *recorder.hook_body.lock().unwrap() =
+                    Some(json!({"models": {"replacement": {"description": "Replaced"}}}));
+                (
+                    StatusCode::OK,
+                    json!({"models": [{"name": "models/replacement", "description": "Replaced"}]}),
+                )
+            }
+            "intentional-error" => {
+                let error = json!({"error": {"message": "plugin denied"}});
+                *recorder.hook_status.lock().unwrap() = Some(StatusCode::FORBIDDEN);
+                *recorder.hook_body.lock().unwrap() = Some(error.clone());
+                (StatusCode::FORBIDDEN, error)
+            }
+            _ => (
+                StatusCode::OK,
+                json!({"models": [{"name": "models/original", "displayName": "Original"}]}),
+            ),
+        };
+        let observation = observe_catalog(recorder.clone(), raw).await;
+        assert_eq!(observation.status, expected_status, "{variant}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&observation.body).unwrap(),
+            expected_body,
+            "{variant}"
+        );
+        assert!(
+            observation.events.iter().any(|event| matches!(
+                event,
+                LifecycleEvent::StreamCompleted { result: Ok(_), .. }
+            )),
+            "{variant}"
+        );
+        assert!(observation.events.iter().any(|event| matches!(
+            event, LifecycleEvent::RequestTerminated { client_status, reason: TerminationReason::Success, .. }
+                if *client_status == expected_status.as_u16()
+        )), "intentional transforms retain existing observation policy: {variant}");
+        assert_eq!(observation.recorded.status, expected_status.as_u16());
+        assert_eq!(observation.recorded.error_code, None, "{variant}");
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        if variant == "api-key" {
+            assert_eq!(requests[0].method(), Method::GET);
+            assert_eq!(requests[0].url().path(), "/v1beta/models");
+        } else {
+            assert_eq!(requests[0].method(), Method::POST);
+            assert_eq!(requests[0].url().as_str(), ENDPOINT);
+        }
+    }
 }
