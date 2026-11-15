@@ -356,6 +356,36 @@ func (w outputWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// The direct child must have been waited on before PID 1 reaps its orphans.
+func reapAdoptedChildren(wait func() (int, error), now func() time.Time, deadline time.Time) error {
+	if wait == nil || now == nil {
+		return errors.New("child_reap_failed")
+	}
+	for {
+		current := now()
+		if !current.Before(deadline) {
+			return errors.New("child_reap_timeout")
+		}
+		pid, err := wait()
+		if errors.Is(err, syscall.ECHILD) {
+			return nil
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return errors.New("child_reap_failed")
+		}
+		if pid == 0 {
+			delay := 10 * time.Millisecond
+			if remaining := deadline.Sub(current); remaining < delay {
+				delay = remaining
+			}
+			time.Sleep(delay)
+		}
+	}
+}
+
 func run() {
 	fail := func(code string) { emit(event{Type: "complete", Error: code}) }
 	c, err := decodeConfig(os.Stdin)
@@ -450,14 +480,21 @@ func run() {
 	cmd.Stderr = outputWriter{capture: &captured, stderr: true}
 	trackerMu.Lock()
 	err = cmd.Start()
+	var reapErr error
 	if err == nil {
 		tracker, observationErr = newListenerTracker(cmd.Process.Pid)
+		constructionErr := observationErr
 		trackerMu.Unlock()
-		if observationErr != nil {
+		if constructionErr != nil {
 			cancel()
 		}
 		err = cmd.Wait()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		reapErr = reapAdoptedChildren(func() (int, error) {
+			var status syscall.WaitStatus
+			pid, waitErr := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+			return pid, waitErr
+		}, time.Now, time.Now().Add(time.Second))
 	} else {
 		trackerMu.Unlock()
 	}
@@ -490,14 +527,20 @@ func run() {
 	if observationErr != nil {
 		closureErr = observationErr
 	}
+	finalObservationErr, finalObserved := observationErr, observed
+	if reapErr != nil {
+		closureErr = reapErr
+	}
 	trackerMu.Unlock()
 	captured.mu.Lock()
 	emit(event{Type: "consumer", ExitCode: exitCode, Signal: signal, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Overflow: captured.overflow, StdoutB64: base64.StdEncoding.EncodeToString(captured.out.Bytes()), StderrB64: base64.StdEncoding.EncodeToString(captured.err.Bytes())})
 	captured.mu.Unlock()
 	counts := snapshot()
 	result := event{Type: "complete", Requests: counts.Requests, BodyReadCalls: counts.BodyReadCalls, AuthValidated: counts.Requests > 0 && counts.AuthValidated == counts.Requests, Listeners: evidence, ListenerClosure: closureErr == nil}
-	if observationErr != nil {
-		if observed {
+	if reapErr != nil {
+		result.Error = reapErr.Error()
+	} else if finalObservationErr != nil {
+		if finalObserved {
 			result.Error = "listener_late_observation_failed"
 		} else {
 			result.Error = "listener_initial_observation_failed"

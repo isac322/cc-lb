@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -899,5 +900,112 @@ func TestInputReadFailuresDoNotLeakDiagnostics(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code < 400 || strings.Contains(w.Body.String(), "untrusted-read-diagnostic") || strings.Contains(w.Body.String(), "QHARNESS_TEST_MARKER") {
 		t.Fatalf("unreadable body did not fail closed: status=%d response=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestReapAdoptedChildrenDrainsUntilNoChildren(t *testing.T) {
+	type result struct {
+		pid int
+		err error
+	}
+	for _, tc := range []struct {
+		name    string
+		results []result
+	}{
+		{"already-empty", []result{{err: syscall.ECHILD}}},
+		{"multiple-reaped", []result{{pid: 101}, {pid: 102}, {pid: 103}, {err: syscall.ECHILD}}},
+		{"interrupted-then-reaped", []result{{err: syscall.EINTR}, {pid: 101}, {err: syscall.EINTR}, {pid: 102}, {err: syscall.ECHILD}}},
+		{"temporarily-alive-then-reaped", []result{{pid: 0}, {pid: 101}, {pid: 0}, {pid: 102}, {err: syscall.ECHILD}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			wait := func() (int, error) {
+				if calls >= len(tc.results) {
+					t.Fatal("reaper continued after ECHILD")
+				}
+				next := tc.results[calls]
+				calls++
+				return next.pid, next.err
+			}
+			now := time.Unix(1700000000, 0)
+			err := reapAdoptedChildren(wait, func() time.Time { return now }, now.Add(time.Second))
+			if err != nil {
+				t.Fatalf("adopted child sequence rejected: %v", err)
+			}
+			if calls != len(tc.results) {
+				t.Fatalf("reaper returned before all children reached ECHILD: consumed=%d total=%d", calls, len(tc.results))
+			}
+		})
+	}
+}
+
+func TestReapAdoptedChildrenDeadlineBoundsAliveOrInterruptedChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pid     int
+		waitErr error
+	}{
+		{"still-alive", 0, nil},
+		{"continuously-interrupted", 0, syscall.EINTR},
+		{"continuous-reaped-children", 101, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Unix(1700000000, 0)
+			deadline := start.Add(4 * time.Millisecond)
+			current := start
+			var lastObservedTime time.Time
+			now := func() time.Time {
+				lastObservedTime = current
+				current = current.Add(time.Millisecond)
+				return lastObservedTime
+			}
+			calls := 0
+			wait := func() (int, error) {
+				calls++
+				if calls > 4 {
+					t.Fatal("reaper ignored advancing deadline")
+				}
+				if !lastObservedTime.Before(deadline) {
+					t.Error("reaper attempted another wait after observing its deadline")
+				}
+				return tc.pid, tc.waitErr
+			}
+			err := reapAdoptedChildren(wait, now, deadline)
+			if err == nil || err.Error() != "child_reap_timeout" {
+				t.Fatalf("live children did not reach bounded static timeout: %v", err)
+			}
+			if calls == 0 {
+				t.Fatal("deadline case never exercised nonblocking wait")
+			}
+		})
+	}
+}
+
+func TestReapAdoptedChildrenExpiredDeadlineDoesNotWait(t *testing.T) {
+	deadline := time.Unix(1700000000, 0)
+	calls := 0
+	err := reapAdoptedChildren(func() (int, error) {
+		calls++
+		return 0, syscall.ECHILD
+	}, func() time.Time { return deadline }, deadline)
+	if err == nil || err.Error() != "child_reap_timeout" || calls != 0 {
+		t.Fatalf("expired deadline invoked wait or reported success: waits=%d error=%v", calls, err)
+	}
+}
+
+func TestReapAdoptedChildrenWaitFailureIsStatic(t *testing.T) {
+	for _, cause := range []error{syscall.EPERM, syscall.EINVAL, errors.New("untrusted-reap-diagnostic")} {
+		now := time.Unix(1700000000, 0)
+		calls := 0
+		err := reapAdoptedChildren(func() (int, error) {
+			calls++
+			if calls > 1 {
+				t.Fatal("failed wait was retried as a running child")
+			}
+			return 0, cause
+		}, func() time.Time { return now }, now.Add(time.Second))
+		if err == nil || err.Error() != "child_reap_failed" || calls != 1 {
+			t.Fatalf("unexpected wait error was not rejected statically: calls=%d error=%v", calls, err)
+		}
 	}
 }

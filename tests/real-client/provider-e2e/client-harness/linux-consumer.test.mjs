@@ -142,6 +142,8 @@ for (const [code, reason] of [
   ['listener_bind_failed', 'QHARNESS_LINUX_HELPER_LISTENER_BIND_FAILED'],
   ['listener_evidence_failed', 'QHARNESS_LINUX_HELPER_LISTENER_EVIDENCE_FAILED'],
   ['server_shutdown_failed', 'QHARNESS_LINUX_HELPER_SERVER_SHUTDOWN_FAILED'],
+  ['child_reap_failed', 'QHARNESS_LINUX_HELPER_CHILD_REAP_FAILED'],
+  ['child_reap_timeout', 'QHARNESS_LINUX_HELPER_CHILD_REAP_TIMEOUT'],
 ]) test(`Linux helper exposes only fixed diagnostic for ${code}`, () => {
   const earlyFailure = encode([{ type: 'complete', error: code }]);
   assert.equal(linuxHelperFailureReason(earlyFailure), reason);

@@ -56,6 +56,8 @@ const HELPER_FAILURES = Object.freeze({
   listener_initial_observation_failed: 'QHARNESS_LINUX_HELPER_LISTENER_INITIAL_OBSERVATION_FAILED',
   listener_late_observation_failed: 'QHARNESS_LINUX_HELPER_LISTENER_LATE_OBSERVATION_FAILED',
   server_shutdown_failed: 'QHARNESS_LINUX_HELPER_SERVER_SHUTDOWN_FAILED',
+  child_reap_failed: 'QHARNESS_LINUX_HELPER_CHILD_REAP_FAILED',
+  child_reap_timeout: 'QHARNESS_LINUX_HELPER_CHILD_REAP_TIMEOUT',
 });
 
 export function linuxHelperFailureReason(bytes) {
