@@ -1736,7 +1736,7 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             Fixture::new_with_upstream_kind(cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth)
                 .await;
         enable_openai_responses_keepalive(&fixture);
-        fixture.http.return_status(StatusCode::OK, response_body);
+        fixture.http.return_responses_sse(response_body);
         let bus = fixture.event_bus();
         let pricing_rx = bus.attach_lifecycle_pricing(64);
         let assembler_rx = bus.attach_lifecycle_assembler(64);
@@ -1908,16 +1908,13 @@ async fn openai_renewal_reconciles_net_input_not_gross_prompt_tokens() {
         Fixture::new_with_upstream_kind(cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth)
             .await;
     enable_openai_responses_keepalive(&fixture);
-    fixture.http.return_status(
-        StatusCode::OK,
-        serde_json::json!({
+    fixture.http.return_responses_sse(serde_json::json!({
             "usage": {
                 "input_tokens": 2048,
                 "output_tokens": 16,
                 "input_tokens_details": { "cached_tokens": 1024 }
             }
-        }),
-    );
+    }));
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),

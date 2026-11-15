@@ -45,8 +45,10 @@ Legacy models keep their separate `prompt_cache_retention` semantics
 (`"in_memory"` or `"24h"`). That maximum-retention policy does not select a
 modern minimum TTL. `"30m"` in the legacy field is invalid provider syntax.
 Responses renewals retain the cache options and prefix and use
-`max_output_tokens: 16` with `stream: false`. They can consume paid output
-tokens and do not guarantee a cache hit or cost saving.
+`max_output_tokens: 16`. API-key upstreams use `stream: false` and JSON;
+Codex OAuth upstreams use `stream: true` and read usage from the completed
+or incomplete SSE response. They can consume paid output tokens and do not
+guarantee a cache hit or cost saving.
 
 A missing, disabled, or deleted upstream instead produces
 `terminal_reason=dispatch_error` with `error="upstream gone"`.

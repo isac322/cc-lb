@@ -38,7 +38,7 @@ use crate::prompt_cache_simulator::{
 use crate::usage_decoder::decode_full_body;
 use crate::usage_parser::{cache_creation_split, observe_non_stream_json_value};
 
-use super::request_snapshot::RequestSnapshot;
+use super::request_snapshot::{RenewalMode, RequestSnapshot};
 use super::scheduler::{
     DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
     RenewalUsage,
@@ -80,6 +80,7 @@ impl AnthropicKeepaliveDispatcher {
         snapshot: &RequestSnapshot,
         upstream: &UpstreamRecord,
         source_ref_id: &str,
+        mode: RenewalMode,
     ) -> Result<(Arc<dyn Signer>, ShapedRequest, Bytes), String> {
         let upstream_api = direct_upstream(snapshot, upstream)?;
         let signer_factory = self
@@ -92,7 +93,7 @@ impl AnthropicKeepaliveDispatcher {
             .await
             .map_err(|source| source.to_string())?;
         let keepalive_body = snapshot
-            .build_keepalive_body()
+            .build_keepalive_body_for(mode)
             .map_err(|source| source.to_string())?;
         let target_url = resolve_keepalive_url(snapshot, upstream)?;
         let shaped = shaped_request_from_snapshot(
@@ -147,9 +148,13 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         if let Err(error) = keepalive_upstream_supported_for_snapshot(snapshot, &upstream) {
             return DispatchOutcome::UnsupportedProvider(error);
         }
+        let mode = match upstream.kind {
+            UpstreamKind::OpenaiOauth => RenewalMode::Sse,
+            _ => RenewalMode::Json,
+        };
 
         let (signer, shaped, keepalive_body) = match self
-            .keepalive_signing_input(snapshot, &upstream, context.source_ref_id())
+            .keepalive_signing_input(snapshot, &upstream, context.source_ref_id(), mode)
             .await
         {
             Ok(input) => input,
@@ -197,6 +202,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                     dispatch_start_ms,
                     accounting_guard,
                     snapshot.surface.as_deref(),
+                    mode,
                 );
                 if let DispatchOutcome::CacheHit { .. } = &outcome
                     && let Some(plan) = observation_plan.as_ref()
@@ -494,6 +500,58 @@ struct KeepaliveResponseBody {
     usage: Option<KeepaliveResponseUsage>,
 }
 
+fn decode_responses_renewal_usage(
+    mut body: &[u8],
+    mode: RenewalMode,
+) -> Result<crate::usage_parser::UsageCounts, &'static str> {
+    use crate::provider_capability::UsageShape;
+    use crate::usage_parser::{
+        find_sse_event_end, observe_non_stream_json_value_for_shape, parse_sse_event,
+    };
+
+    if matches!(mode, RenewalMode::Json) {
+        let value =
+            sonic_rs::from_slice::<Value>(body).map_err(|_| "invalid OpenAI Responses JSON")?;
+        return Ok(
+            observe_non_stream_json_value_for_shape(&value, UsageShape::OpenaiResponses).usage,
+        );
+    }
+
+    let mut terminal_usage = None;
+    while let Some(end) = find_sse_event_end(body) {
+        let event = parse_sse_event(&body[..end]);
+        body = &body[end..];
+        let value = event.value().map_err(|_| "invalid OpenAI Responses SSE")?;
+        if matches!(event.event_type(), Some("error" | "response.failed")) {
+            return Err("OpenAI Responses renewal failed");
+        }
+        if matches!(
+            event.event_type(),
+            Some("response.completed" | "response.incomplete")
+        ) {
+            let response = value
+                .and_then(|value| value.get("response"))
+                .filter(|response| response.is_object())
+                .ok_or("invalid OpenAI Responses terminal event")?;
+            if response.get("error").is_some_and(|error| !error.is_null())
+                || response.get("status").and_then(Value::as_str) == Some("failed")
+            {
+                return Err("OpenAI Responses renewal failed");
+            }
+            // Only the terminal snapshot is authoritative; preamble usage and
+            // service tiers must not leak into renewal accounting.
+            terminal_usage = Some(
+                observe_non_stream_json_value_for_shape(response, UsageShape::OpenaiResponses)
+                    .usage,
+            );
+        }
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        return Err("incomplete OpenAI Responses SSE event");
+    }
+    terminal_usage.ok_or("OpenAI Responses SSE ended before a terminal event")
+}
+
 fn classify_success_body_with_surface(
     body: &[u8],
     cache_anchor_age: Duration,
@@ -501,16 +559,13 @@ fn classify_success_body_with_surface(
     request_start_ms: u64,
     accounting_guard: ResponseAccountingGuard,
     surface: Option<&str>,
+    mode: RenewalMode,
 ) -> DispatchOutcome {
     if surface == Some("responses") {
-        let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
-            return DispatchOutcome::Error("invalid OpenAI Responses JSON".to_owned());
+        let usage = match decode_responses_renewal_usage(body, mode) {
+            Ok(usage) => usage,
+            Err(error) => return DispatchOutcome::Error(error.to_owned()),
         };
-        let usage = crate::usage_parser::observe_non_stream_json_value_for_shape(
-            &value,
-            crate::provider_capability::UsageShape::OpenaiResponses,
-        )
-        .usage;
         let usage_present = usage.has_billable_usage();
         let evidence = |value| match value {
             crate::usage_parser::CacheTokenEvidence::Unreported => {
@@ -621,6 +676,7 @@ fn classify_success_body(
         request_start_ms,
         accounting_guard,
         None,
+        RenewalMode::Json,
     )
 }
 

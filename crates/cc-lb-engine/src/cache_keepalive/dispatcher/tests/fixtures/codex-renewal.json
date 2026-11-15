@@ -1,0 +1,1 @@
+{"model":"gpt-6.1-sol","instructions":"Reply exactly OK.","input":[{"role":"user","content":[{"type":"input_text","text":"Say OK"}]}],"store":false,"stream":true,"max_output_tokens":16}

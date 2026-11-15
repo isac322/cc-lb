@@ -14,6 +14,8 @@ use cc_lb_control::PromptCacheObservationSinkLike;
 use cc_lb_domain::{Provider, TtlClass};
 use cc_lb_storage_api::PromptCacheObservationRecord;
 
+mod codex;
+
 // Schema-6 identity independently derived from the three-block golden body below.
 const KEEPALIVE_IDENTITY_KEY: &str =
     "a9dbee437076709a34484806d86886bf7c0d944be8ef721bad98659895c52036";
@@ -91,6 +93,7 @@ fn responses_renewal_uses_normalized_usage_and_preserves_native_write_presence()
             42,
             accounting_guard(),
             Some("responses"),
+            RenewalMode::Json,
         );
         let (hit, finalization) = match outcome {
             DispatchOutcome::CacheHit { finalization, .. } => (true, finalization),
@@ -151,6 +154,7 @@ fn responses_renewal_absent_or_nonobject_usage_is_not_a_measured_zero() {
             0,
             accounting_guard(),
             Some("responses"),
+            RenewalMode::Json,
         );
         let DispatchOutcome::CacheMiss { finalization } = outcome else {
             panic!("absent usage must remain a miss");
@@ -162,6 +166,7 @@ fn responses_renewal_absent_or_nonobject_usage_is_not_a_measured_zero() {
     assert!(matches!(
         classify_success_body_with_surface(
             b"{", Duration::ZERO, Duration::ZERO, 0, accounting_guard(), Some("responses"),
+            RenewalMode::Json,
         ),
         DispatchOutcome::Error(message) if message == "invalid OpenAI Responses JSON"
     ));
@@ -189,6 +194,7 @@ fn responses_renewal_explicit_zero_usage_is_measured() {
         0,
         accounting_guard(),
         Some("responses"),
+        RenewalMode::Json,
     );
     let DispatchOutcome::CacheMiss { finalization } = outcome else {
         panic!("zero usage must remain a miss");
