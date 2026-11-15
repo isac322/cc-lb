@@ -28,7 +28,7 @@ function pendingLedger() {
       id, client: id.startsWith('codex-') ? 'codex' : 'agy',
       caller: 'Synthetic caller', reachability: 'Not executed', authBase: 'Explicit configured origin', clientMode: 'Synthetic client mode',
       upstreamCredential: boundary === 'feature' ? (id.startsWith('codex-') ? 'openai_oauth' : id === 'agy-native-api-key' ? 'gemini_api_key' : 'gemini_oauth') : boundary === 'signed-storage' ? 'signed-url' : boundary === 'configured' ? 'configured-service' : 'none',
-      ownerIssue: issue(owner), dependencies: [issue(1324), issue(1325), ...(id === 'agy-native-oauth' ? [issue(1310)] : [])], sourceEvidence: ['source'],
+      ownerIssue: issue(owner), dependencies: [issue(1324), issue(1325), ...(id === 'agy-native-oauth' ? [issue(1310)] : id === 'agy-raw-code-assist' ? [issue(1312), issue(1306), issue(1310)] : [])], sourceEvidence: ['source'],
       status: { route: 'not-claimed', boundary, clientAcceptance: 'pending' },
       deferReason: 'Exact pinned-client execution and entitlement evidence remain pending.', acceptanceEvidence: null,
     })),
@@ -185,6 +185,27 @@ test('public credentials, signed queries, private identifiers and local paths ar
   rejects((_, row) => { row.access_token = 'synthetic'; }, /credential or private identifier/);
 });
 
+test('untrusted family identifiers and malformed source keys never appear in diagnostics', () => {
+  const planted = 'sk-syntheticsecret123456';
+  for (const place of ['family-id', 'source-key']) {
+    const ledger = pendingLedger();
+    if (place === 'family-id') ledger.families[0].id = planted;
+    else ledger.sources[planted] = {};
+    const errors = validateClientCapabilities(ledger);
+    assert.ok(errors.length > 0);
+    assert.ok(errors.every((error) => !error.includes(planted)), place);
+    assert.ok(errors.some((error) => /family\[\d+\]|source\[\d+\]/.test(error)), place);
+  }
+});
+
+test('raw Code Assist preserves its actual foundation, host and discovery dependencies', () => {
+  const ledger = pendingLedger();
+  const row = ledger.families.find((family) => family.id === 'agy-raw-code-assist');
+  assert.deepEqual(row.dependencies, [issue(1324), issue(1325), issue(1312), issue(1306), issue(1310)]);
+  row.dependencies.push(issue(1311));
+  assert.match(validateClientCapabilities(ledger).join(' '), /not Codex C-AUTH/);
+});
+
 test('credential-custody descriptions are allowed but adjoining actual values are still rejected', () => {
   const ledger = pendingLedger();
   const row = ledger.families.find((family) => family.id === 'codex-signed-storage');
@@ -247,5 +268,25 @@ test('negated broad claims are not mistaken for positive promotions', () => {
 test('an unrelated caveat cannot license broad or mixed positive client claims', () => {
   for (const claim of ['Codex CLI is fully supported.', 'Full Codex CLI support is available.', 'All agy features are supported.', 'Codex CLI is not fully supported, but agy CLI is fully supported.', 'Not complete parity for Codex; Antigravity is fully verified.', 'Codex CLI 0.169.0 is supported.', 'agy 1.5.9 is supported.', 'Codex CLI is real-client tested.', 'Subscription acceptance passed.']) {
     assert.match(validatePublicClaims(`${caveat}\n\n${claim}`, 'control', pendingLedger()).join(' '), /promotion lacks accepted feature evidence/, claim);
+  }
+});
+
+test('pending text in another comma or while clause cannot negate an asserted promotion', () => {
+  const boundary = 'The tables describe shipped routes. Full client acceptance remains unverified for Codex CLI and agy.';
+  for (const claim of [
+    'Codex CLI is fully supported, while subscription acceptance remains pending.',
+    'Codex CLI is fully supported, subscription acceptance remains pending.',
+    'Subscription acceptance remains pending, while Codex CLI is fully supported.',
+    'Codex CLI is fully supported and subscription acceptance remains pending.',
+    'Codex CLI is fully supported with subscription acceptance pending.',
+  ]) {
+    assert.match(validatePublicClaims(`${boundary}\n\n${claim}`, 'mixed clause control', pendingLedger()).join(' '), /promotion lacks accepted feature evidence/, claim);
+  }
+  for (const claim of [
+    'Codex CLI is not fully supported, while subscription acceptance remains pending.',
+    'Full Codex CLI support is not established, and subscription acceptance remains pending.',
+    'We do not claim complete support for Codex CLI, while subscription acceptance remains pending.',
+  ]) {
+    assert.deepEqual(validatePublicClaims(`${boundary}\n\n${claim}`, 'negated clause control', pendingLedger()), [], claim);
   }
 });

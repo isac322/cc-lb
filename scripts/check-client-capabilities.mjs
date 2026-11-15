@@ -111,17 +111,18 @@ export function validateClientCapabilities(ledger) {
   }
   const sources = object(ledger.sources) ? ledger.sources : {};
   if (!object(ledger.sources) || !Object.keys(sources).length) fail('sources', 'requires pinned source evidence');
-  for (const [id, source] of Object.entries(sources)) {
-    if (!fields(source, ['kind', 'reference', 'scope'], `source.${id}`)) continue;
-    enumValue(source.kind, ['pinned-source', 'runtime-documentation', 'issue-handoff'], `source.${id}.kind`);
-    reference(source.reference, `source.${id}`);
-    requiredText(source.scope, `source.${id}.scope`);
-    if (source.kind === 'pinned-source' && !/\/(?:blob|tree)\/[a-f0-9]{40}(?:\/|$)/.test(source.reference ?? '')) fail(`source.${id}`, 'source revision must be pinned');
+  for (const [index, source] of Object.values(sources).entries()) {
+    const label = `source[${index}]`;
+    if (!fields(source, ['kind', 'reference', 'scope'], label)) continue;
+    enumValue(source.kind, ['pinned-source', 'runtime-documentation', 'issue-handoff'], `${label}.kind`);
+    reference(source.reference, label);
+    requiredText(source.scope, `${label}.scope`);
+    if (source.kind === 'pinned-source' && !/\/(?:blob|tree)\/[a-f0-9]{40}(?:\/|$)/.test(source.reference ?? '')) fail(label, 'source revision must be pinned');
   }
   if (!Array.isArray(ledger.families)) { fail('families', 'must be an array'); return errors; }
   const seen = new Set();
-  for (const row of ledger.families) {
-    const label = typeof row?.id === 'string' && /^[a-z][a-z0-9-]*$/.test(row.id) ? `family.${row.id}` : 'family';
+  for (const [index, row] of ledger.families.entries()) {
+    const label = `family[${index}]`;
     if (!fields(row, ['id', 'client', 'caller', 'reachability', 'authBase', 'clientMode', 'upstreamCredential', 'ownerIssue', 'dependencies', 'sourceEvidence', 'status', 'deferReason', 'acceptanceEvidence'], label)) continue;
     if (seen.has(row.id)) fail(label, 'duplicate family');
     seen.add(row.id);
@@ -141,6 +142,7 @@ export function validateClientCapabilities(ledger) {
       if (requirement && row.status.boundary !== requirement[1]) fail(label, 'incorrect required boundary');
       if (row.status.route !== 'not-claimed' && !(Array.isArray(row.sourceEvidence) && row.sourceEvidence.some((id) => sources[id]?.kind === 'runtime-documentation'))) fail(label, 'shipped route needs separate runtime documentation');
       if (row.id === 'agy-native-oauth' && (!Array.isArray(row.dependencies) || !row.dependencies.includes(issue(1310)))) fail(label, 'native OAuth requires the G-DISC dependency without transferring G-NATIVE ownership');
+      if (row.id === 'agy-raw-code-assist' && (!Array.isArray(row.dependencies) || ![1312, 1306, 1310].every((number) => row.dependencies.includes(issue(number))) || row.dependencies.includes(issue(1311)))) fail(label, 'raw Code Assist requires F-OWNER, G-HOST and G-DISC, not Codex C-AUTH');
     }
     if (row.id === 'agy-native-api-key' && row.upstreamCredential !== 'gemini_api_key') fail(label, 'API-key axis mismatch');
     if (['agy-native-oauth', 'agy-raw-code-assist', 'agy-code-assist-controls', 'agy-remote-agent', 'agy-remote-control', 'agy-subscription-voice'].includes(row.id) && row.upstreamCredential !== 'gemini_oauth') fail(label, 'OAuth axis mismatch');
@@ -223,11 +225,18 @@ export function validatePublicClaims(content, label, ledger) {
     if (!positive.test(sentence) || !/\b(?:Codex|agy|Antigravity|client|CLI|subscription\s+acceptance)\b/i.test(sentence)) continue;
     // A negated assertion is not a positive support claim. Require negation in
     // the same clause; a preceding unrelated caveat cannot license promotion.
-    for (const clause of sentence.split(/\bbut\b|;/i)) {
-      if (!positive.test(clause) || /\b(?:no|not|never|cannot|without|unverified|pending)\b.{0,90}(?:support|verif|parity|features|capabilities|tested|acceptance|passed)|\b(?:support|verif|parity|tested|acceptance|passed).{0,60}\b(?:not|unverified|pending)\b/i.test(clause)) continue;
-      const client = /\b(?:agy|Antigravity)\b/i.test(clause) ? 'agy' : /\bCodex\b/i.test(clause) ? 'codex' : null;
-      const rows = (Array.isArray(ledger?.families) ? ledger.families : []).filter((row) => row?.status?.boundary === 'feature' && (!client || row.client === client));
-      if (ledger?.metadata?.canonicalCoverage?.status === 'pending-external-ledger' || !rows.length || rows.some((row) => row.status?.clientAcceptance !== 'supported') || validateClientCapabilities(ledger).length) errors.push(`${label}: broad client-support promotion lacks accepted feature evidence and canonical Q-HARNESS completeness`);
+    for (const clause of sentence.split(/[,;]|\b(?:but|while|whereas|although|and|yet|however)\b/i)) {
+      const assertions = [...clause.matchAll(new RegExp(positive.source, 'gi'))];
+      for (const [index, assertion] of assertions.entries()) {
+        const before = clause.slice(index ? assertions[index - 1].index + assertions[index - 1][0].length : 0, assertion.index);
+        const after = clause.slice(assertion.index + assertion[0].length, assertions[index + 1]?.index);
+        const negatedBefore = /\b(?:no|not|never|cannot|without|unverified|pending)(?:\s+[a-z-]+){0,3}\s*$/i.test(before);
+        const negatedAfter = /^\s+(?:(?:is|are|remains?|has|have|still)\s+){0,2}(?:not|unverified|pending)\b/i.test(after);
+        if (negatedBefore || negatedAfter) continue;
+        const client = /\b(?:agy|Antigravity)\b/i.test(clause) ? 'agy' : /\bCodex\b/i.test(clause) ? 'codex' : null;
+        const rows = (Array.isArray(ledger?.families) ? ledger.families : []).filter((row) => row?.status?.boundary === 'feature' && (!client || row.client === client));
+        if (ledger?.metadata?.canonicalCoverage?.status === 'pending-external-ledger' || !rows.length || rows.some((row) => row.status?.clientAcceptance !== 'supported') || validateClientCapabilities(ledger).length) errors.push(`${label}: broad client-support promotion lacks accepted feature evidence and canonical Q-HARNESS completeness`);
+      }
     }
   }
   return errors;

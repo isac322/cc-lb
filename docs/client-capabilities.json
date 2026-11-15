@@ -668,7 +668,8 @@
       "dependencies": [
         "https://github.com/isac322/cc-lb/issues/1324",
         "https://github.com/isac322/cc-lb/issues/1325",
-        "https://github.com/isac322/cc-lb/issues/1311",
+        "https://github.com/isac322/cc-lb/issues/1306",
+        "https://github.com/isac322/cc-lb/issues/1310",
         "https://github.com/isac322/cc-lb/issues/1312"
       ],
       "sourceEvidence": [
