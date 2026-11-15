@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 use cc_lb_storage_api::CacheTtl;
 
+#[derive(Clone, Copy)]
+pub(super) enum RenewalMode {
+    Json,
+    Sse,
+}
+
 #[derive(Debug, Error)]
 pub enum SnapshotError {
     #[error("shaped body exceeds snapshot_max_bytes ({actual} > {max})")]
@@ -176,13 +182,6 @@ impl RequestSnapshot {
         if !value.is_object() {
             return Err(SnapshotError::NotAnObject);
         }
-        let keepalive_body = rewrite_object(
-            &body,
-            &[
-                ("max_output_tokens", Some(br#"16"#)),
-                ("stream", Some(br#"false"#)),
-            ],
-        )?;
         let keepalive_model = value
             .get("model")
             .and_then(Value::as_str)
@@ -193,14 +192,14 @@ impl RequestSnapshot {
             url,
             method,
             headers,
-            body,
+            body: body.clone(),
             upstream_id,
             ttl,
             prefix_fingerprint: None,
             prefix_hash: None,
             prefix_policy_version: None,
             prefix_schema_version: None,
-            keepalive_body: Bytes::from(keepalive_body),
+            keepalive_body: body,
             keepalive_model,
             surface,
         })
@@ -240,6 +239,24 @@ impl RequestSnapshot {
     }
 
     pub fn build_keepalive_body(&self) -> Result<Bytes, SnapshotError> {
+        self.build_keepalive_body_for(RenewalMode::Json)
+    }
+
+    pub(super) fn build_keepalive_body_for(
+        &self,
+        mode: RenewalMode,
+    ) -> Result<Bytes, SnapshotError> {
+        if self.surface.as_deref() == Some("responses") {
+            let stream: &[u8] = match mode {
+                RenewalMode::Json => b"false",
+                RenewalMode::Sse => b"true",
+            };
+            return rewrite_object(
+                &self.body,
+                &[("max_output_tokens", Some(b"16")), ("stream", Some(stream))],
+            )
+            .map(Bytes::from);
+        }
         Ok(self.keepalive_body.clone())
     }
     pub fn cache_input_token_estimate(&self) -> u64 {

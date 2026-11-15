@@ -26,6 +26,7 @@ pub(in crate::scheduler_dispatch::tests) struct RecordingHttp {
 enum RecordingHttpResponse {
     Json(Value),
     Status(StatusCode, Value),
+    ResponsesSse(Value),
 }
 
 impl Default for RecordingHttpResponse {
@@ -77,6 +78,10 @@ impl RecordingHttp {
     ) {
         *self.response.lock().expect("response lock") = RecordingHttpResponse::Status(status, body);
     }
+
+    pub(in crate::scheduler_dispatch::tests) fn return_responses_sse(&self, body: Value) {
+        *self.response.lock().expect("response lock") = RecordingHttpResponse::ResponsesSse(body);
+    }
 }
 
 #[derive(Clone)]
@@ -111,6 +116,17 @@ impl UpstreamDispatch for RecordingHttp {
         match &*self.response.lock().expect("response lock") {
             RecordingHttpResponse::Json(body) => Ok(json_response(StatusCode::OK, body.clone())),
             RecordingHttpResponse::Status(status, body) => Ok(json_response(*status, body.clone())),
+            RecordingHttpResponse::ResponsesSse(body) => {
+                let event = json!({"type": "response.completed", "response": body});
+                let mut response = Response::new(Body::from(format!(
+                    "event: response.completed\ndata: {event}\n\n"
+                )));
+                response.headers_mut().insert(
+                    ::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                Ok(response)
+            }
         }
     }
 }
