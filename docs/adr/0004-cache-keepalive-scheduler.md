@@ -52,6 +52,12 @@ The amended scheduling invariants are:
 The durable implementation keeps the engine/scheduler module boundary intact. `cc-lb-engine` defines a scheduling port and owns classification, snapshot construction, and cache-anchor extraction; it must not depend on `cc-lb-scheduler`, Apalis, SQLx pools, or storage adapters. Storage record/operation traits live in `cc-lb-storage-api`; SQLite/Postgres adapters implement them; `cc-lb-scheduler` owns `CacheKeepaliveJob` and workers; `cc-lb-server` wires the dependencies.
 
 The amended decision preserves per-principal opt-in, cache-control-only tracking, 5 m / 1 h TTLs, `refresh_lead_time_5m_secs = 30`, `refresh_lead_time_1h_secs = 300`, `max_total_duration_secs = 14400`, `snapshot_max_bytes = 8388608` (8 MiB), and `min_cache_tokens = 10000`. Session identity comes from `x-claude-code-session-id`, `x-claude-session-id`, `x-session-affinity`, `x-session-id`, then cache-prefix-hash fallback, with `x-claude-code-agent-id` isolating non-main subagent sessions by `(thread_id, agent_id)`. The 2026-11-12 amendment lowers the default `max_refreshes_per_session` from `12` to `4` and adds `SubagentHandback` and `EndConversation` to the built-in wait-for-user tools. Explicit caps remain unchanged. `llm_judge` remains reserved/rejected.
+Amendment 2026-11-14: lower the default `refresh_lead_time_5m_secs` from 30
+to 10. Anthropic measurements through cc-lb found 5-minute reads through about
+309 seconds after `message_start` and misses from about 310 seconds; production
+renewal dispatch lateness was p99 0.84 seconds, p99.9 1.4 seconds, and max
+2.9 seconds over 4,000 renewals, leaving more than 6 seconds of observed
+headroom without relying on undocumented provider grace.
 
 Observability must remain secret-safe. Keepalive metrics should report scheduled/fired/cancelled/stale/noop/hit/miss/error/decrypt_failed outcomes. Scheduler/admin failure views may show job type, status, sanitized reason, hashed session/idempotency summaries, and bounded non-secret metadata only; they must not expose plaintext prompts, downstream auth, or raw encrypted payload blobs.
 

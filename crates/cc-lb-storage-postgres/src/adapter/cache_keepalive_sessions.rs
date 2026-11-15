@@ -955,6 +955,10 @@ pub(crate) fn row_to_record(row: PgRow) -> StorageResult<CacheKeepaliveSessionRe
         accounting_key_id: row.try_get("accounting_key_id").map_err(map_sqlx_error)?,
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
         cycle_id: row.try_get("cycle_id").map_err(map_sqlx_error)?,
+        last_message_at_ms: i64_to_u64(
+            row.try_get("last_message_at_ms").map_err(map_sqlx_error)?,
+            "cache keepalive last_message_at_ms",
+        )?,
         generation: i64_to_u64(
             row.try_get("generation").map_err(map_sqlx_error)?,
             "cache keepalive generation",

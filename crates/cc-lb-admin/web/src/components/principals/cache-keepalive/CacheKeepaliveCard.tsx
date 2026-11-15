@@ -140,7 +140,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         expected_revision: base.revision,
         cache_keepalive: {
           ...(base.cache_keepalive ?? {
-            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_5m_secs: 10,
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 4,
             max_total_duration_secs: 14400,

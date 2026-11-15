@@ -97,6 +97,7 @@ export const CacheKeepaliveSummarySchema = z.object({
   unlisted_net: z.number().nullable(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   unknown_cycles: z.number(),
+  not_needed_cycles: z.number().int().nonnegative(),
   retained_from_ms: z.number().nullable(),
 });
 export type CacheKeepaliveSummary = z.infer<typeof CacheKeepaliveSummarySchema>;
@@ -203,6 +204,7 @@ export const CacheKeepaliveGapSchema = z.object({
   pulses: z.array(CacheKeepalivePulseSchema),
   ending_kind: z.enum([
     'followup_hit',
+    'followup_before_expiry',
     'followup_unknown',
     'scheduled_waiting',
     'followup_pending',
@@ -210,6 +212,7 @@ export const CacheKeepaliveGapSchema = z.object({
     'ttl_expired_no_followup',
   ]),
   ending_at_ms: z.number(),
+  natural_expiry_ms: z.number().nullable(),
   total_duration_sec: z.number(),
   since_last_renewal_sec: z.number().nullable(),
   spent_usd: z.number(),
@@ -220,6 +223,7 @@ export type CacheKeepaliveGap = z.infer<typeof CacheKeepaliveGapSchema>;
 
 export const CacheKeepaliveFollowUpOutcomesSchema = z.object({
   observed: z.number().int().nonnegative(),
+  not_needed: z.number().int().nonnegative(),
   pending: z.number().int().nonnegative(),
   no_follow_up: z.number().int().nonnegative(),
   unknown: z.number().int().nonnegative(),

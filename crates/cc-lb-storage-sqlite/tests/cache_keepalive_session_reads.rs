@@ -1484,6 +1484,7 @@ fn economics_projection(
         .evidence
         .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
             session_key_hash: None,
+            cycle_anchor_ms: Some(ts.saturating_sub(300) * 1_000),
             evidence_id: format!("evidence-{source_ref_id}"),
             cycle_id,
             evidence_kind: "renewal".to_owned(),
@@ -1512,6 +1513,7 @@ fn follow_up_evidence(
 ) -> cc_lb_storage_api::CacheKeepaliveEvidenceRow {
     cc_lb_storage_api::CacheKeepaliveEvidenceRow {
         session_key_hash: None,
+        cycle_anchor_ms: None,
         evidence_id: format!("follow-up-{source_ref_id}"),
         cycle_id: None,
         evidence_kind: "follow_up".to_owned(),
@@ -1731,7 +1733,7 @@ async fn summary_aggregate_active_complete_follow_up_is_observed() {
 }
 
 #[tokio::test]
-async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
+async fn summary_aggregate_follow_up_credits_kept_tokens_on_hits_and_misses() {
     let (_temp_dir, storage) = storage().await;
     for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
         let session_key_hash = format!("active-follow-up-{outcome}");
@@ -1769,11 +1771,12 @@ async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
-    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 40_000);
+    assert_eq!(aggregate.groups[0].renewals, 2);
 }
 
 #[tokio::test]
-async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_credits_neither() {
+async fn summary_aggregate_same_cycle_hit_then_miss_credits_earliest_matching_renewal() {
     let (_temp_dir, storage) = storage().await;
     let cycle_id = Uuid::from_u128(1_081);
     let session_key_hash = "active-same-cycle-hit-miss";
@@ -1834,13 +1837,9 @@ async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_cred
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
-    assert!(
-        aggregate
-            .groups
-            .iter()
-            .all(|group| group.avoided_cache_read_tokens == 0),
-        "the latest miss must suppress avoided-token credit for the shared follow-up"
-    );
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].renewals, 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
 }
 
 #[tokio::test]
@@ -1950,7 +1949,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
     assert_eq!(aggregate.total_spent_micros, 12_000);
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
     assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 10_000);
 }
@@ -2007,7 +2006,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
     assert_eq!(aggregate.total_spent_micros, 21_000);
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.evidence_status, "observed");
     assert_eq!(aggregate.groups.len(), 1);
     assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
 }
@@ -3030,4 +3029,622 @@ async fn session_evidence_honors_long_ttl_boundaries() {
     assert_eq!(metrics.count("not_first_in_cycle"), 2);
     assert_eq!(metrics.count("outside_ttl"), 2);
     assert_eq!(metrics.count("no_matching_renewal_prefix"), 2);
+}
+
+#[tokio::test]
+async fn counterfactual_summary_natural_expiry_earliest_renewal_and_token_caps() {
+    // Follow-ups at/before A+300s never save money. Later follow-ups credit
+    // the earliest matching renewal, including cache recreated by a miss.
+    for (name, offsets, follow_offset, read, creation, follow_read, expected_tokens, not_needed) in [
+        ("production", vec![270], Some(271), 100, 0, 100, 0, 1),
+        ("after-expiry", vec![270], Some(320), 100, 0, 100, 100, 0),
+        ("multi", vec![270, 540, 550], Some(551), 100, 0, 100, 100, 0),
+        ("boundary", vec![270], Some(300), 100, 0, 100, 0, 1),
+        ("no-followup", vec![270], None, 100, 0, 100, 0, 0),
+        ("follow-cap", vec![270], Some(320), 100, 0, 60, 60, 0),
+        ("kept-cap", vec![270], Some(320), 100, 0, 200, 100, 0),
+        ("recreated", vec![270], Some(320), 0, 80, 100, 80, 0),
+        ("empty-miss", vec![270], Some(320), 0, 0, 100, 0, 0),
+    ] {
+        let (_directory, storage) = storage().await;
+        let anchor = 1_000_u64;
+        let cycle = Uuid::from_u128(90_001);
+        for (ordinal, offset) in offsets.iter().copied().enumerate() {
+            let source = format!("counterfactual-{name}-{ordinal}");
+            let mut projection =
+                economics_projection(&source, Some(cycle), anchor + offset, "hit", 7);
+            let turn = projection.turn.as_mut().expect("turn");
+            turn.cache_read_input_tokens = read + ordinal as u64 * 10;
+            turn.cache_creation_input_tokens = creation;
+            projection.evidence[0].cycle_anchor_ms = Some(anchor * 1_000);
+            projection.evidence[0].cache_read_input_tokens = Some(read);
+            storage
+                .append_request_event_with_projections(
+                    &event(&source, anchor + offset),
+                    &projection,
+                )
+                .await
+                .expect("persist renewal");
+        }
+        if let Some(offset) = follow_offset {
+            let mut follow_up = follow_up_evidence(name, anchor + offset - 1, "claude-sonnet-4-5");
+            follow_up.cache_read_input_tokens = Some(follow_read);
+            storage
+                .append_request_event_with_evidence(&event(name, anchor + offset), &[follow_up])
+                .await
+                .expect("persist follow-up");
+        }
+        let aggregate = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("counterfactual summary");
+        let avoided_tokens = aggregate
+            .groups
+            .iter()
+            .map(|group| group.avoided_cache_read_tokens)
+            .sum::<u64>();
+        assert_eq!(avoided_tokens, expected_tokens, "{name}");
+        assert_eq!(aggregate.not_needed_cycles, not_needed, "{name}");
+        assert_eq!(aggregate.unknown_cycles, 0, "{name}");
+        assert_eq!(
+            aggregate.total_spent_micros,
+            offsets.len() as i64 * 7,
+            "{name}"
+        );
+        let turns = storage
+            .list_cache_keepalive_turns(PRINCIPAL_ID, "renewed-session")
+            .await
+            .expect("per-session turns");
+        assert_eq!(
+            turns
+                .iter()
+                .filter_map(|turn| turn.cost_micros)
+                .sum::<i64>(),
+            aggregate.total_spent_micros,
+            "{name}: session/header spend"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_anchor_is_derived_at_read_time_without_rewriting_evidence() {
+    for snapshot in [false, true] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(90_002);
+        if snapshot {
+            let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+            replace.cycle_id = cycle;
+            storage
+                .replace_from_real_request(&replace)
+                .await
+                .expect("legacy owning snapshot");
+        }
+        let mut projection = economics_projection("legacy-anchor", Some(cycle), 1_270, "hit", 7);
+        projection.evidence[0].cycle_anchor_ms = None;
+        projection.evidence[0].session_key_hash = Some("renewed-session".to_owned());
+        if !snapshot {
+            projection.decision.config_snapshot = None;
+        }
+        storage
+            .append_request_event_with_projections(&event("legacy-anchor", 1_270), &projection)
+            .await
+            .expect("persist nullable anchor");
+        let follow_up = follow_up_evidence("legacy-anchor", 1_319, "claude-sonnet-4-5");
+        storage
+            .append_request_event_with_evidence(&event("legacy-followup", 1_320), &[follow_up])
+            .await
+            .expect("persist legacy follow-up");
+        let aggregate = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("legacy economics");
+        assert_eq!(aggregate.total_spent_micros, 7);
+        assert_eq!(aggregate.unknown_cycles, u64::from(!snapshot));
+        assert_eq!(aggregate.not_needed_cycles, 0);
+        assert_eq!(
+            aggregate.groups.iter().map(|g| g.renewals).sum::<u64>(),
+            u64::from(snapshot)
+        );
+        let persisted: Option<i64> = sqlx::query_scalar(
+            "SELECT cycle_anchor_ms FROM cache_keepalive_evidence WHERE evidence_kind = 'renewal'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("nullable migration column");
+        assert_eq!(
+            persisted, None,
+            "legacy fallback must not rewrite stored evidence"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cycle_anchor_is_resolved_from_all_renewals_and_avoided_tokens_fall_back_without_turn() {
+    let (_directory, storage) = storage().await;
+    let cycle = Uuid::from_u128(90_003);
+    let mut earliest = economics_projection("anchor-first", Some(cycle), 1_270, "hit", 7);
+    earliest.evidence[0].cycle_anchor_ms = Some(1_000_000);
+    storage
+        .append_request_event_with_projections(&event("anchor-first", 1_270), &earliest)
+        .await
+        .expect("first explicit cycle anchor");
+    let mut latest = economics_projection("anchor-later", Some(cycle), 1_540, "hit", 9);
+    latest.evidence[0].cycle_anchor_ms = None;
+    latest.evidence[0].cache_read_input_tokens = Some(30_000);
+    storage
+        .append_request_event_with_projections(&event("anchor-later", 1_540), &latest)
+        .await
+        .expect("later legacy renewal");
+    let mut follow_up = follow_up_evidence("anchor-followup", 1_550, "claude-sonnet-4-5");
+    follow_up.cache_read_input_tokens = Some(25_000);
+    storage
+        .append_request_event_with_evidence(&event("anchor-followup", 1_551), &[follow_up])
+        .await
+        .expect("follow-up inside both renewal windows");
+    // The credited renewal precedes the horizon, so only the newest turn's
+    // spend belongs to the horizon and no avoided tokens are included.
+    let summary = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, Some(1_500_000))
+        .await
+        .expect("cycle-scoped horizon");
+    assert_eq!(summary.unknown_cycles, 0);
+    assert_eq!(summary.total_spent_micros, 9);
+    assert!(summary.groups.is_empty());
+
+    sqlx::query("DELETE FROM cache_keepalive_turns WHERE source_ref_id = 'anchor-first'")
+        .execute(storage.pool())
+        .await
+        .expect("retain evidence without earliest turn");
+    let retained = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("evidence-only kept-token fallback");
+    assert_eq!(retained.unknown_cycles, 0);
+    assert_eq!(retained.groups[0].avoided_cache_read_tokens, 20_000);
+}
+
+#[tokio::test]
+async fn legacy_anchor_uses_ttl_specific_snapshot_lead() {
+    for (ttl, persisted, lead) in [
+        (CacheTtl::Ttl5m, "5m", 30_u64),
+        (CacheTtl::Ttl1h, "1h", 300),
+        (CacheTtl::Ttl30m, "30m", 30),
+        (CacheTtl::Ttl12h, "12h", 300),
+    ] {
+        let (_directory, storage) = storage().await;
+        let anchor = 50_000_u64;
+        let cycle = Uuid::from_u128(90_004);
+        let mut replace = request("renewed-session", anchor, "agent-in-turn");
+        replace.cycle_id = cycle;
+        replace.ttl = ttl;
+        storage
+            .replace_from_real_request(&replace)
+            .await
+            .expect("owning TTL snapshot");
+        let renewal_at = anchor + ttl.as_secs() - lead;
+        let mut projection = economics_projection("legacy-ttl", Some(cycle), renewal_at, "hit", 7);
+        projection.evidence[0].cycle_anchor_ms = None;
+        projection.evidence[0].ttl = ttl;
+        storage
+            .append_request_event_with_projections(&event("legacy-ttl", renewal_at), &projection)
+            .await
+            .expect("legacy TTL renewal");
+        let follow_up = follow_up_evidence(
+            "legacy-ttl",
+            anchor + ttl.as_secs() - 1,
+            "claude-sonnet-4-5",
+        );
+        storage
+            .append_request_event_with_evidence(
+                &event("legacy-ttl-followup", anchor + ttl.as_secs()),
+                &[follow_up],
+            )
+            .await
+            .expect("follow-up at natural expiry");
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("TTL-specific legacy derivation");
+        assert_eq!(summary.unknown_cycles, 0, "{persisted}");
+        assert_eq!(summary.not_needed_cycles, 1, "{persisted}");
+        assert!(summary.groups.is_empty(), "{persisted}");
+    }
+}
+
+#[tokio::test]
+async fn real_request_anchor_survives_synthetic_refresh_and_provisional_request_fence() {
+    let (_directory, storage) = storage().await;
+    let original = storage
+        .replace_from_real_request(&request("cycle-anchor", 1_000, "agent-in-turn"))
+        .await
+        .expect("owning real request");
+    let refreshed = storage
+        .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
+            session_key_hash: original.session_key_hash.clone(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 1_270,
+            run_at_unix_secs: 1_540,
+            expires_at_unix_secs: 1_570,
+            encrypted_payload: None,
+            now_unix_secs: 1_270,
+        })
+        .await
+        .expect("synthetic refresh")
+        .expect("same cycle");
+    assert_eq!(refreshed.last_message_at_ms, 1_000_000);
+    assert_eq!(refreshed.cache_anchor_at_unix_secs, 1_270);
+    storage
+        .begin_cache_keepalive_request_fenced("cycle-anchor", None, 1_280, 1_900)
+        .await
+        .expect("begin real follow-up");
+    let fenced = storage
+        .get_cache_keepalive_session_for_principal(PRINCIPAL_ID, "cycle-anchor")
+        .await
+        .expect("fenced session")
+        .expect("retained owning cycle");
+    assert_eq!(fenced.last_message_at_ms, 1_000_000);
+    assert_ne!(
+        fenced.first_scheduled_at_unix_secs, 1_000,
+        "request fence provisionally moves first_scheduled_at, so it is not the renewal economics anchor"
+    );
+}
+
+#[tokio::test]
+async fn first_pre_expiry_followup_remains_not_needed_after_later_followup_and_purge() {
+    let (_directory, storage) = storage().await;
+    let cycle = Uuid::from_u128(91_001);
+    let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("owning session");
+    let mut projection = economics_projection("two-followups", Some(cycle), 1_270, "hit", 7);
+    projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+    storage
+        .append_request_event_with_projections(&event("two-followups", 1_270), &projection)
+        .await
+        .expect("renewal");
+    for offset in [271, 320] {
+        let id = format!("two-followups-{offset}");
+        let followup = follow_up_evidence(&id, 1_000 + offset - 1, "claude-sonnet-4-5");
+        storage
+            .append_request_event_with_evidence(&event(&id, 1_000 + offset), &[followup])
+            .await
+            .expect("follow-up");
+    }
+    for purged in [false, true] {
+        if purged {
+            storage
+                .purge_cache_keepalive_expired(2_000)
+                .await
+                .expect("purge expired session");
+        }
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("first-follow-up outcome");
+        assert_eq!(summary.not_needed_cycles, 1, "purged={purged}");
+        assert_eq!(summary.unknown_cycles, 0, "purged={purged}");
+        assert!(summary.groups.is_empty(), "purged={purged}");
+        assert_eq!(summary.total_spent_micros, 7);
+    }
+}
+
+#[tokio::test]
+async fn open_and_in_request_cycles_with_followups_are_never_pending() {
+    for in_request in [false, true] {
+        for saved in [false, true] {
+            let (_directory, storage) = storage().await;
+            let now = live_evidence_base_secs();
+            let anchor = now - if saved { 540 } else { 270 };
+            let cycle = Uuid::from_u128(91_002);
+            let mut replace = request("renewed-session", anchor, "agent-in-turn");
+            replace.cycle_id = cycle;
+            storage
+                .replace_from_real_request(&replace)
+                .await
+                .expect("open cycle");
+            let offsets = if saved { vec![270, 540] } else { vec![270] };
+            for (ordinal, offset) in offsets.into_iter().enumerate() {
+                let id = format!("open-followup-{ordinal}");
+                let mut projection =
+                    economics_projection(&id, Some(cycle), anchor + offset, "hit", 7);
+                projection.evidence[0].cycle_anchor_ms = Some(anchor * 1_000);
+                storage
+                    .append_request_event_with_projections(
+                        &event(&id, anchor + offset),
+                        &projection,
+                    )
+                    .await
+                    .expect("open-cycle renewal");
+            }
+            if in_request {
+                storage
+                    .begin_cache_keepalive_request_fenced("renewed-session", None, now, now + 300)
+                    .await
+                    .expect("request marker");
+            }
+            let followup_offset = if saved { 551 } else { 271 };
+            let followup = follow_up_evidence(
+                "open-cycle-followup",
+                anchor + followup_offset - 1,
+                "claude-sonnet-4-5",
+            );
+            storage
+                .append_request_event_with_evidence(
+                    &event("open-cycle-followup", anchor + followup_offset),
+                    &[followup],
+                )
+                .await
+                .expect("open-cycle follow-up");
+            let summary = storage
+                .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                .await
+                .expect("resolved open cycle");
+            assert_eq!(
+                summary.evidence_status, "observed",
+                "saved={saved}, in_request={in_request}"
+            );
+            assert_eq!(summary.unknown_cycles, 0);
+            assert_eq!(summary.not_needed_cycles, u64::from(!saved));
+            assert_eq!(
+                summary.groups.iter().map(|g| g.renewals).sum::<u64>(),
+                u64::from(saved)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn summary_groups_sum_identical_cycle_sizes_without_rounding_away_savings() {
+    let (_directory, storage) = storage().await;
+    for (index, tokens) in [20_000, 20_000, 10_000].into_iter().enumerate() {
+        let id = format!("group-cycle-{index}");
+        let mut projection = economics_projection(
+            &id,
+            Some(Uuid::from_u128(91_100 + index as u128)),
+            1_270,
+            "hit",
+            7,
+        );
+        projection.evidence[0].cycle_anchor_ms = Some(1_000_000);
+        projection.evidence[0].prefix_hash = Some(id.clone());
+        projection
+            .turn
+            .as_mut()
+            .expect("turn")
+            .cache_read_input_tokens = tokens;
+        projection.evidence[0].cache_read_input_tokens = Some(tokens);
+        storage
+            .append_request_event_with_projections(&event(&id, 1_270), &projection)
+            .await
+            .expect("grouped renewal");
+        let mut followup = follow_up_evidence(&id, 1_319, "claude-sonnet-4-5");
+        followup.prefix_hash = Some(id);
+        storage
+            .append_request_event_with_evidence(
+                &event(&format!("group-followup-{index}"), 1_320),
+                &[followup],
+            )
+            .await
+            .expect("grouped follow-up");
+    }
+    let summary = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("multi-cycle groups");
+    assert_eq!(summary.groups.len(), 2);
+    let repeated = summary
+        .groups
+        .iter()
+        .find(|g| g.renewals == 2)
+        .expect("two identical cycles");
+    assert_eq!(repeated.avoided_cache_read_tokens, 40_000);
+    assert_eq!(
+        repeated.avoided_cache_read_tokens / repeated.renewals,
+        20_000
+    );
+    assert_eq!(
+        summary
+            .groups
+            .iter()
+            .map(|g| g.avoided_cache_read_tokens)
+            .sum::<u64>(),
+        50_000
+    );
+    assert_eq!(summary.total_spent_micros, 21);
+}
+
+#[tokio::test]
+async fn purged_legacy_cycle_uses_renewal_decision_snapshot_for_anchor() {
+    let (_directory, storage) = storage().await;
+    let cycle = Uuid::from_u128(91_003);
+    let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("legacy owner");
+    let mut projection = economics_projection("purged-legacy", Some(cycle), 1_270, "hit", 7);
+    projection.evidence[0].cycle_anchor_ms = None;
+    projection.evidence[0].session_key_hash = None;
+    projection.decision.config_snapshot = Some(snapshot());
+    storage
+        .append_request_event_with_projections(&event("purged-legacy", 1_270), &projection)
+        .await
+        .expect("legacy renewal and decision snapshot");
+    let followup = follow_up_evidence("purged-legacy", 1_319, "claude-sonnet-4-5");
+    storage
+        .append_request_event_with_evidence(&event("purged-legacy-followup", 1_320), &[followup])
+        .await
+        .expect("legacy follow-up");
+    let before = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("before purge");
+    storage
+        .purge_cache_keepalive_expired(2_000)
+        .await
+        .expect("purge legacy owner");
+    assert!(
+        storage
+            .get_cache_keepalive_session_for_principal(PRINCIPAL_ID, "renewed-session")
+            .await
+            .expect("owner lookup")
+            .is_none()
+    );
+    let after = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("after purge");
+    assert_eq!(after.unknown_cycles, 0);
+    assert_eq!(after.groups, before.groups);
+    assert_eq!(after.total_spent_micros, before.total_spent_micros);
+    assert_eq!(after.groups[0].avoided_cache_read_tokens, 20_000);
+}
+
+#[tokio::test]
+async fn legacy_delay_clamps_to_one_second_when_lead_reaches_or_exceeds_ttl() {
+    for lead in [300, 600] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(91_004);
+        let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        replace.config_snapshot.refresh_lead_time_5m_secs = lead;
+        storage
+            .replace_from_real_request(&replace)
+            .await
+            .expect("large lead snapshot");
+        let mut projection = economics_projection("lead-clamp", Some(cycle), 1_001, "hit", 7);
+        projection.evidence[0].cycle_anchor_ms = None;
+        projection.decision.config_snapshot = Some(replace.config_snapshot);
+        storage
+            .append_request_event_with_projections(&event("lead-clamp", 1_001), &projection)
+            .await
+            .expect("one-second renewal delay");
+        let followup = follow_up_evidence("lead-clamp", 1_300, "claude-sonnet-4-5");
+        storage
+            .append_request_event_with_evidence(&event("lead-clamp-followup", 1_301), &[followup])
+            .await
+            .expect("follow-up one second past natural expiry");
+        let summary = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("clamped delay");
+        assert_eq!(summary.not_needed_cycles, 0, "lead={lead}");
+        assert_eq!(
+            summary.groups.iter().map(|g| g.renewals).sum::<u64>(),
+            1,
+            "lead={lead}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
+    for own_decision_snapshot in [false, true] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(92_001);
+        let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage
+            .replace_from_real_request(&replace)
+            .await
+            .expect("original owning cycle");
+        let mut projection =
+            economics_projection("historical-legacy", Some(cycle), 1_270, "hit", 7);
+        projection.evidence[0].cycle_anchor_ms = None;
+        projection.decision.config_snapshot = own_decision_snapshot.then(snapshot);
+        storage
+            .append_request_event_with_projections(&event("historical-legacy", 1_270), &projection)
+            .await
+            .expect("legacy renewal");
+        let followup = follow_up_evidence("historical-legacy", 1_289, "claude-sonnet-4-5");
+        storage
+            .append_request_event_with_evidence(
+                &event("historical-legacy-followup", 1_290),
+                &[followup],
+            )
+            .await
+            .expect("follow-up while original cache remains warm");
+        let before = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("before replacement");
+        assert_eq!(before.not_needed_cycles, 1);
+
+        let mut replacement = request("renewed-session", 2_000, "agent-in-turn");
+        replacement.cycle_id = Uuid::from_u128(92_002);
+        replacement.config_snapshot.refresh_lead_time_5m_secs = 10;
+        storage
+            .replace_from_real_request(&replacement)
+            .await
+            .expect("later cycle with different lead");
+        let after = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("after replacement");
+        assert_eq!(after.not_needed_cycles, u64::from(own_decision_snapshot));
+        assert_eq!(after.unknown_cycles, u64::from(!own_decision_snapshot));
+        assert!(
+            after.groups.is_empty(),
+            "later session snapshot must never create historical savings"
+        );
+        assert_eq!(after.total_spent_micros, before.total_spent_micros);
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(PRINCIPAL_ID, &[cycle], &[], 0, 2_000_000)
+            .await
+            .expect("resolved evidence");
+        let renewal = evidence
+            .iter()
+            .find(|row| row.evidence_kind == "renewal")
+            .expect("renewal evidence");
+        assert_eq!(
+            renewal.cycle_anchor_ms,
+            own_decision_snapshot.then_some(1_000_000)
+        );
+        assert!(
+            evidence
+                .iter()
+                .filter(|row| row.evidence_kind == "follow_up")
+                .all(|row| row.cycle_anchor_ms.is_none())
+        );
+    }
+}
+
+#[tokio::test]
+async fn activity_anchor_uses_full_cycle_and_earliest_usable_snapshot_for_source_subset() {
+    for explicit_anchor in [false, true] {
+        let (_directory, storage) = storage().await;
+        let cycle = Uuid::from_u128(92_003);
+        for (id, start, lead) in [("snapshot-first", 1_270, 10), ("snapshot-later", 1_540, 30)] {
+            let mut projection = economics_projection(id, Some(cycle), start, "hit", 7);
+            projection.evidence[0].cycle_anchor_ms =
+                (explicit_anchor && id == "snapshot-first").then_some(950_000);
+            let mut config = snapshot();
+            config.refresh_lead_time_5m_secs = lead;
+            projection.decision.config_snapshot = Some(config);
+            storage
+                .append_request_event_with_projections(&event(id, start), &projection)
+                .await
+                .expect("cycle renewal with own snapshot");
+        }
+        let evidence = storage
+            .list_cache_keepalive_evidence_for_activity(
+                PRINCIPAL_ID,
+                &[],
+                &["snapshot-later".to_owned()],
+                0,
+                2_000_000,
+            )
+            .await
+            .expect("source-ref subset with full-cycle anchor");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].event_ref.as_deref(), Some("snapshot-later"));
+        assert_eq!(
+            evidence[0].cycle_anchor_ms,
+            Some(if explicit_anchor { 950_000 } else { 980_000 })
+        );
+    }
 }

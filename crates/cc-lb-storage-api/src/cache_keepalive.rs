@@ -25,7 +25,7 @@ pub struct CacheKeepaliveConfig {
     pub enabled: bool,
 
     /// Fire the keep-alive this many seconds before the 5-minute cache TTL
-    /// would expire. Default 30 → schedule at (300 - 30) = 270 s = 4m30s.
+    /// would expire. Default 10 → schedule at (300 - 10) = 290 s = 4m50s.
     #[serde(default = "default_lead_5m")]
     pub refresh_lead_time_5m_secs: u32,
 
@@ -158,7 +158,7 @@ pub enum JudgeResponseFormat {
 // -- Default value helpers ---------------------------------------------
 
 fn default_lead_5m() -> u32 {
-    30
+    10
 }
 fn default_lead_1h() -> u32 {
     300
@@ -288,7 +288,7 @@ mod tests {
         let json = r#"{"enabled": true}"#;
         let cfg: CacheKeepaliveConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.enabled);
-        assert_eq!(cfg.refresh_lead_time_5m_secs, 30);
+        assert_eq!(cfg.refresh_lead_time_5m_secs, 10);
         assert_eq!(cfg.refresh_lead_time_1h_secs, 300);
         assert_eq!(cfg.max_refreshes_per_session, 4);
         assert_eq!(cfg.max_total_duration_secs, 14400);

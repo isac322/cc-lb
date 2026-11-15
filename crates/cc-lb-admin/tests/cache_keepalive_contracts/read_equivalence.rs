@@ -135,6 +135,7 @@ async fn legacy_summary_oracle(
             "total_avoided": null,
             "evidence_status": "none",
             "unknown_cycles": 0,
+            "not_needed_cycles": 0,
             "retained_from_ms": null
         },
         "rows": [],
@@ -607,6 +608,7 @@ async fn empty_and_disabled_summary_are_zero() {
             "total_avoided": 0.0,
             "evidence_status": "none",
             "unknown_cycles": 0,
+            "not_needed_cycles": 0,
             "retained_from_ms": null
         },
         "groups": null,
@@ -668,8 +670,8 @@ async fn summary_five_minute_cutoff_is_inclusive() {
     let mut expected = legacy_summary_oracle(&storage, &principal_id, now_ms).await;
     expected["summary"]["retained_successful_hits"] = json!(1);
     expected["summary"]["evidence_status"] = json!("unknown");
-    expected["summary"]["cost_saved"] = Value::Null;
-    expected["summary"]["total_avoided"] = Value::Null;
+    expected["summary"]["cost_saved"] = json!(0.0);
+    expected["summary"]["total_avoided"] = json!(0.0);
     expected["summary"]["unknown_cycles"] = json!(1);
     // The joined turn has neither a session row nor renewal evidence, so it is
     // only visible through the deleted-sessions aggregate.
@@ -1147,9 +1149,17 @@ async fn assert_unknown_evidence_does_not_fabricate_pnl() {
     .await;
     assert_eq!(status, StatusCode::OK, "overflow response: {body:?}");
     assert_eq!(body["rows"][0]["evidence_status"], "unknown");
-    // Unknown follow-up evidence avoids $0 so far; the huge token count must
-    // not leak an overflowed saving into the row.
-    assert_eq!(body["rows"][0]["net_pnl"], 0.0);
-    assert_eq!(body["rows"][0]["total_avoided"], 0.0);
+    // Missing cycle evidence leaves avoided/net unknown even with zero spend;
+    // the huge token count must not become an invented saving.
+    assert!(body["rows"][0]["net_pnl"].is_null());
+    assert!(body["rows"][0]["total_avoided"].is_null());
     assert_eq!(body["rows"][0]["total_spent"], 0.0);
+    assert_eq!(body["summary"]["evidence_status"], "unknown");
+    assert!(
+        body["summary"]["unknown_cycles"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert_eq!(body["summary"]["cost_saved"], 0.0);
+    assert_eq!(body["summary"]["total_avoided"], 0.0);
 }

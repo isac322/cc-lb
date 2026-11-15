@@ -964,6 +964,7 @@ fn follow_up_evidence(
                 request_ref: Some(row.request_id.clone()),
                 event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
                 session_key_hash: None,
+                cycle_anchor_ms: None,
             }
         })
         .collect();
@@ -994,6 +995,7 @@ fn follow_up_evidence(
             request_ref: Some(row.request_id.clone()),
             event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
             session_key_hash: Some(session_key_hash),
+            cycle_anchor_ms: None,
         });
     }
     evidence
@@ -6062,6 +6064,7 @@ mod tests {
                 request_ref: Some("req-session".to_owned()),
                 event_ref: Some("source-session".to_owned()),
                 session_key_hash: Some("principal-1/thread:session-1".to_owned()),
+                cycle_anchor_ms: None,
             },
         );
         row.cache_read_input_tokens = Some(0);
@@ -6201,6 +6204,7 @@ mod keepalive_filter_diagnostics_tests {
                             request_ref: Some(id.to_owned()),
                             event_ref: Some(id.to_owned()),
                             session_key_hash: None,
+                            cycle_anchor_ms: None,
                         }
                     };
                     storage

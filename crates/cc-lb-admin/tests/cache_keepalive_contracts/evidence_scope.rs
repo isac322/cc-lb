@@ -113,8 +113,8 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
              (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
               prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
               upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
-              request_ref, event_ref, created_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              request_ref, event_ref, created_at_ms, cycle_anchor_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(evidence_id)
         .bind(cycle_id)
@@ -134,6 +134,10 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
         .bind(format!("request-{evidence_id}"))
         .bind(event_ref)
         .bind(i64::try_from(request_start_ms).expect("evidence timestamp fits i64"))
+        .bind(
+            (evidence_kind == "renewal")
+                .then_some(i64::try_from(turn_start_ms - 301_000).expect("cycle anchor fits i64")),
+        )
         .execute(storage.pool())
         .await
         .expect("seed evidence-scope evidence");

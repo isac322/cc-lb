@@ -17,6 +17,45 @@ use crate::error_map::map_sqlx_error;
 
 const EVIDENCE_ID_BATCH_SIZE: usize = 4_000;
 
+macro_rules! cycle_anchors_sql {
+    () => {
+        cycle_anchors_sql!("")
+    };
+    ($cycle_join:literal) => {
+        concat!(
+            "SELECT cycle_id,
+            COALESCE(MIN(cycle_anchor_ms),
+                CASE WHEN COUNT(lead_ms) > 0 THEN GREATEST(0, MIN(request_start_ms)
+                    - (ARRAY_AGG(GREATEST(ttl_ms - lead_ms, 1000)
+                        ORDER BY request_start_ms ASC, evidence_id ASC)
+                        FILTER (WHERE lead_ms IS NOT NULL))[1])
+                END) AS cycle_anchor_ms,
+            BOOL_AND((prefix_hash IS NOT NULL OR session_key_hash IS NOT NULL)
+                AND prefix_policy_version IS NOT NULL
+                AND prefix_schema_version IS NOT NULL) AS known
+     FROM (
+         SELECT r.*, ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            " AS ttl_ms, (COALESCE(d.config_snapshot,
+                CASE WHEN s.cycle_id = r.cycle_id THEN s.config_snapshot END)::jsonb ->> CASE
+            WHEN r.ttl IN ('5m', '30m') THEN 'refresh_lead_time_5m_secs'
+            ELSE 'refresh_lead_time_1h_secs' END)::BIGINT * 1000 AS lead_ms
+         FROM cache_keepalive_evidence r ",
+            $cycle_join,
+            " LEFT JOIN cache_keepalive_turns t
+           ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
+         LEFT JOIN cache_keepalive_sessions s
+           ON s.principal_id = r.principal_id
+          AND s.session_key_hash = COALESCE(r.session_key_hash, t.session_key_hash)
+         LEFT JOIN cache_keepalive_decisions d
+           ON d.principal_id = r.principal_id AND d.source_ref_id = r.event_ref
+         WHERE r.principal_id = $1 AND r.evidence_kind = 'renewal' AND r.cycle_id IS NOT NULL
+     ) renewal_anchors
+     GROUP BY cycle_id"
+        )
+    };
+}
+
 // statement_timestamp keeps deadline projection stable for every row in a query.
 const REQUEST_MARKER_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL)";
 const REQUEST_FRESH_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > FLOOR(EXTRACT(EPOCH FROM statement_timestamp()))::BIGINT)";
@@ -743,7 +782,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             let source_ref_ids = &source_ref_ids[start.min(source_ref_ids.len())
                 ..(start + EVIDENCE_ID_BATCH_SIZE).min(source_ref_ids.len())];
             let mut renewal_query = QueryBuilder::<Postgres>::new(
-                "SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
+                "WITH selected_evidence AS (SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
             );
             renewal_query.push_bind(principal_id);
             renewal_query.push(" AND (");
@@ -762,7 +801,19 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 renewal_query.push_bind(source_ref_ids);
                 renewal_query.push(")");
             }
-            renewal_query.push(") ORDER BY request_start_ms ASC, evidence_id ASC");
+            renewal_query.push(
+                ")), selected_cycles AS (\
+                    SELECT DISTINCT cycle_id FROM selected_evidence WHERE cycle_id IS NOT NULL\
+                 ), cycle_anchors AS (",
+            );
+            renewal_query.push(cycle_anchors_sql!(
+                "JOIN selected_cycles selected ON selected.cycle_id = r.cycle_id"
+            ));
+            renewal_query.push(
+                ") SELECT e.*, CASE WHEN e.evidence_kind = 'renewal' THEN a.cycle_anchor_ms END AS resolved_cycle_anchor_ms \
+                 FROM selected_evidence e LEFT JOIN cycle_anchors a ON a.cycle_id = e.cycle_id \
+                 ORDER BY e.request_start_ms ASC, e.evidence_id ASC",
+            );
             let renewal_rows = renewal_query
                 .build()
                 .fetch_all(&self.pool)
@@ -821,7 +872,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         ] {
             for hashes in hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
                 let mut follow_up_query = QueryBuilder::<Postgres>::new(
-                    "SELECT * FROM cache_keepalive_evidence \
+                    "SELECT *, NULL::BIGINT AS resolved_cycle_anchor_ms FROM cache_keepalive_evidence \
                  WHERE principal_id = ",
                 );
                 follow_up_query.push_bind(principal_id);
@@ -893,7 +944,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             "value exceeds i64::MAX",
         )?;
         let row = sqlx::query(concat!(
-            "WITH current_cycle_turns AS (
+            "WITH cycle_anchors AS (",
+            cycle_anchors_sql!(),
+            "), current_cycle_turns AS (
                 SELECT s.principal_id, s.session_key_hash, s.cycle_id, t.source_ref_id,
                        t.upstream_id, t.model,
                        ROW_NUMBER() OVER (
@@ -941,6 +994,8 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND (e.prefix_hash IS NOT NULL OR e.session_key_hash IS NOT NULL)
                  AND e.prefix_policy_version IS NOT NULL
                  AND e.prefix_schema_version IS NOT NULL
+                JOIN cycle_anchors ca ON ca.cycle_id = e.cycle_id
+                  AND ca.known AND ca.cycle_anchor_ms IS NOT NULL
                 WHERE a.rn = 1
                   AND FLOOR(EXTRACT(EPOCH FROM statement_timestamp()) * 1000)::BIGINT
                       < e.request_start_ms + ",
@@ -948,12 +1003,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             "
             ),
             attributed_follow_ups AS (
-                SELECT a.principal_id, a.session_key_hash, r.event_ref,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY a.principal_id, a.session_key_hash
-                           ORDER BY f.request_start_ms ASC, f.evidence_id ASC,
-                                    r.request_start_ms DESC, r.evidence_id DESC
-                       ) AS rn
+                SELECT DISTINCT a.principal_id, a.session_key_hash
                 FROM current_renewals a
                 JOIN cache_keepalive_evidence r
                   ON r.principal_id = a.principal_id
@@ -964,12 +1014,16 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND (r.prefix_hash IS NOT NULL OR r.session_key_hash IS NOT NULL)
                  AND r.prefix_policy_version IS NOT NULL
                  AND r.prefix_schema_version IS NOT NULL
+                LEFT JOIN cache_keepalive_turns t
+                  ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
                 JOIN cache_keepalive_evidence f
                   ON f.principal_id = r.principal_id
                  AND f.evidence_kind = 'follow_up'
                  AND f.upstream_id = r.upstream_id
                  AND f.model = r.model
                  AND COALESCE(f.cache_read_input_tokens, 0) > 0
+                 AND COALESCE(t.cache_read_input_tokens + t.cache_creation_input_tokens,
+                     r.cache_read_input_tokens, 0) > 0
                  AND (
                      (r.prefix_hash IS NOT NULL AND f.prefix_hash = r.prefix_hash)
                          OR (
@@ -993,8 +1047,6 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                     FROM attributed_follow_ups f
                     WHERE f.principal_id = a.principal_id
                       AND f.session_key_hash = a.session_key_hash
-                      AND f.rn = 1
-                      AND f.event_ref = a.source_ref_id
                 )
             )
             SELECT
@@ -1021,8 +1073,14 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                          AND e.evidence_kind = 'renewal'
                          AND e.event_ref = t.source_ref_id
                    )) +
-                COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NULL OR e_summary.prefix_hash IS NULL OR e_summary.prefix_policy_version IS NULL OR e_summary.prefix_schema_version IS NULL THEN 1 ELSE 0 END), 0) AS unknown_cycles,
-                COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NOT NULL AND e_summary.prefix_hash IS NOT NULL AND e_summary.prefix_policy_version IS NOT NULL AND e_summary.prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
+                COUNT(DISTINCT CASE WHEN e_summary.cycle_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1 FROM cycle_anchors a
+                        WHERE a.cycle_id = e_summary.cycle_id
+                          AND a.known AND a.cycle_anchor_ms IS NOT NULL
+                    )
+                    THEN COALESCE(e_summary.cycle_id::TEXT, e_summary.evidence_id) END) AS unknown_cycles,
+                COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NOT NULL AND (e_summary.prefix_hash IS NOT NULL OR e_summary.session_key_hash IS NOT NULL) AND e_summary.prefix_policy_version IS NOT NULL AND e_summary.prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
                 MIN(e_summary.request_start_ms) AS retained_from_ms,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t_cost
                  WHERE t_cost.principal_id = $15
@@ -1052,7 +1110,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
              FROM cache_keepalive_evidence e_summary
              WHERE e_summary.principal_id = $13
                AND e_summary.evidence_kind = 'renewal'
-               AND ($14 IS NULL OR e_summary.request_start_ms >= $14 OR EXISTS (
+               AND ($14 IS NULL OR EXISTS (
                    SELECT 1 FROM cache_keepalive_turns t
                    WHERE t.principal_id = e_summary.principal_id
                      AND t.source_ref_id = e_summary.event_ref
@@ -1115,17 +1173,36 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 message: "negative cache keepalive successful hit count".to_owned(),
             })?;
         let group_rows = sqlx::query(concat!(
-"WITH renewals AS (
+            "WITH cycle_anchors AS (",
+            cycle_anchors_sql!(),
+            "), horizon_renewals AS (
                 SELECT *
                 FROM cache_keepalive_evidence
-                WHERE principal_id = $1 AND evidence_kind = 'renewal' AND cycle_id IS NOT NULL
-                  AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL
-                  AND ($2 IS NULL OR request_start_ms >= $2 OR EXISTS (
+                WHERE principal_id = $1 AND evidence_kind = 'renewal'
+                  AND ($2 IS NULL OR EXISTS (
                       SELECT 1 FROM cache_keepalive_turns t
                       WHERE t.principal_id = cache_keepalive_evidence.principal_id
                         AND t.source_ref_id = cache_keepalive_evidence.event_ref
                         AND t.ts * 1000 >= $2
                   ))
+             ),
+             eligible_anchors AS (
+                SELECT a.* FROM cycle_anchors a
+                WHERE a.known AND a.cycle_anchor_ms IS NOT NULL
+                  AND a.cycle_id IN (SELECT cycle_id FROM horizon_renewals)
+             ),
+             renewals AS (
+                SELECT r.*,
+                       COALESCE(t.cache_read_input_tokens + t.cache_creation_input_tokens,
+                           r.cache_read_input_tokens, 0) AS kept_tokens,
+                       t.ts * 1000 AS turn_start_ms
+                FROM cache_keepalive_evidence r
+                JOIN eligible_anchors a ON a.cycle_id = r.cycle_id
+                LEFT JOIN cache_keepalive_turns t
+                  ON t.principal_id = r.principal_id AND t.source_ref_id = r.event_ref
+                WHERE r.principal_id = $1 AND r.evidence_kind = 'renewal'
+                  AND COALESCE(t.cache_read_input_tokens + t.cache_creation_input_tokens,
+                      r.cache_read_input_tokens, 0) > 0
              ),
              qualifying_follow_ups AS (
                 SELECT r.cycle_id, r.principal_id, r.upstream_id, r.model,
@@ -1168,9 +1245,11 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
              ),
              proven AS (
                 SELECT r.*,
+                       f.follow_up_request_start_ms,
+                       LEAST(f.follow_up_cache_read_input_tokens, r.kept_tokens) AS avoided_tokens,
                        ROW_NUMBER() OVER (
                            PARTITION BY r.cycle_id
-                           ORDER BY r.request_start_ms DESC, r.evidence_id DESC
+                           ORDER BY r.request_start_ms ASC, r.evidence_id ASC
                        ) AS rn
                 FROM renewals r
                 JOIN selected_follow_ups f
@@ -1192,87 +1271,63 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                      + ",
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
             "
+             ),
+             outcomes AS (
+                SELECT r.*, r.follow_up_request_start_ms > a.cycle_anchor_ms + ",
+            cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("r.ttl"),
+            " AS saved
+                FROM proven r
+                JOIN cycle_anchors a ON a.cycle_id = r.cycle_id
+                WHERE r.rn = 1
              )
-             SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
+             SELECT r.model, r.ttl, r.saved,
+                    CASE WHEN r.saved THEN SUM(r.avoided_tokens)::BIGINT ELSE 0 END AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
-             FROM proven r
-             WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
-             GROUP BY r.model, r.ttl, r.cache_read_input_tokens
-             ORDER BY r.model, r.ttl, r.cache_read_input_tokens",
+             FROM outcomes r
+             WHERE NOT r.saved OR $2 IS NULL OR r.turn_start_ms >= $2
+             GROUP BY r.model, r.ttl, r.saved, r.avoided_tokens
+             ORDER BY r.model, r.ttl, r.saved, r.avoided_tokens",
         ))
         .bind(principal_id)
         .bind(horizon_start_ms)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
-        let mut observed_cycles = 0_u64;
-        let mut groups = group_rows
-            .into_iter()
-            .map(|row| {
-                let renewals = u64::try_from(
-                    row.try_get::<i64, _>("observed_cycles")
+        let mut not_needed_cycles = 0_u64;
+        let mut groups = Vec::new();
+        for group_row in group_rows {
+            let renewals = u64::try_from(
+                group_row
+                    .try_get::<i64, _>("observed_cycles")
+                    .map_err(map_sqlx_error)?,
+            )
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive observed cycle count".to_owned(),
+            })?;
+            if !group_row
+                .try_get::<bool, _>("saved")
+                .map_err(map_sqlx_error)?
+            {
+                not_needed_cycles = not_needed_cycles.saturating_add(renewals);
+                continue;
+            }
+            groups.push(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
+                model: group_row.try_get("model").map_err(map_sqlx_error)?,
+                ttl: ttl_from_evidence_db(
+                    &group_row
+                        .try_get::<String, _>("ttl")
+                        .map_err(map_sqlx_error)?,
+                )?,
+                avoided_cache_read_tokens: u64::try_from(
+                    group_row
+                        .try_get::<i64, _>("avoided_cache_read_tokens")
                         .map_err(map_sqlx_error)?,
                 )
                 .map_err(|_| StorageError::Corrupted {
-                    message: "negative cache keepalive observed cycle count".to_owned(),
-                })?;
-                observed_cycles = observed_cycles.saturating_add(renewals);
-                Ok(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
-                    model: row.try_get("model").map_err(map_sqlx_error)?,
-                    ttl: ttl_from_evidence_db(
-                        &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
-                    )?,
-                    avoided_cache_read_tokens: u64::try_from(
-                        row.try_get::<i64, _>("avoided_cache_read_tokens")
-                            .map_err(map_sqlx_error)?,
-                    )
-                    .map_err(|_| StorageError::Corrupted {
-                        message: "negative cache keepalive avoided token count".to_owned(),
-                    })?,
-                    renewals,
-                })
-            })
-            .collect::<StorageResult<Vec<_>>>()?;
-        let model_rows = sqlx::query(
-            "SELECT DISTINCT t.model,
-                COALESCE(
-                    (SELECT e.ttl FROM cache_keepalive_evidence e
-                     WHERE e.principal_id = t.principal_id AND e.event_ref = t.source_ref_id
-                       AND e.evidence_kind = 'renewal' LIMIT 1),
-                    (SELECT s.ttl FROM cache_keepalive_sessions s
-                     WHERE s.principal_id = t.principal_id AND s.session_key_hash = t.session_key_hash),
-                    '5m'
-                ) AS ttl
-             FROM cache_keepalive_turns t
-             WHERE t.principal_id = $1
-               AND ($2 IS NULL OR t.ts * 1000 >= $2)
-             ORDER BY t.model, ttl",
-        )
-        .bind(principal_id)
-        .bind(horizon_start_ms)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        for model_row in model_rows {
-            let model = model_row
-                .try_get::<String, _>("model")
-                .map_err(map_sqlx_error)?;
-            let ttl = ttl_from_evidence_db(
-                &model_row
-                    .try_get::<String, _>("ttl")
-                    .map_err(map_sqlx_error)?,
-            )?;
-            if !groups
-                .iter()
-                .any(|group| group.model == model && group.ttl == ttl)
-            {
-                groups.push(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
-                    model,
-                    ttl,
-                    avoided_cache_read_tokens: 0,
-                    renewals: 0,
-                });
-            }
+                    message: "negative cache keepalive avoided token count".to_owned(),
+                })?,
+                renewals,
+            });
         }
         Ok(cc_lb_storage_api::CacheKeepaliveSummaryAggregate {
             renewing_now: row
@@ -1299,6 +1354,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             total_spent_micros: row.try_get("total_spent_micros").map_err(map_sqlx_error)?,
             successful_hits,
             unknown_cycles,
+            not_needed_cycles,
             unknown_costs: row
                 .try_get::<i64, _>("unknown_costs")
                 .map_err(map_sqlx_error)?
@@ -1406,5 +1462,14 @@ fn postgres_evidence_from_row(
         request_ref: row.try_get("request_ref").map_err(map_sqlx_error)?,
         event_ref: row.try_get("event_ref").map_err(map_sqlx_error)?,
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
+        cycle_anchor_ms: row
+            .try_get::<Option<i64>, _>("resolved_cycle_anchor_ms")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                u64::try_from(value).map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive evidence cycle_anchor_ms".to_owned(),
+                })
+            })
+            .transpose()?,
     })
 }

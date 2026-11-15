@@ -26,6 +26,7 @@ export const cacheKeepaliveSummaryFixture: CacheKeepaliveSummary = {
   unlisted_net: 0,
   evidence_status: 'observed',
   unknown_cycles: 0,
+  not_needed_cycles: 0,
   retained_from_ms: BASE_MS - 7 * 24 * 60 * 60 * 1_000,
 };
 
@@ -146,6 +147,7 @@ export function apiDetailFromFixture(
     total_renewals_current_cycle: fixture.attempts ?? 0,
     follow_up_outcomes: {
       observed: 0,
+      not_needed: 0,
       pending: 0,
       no_follow_up: 0,
       unknown: 0,

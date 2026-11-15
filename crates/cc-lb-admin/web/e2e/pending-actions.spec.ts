@@ -165,6 +165,7 @@ async function installPrincipalFixtures(page: Page) {
           unlisted_net: 0,
           evidence_status: 'none',
           unknown_cycles: 0,
+          not_needed_cycles: 0,
           retained_from_ms: null,
         },
         groups: null,

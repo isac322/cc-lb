@@ -19,6 +19,7 @@ pub async fn batch_turn_reads_match_canonical_per_session_reads<B>(backend: Arc<
 where
     B: ConformanceBackend,
 {
+    counterfactual_cycle_economics(Arc::clone(&backend)).await?;
     with_conformance_fixture(backend, |storage| async move {
         let empty = storage
             .list_cache_keepalive_turns_for_sessions(TARGET_PRINCIPAL, &[])
@@ -1093,4 +1094,677 @@ fn turn_fixture(
     };
 
     (event, projections, record)
+}
+
+/// Shared backend QA: natural-expiry boundaries, earliest renewal attribution,
+/// recreation token caps, legacy read-time anchors, and additive summary totals.
+async fn counterfactual_cycle_economics<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let anchor = 1_000_u64;
+        let mut expected_spend = 0_i64;
+        let mut expected_saved_tokens = 0_u64;
+        let mut expected_not_needed = 0_u64;
+        let mut expected_unknown = 0_u64;
+        // name, renewal offsets, follow-up offset, explicit anchor, legacy snapshot,
+        // renewal read, renewal creation, follow-up read, saved tokens, not-needed, unknown.
+        for (
+            index,
+            (
+                name,
+                offsets,
+                follow_up,
+                explicit,
+                snapshot,
+                read,
+                creation,
+                follow_read,
+                saved,
+                redundant,
+                unknown,
+            ),
+        ) in [
+            (
+                "early",
+                vec![270],
+                Some(271),
+                true,
+                false,
+                100,
+                0,
+                100,
+                0,
+                1,
+                0,
+            ),
+            (
+                "saved",
+                vec![270],
+                Some(320),
+                true,
+                false,
+                100,
+                0,
+                100,
+                100,
+                0,
+                0,
+            ),
+            (
+                "multi",
+                vec![270, 540, 550],
+                Some(551),
+                true,
+                false,
+                100,
+                0,
+                100,
+                100,
+                0,
+                0,
+            ),
+            (
+                "boundary",
+                vec![270],
+                Some(300),
+                true,
+                false,
+                100,
+                0,
+                100,
+                0,
+                1,
+                0,
+            ),
+            ("closed", vec![270], None, true, false, 100, 0, 100, 0, 0, 0),
+            (
+                "unknown",
+                vec![270],
+                Some(320),
+                false,
+                false,
+                100,
+                0,
+                100,
+                0,
+                0,
+                1,
+            ),
+            (
+                "follow-cap",
+                vec![270],
+                Some(320),
+                true,
+                false,
+                100,
+                0,
+                60,
+                60,
+                0,
+                0,
+            ),
+            (
+                "kept-cap",
+                vec![270],
+                Some(320),
+                true,
+                false,
+                100,
+                0,
+                200,
+                100,
+                0,
+                0,
+            ),
+            (
+                "recreated",
+                vec![270],
+                Some(320),
+                true,
+                false,
+                0,
+                80,
+                100,
+                80,
+                0,
+                0,
+            ),
+            (
+                "legacy",
+                vec![270],
+                Some(320),
+                false,
+                true,
+                100,
+                0,
+                100,
+                100,
+                0,
+                0,
+            ),
+            (
+                "legacy-early",
+                vec![270],
+                Some(290),
+                false,
+                true,
+                100,
+                0,
+                100,
+                0,
+                1,
+                0,
+            ),
+            (
+                "empty-miss",
+                vec![270],
+                Some(320),
+                true,
+                false,
+                0,
+                0,
+                100,
+                0,
+                0,
+                0,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let session = format!("counterfactual-{name}");
+            let cycle = Uuid::from_u128(90_000 + index as u128);
+            if snapshot || name == "early" {
+                storage
+                    .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                        session_key_hash: session.clone(),
+                        principal_id: TARGET_PRINCIPAL.to_owned(),
+                        accounting_key_id: None,
+                        upstream_id: Uuid::from_u128(11),
+                        cycle_id: cycle,
+                        ttl: CacheTtl::Ttl5m,
+                        cache_anchor_at_unix_secs: anchor,
+                        run_at_unix_secs: anchor + 270,
+                        expires_at_unix_secs: anchor + 300,
+                        encrypted_payload: vec![1],
+                        display_reason: "agent-in-turn".to_owned(),
+                        config_snapshot: CacheKeepaliveConfigSnapshot {
+                            refresh_lead_time_5m_secs: 30,
+                            refresh_lead_time_1h_secs: 300,
+                            max_refreshes_per_session: 12,
+                            max_total_duration_secs: 14_400,
+                            snapshot_max_bytes: 524_288,
+                        },
+                        now_unix_secs: anchor,
+                    })
+                    .await?;
+            }
+            for (ordinal, offset) in offsets.iter().copied().enumerate() {
+                let source = format!("{session}-{ordinal}");
+                let (event, mut projections, _) = turn_fixture(TurnSeed {
+                    source_ref_id: &source,
+                    session_key_hash: &session,
+                    principal_id: TARGET_PRINCIPAL,
+                    accounting_key_id: None,
+                    upstream_id: Uuid::from_u128(11),
+                    model: "claude-sonnet-4-5",
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: creation,
+                    cache_creation_input_tokens_5m: creation,
+                    cache_creation_input_tokens_1h: 0,
+                    cache_read_input_tokens: read + ordinal as u64 * 10,
+                    cost_micros: 7,
+                    hit_miss: if read == 0 { "miss" } else { "hit" },
+                    ts: anchor + offset,
+                });
+                projections.turn.as_mut().expect("turn").cycle_id = Some(cycle);
+                projections.decision.source_ref_id = source.clone();
+                if snapshot {
+                    projections.decision.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
+                        refresh_lead_time_5m_secs: 30,
+                        refresh_lead_time_1h_secs: 300,
+                        max_refreshes_per_session: 12,
+                        max_total_duration_secs: 14_400,
+                        snapshot_max_bytes: 524_288,
+                    });
+                }
+                projections
+                    .evidence
+                    .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+                        evidence_id: format!("{source}-evidence"),
+                        cycle_id: Some(cycle),
+                        evidence_kind: "renewal".to_owned(),
+                        request_start_ms: (anchor + offset) * 1_000,
+                        prefix_fingerprint: None,
+                        prefix_hash: Some(session.clone()),
+                        prefix_policy_version: Some("policy".to_owned()),
+                        prefix_schema_version: Some("schema".to_owned()),
+                        principal_id: TARGET_PRINCIPAL.to_owned(),
+                        upstream_id: Uuid::from_u128(11),
+                        model: "claude-sonnet-4-5".to_owned(),
+                        ttl: CacheTtl::Ttl5m,
+                        hit_miss: Some("hit".to_owned()),
+                        cache_read_input_tokens: Some(read),
+                        cost_micros: Some(7),
+                        request_ref: None,
+                        event_ref: Some(source),
+                        session_key_hash: (!snapshot).then_some(session.clone()),
+                        cycle_anchor_ms: explicit.then_some(anchor * 1_000),
+                    });
+                storage
+                    .append_request_event_with_projections(&event, &projections)
+                    .await?;
+            }
+            let selected = storage
+                .list_cache_keepalive_evidence_for_activity(
+                    TARGET_PRINCIPAL,
+                    &[],
+                    &[format!("{session}-{}", offsets.len() - 1)],
+                    0,
+                    (anchor + 1_000) * 1_000,
+                )
+                .await?;
+            ensure!(
+                selected
+                    .iter()
+                    .filter(|row| row.evidence_kind == "renewal")
+                    .all(|row| row.cycle_anchor_ms
+                        == (explicit || snapshot).then_some(anchor * 1_000)),
+                "{name}: activity evidence must carry the canonical resolved anchor"
+            );
+            if let Some(offset) = follow_up {
+                for offset in std::iter::once(offset).chain((name == "early").then_some(320)) {
+                    storage
+                        .append_request_event_with_evidence(
+                            &RequestEvent {
+                                ts: anchor + offset,
+                                ts_ms: Some((anchor + offset).saturating_mul(1_000)),
+                                event_id: Some(format!("{session}-followup-event-{offset}")),
+                                ..RequestEvent::default()
+                            },
+                            &[cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+                                evidence_id: format!("{session}-followup-{offset}"),
+                                cycle_id: None,
+                                evidence_kind: "follow_up".to_owned(),
+                                request_start_ms: (anchor + offset) * 1_000,
+                                prefix_fingerprint: None,
+                                prefix_hash: Some(session.clone()),
+                                prefix_policy_version: Some("policy".to_owned()),
+                                prefix_schema_version: Some("schema".to_owned()),
+                                principal_id: TARGET_PRINCIPAL.to_owned(),
+                                upstream_id: Uuid::from_u128(11),
+                                model: "claude-sonnet-4-5".to_owned(),
+                                ttl: CacheTtl::Ttl5m,
+                                hit_miss: Some("hit".to_owned()),
+                                cache_read_input_tokens: Some(follow_read),
+                                cost_micros: None,
+                                request_ref: None,
+                                event_ref: None,
+                                session_key_hash: None,
+                                cycle_anchor_ms: None,
+                            }],
+                        )
+                        .await?;
+                }
+            }
+            expected_spend += offsets.len() as i64 * 7;
+            expected_saved_tokens += saved;
+            expected_not_needed += redundant;
+            expected_unknown += unknown;
+            let totals = storage
+                .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                .await?;
+            if name == "legacy-early" {
+                storage
+                    .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                        session_key_hash: session.clone(),
+                        principal_id: TARGET_PRINCIPAL.to_owned(),
+                        accounting_key_id: None,
+                        upstream_id: Uuid::from_u128(11),
+                        cycle_id: Uuid::from_u128(100_000 + index as u128),
+                        ttl: CacheTtl::Ttl5m,
+                        cache_anchor_at_unix_secs: anchor + 500,
+                        run_at_unix_secs: anchor + 770,
+                        expires_at_unix_secs: anchor + 800,
+                        encrypted_payload: vec![1],
+                        display_reason: "agent-in-turn".to_owned(),
+                        config_snapshot: CacheKeepaliveConfigSnapshot {
+                            refresh_lead_time_5m_secs: 10,
+                            refresh_lead_time_1h_secs: 300,
+                            max_refreshes_per_session: 12,
+                            max_total_duration_secs: 14_400,
+                            snapshot_max_bytes: 524_288,
+                        },
+                        now_unix_secs: anchor + 500,
+                    })
+                    .await?;
+                let replaced = storage
+                    .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                    .await?;
+                ensure!(
+                    replaced.not_needed_cycles == expected_not_needed
+                        && replaced.unknown_cycles == expected_unknown
+                );
+                ensure!(
+                    replaced.groups == totals.groups,
+                    "replacement lead must not change historical savings"
+                );
+                let evidence = storage
+                    .list_cache_keepalive_evidence_for_activity(
+                        TARGET_PRINCIPAL,
+                        &[cycle],
+                        &[],
+                        0,
+                        (anchor + 1_000) * 1_000,
+                    )
+                    .await?;
+                ensure!(
+                    evidence
+                        .iter()
+                        .filter(|row| row.evidence_kind == "renewal")
+                        .all(|row| row.cycle_anchor_ms == Some(anchor * 1_000))
+                );
+            }
+            ensure!(totals.total_spent_micros == expected_spend, "{name}: spend");
+            if name == "multi" {
+                let repeated = totals
+                    .groups
+                    .iter()
+                    .find(|g| g.renewals == 2)
+                    .context("two saved cycles with identical token size")?;
+                ensure!(repeated.avoided_cache_read_tokens == 200);
+                ensure!(repeated.avoided_cache_read_tokens / repeated.renewals == 100);
+                let horizon = storage
+                    .read_cache_keepalive_summary_aggregate_for_horizon(
+                        TARGET_PRINCIPAL,
+                        0,
+                        Some((anchor + 500) * 1_000),
+                    )
+                    .await?;
+                ensure!(
+                    horizon.groups.is_empty(),
+                    "credited renewal precedes horizon"
+                );
+                ensure!(horizon.total_spent_micros == 14 && horizon.not_needed_cycles == 0);
+            }
+            ensure!(
+                totals.not_needed_cycles == expected_not_needed,
+                "{name}: not-needed"
+            );
+            ensure!(totals.unknown_cycles == expected_unknown, "{name}: unknown");
+            ensure!(
+                totals
+                    .groups
+                    .iter()
+                    .map(|g| g.avoided_cache_read_tokens)
+                    .sum::<u64>()
+                    == expected_saved_tokens,
+                "{name}: avoided tokens"
+            );
+            let mut session_spend = 0_i64;
+            for hash in (0..=index).map(|i| {
+                format!(
+                    "counterfactual-{}",
+                    [
+                        "early",
+                        "saved",
+                        "multi",
+                        "boundary",
+                        "closed",
+                        "unknown",
+                        "follow-cap",
+                        "kept-cap",
+                        "recreated",
+                        "legacy",
+                        "legacy-early",
+                        "empty-miss",
+                    ][i]
+                )
+            }) {
+                session_spend += storage
+                    .list_cache_keepalive_turns(TARGET_PRINCIPAL, &hash)
+                    .await?
+                    .iter()
+                    .filter_map(|turn| turn.cost_micros)
+                    .sum::<i64>();
+            }
+            ensure!(
+                session_spend == totals.total_spent_micros,
+                "{name}: session/header parity"
+            );
+            if snapshot || name == "early" {
+                storage
+                    .purge_cache_keepalive_expired(anchor + 1_000)
+                    .await?;
+                ensure!(
+                    storage
+                        .get_cache_keepalive_session_for_principal(TARGET_PRINCIPAL, &session)
+                        .await?
+                        .is_none(),
+                    "{name}: session must be purged"
+                );
+                let purged = storage
+                    .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                    .await?;
+                ensure!(
+                    purged.not_needed_cycles == expected_not_needed,
+                    "{name}: purged not-needed"
+                );
+                ensure!(
+                    purged.unknown_cycles == expected_unknown,
+                    "{name}: purged legacy anchor"
+                );
+                ensure!(
+                    purged
+                        .groups
+                        .iter()
+                        .map(|g| g.avoided_cache_read_tokens)
+                        .sum::<u64>()
+                        == expected_saved_tokens,
+                    "{name}: purged totals"
+                );
+            }
+        }
+        let principal = "counterfactual-pending-principal";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let cycle = Uuid::from_u128(99_999);
+        storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: "counterfactual-pending".to_owned(),
+                principal_id: principal.to_owned(),
+                accounting_key_id: None,
+                upstream_id: Uuid::from_u128(11),
+                cycle_id: cycle,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: now.saturating_sub(270),
+                run_at_unix_secs: now,
+                expires_at_unix_secs: now + 300,
+                encrypted_payload: vec![1],
+                display_reason: "agent-in-turn".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: now,
+            })
+            .await?;
+        let (event, mut projections, _) = turn_fixture(TurnSeed {
+            source_ref_id: "counterfactual-pending-turn",
+            session_key_hash: "counterfactual-pending",
+            principal_id: principal,
+            accounting_key_id: None,
+            upstream_id: Uuid::from_u128(11),
+            model: "claude-sonnet-4-5",
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens_5m: 0,
+            cache_creation_input_tokens_1h: 0,
+            cache_read_input_tokens: 100,
+            cost_micros: 7,
+            hit_miss: "hit",
+            ts: now,
+        });
+        projections.turn.as_mut().expect("turn").cycle_id = Some(cycle);
+        projections
+            .evidence
+            .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+                evidence_id: "counterfactual-pending-evidence".to_owned(),
+                cycle_id: Some(cycle),
+                evidence_kind: "renewal".to_owned(),
+                request_start_ms: now * 1_000,
+                prefix_fingerprint: None,
+                prefix_hash: Some("pending-prefix".to_owned()),
+                prefix_policy_version: Some("policy".to_owned()),
+                prefix_schema_version: Some("schema".to_owned()),
+                principal_id: principal.to_owned(),
+                upstream_id: Uuid::from_u128(11),
+                model: "claude-sonnet-4-5".to_owned(),
+                ttl: CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(100),
+                cost_micros: Some(7),
+                request_ref: None,
+                event_ref: Some("counterfactual-pending-turn".to_owned()),
+                session_key_hash: Some("counterfactual-pending".to_owned()),
+                cycle_anchor_ms: Some(now.saturating_sub(270) * 1_000),
+            });
+        storage
+            .append_request_event_with_projections(&event, &projections)
+            .await?;
+        let pending = storage
+            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .await?;
+        ensure!(pending.evidence_status == "pending");
+        ensure!(
+            pending.unknown_cycles == 0
+                && pending.not_needed_cycles == 0
+                && pending.groups.is_empty()
+        );
+        ensure!(pending.total_spent_micros == 7);
+        storage
+            .begin_cache_keepalive_request_fenced("counterfactual-pending", None, now, now + 300)
+            .await?;
+        let mut followup = projections.evidence[0].clone();
+        followup.evidence_id = "counterfactual-in-request-followup".to_owned();
+        followup.evidence_kind = "follow_up".to_owned();
+        followup.cycle_id = None;
+        followup.cycle_anchor_ms = None;
+        followup.request_start_ms = (now + 1) * 1_000;
+        followup.session_key_hash = None;
+        followup.event_ref = None;
+        storage
+            .append_request_event_with_evidence(
+                &RequestEvent {
+                    ts: now + 1,
+                    ts_ms: Some((now + 1).saturating_mul(1_000)),
+                    event_id: Some("counterfactual-in-request-followup-event".to_owned()),
+                    ..RequestEvent::default()
+                },
+                &[followup],
+            )
+            .await?;
+        let observed = storage
+            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .await?;
+        ensure!(observed.evidence_status == "observed" && observed.not_needed_cycles == 1);
+
+        let new_cycle = Uuid::from_u128(100_000);
+        storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: "counterfactual-open-saved".to_owned(),
+                principal_id: principal.to_owned(),
+                accounting_key_id: None,
+                upstream_id: Uuid::from_u128(11),
+                cycle_id: new_cycle,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: now - 540,
+                run_at_unix_secs: now,
+                expires_at_unix_secs: now + 300,
+                encrypted_payload: vec![1],
+                display_reason: "agent-in-turn".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: now,
+            })
+            .await?;
+        for (ordinal, start) in [now - 270, now].into_iter().enumerate() {
+            let source = format!("counterfactual-open-saved-{ordinal}");
+            let mut renewal = projections.clone();
+            let turn = renewal.turn.as_mut().expect("turn");
+            turn.source_ref_id = source.clone();
+            turn.session_key_hash = "counterfactual-open-saved".to_owned();
+            turn.cycle_id = Some(new_cycle);
+            turn.ts = start;
+            renewal.decision.source_ref_id = source.clone();
+            renewal.decision.session_key_hash = Some("counterfactual-open-saved".to_owned());
+            renewal.decision.ts = start;
+            let evidence = &mut renewal.evidence[0];
+            evidence.evidence_id = format!("{source}-evidence");
+            evidence.cycle_id = Some(new_cycle);
+            evidence.event_ref = Some(source.clone());
+            evidence.session_key_hash = Some("counterfactual-open-saved".to_owned());
+            evidence.request_start_ms = start * 1_000;
+            evidence.cycle_anchor_ms = Some((now - 540) * 1_000);
+            evidence.prefix_hash = Some("counterfactual-open-saved-prefix".to_owned());
+            storage
+                .append_request_event_with_projections(
+                    &RequestEvent {
+                        ts: start,
+                        ts_ms: Some(start.saturating_mul(1_000)),
+                        event_id: Some(source),
+                        ..RequestEvent::default()
+                    },
+                    &renewal,
+                )
+                .await?;
+        }
+        let mut followup = projections.evidence[0].clone();
+        followup.evidence_id = "counterfactual-open-saved-followup".to_owned();
+        followup.evidence_kind = "follow_up".to_owned();
+        followup.cycle_id = None;
+        followup.cycle_anchor_ms = None;
+        followup.request_start_ms = (now + 11) * 1_000;
+        followup.prefix_hash = Some("counterfactual-open-saved-prefix".to_owned());
+        followup.session_key_hash = None;
+        followup.event_ref = None;
+        storage
+            .append_request_event_with_evidence(
+                &RequestEvent {
+                    ts: now + 11,
+                    ts_ms: Some((now + 11).saturating_mul(1_000)),
+                    event_id: Some("counterfactual-open-saved-followup-event".to_owned()),
+                    ..RequestEvent::default()
+                },
+                &[followup],
+            )
+            .await?;
+        let saved = storage
+            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .await?;
+        ensure!(saved.evidence_status == "observed" && saved.not_needed_cycles == 1);
+        ensure!(
+            saved
+                .groups
+                .iter()
+                .map(|g| g.avoided_cache_read_tokens)
+                .sum::<u64>()
+                == 100
+        );
+        Ok(())
+    })
+    .await
 }
