@@ -523,6 +523,46 @@ describe('D1: selected credit evidence in the actual upstream route', () => {
     expect(within(caption).getByTitle(title)).not.toBeNull();
   }
 
+  it('D1-03 poll crossing staleness threshold keeps credit row and caption on one clock', () => {
+    vi.setSystemTime(capturedNow * 1000);
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      successQuery<UpstreamsData>({
+        upstreams: [{ ...upstream, kind: 'openai_oauth' }],
+      }),
+    );
+    const observedAt = (capturedNow - 285) * 1000;
+    const windows = structuredClone(capturedWindows).filter(
+      (snapshot) => snapshot.window === 'overage',
+    );
+    windows[0].observed_at_unix_millis = observedAt;
+    windows[0].credits!.observations = {
+      has_credits: { source: 'api', observed_at_unix_millis: observedAt },
+      unlimited: { source: 'api', observed_at_unix_millis: observedAt },
+      balance: { source: 'api', observed_at_unix_millis: observedAt },
+    };
+    const poll = (now: number) => {
+      vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+        successQuery<QuotaLatestData>({
+          now_unix_secs: now,
+          max_staleness_secs: 300,
+          upstreams: [latestRow(structuredClone(windows))],
+        }),
+      );
+    };
+    poll(capturedNow);
+    const view = render(element());
+    expect(quotaSection().getByText('Available')).not.toBeNull();
+    expectCaption(false);
+
+    // Advancing Date alone leaves the route's 60-second interval state at its
+    // first tick. A new query response still causes a normal route rerender.
+    vi.setSystemTime((capturedNow + 30) * 1000);
+    poll(capturedNow + 30);
+    view.rerender(element());
+    expect(quotaSection().getByText('Stale')).not.toBeNull();
+    expectCaptionTimestamp(expectCaption(true), observedAt);
+  });
+
   it.each([false, true])(
     'D1-01 captured fresh API credits ignore unrelated stale header (reversed=%s)',
     (reversed) => {

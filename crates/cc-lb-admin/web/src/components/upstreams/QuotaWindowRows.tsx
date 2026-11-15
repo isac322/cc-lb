@@ -173,6 +173,7 @@ export function QuotaWindowRow({
       <CodexCreditsRow
         observations={creditObservations ?? [snap]}
         maxStalenessSecs={maxStalenessSecs}
+        nowUnixSecs={nowUnixSecs}
         label={label}
       />
     );
@@ -444,13 +445,19 @@ function QuotaResetCells({ resetTime }: { resetTime: number | null }) {
 function CodexCreditsRow({
   observations,
   maxStalenessSecs,
+  nowUnixSecs,
   label,
 }: {
   observations: readonly QuotaSnapshot[];
   maxStalenessSecs?: number;
+  nowUnixSecs: number;
   label?: string;
 }) {
-  const facts = selectCodexCredits(observations, maxStalenessSecs);
+  const facts = selectCodexCredits(
+    observations,
+    maxStalenessSecs,
+    nowUnixSecs * 1000,
+  );
   if (facts == null) return null;
   return (
     <div role="listitem" data-window="unified" className={ROW_CLASS}>

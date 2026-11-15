@@ -1388,11 +1388,14 @@ export function DetailView({
         ),
       };
     }, [selectedLatest, upstream.kind, nowUnixSecs]);
+  // Poll responses can rerender between minute ticks. Credit fields and their
+  // caption must evaluate freshness against the same current render clock.
+  const creditNowUnixMillis = Date.now();
   const quotaFreshnessObservations = useMemo(() => {
     const credits = selectCodexCredits(
       selectedLatest?.windows ?? [],
       quotaLatest.data?.max_staleness_secs,
-      nowUnixSecs * 1000,
+      creditNowUnixMillis,
     );
     return [
       ...quotaCards.filter(
@@ -1404,7 +1407,7 @@ export function DetailView({
   }, [
     selectedLatest,
     quotaLatest.data?.max_staleness_secs,
-    nowUnixSecs,
+    creditNowUnixMillis,
     quotaCards,
     rawMeters,
   ]);
@@ -1751,7 +1754,9 @@ export function DetailView({
               snap={snap}
               creditObservations={selectedLatest?.windows}
               maxStalenessSecs={quotaLatest.data?.max_staleness_secs}
-              nowUnixSecs={nowUnixSecs}
+              nowUnixSecs={
+                snap.credits != null ? creditNowUnixMillis / 1000 : nowUnixSecs
+              }
               placeholder={geminiGroupPlaceholderState(
                 selectedLatest?.windows,
                 snap.window,
