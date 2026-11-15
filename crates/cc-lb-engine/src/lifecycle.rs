@@ -7931,9 +7931,9 @@ impl Lifecycle {
             // absorbs the tail there; otherwise the result (tail or failure)
             // goes to the normal post-loop handling, exactly as without a hold.
             let mut early_decoder_finish: Option<std::io::Result<Vec<u8>>> = None;
-            'upstream: while !native_sse_framing_error {
-                if upstream_body_eof {
-                    // Only the held-body replay chunk below runs after EOF.
+            'upstream: loop {
+                if native_sse_framing_error || upstream_body_eof {
+                    // Reject known framing mismatches before polling; only a held-body replay runs after EOF.
                     break;
                 }
                 let frame = match timed_body_frame(&mut body, &stream_body_io_timing).await {
