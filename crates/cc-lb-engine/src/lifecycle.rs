@@ -1,3 +1,5 @@
+mod gemini_native;
+
 #[path = "realtime_websocket_lifecycle.rs"]
 mod realtime_websocket_lifecycle;
 
@@ -6295,6 +6297,8 @@ impl Lifecycle {
         cache_metadata.cache_control_message_indices.sort_unstable();
         cache_metadata.cache_control_message_indices.dedup();
         let status = response.status();
+        let native_sse_framing_error =
+            gemini_native::rejects_json_success(&ctx, routed.record.kind, &response);
         // Renewal capture is optional; ownership acquired at dispatch is not.
         // In particular, shaping fallback or a dynamic config change can leave
         // an owner even when the initial response-tracking decision was false.
@@ -6349,6 +6353,7 @@ impl Lifecycle {
                 response,
                 signer,
                 body_view.stream(),
+                native_sse_framing_error,
                 active_limit.take(),
                 reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
@@ -6529,6 +6534,7 @@ impl Lifecycle {
         response: Response<Body>,
         signer: Arc<dyn Signer>,
         stream_requested: bool,
+        native_sse_framing_error: bool,
         active_limit: Option<ActiveLimit>,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         duration: Duration,
@@ -6562,8 +6568,9 @@ impl Lifecycle {
         let force_buffered_response = (gemini_catalog && status.is_success())
             || response_affinity_context.capability
                 == ProviderCapability::GeminiCachedContentsCreate;
-        if !force_buffered_response
-            && (response_is_sse || (stream_response && !buffered_transform_required))
+        if native_sse_framing_error
+            || (!force_buffered_response
+                && (response_is_sse || (stream_response && !buffered_transform_required)))
         {
             let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
@@ -6572,6 +6579,7 @@ impl Lifecycle {
                 signer,
                 response_status,
                 stream_requested,
+                native_sse_framing_error,
                 response_accounting_guard,
                 event_ctx.clone(),
                 transform_ctx,
@@ -7646,6 +7654,7 @@ impl Lifecycle {
         signer: Arc<dyn Signer>,
         status: StatusCode,
         stream_requested: bool,
+        native_sse_framing_error: bool,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
@@ -7664,14 +7673,25 @@ impl Lifecycle {
             decompression_output_budget_bytes(self.config.messages_body_cap_bytes);
         let incomplete_sse_event_budget_bytes =
             incomplete_sse_event_budget_bytes(self.config.messages_body_cap_bytes);
-        let usage_decoder =
-            UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
+        let usage_decoder = if native_sse_framing_error {
+            // The request/response framing mismatch is known from headers;
+            // reject it without reading or decoding the upstream JSON body.
+            UsageDecoder::Identity
+        } else {
+            UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes)
+        };
         let downstream_stream_is_identity = matches!(&usage_decoder, UsageDecoder::Identity);
         let upstream_is_sse = is_sse_response(
             &parts.headers,
             stream_requested,
             response_affinity_context.capability,
         );
+        if native_sse_framing_error {
+            sanitize_downstream_stream_headers(&mut parts.headers);
+            parts
+                .headers
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        }
         let success_sse_affinity_gate = upstream_is_sse
             && status.is_success()
             && (response_affinity_context.observe_response_keys
@@ -7707,7 +7727,7 @@ impl Lifecycle {
         {
             sanitize_downstream_stream_headers(&mut parts.headers);
         }
-        if upstream_is_sse {
+        if upstream_is_sse || native_sse_framing_error {
             // SSE inspection can replace, append, or suppress bytes even when
             // no transform hook is active. The upstream length is therefore
             // not a downstream framing contract. Preserve Content-Encoding
@@ -7896,6 +7916,8 @@ impl Lifecycle {
             // independent of the downstream framing, which permits rewritten
             // SSE bytes and no longer advertises the upstream length.
             let mut deferred_terminal_chunks: Vec<Bytes> = Vec::new();
+            // Commit Gemini framing failures before exposing their terminal error frame.
+            let mut deferred_gemini_framing_error: Option<Bytes> = None;
             // Dynamic unsolicited hold: `unsolicited_hold_pending` is set while
             // the unforwarded buffered bytes may carry provider state, and
             // `unsolicited_forwarded_bytes` counts the leading bytes of the
@@ -7912,8 +7934,8 @@ impl Lifecycle {
             // goes to the normal post-loop handling, exactly as without a hold.
             let mut early_decoder_finish: Option<std::io::Result<Vec<u8>>> = None;
             'upstream: loop {
-                if upstream_body_eof {
-                    // Only the held-body replay chunk below runs after EOF.
+                if native_sse_framing_error || upstream_body_eof {
+                    // Reject known framing mismatches before polling; only a held-body replay runs after EOF.
                     break;
                 }
                 let frame = match timed_body_frame(&mut body, &stream_body_io_timing).await {
@@ -9809,20 +9831,23 @@ impl Lifecycle {
                 deferred_terminal_chunks.push(buffer.split().freeze());
             }
             let mut keepalive_framing_complete = true;
-            if upstream_is_sse
-                && (!upstream_error_status || sse_transform_active)
-                && parse_sse_events_active
-                && buffer
-                    .iter()
-                    .any(|byte| !matches!(byte, b'\r' | b'\n'))
-                && stream_upstream_error.is_none()
-                && !stream_provider_error_forwarded
-                && !stream_upstream_error_frame_emitted
-                && stream_transform_error.is_none()
-                && stream_affinity_error.is_none()
+            if native_sse_framing_error
+                || (upstream_is_sse
+                    && (!upstream_error_status || sse_transform_active)
+                    && parse_sse_events_active
+                    && buffer
+                        .iter()
+                        .any(|byte| !matches!(byte, b'\r' | b'\n'))
+                    && stream_upstream_error.is_none()
+                    && !stream_provider_error_forwarded
+                    && !stream_upstream_error_frame_emitted
+                    && stream_transform_error.is_none()
+                    && stream_affinity_error.is_none())
             {
                 keepalive_framing_complete = false;
-                let error_message = if transformed_output_started {
+                let error_message = if native_sse_framing_error {
+                    gemini_native::JSON_SSE_FRAMING_ERROR_MESSAGE.to_owned()
+                } else if transformed_output_started {
                     "upstream SSE response ended with an incomplete event after transform output"
                         .to_owned()
                 } else {
@@ -9840,7 +9865,8 @@ impl Lifecycle {
                         None,
                     );
                 }
-                if success_sse_affinity_gate
+                if native_sse_framing_error
+                    || success_sse_affinity_gate
                     || sse_transform_active
                     || downstream_stream_is_identity
                 {
@@ -9858,7 +9884,11 @@ impl Lifecycle {
                     {
                         o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                     }
-                    if deferred_terminal_chunks.is_empty() {
+                    if response_affinity_context.capability
+                        == ProviderCapability::GeminiGenerateContent
+                    {
+                        deferred_gemini_framing_error = Some(frame);
+                    } else if deferred_terminal_chunks.is_empty() {
                         yield Ok::<Bytes, Infallible>(frame);
                     } else {
                         // Preserve byte order while retaining final-frame
@@ -10241,6 +10271,9 @@ impl Lifecycle {
             }
             for chunk in deferred_terminal_chunks {
                 yield Ok::<Bytes, Infallible>(chunk);
+            }
+            if let Some(frame) = deferred_gemini_framing_error {
+                yield Ok::<Bytes, Infallible>(frame);
             }
         };
         Response::from_parts(
@@ -16411,6 +16444,7 @@ mod tests {
             Arc::new(TestSigner),
             StatusCode::OK,
             false,
+            false,
             None,
             event_ctx.clone(),
             transform_ctx.clone(),
@@ -16446,6 +16480,7 @@ mod tests {
             .finish_success_response(
                 upstream_response(StatusCode::OK, BUFFERED),
                 Arc::new(TestSigner),
+                false,
                 false,
                 None,
                 None,

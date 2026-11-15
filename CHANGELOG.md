@@ -66,6 +66,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Preserve Gemini generation request-event diagnostics after immediate response-body drop for JSON/SSE header mismatches and incomplete SSE events detected by the final framing check after upstream reading. Earlier SSE inspection-limit failures are outside this change. ([#1308](https://github.com/isac322/cc-lb/issues/1308))
+- Reject successful JSON responses from Gemini API-key upstreams when a native `streamGenerateContent` request explicitly selects `alt=sse`. Emit the existing SSE error and record the framing failure without reading the upstream JSON body; OAuth and non-SSE response handling remain unchanged. ([#1308](https://github.com/isac322/cc-lb/issues/1308))
 - Cost metrics now retain request attribution until asynchronous pricing arrives, so completed requests contribute their known cost once. Unknown prices no longer create zero-cost series; pending prices remain bounded by the metrics subscriber's capacity and TTL. ([#1299](https://github.com/isac322/cc-lb/issues/1299))
 - Responses WebSocket now preserves `store:false` encrypted-reasoning ownership across connections, checks it against live response owners, acknowledges client close frames, and forwards unattributed provider errors unchanged before retiring their connection. Existing affinity rows remain compatible. ([#1296](https://github.com/isac322/cc-lb/issues/1296))
 - The Plugins catalog and detail page use the backend registry description for every provider pool, removing contradictory quota guidance for OpenAI and Gemini. ([#1297](https://github.com/isac322/cc-lb/issues/1297))

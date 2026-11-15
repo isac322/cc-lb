@@ -41,6 +41,9 @@ use uuid::Uuid;
 
 use common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
 
+#[path = "response_transform_paths/gemini_native.rs"]
+mod gemini_native;
+
 #[path = "response_transform_paths/semantic_sse_eof.rs"]
 mod semantic_sse_eof;
 
