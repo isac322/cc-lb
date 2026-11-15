@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Gemini OAuth operations, including `loadCodeAssist`, now honor an explicit upstream base URL and preserve custom prefixes while normalizing root, version, and known-action paths. Operation-specific defaults and profile-configured userinfo endpoints remain unchanged. ([#1306](https://github.com/isac322/cc-lb/issues/1306))
 - Clarified the current-mode Codex 0.169.0 and agy 1.5.9 client acceptance boundary, separating shipped route and credential support from per-feature client evidence, vendor services, remote sessions, and local microphone access. Existing supported proxy contracts are unchanged. ([#1318](https://github.com/isac322/cc-lb/issues/1318))
 - `/api/oauth/usage` now omits all-absent Anthropic secondary windows (`seven_day_sonnet`, `seven_day_opus`, `limits`). ([#1279](https://github.com/isac322/cc-lb/issues/1279))
 - The all-provider Overview Upstreams table now uses shared `5h` and `7d` columns. Each row maps its own windows into those columns: Anthropic shows `All models` and `Fable` as separate 7d readings, and Gemini shows `Gemini models` and `Claude & GPT-OSS` as separate readings in the same order in both columns. Readings are never summed or averaged. Provider Overview pages keep their per-provider columns. ([#1279](https://github.com/isac322/cc-lb/issues/1279))

@@ -1374,28 +1374,36 @@ async fn read_only_keepalive_official_header_only_has_no_eligible_prefix()
 #[tokio::test]
 async fn read_only_keepalive_non_anthropic_rejects_without_dispatch_or_observation()
 -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = billing_keepalive_observation_fixture(
-        UpstreamKind::OpenaiOauth,
-        Some("https://api.openai.com"),
-        false,
-    )?;
-    let outcome = fixture
-        .dispatcher
-        .dispatch(
-            &fixture.snapshot,
-            KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned(), u64::MAX),
-        )
-        .await;
-    assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
-    assert!(
-        fixture
-            .http
-            .requests
-            .lock()
-            .map_err(|_| "HTTP requests poisoned")?
-            .is_empty()
-    );
-    assert!(fixture.observations.records.lock().is_empty());
+    for (kind, base) in [
+        (UpstreamKind::OpenaiOauth, "https://api.openai.com"),
+        (
+            UpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com",
+        ),
+        (
+            UpstreamKind::GeminiApiKey,
+            "https://generativelanguage.googleapis.com",
+        ),
+    ] {
+        let fixture = billing_keepalive_observation_fixture(kind, Some(base), false)?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned(), u64::MAX),
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
+        assert!(
+            fixture
+                .http
+                .requests
+                .lock()
+                .map_err(|_| "HTTP requests poisoned")?
+                .is_empty()
+        );
+        assert!(fixture.observations.records.lock().is_empty());
+    }
     Ok(())
 }
 

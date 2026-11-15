@@ -1854,3 +1854,21 @@ async fn provider_native_preflight_preserves_model_list_failure_classification()
     );
     assert!(harness.requests("/v1beta/models/").is_empty());
 }
+
+#[tokio::test]
+async fn gemini_oauth_preflight_remains_unsupported_without_provider_requests() {
+    let harness = harness().await;
+    for suffix in ["", "v1internal", "v1internal:generateContent"] {
+        let response = harness
+            .preflight(
+                "synthetic-unused-key",
+                json!({
+                    "kind": "gemini_oauth",
+                    "base_url": format!("{}{suffix}", harness.fake_url),
+                }),
+            )
+            .await;
+        assert_flat(&response, StatusCode::BAD_REQUEST, "not_api_key_upstream");
+        assert!(harness.requests("/").is_empty());
+    }
+}

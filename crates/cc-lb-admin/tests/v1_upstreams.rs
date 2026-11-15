@@ -1200,6 +1200,28 @@ async fn gemini_oauth_requires_project_id_and_persists_body_project_id_without_s
     assert_eq!(missing_project.status, StatusCode::BAD_REQUEST);
     assert_eq!(body(&missing_project)["error"], "missing_project_id");
 
+    let mismatched_project = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "gemini-mismatched-project",
+            "kind": "gemini_oauth",
+            "project_id": "requested-project",
+            "oauth_tokens": oauth_bundle_json(
+                "synthetic-access",
+                "",
+                None,
+                Some("credential-project"),
+                true
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(mismatched_project.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&mismatched_project)["error"], "project_id_mismatch");
+
     let access_token = "gemini-access-secret";
     let refresh_token = "gemini-refresh-secret";
     let created = request(

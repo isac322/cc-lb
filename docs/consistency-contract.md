@@ -325,12 +325,23 @@ The field is an estimate of the response's quota state, not a billing receipt.
 
 **Subscription display metadata.** OpenAI usage polls merge the plan and email
 from the usage response only after its account ID matches the current
-credential. Gemini polls collect the selected tier and userinfo through the
-credential profile's configured metadata endpoints when metadata is missing
-or the eight-hour metadata cadence is due. This work runs after successful
-quota observation, outside the proxy path. Metadata errors leave the quota
-outcome and previous valid fields intact. Admin metadata reads see the
-committed record; a proxy response does not guarantee that enrichment has run.
+credential. Gemini polls collect the selected tier and userinfo when metadata
+is missing or the eight-hour metadata cadence is due. `loadCodeAssist` uses
+an explicitly configured upstream `base_url`, including a Cloud Code override
+for the Antigravity profile. Without an upstream override, it keeps the
+profile's configured metadata base and existing default host. Userinfo always
+uses the profile's configured endpoint.
+
+An explicit root base resolves to `/v1internal:loadCodeAssist`; version and
+custom prefixes are preserved, and a known terminal action is replaced.
+An explicit upstream `/metadata` becomes `/metadata:loadCodeAssist`, while a
+profile metadata base `/metadata` keeps `/metadata/v1internal:loadCodeAssist`.
+Operation-specific default hosts are unchanged.
+
+This work runs after successful quota observation, outside the proxy path.
+Metadata errors leave the quota outcome and previous valid fields intact.
+Admin metadata reads see the committed record; a proxy response does not
+guarantee that enrichment has run.
 The metadata write compares both the captured credential generation and the
 metadata record read before collection within one storage transaction.
 A delayed observation for a replaced credential, a newer metadata publication,

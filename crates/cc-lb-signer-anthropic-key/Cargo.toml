@@ -16,6 +16,7 @@ async-trait.workspace = true
 bytes.workspace = true
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-domain.workspace = true
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-upstream.workspace = true
 http.workspace = true
 secrecy.workspace = true
