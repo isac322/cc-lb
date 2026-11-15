@@ -3383,11 +3383,32 @@ impl Drop for WsDownstreamReader {
 async fn flush_responses_peer_close(
     sink: futures_util::stream::SplitSink<WebSocket, Message>,
     stream: futures_util::stream::SplitStream<WebSocket>,
+    deadline: tokio::time::Instant,
 ) {
     // A cancelled send can leave application data in SplitSink's slot. Reunite
     // drops that unsent slot so it cannot block the automatically queued reply.
     let mut socket = sink.reunite(stream).expect("matching downstream halves");
-    let _ = tokio::time::timeout(Duration::from_secs(1), socket.flush()).await;
+    let _ = tokio::time::timeout_at(deadline, socket.flush()).await;
+}
+
+async fn close_responses_downstream(
+    mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut reader: WsDownstreamReader,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let _ = tokio::time::timeout_at(deadline, sink.send(Message::Close(None))).await;
+    // The reader may consume a peer close while the shutdown send is pending.
+    // Use its result even when the send failed with SendAfterClosing.
+    match tokio::time::timeout_at(deadline, &mut reader.task).await {
+        Ok(Ok((true, stream))) => {
+            flush_responses_peer_close(sink, stream, deadline).await;
+        }
+        Ok(_) => {}
+        Err(_) => {
+            reader.task.abort();
+            let _ = (&mut reader.task).await;
+        }
+    }
 }
 
 async fn relay_responses_websocket(
@@ -3667,16 +3688,15 @@ async fn relay_responses_websocket(
         if let Ok((peer_closed, stream)) = (&mut client_reader.task).await
             && peer_closed
         {
-            flush_responses_peer_close(downstream_sink, stream).await;
+            flush_responses_peer_close(
+                downstream_sink,
+                stream,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
         }
     } else {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(1),
-            downstream_sink.send(Message::Close(None)),
-        )
-        .await;
-        client_reader.task.abort();
-        let _ = (&mut client_reader.task).await;
+        close_responses_downstream(downstream_sink, client_reader).await;
     }
     for (_, mut connection) in connections.drain() {
         connection.task.abort();
@@ -7180,7 +7200,12 @@ mod tests {
                             peer_close,
                             Message::Close(Some(frame)) if frame.code == 1000
                         ));
-                        flush_responses_peer_close(sink, stream).await;
+                        flush_responses_peer_close(
+                            sink,
+                            stream,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        )
+                        .await;
                         closed_tx.send(()).await.expect("shutdown is signalled");
                     })
                 }
@@ -7218,6 +7243,54 @@ mod tests {
             .await
             .expect("close cleanup completes")
             .expect("close cleanup signal arrives");
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ws1296_drain_shutdown_rechecks_peer_close_before_dropping_reader() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+        let router = Router::new().route(
+            "/ws",
+            get(|upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(|socket| async move {
+                    let (sink, mut stream) = socket.split();
+                    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+                    let reader = WsDownstreamReader {
+                        task: tokio::spawn(async move {
+                            let close = stream.next().await.unwrap().unwrap();
+                            assert!(
+                                matches!(close, Message::Close(Some(frame)) if frame.code == 1000)
+                            );
+                            observed_tx.send(()).unwrap();
+                            (true, stream)
+                        }),
+                    };
+                    // The drain branch has already been selected. The reader
+                    // consumes Close before its shutdown send reaches the socket.
+                    observed_rx.await.unwrap();
+                    assert!(reader.task.is_finished());
+                    close_responses_downstream(sink, reader).await;
+                })
+            }),
+        );
+        let (address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        client
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("drain close acknowledgement arrives")
+            .expect("drain must not discard the reader's close reply")
+            .expect("drain must complete the peer close handshake");
+        assert!(
+            matches!(reply, UpstreamMessage::Close(Some(frame)) if frame.code == CloseCode::Normal)
+        );
         proxy_task.abort();
     }
 
