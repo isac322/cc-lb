@@ -7133,6 +7133,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws1296_eof_and_read_error_do_not_synthesize_normal_close() {
+        use tokio::io::AsyncWriteExt as _;
+
+        for malformed_frame in [false, true] {
+            let router = websocket_test_router(Vec::new(), TerminalStrategy::FirstPick).await;
+            let (address, proxy_task) = spawn_proxy_router(router).await;
+            let (mut client, _) = connect_async(websocket_request(address))
+                .await
+                .expect("downstream handshake succeeds");
+            if malformed_frame {
+                // A client data frame must be masked; this produces a read error.
+                client.get_mut().write_all(&[0x81, 0x00]).await.unwrap();
+            } else {
+                client.get_mut().shutdown().await.unwrap();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("abnormal client termination releases the socket");
+            assert!(
+                !matches!(&result, Some(Ok(UpstreamMessage::Close(Some(frame))))
+                    if u16::from(frame.code) == 1000),
+                "EOF and protocol errors must not be acknowledged as normal close"
+            );
+            proxy_task.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn ws1296_unattributed_native_error_retires_two_named_lanes_without_duplicates() {
         const NATIVE_ERROR: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Unsupported parameter: stream_id"}}"#;
         const RECOVERED: &str = r#"{"type":"response.completed","stream_id":"a","response":{"id":"resp-recovered","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
