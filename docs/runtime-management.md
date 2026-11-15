@@ -32,7 +32,7 @@ Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
 - Anthropic Messages: web-search `encrypted_content`, file ids in `file` / `container_upload` blocks, and container ids.
-- OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
+- OpenAI HTTP Responses also records typed `compaction` and `compaction_summary` items when they carry `encrypted_content`; nested tool-schema annotations are request data, not provider-owned state.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
 - Gemini cachedContents creation: the exact `POST /gemini/v1beta/cachedContents` operation is available only with Gemini API-key upstreams and explicit-caching Gemini 2.5 and Gemini 3 family models. Gemini 4+ explicit caching, other models, and non-create `cachedContents` API surfaces remain HTTP `404 operation_not_supported`. cc-lb forwards the request body unchanged and binds a successful canonical response `name` in the form `cachedContents/<id>` to the selected upstream before returning success; later `generateContent` and `countTokens` requests that reference that name remain pinned to its owner.
@@ -112,6 +112,8 @@ Not yet supported: cachedContents operations other than create, file upload/down
 An unsupported operation under a provider prefix returns HTTP **404**, with a provider-shaped `operation_not_supported` error and the message `<method> <canonical-path> is not supported by cc-lb yet`. It produces one terminal request event after authentication, without selecting an upstream. Scoped Gemini Live WebSocket handshakes follow the same rule. Unprefixed unsupported paths retain their previous rejection behavior.
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
+
+OpenAI Responses `POST` requests accept identity bodies and authenticated `Content-Encoding: zstd` bodies on `/v1/responses` and `/openai/v1/responses`. The compressed input is bounded by `messages_body_cap_bytes`; the decoded body is bounded by the same cap. Malformed, truncated, checksum-invalid, stacked, duplicate, or unsupported encodings return `400 invalid_request_error` without upstream dispatch. A decoded body over the cap returns `413`. Authentication runs before the proxy reads or decodes the body.
 
 #### OpenAI Responses WebSocket continuation and errors
 
