@@ -428,6 +428,7 @@ pub struct GeminiSubscriptionSigner {
     clock: ClockHandle,
     content_target: GeminiOAuthTarget,
     antigravity: Option<AntigravityRequestProfile>,
+    catalog_endpoint: Option<Url>,
 }
 
 #[derive(Clone)]
@@ -437,6 +438,13 @@ struct AntigravityRequestProfile {
 }
 
 impl GeminiSubscriptionSigner {
+    /// Supplies the discovery endpoint resolved by the owning credential factory.
+    /// No host selection or discovery fallback is performed by the signer.
+    pub fn with_catalog_endpoint(mut self, endpoint: Url) -> Self {
+        self.catalog_endpoint = Some(endpoint);
+        self
+    }
+
     /// Access-only imports supply their expiry; rotating credentials use
     /// [`Self::new_refreshing`] so expiry is checked with refresh skew.
     pub fn new(
@@ -512,6 +520,7 @@ impl GeminiSubscriptionSigner {
             clock,
             content_target,
             antigravity: None,
+            catalog_endpoint: None,
         })
     }
 
@@ -866,6 +875,44 @@ impl Signer for GeminiSubscriptionSigner {
             self.never_refresh,
             self.clock.as_ref(),
         )?;
+        if shaped.method() == http::Method::GET
+            && (shaped.url().path().starts_with("/v1beta/models/")
+                || shaped.url().path().starts_with("/v1/models/"))
+        {
+            return Err(SignerError::SigningFailed {
+                reason: "Gemini OAuth single-model metadata is not supported".to_owned(),
+            });
+        }
+        if shaped.method() == http::Method::GET
+            && matches!(shaped.url().path(), "/v1beta/models" | "/v1/models")
+        {
+            let project = self
+                .project_id
+                .as_deref()
+                .filter(|project| !project.trim().is_empty())
+                .ok_or_else(|| SignerError::SigningFailed {
+                    reason: "Gemini OAuth catalog requires a stored project".to_owned(),
+                })?;
+            let endpoint =
+                self.catalog_endpoint
+                    .clone()
+                    .ok_or_else(|| SignerError::SigningFailed {
+                        reason: "Gemini OAuth catalog endpoint was not resolved".to_owned(),
+                    })?;
+            shaped.set_url(endpoint);
+            shaped.set_method(http::Method::POST);
+            shaped.set_body(Bytes::from(
+                serde_json::to_vec(&json!({"project": project})).map_err(|_| {
+                    SignerError::SigningFailed {
+                        reason: "Gemini OAuth catalog body could not be serialized".to_owned(),
+                    }
+                })?,
+            ));
+            shaped.headers_mut().remove(CONTENT_LENGTH);
+            shaped
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
         let wrapped = wrap_gemini_code_assist_request(
             &mut shaped,
             self.project_id.as_deref(),
@@ -2521,6 +2568,86 @@ mod tests {
                             (profile == GeminiOAuthProfile::Antigravity).then_some("antigravity")
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_resolved_catalog_target_preserves_tenant_query_and_credentials() {
+        let content_base: Url = "http://content.invalid/content/v1internal"
+            .parse()
+            .expect("content URL");
+        let catalog_base: Url =
+            "http://catalog.invalid/metadata/v1internal:loadCodeAssist?tenant=one&key=discard#discard"
+                .parse()
+                .expect("catalog URL");
+        for profile in [
+            GeminiOAuthProfile::GeminiCli,
+            GeminiOAuthProfile::Antigravity,
+        ] {
+            let content_target = resolve_gemini_oauth_target(
+                profile,
+                Some(&content_base),
+                None,
+                None,
+                GeminiOAuthOperation::GenerateContent,
+            )
+            .expect("resolved content target");
+            let catalog_target = resolve_gemini_oauth_target(
+                profile,
+                Some(&catalog_base),
+                None,
+                None,
+                GeminiOAuthOperation::FetchAvailableModels,
+            )
+            .expect("resolved catalog target");
+            let signer = GeminiSubscriptionSigner::new_for_target(
+                "access-token",
+                Some("stored-project"),
+                None,
+                Arc::new(cc_lb_clock::SystemClock),
+                content_target,
+            )
+            .expect("signer")
+            .with_catalog_endpoint(catalog_target.endpoint());
+            let signer = if profile == GeminiOAuthProfile::Antigravity {
+                signer
+                    .with_antigravity_user_agent("antigravity/test")
+                    .expect("Antigravity headers")
+            } else {
+                signer
+            };
+            for path in ["/v1/models", "/v1beta/models"] {
+                let mut shaped = shaped_request();
+                shaped.set_method(Method::GET);
+                shaped.set_url(
+                    format!("http://downstream.invalid{path}?tenant=downstream&key=downstream")
+                        .parse()
+                        .expect("native catalog URL"),
+                );
+                for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                    shaped
+                        .headers_mut()
+                        .insert(name, HeaderValue::from_static("downstream"));
+                }
+                let signed = sign_request(&signer, shaped).await.expect("signed catalog");
+                assert_eq!(signed.method(), Method::POST);
+                assert_eq!(signed.url().host_str(), Some("catalog.invalid"));
+                assert_eq!(
+                    signed.url().path(),
+                    "/metadata/v1internal:fetchAvailableModels"
+                );
+                assert_eq!(signed.url().query(), Some("tenant=one"));
+                assert!(signed.url().fragment().is_none());
+                let body: Value = serde_json::from_slice(signed.body()).expect("catalog body");
+                assert_eq!(body, json!({"project": "stored-project"}));
+                assert_eq!(
+                    header_values(&signed, "authorization"),
+                    ["Bearer access-token"]
+                );
+                for name in ["x-api-key", "x-goog-api-key", "api-key"] {
+                    assert!(signed.headers().get(name).is_none());
                 }
             }
         }

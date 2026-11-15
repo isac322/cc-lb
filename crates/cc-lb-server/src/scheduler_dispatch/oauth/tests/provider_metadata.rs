@@ -928,6 +928,7 @@ async fn assert_gemini_explicit_destination_matrix_with_query(
             &upstream,
             &credential,
             fixture.clock.clone(),
+            fixture.dispatch.config.oauth.gemini.as_ref(),
             fixture.dispatch.config.oauth.antigravity.as_ref(),
         )
         .expect("real content signer");

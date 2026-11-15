@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Gemini OAuth model-list routes now use project-scoped `FetchAvailableModels` and expose observed native catalog fields. Per-upstream quota reads retain separate timestamped `raw_summary` and `raw_fallback` provider snapshots, fenced to the current credential binding and OAuth profile. ([#1310](https://github.com/isac322/cc-lb/issues/1310))
 - `GET /admin/v1/subscription-quotas/latest` now includes optional `period_unknown_meters` for Gemini OAuth upstreams when provider buckets omit period labels. ([#1279](https://github.com/isac322/cc-lb/issues/1279))
 - Codex credit observations now retain raw decimal balances and field-specific freshness across response headers, usage API polls, and Responses WebSocket `codex.rate_limits` frames. The admin API exposes per-upstream and OpenAI pool balance history, while the web UI shows a compact integer balance with a small history graph and overlays absolute credit history on the existing quota chart.
 - Request events may include nullable `included_estimated` or `credits_estimated` funding evidence when a complete, request-matched main-limit response supports it. Ambiguous or connection-only observations remain null.

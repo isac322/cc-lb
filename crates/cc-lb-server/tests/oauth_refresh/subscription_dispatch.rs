@@ -316,6 +316,7 @@ async fn make_lifecycle(
     };
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         Some(&antigravity),
         fixture.aead.clone(),
         Some(lazy),

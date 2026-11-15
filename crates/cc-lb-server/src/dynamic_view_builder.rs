@@ -170,6 +170,7 @@ pub fn ensure_wasm_cached(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_dynamic_view(
     stores: &Stores,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
@@ -233,6 +234,7 @@ pub async fn build_dynamic_view(
         aead,
         lazy_refresher,
         clock.clone(),
+        gemini_config.cloned().unwrap_or_default(),
         antigravity_config.cloned().unwrap_or_default(),
     ));
     let snapshot = Arc::new(UpstreamStatusSnapshot {
@@ -1122,6 +1124,7 @@ struct DbCompositeSignerFactory {
     refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
     router_chosen_upstream_name: Option<String>,
     clock: cc_lb_clock::ClockHandle,
+    gemini_config: Arc<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
 }
 
@@ -1132,6 +1135,7 @@ impl DbCompositeSignerFactory {
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         clock: cc_lb_clock::ClockHandle,
+        gemini_config: cc_lb_config::GeminiOAuthConfig,
         antigravity_config: cc_lb_config::AntigravityOAuthConfig,
     ) -> Self {
         Self {
@@ -1142,6 +1146,7 @@ impl DbCompositeSignerFactory {
             refresh_locks: cc_lb_signer_anthropic_oauth::new_refresh_locks(),
             router_chosen_upstream_name: None,
             clock,
+            gemini_config: Arc::new(gemini_config),
             antigravity_config: Arc::new(antigravity_config),
         }
     }
@@ -1155,6 +1160,7 @@ impl DbCompositeSignerFactory {
             refresh_locks: self.refresh_locks.clone(),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
             clock: self.clock.clone(),
+            gemini_config: self.gemini_config.clone(),
             antigravity_config: self.antigravity_config.clone(),
         }
     }
@@ -1257,6 +1263,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                     record,
                     &tokens,
                     self.clock.clone(),
+                    Some(&self.gemini_config),
                     Some(&self.antigravity_config),
                     true,
                 )?;
@@ -1276,6 +1283,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                         store: self.upstream_store.clone(),
                         aead: self.aead.clone(),
                         clock: self.clock.clone(),
+                        gemini_config: self.gemini_config.clone(),
                         antigravity_config: self.antigravity_config.clone(),
                         refresh_handle,
                         refresh_locks: self.refresh_locks.clone(),
@@ -1320,15 +1328,24 @@ pub(crate) fn build_subscription_signer(
     record: &UpstreamRecord,
     tokens: &cc_lb_aead::OAuthTokenBundle,
     clock: cc_lb_clock::ClockHandle,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
 ) -> Result<Arc<dyn Signer>, SignerError> {
-    build_subscription_signer_with_policy(record, tokens, clock, antigravity_config, false)
+    build_subscription_signer_with_policy(
+        record,
+        tokens,
+        clock,
+        gemini_config,
+        antigravity_config,
+        false,
+    )
 }
 
 fn build_subscription_signer_with_policy(
     record: &UpstreamRecord,
     tokens: &cc_lb_aead::OAuthTokenBundle,
     clock: cc_lb_clock::ClockHandle,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
     refreshing: bool,
 ) -> Result<Arc<dyn Signer>, SignerError> {
@@ -1352,15 +1369,16 @@ fn build_subscription_signer_with_policy(
             Ok(Arc::new(signer))
         }
         UpstreamKind::GeminiOauth => {
+            let profile = match tokens.oauth_profile {
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                    cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli
+                }
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                    cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity
+                }
+            };
             let target = cc_lb_oauth_protocol::resolve_gemini_oauth_target(
-                match tokens.oauth_profile {
-                    cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
-                        cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli
-                    }
-                    cc_lb_aead::GeminiOAuthProfile::Antigravity => {
-                        cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity
-                    }
-                },
+                profile,
                 record.base_url.as_ref(),
                 antigravity_config.map(|config| &config.code_assist_url),
                 None,
@@ -1394,6 +1412,25 @@ fn build_subscription_signer_with_policy(
                         .unwrap_or(cc_lb_oauth_protocol::ANTIGRAVITY_OAUTH_USER_AGENT),
                 )?,
             };
+            let metadata_default = match profile {
+                cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli => {
+                    gemini_config.map(|config| &config.code_assist_url)
+                }
+                cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity => {
+                    antigravity_config.map(|config| &config.code_assist_url)
+                }
+            };
+            let catalog_target = cc_lb_oauth_protocol::resolve_gemini_oauth_target(
+                profile,
+                record.base_url.as_ref(),
+                None,
+                metadata_default,
+                cc_lb_oauth_protocol::GeminiOAuthOperation::FetchAvailableModels,
+            )
+            .map_err(|_| SignerError::SigningFailed {
+                reason: "Gemini OAuth catalog endpoint could not be resolved".to_owned(),
+            })?;
+            let signer = signer.with_catalog_endpoint(catalog_target.endpoint());
             Ok(Arc::new(signer))
         }
         _ => Err(SignerError::SigningFailed {
@@ -1462,6 +1499,7 @@ struct RefreshingSubscriptionSigner {
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     clock: cc_lb_clock::ClockHandle,
+    gemini_config: Arc<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
     refresh_handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>,
     refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
@@ -1557,6 +1595,7 @@ impl RefreshingSubscriptionSigner {
                     &record,
                     &tokens,
                     self.clock.clone(),
+                    Some(&self.gemini_config),
                     Some(&self.antigravity_config),
                     true,
                 )?;
@@ -1582,6 +1621,7 @@ impl RefreshingSubscriptionSigner {
             &record,
             &tokens,
             self.clock.clone(),
+            Some(&self.gemini_config),
             Some(&self.antigravity_config),
             true,
         )?;
@@ -3112,6 +3152,7 @@ mod tests {
         let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
         build_dynamic_view(
             stores,
+            config.oauth.gemini.as_ref(),
             config.oauth.antigravity.as_ref(),
             Arc::new(AeadService::from_master_key([19; 32])),
             None,
@@ -3379,28 +3420,68 @@ mod tests {
             cc_lb_aead::GeminiOAuthProfile::GeminiCli,
             cc_lb_aead::GeminiOAuthProfile::Antigravity,
         ] {
-            for (endpoint, prefix) in [
-                ("http://override.invalid/", "/v1internal"),
-                ("http://override.invalid/v1internal", "/v1internal"),
-                (
-                    "http://override.invalid/v1internal:generateContent",
-                    "/v1internal",
-                ),
-                ("http://override.invalid/gateway", "/gateway"),
-                (
-                    "http://override.invalid/gateway/v1internal",
-                    "/gateway/v1internal",
-                ),
-                (
-                    "http://override.invalid/gateway/v1internal:streamGenerateContent",
-                    "/gateway/v1internal",
-                ),
-                (
-                    "http://override.invalid/gateway/v1internal:countTokens",
-                    "/gateway/v1internal",
-                ),
-            ] {
-                cases.push((profile, None, Some(endpoint), "override.invalid", prefix));
+            let metadata_endpoint =
+                "https://configured.invalid/metadata?tenant=one#metadata-fragment";
+            cases.push((
+                profile,
+                Some(metadata_endpoint),
+                None,
+                match profile {
+                    cc_lb_aead::GeminiOAuthProfile::GeminiCli => "cloudcode-pa.googleapis.com",
+                    cc_lb_aead::GeminiOAuthProfile::Antigravity => "configured.invalid",
+                },
+                "/v1internal",
+            ));
+            for configured_endpoint in [None, Some(metadata_endpoint)] {
+                for (endpoint, host, prefix) in [
+                    (
+                        "http://override.invalid/",
+                        "override.invalid",
+                        "/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/v1internal",
+                        "override.invalid",
+                        "/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/v1internal:generateContent",
+                        "override.invalid",
+                        "/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/gateway",
+                        "override.invalid",
+                        "/gateway",
+                    ),
+                    (
+                        "http://override.invalid/gateway/v1internal",
+                        "override.invalid",
+                        "/gateway/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/gateway/v1internal:streamGenerateContent",
+                        "override.invalid",
+                        "/gateway/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/gateway/v1internal:countTokens",
+                        "override.invalid",
+                        "/gateway/v1internal",
+                    ),
+                    (
+                        "http://override.invalid/gateway?tenant=one#override-fragment",
+                        "override.invalid",
+                        "/gateway",
+                    ),
+                    (
+                        "https://cloudcode-pa.googleapis.com/tenant/v1internal:fetchAvailableModels?tenant=one#override-fragment",
+                        "cloudcode-pa.googleapis.com",
+                        "/tenant/v1internal",
+                    ),
+                ] {
+                    cases.push((profile, configured_endpoint, Some(endpoint), host, prefix));
+                }
             }
         }
         for (profile, configured_endpoint, override_endpoint, expected_host, expected_prefix) in
@@ -3420,12 +3501,14 @@ mod tests {
                 )
                 .expect("encrypted credential"),
             );
+            let mut gemini_config = cc_lb_config::GeminiOAuthConfig::default();
             let mut config = cc_lb_config::AntigravityOAuthConfig {
                 user_agent: "antigravity/custom-config".to_owned(),
                 ..Default::default()
             };
             if let Some(endpoint) = configured_endpoint {
                 config.code_assist_url = endpoint.parse().expect("configured URL");
+                gemini_config.code_assist_url = endpoint.parse().expect("configured Gemini URL");
             }
             let factory = DbCompositeSignerFactory::new(
                 vec![record],
@@ -3433,6 +3516,7 @@ mod tests {
                 aead.clone(),
                 None,
                 Arc::new(TestClock::new_at_secs(1_700_000_000)),
+                gemini_config,
                 config,
             )
             .with_router_choice_state(stored.name.clone());
@@ -3444,7 +3528,7 @@ mod tests {
                 let mut shaped = shaped_request();
                 shaped.set_url(
                     format!(
-                        "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:{action}"
+                        "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:{action}?tenant=client&key=synthetic"
                     )
                     .parse()
                     .expect("request URL"),
@@ -3472,9 +3556,27 @@ mod tests {
                     "profile={profile:?}, override={override_endpoint:?}"
                 );
                 assert_eq!(
-                    signed.url().query(),
-                    (action == "streamGenerateContent").then_some("alt=sse")
+                    signed
+                        .url()
+                        .query_pairs()
+                        .find(|(key, _)| key == "tenant")
+                        .map(|(_, value)| value.into_owned()),
+                    Some("client".to_owned())
                 );
+                assert_eq!(
+                    signed
+                        .url()
+                        .query_pairs()
+                        .find(|(key, _)| key == "alt")
+                        .map(|(_, value)| value.into_owned()),
+                    (action == "streamGenerateContent").then(|| "sse".to_owned())
+                );
+                assert_eq!(
+                    signed.url().query_pairs().count(),
+                    1 + usize::from(action == "streamGenerateContent")
+                );
+                assert!(!signed.url().query_pairs().any(|(key, _)| key == "key"));
+                assert!(signed.url().fragment().is_none());
                 let body: serde_json::Value =
                     serde_json::from_slice(signed.body()).expect("envelope");
                 assert_eq!(body["request"]["contents"], serde_json::json!([]));
@@ -3513,6 +3615,57 @@ mod tests {
                     Some(&http::HeaderValue::from_static(expected_ua))
                 );
             }
+            let metadata_source: url::Url = override_endpoint
+                .or(configured_endpoint)
+                .unwrap_or(match profile {
+                    cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                        "https://cloudcode-pa.googleapis.com"
+                    }
+                    cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                        "https://daily-cloudcode-pa.googleapis.com"
+                    }
+                })
+                .parse()
+                .expect("metadata source");
+            let metadata_prefix = if override_endpoint.is_none()
+                && configured_endpoint.is_some_and(|endpoint| endpoint.contains("/metadata"))
+            {
+                "/metadata/v1internal"
+            } else {
+                expected_prefix
+            };
+            for path in ["/v1/models", "/v1beta/models"] {
+                let mut shaped = shaped_request();
+                shaped.set_method(http::Method::GET);
+                shaped.set_url(
+                    format!("https://generativelanguage.googleapis.com{path}")
+                        .parse()
+                        .expect("catalog URL"),
+                );
+                shaped.set_body(bytes::Bytes::new());
+                let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+                    .await
+                    .expect("signed catalog request");
+                assert_eq!(signed.method(), http::Method::POST);
+                assert_eq!(signed.url().origin(), metadata_source.origin());
+                assert_eq!(
+                    signed.url().path(),
+                    format!("{metadata_prefix}:fetchAvailableModels")
+                );
+                assert_eq!(signed.url().query(), metadata_source.query());
+                assert!(signed.url().fragment().is_none());
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(signed.body())
+                        .expect("catalog body"),
+                    serde_json::json!({"project": "project-123"})
+                );
+                assert_eq!(
+                    signed.headers().get(http::header::AUTHORIZATION),
+                    Some(&http::HeaderValue::from_static(
+                        "Bearer gemini-profile-access"
+                    ))
+                );
+            }
         }
     }
     #[tokio::test]
@@ -3542,6 +3695,7 @@ mod tests {
                 aead.clone(),
                 None,
                 clock.clone(),
+                cc_lb_config::GeminiOAuthConfig::default(),
                 cc_lb_config::AntigravityOAuthConfig::default(),
             )
             .with_router_choice_state(stored.name.clone());
@@ -3641,6 +3795,7 @@ mod tests {
                 Arc::new(AeadService::from_master_key([19; 32])),
                 None,
                 Arc::new(TestClock::new_at_secs(1_700_000_000)),
+                cc_lb_config::GeminiOAuthConfig::default(),
                 cc_lb_config::AntigravityOAuthConfig::default(),
             )
             .with_router_choice_state("workspace-key".to_owned());
@@ -3819,6 +3974,7 @@ mod tests {
             Arc::new(sink),
             1800,
             clock,
+            None,
             None,
         );
 
@@ -4096,6 +4252,7 @@ mod tests {
         let forced = build_dynamic_view(
             &stores,
             None,
+            None,
             aead.clone(),
             None,
             holder.generation(),
@@ -4130,6 +4287,7 @@ mod tests {
             sink,
             1800,
             clock,
+            None,
             None,
         );
         reconciler.reconcile_once().await.expect("reconcile runs");
@@ -4281,6 +4439,7 @@ mod tests {
         aead: Arc<AeadService>,
         handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>,
         clock: cc_lb_clock::ClockHandle,
+        config: &cc_lb_config::Config,
     ) -> DbCompositeSignerFactory {
         DbCompositeSignerFactory::new(
             vec![record.clone()],
@@ -4288,10 +4447,8 @@ mod tests {
             aead,
             Some(handle),
             clock,
-            cc_lb_config::AntigravityOAuthConfig {
-                user_agent: "antigravity/test".to_owned(),
-                ..Default::default()
-            },
+            config.oauth.gemini.clone().unwrap_or_default(),
+            config.oauth.antigravity.clone().unwrap_or_default(),
         )
         .with_router_choice_state(record.name)
     }
@@ -4332,10 +4489,17 @@ mod tests {
             fail: false,
             gate: None,
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("OpenAI signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("OpenAI signer");
 
         let first = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
             .await
@@ -4363,72 +4527,214 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let (_dir, storage) = storage_fixture(42 + index as u8).await;
-            let aead = Arc::new(AeadService::from_master_key([19; 32]));
-            let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-            let mut tokens = expired_tokens();
-            tokens.oauth_profile = profile;
-            let record = oauth_record(
-                &storage,
-                &aead,
-                "refresh-gemini",
-                UpstreamKind::GeminiOauth,
-                tokens,
-                None,
-            )
-            .await;
-            let handle = Arc::new(DynamicRefreshHandle {
-                storage: storage.clone(),
-                aead: aead.clone(),
-                refreshed_access_token: "new-gemini".to_owned(),
-                calls: AtomicUsize::new(0),
-                fail: false,
-                gate: None,
-            });
-            let signer = refreshing_factory(record, storage, aead, handle, clock)
-                .build(&Upstream::GeminiDirect { base_url: None })
-                .await
-                .expect("Gemini signer");
-            let mut shaped = shaped_request();
-            shaped.set_url(
-                "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+            let mut config = cc_lb_config::Config::default();
+            config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+                code_assist_url: "https://cli-metadata.invalid/cli-metadata?tenant=cli#fragment"
                     .parse()
-                    .expect("Gemini URL"),
-            );
-            shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
-            shaped.headers_mut().insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_static("GeminiCLI/existing"),
-            );
-            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
-                .await
-                .expect("refresh and sign Gemini");
-            assert_eq!(
-                signed.headers().get(http::header::AUTHORIZATION),
-                Some(&http::HeaderValue::from_static("Bearer new-gemini"))
-            );
-            let body: serde_json::Value =
-                serde_json::from_slice(signed.body()).expect("Gemini envelope");
-            assert_eq!(body["project"], "project");
-            match profile {
-                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
-                    assert!(body.get("userAgent").is_none());
+                    .expect("CLI metadata URL"),
+                ..Default::default()
+            });
+            config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+                code_assist_url:
+                    "https://antigravity-metadata.invalid/antigravity-metadata?tenant=antigravity#fragment"
+                        .parse().expect("Antigravity metadata URL"),
+                user_agent: "antigravity/test".to_owned(),
+                ..Default::default()
+            });
+            let (default_content, default_catalog) = match profile {
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => (
+                    "https://cloudcode-pa.googleapis.com/v1internal:generateContent?tenant=client",
+                    "https://cli-metadata.invalid/cli-metadata/v1internal:fetchAvailableModels?tenant=cli",
+                ),
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => (
+                    "https://antigravity-metadata.invalid/v1internal:generateContent?tenant=client",
+                    "https://antigravity-metadata.invalid/antigravity-metadata/v1internal:fetchAvailableModels?tenant=antigravity",
+                ),
+            };
+            for (base_url, content_endpoint, catalog_endpoint) in [
+                (None, default_content, default_catalog),
+                (
+                    Some("https://cloudcode-pa.googleapis.com/stored/prefix?tenant=one#fragment"),
+                    "https://cloudcode-pa.googleapis.com/stored/prefix:generateContent?tenant=client",
+                    "https://cloudcode-pa.googleapis.com/stored/prefix:fetchAvailableModels?tenant=one",
+                ),
+                (
+                    Some(
+                        "http://override.invalid/gateway/v1internal:loadCodeAssist?tenant=one#fragment",
+                    ),
+                    "http://override.invalid/gateway/v1internal:generateContent?tenant=client",
+                    "http://override.invalid/gateway/v1internal:fetchAvailableModels?tenant=one",
+                ),
+            ] {
+                for reuse_stored_token in [false, true] {
+                    let (_dir, storage) = storage_fixture(42 + index as u8).await;
+                    let aead = Arc::new(AeadService::from_master_key([19; 32]));
+                    let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+                    let mut tokens = expired_tokens();
+                    tokens.oauth_profile = profile;
+                    tokens.expires_at_unix_secs = 1_700_000_060;
+                    let record = oauth_record(
+                        &storage,
+                        &aead,
+                        "refresh-gemini",
+                        UpstreamKind::GeminiOauth,
+                        tokens,
+                        base_url,
+                    )
+                    .await;
+                    let handle = Arc::new(DynamicRefreshHandle {
+                        storage: storage.clone(),
+                        aead: aead.clone(),
+                        refreshed_access_token: "new-gemini".to_owned(),
+                        calls: AtomicUsize::new(0),
+                        fail: false,
+                        gate: None,
+                    });
+                    let signer = refreshing_factory(
+                        record.clone(),
+                        storage.clone(),
+                        aead.clone(),
+                        handle.clone(),
+                        clock.clone(),
+                        &config,
+                    )
+                    .build(&Upstream::GeminiDirect { base_url: None })
+                    .await
+                    .expect("Gemini signer");
+                    let request = |catalog: bool| {
+                        let mut shaped = shaped_request();
+                        shaped.set_url(if catalog {
+                            "https://generativelanguage.googleapis.com/v1beta/models"
+                        } else {
+                            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent?tenant=client&key=synthetic"
+                        }.parse().expect("Gemini request URL"));
+                        if catalog {
+                            shaped.set_method(http::Method::GET);
+                            shaped.set_body(bytes::Bytes::new());
+                        } else {
+                            shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+                        }
+                        shaped.headers_mut().insert(
+                            http::header::USER_AGENT,
+                            http::HeaderValue::from_static("GeminiCLI/existing"),
+                        );
+                        shaped
+                    };
+                    let assert_signed = |signed: &SignedRequest, catalog: bool, token: &str| {
+                        assert_eq!(
+                            signed.url().as_str(),
+                            if catalog {
+                                catalog_endpoint
+                            } else {
+                                content_endpoint
+                            },
+                            "profile={profile:?}, stored={base_url:?}, reuse={reuse_stored_token}"
+                        );
+                        assert!(!signed.url().query_pairs().any(|(key, _)| key == "key"));
+                        assert_eq!(signed.method(), http::Method::POST);
+                        assert_eq!(
+                            signed
+                                .headers()
+                                .get(http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok()),
+                            Some(format!("Bearer {token}").as_str())
+                        );
+                        let body: serde_json::Value =
+                            serde_json::from_slice(signed.body()).expect("Gemini envelope");
+                        if catalog {
+                            assert_eq!(body, serde_json::json!({"project": "project"}));
+                            return;
+                        }
+                        assert_eq!(body["project"], "project");
+                        assert_eq!(body["model"], "gemini-3-pro");
+                        assert_eq!(body["request"]["contents"], serde_json::json!([]));
+                        match profile {
+                            cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                                assert!(body.get("userAgent").is_none());
+                                assert_eq!(
+                                    signed.headers().get(http::header::USER_AGENT),
+                                    Some(&http::HeaderValue::from_static("GeminiCLI/existing"))
+                                );
+                            }
+                            cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                                assert_eq!(body["userAgent"], "antigravity");
+                                assert!(body.get("requestType").is_none());
+                                assert!(
+                                    body["requestId"]
+                                        .as_str()
+                                        .is_some_and(|id| id.starts_with("agent-"))
+                                );
+                                assert_eq!(
+                                    signed.headers().get(http::header::USER_AGENT),
+                                    Some(&http::HeaderValue::from_static("antigravity/test"))
+                                );
+                            }
+                        }
+                    };
+                    for refreshed in [false, true] {
+                        if refreshed {
+                            clock.set_unix_secs(1_700_000_061);
+                            if reuse_stored_token {
+                                let mut tokens = expired_tokens();
+                                tokens.oauth_profile = profile;
+                                tokens.access_token = "new-gemini".to_owned();
+                                tokens.expires_at_unix_secs = 1_900_000_000;
+                                let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                                    &aead,
+                                    &tokens,
+                                    record.id.as_bytes(),
+                                )
+                                .expect("encrypt newer stored token");
+                                UpstreamStore::store_oauth_tokens(
+                                    storage.as_ref(),
+                                    record.id,
+                                    record.revision,
+                                    encrypted,
+                                    false,
+                                )
+                                .await
+                                .expect("persist newer token");
+                            }
+                        }
+                        for catalog in [false, true] {
+                            let signed =
+                                cc_lb_upstream::sign_request(signer.as_ref(), request(catalog))
+                                    .await
+                                    .expect("sign before and after token reconstruction");
+                            assert_signed(
+                                &signed,
+                                catalog,
+                                if refreshed {
+                                    "new-gemini"
+                                } else {
+                                    "old-access"
+                                },
+                            );
+                        }
+                        assert_eq!(
+                            handle.calls.load(Ordering::SeqCst),
+                            usize::from(refreshed && !reuse_stored_token)
+                        );
+                    }
+                    let decision = signer
+                        .on_unauthorized(&UpstreamError::Unauthorized {
+                            status: http::StatusCode::UNAUTHORIZED,
+                            body: None,
+                        })
+                        .await;
+                    let RetryDecision::Refresh { new_signer } = decision else {
+                        panic!("Gemini 401 must rebuild a signer for one retry");
+                    };
+                    for catalog in [false, true] {
+                        let signed =
+                            cc_lb_upstream::sign_request(new_signer.as_ref(), request(catalog))
+                                .await
+                                .expect("sign forced-refresh retry");
+                        assert_signed(&signed, catalog, "new-gemini");
+                    }
                     assert_eq!(
-                        signed.headers().get(http::header::USER_AGENT),
-                        Some(&http::HeaderValue::from_static("GeminiCLI/existing"))
-                    );
-                }
-                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
-                    assert_eq!(body["userAgent"], "antigravity");
-                    assert!(body.get("requestType").is_none());
-                    assert!(
-                        body["requestId"]
-                            .as_str()
-                            .is_some_and(|id| id.starts_with("agent-"))
-                    );
-                    assert_eq!(
-                        signed.headers().get(http::header::USER_AGENT),
-                        Some(&http::HeaderValue::from_static("antigravity/test"))
+                        handle.calls.load(Ordering::SeqCst),
+                        1 + usize::from(!reuse_stored_token)
                     );
                 }
             }
@@ -4457,10 +4763,17 @@ mod tests {
             fail: false,
             gate: None,
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("OpenAI signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("OpenAI signer");
 
         let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
             .await
@@ -4509,10 +4822,17 @@ mod tests {
             fail: false,
             gate: None,
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("OpenAI signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("OpenAI signer");
         let decision = signer
             .on_unauthorized(&UpstreamError::Unauthorized {
                 status: http::StatusCode::UNAUTHORIZED,
@@ -4555,10 +4875,17 @@ mod tests {
             fail: false,
             gate: Some(gate.clone()),
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("OpenAI signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("OpenAI signer");
         let first_signer = signer.clone();
         let entered = gate.entered.notified();
         let first = tokio::spawn(async move {
@@ -4601,10 +4928,17 @@ mod tests {
             fail: false,
             gate: None,
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("access-only signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("access-only signer");
         let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
             .await
             .expect("access-only request signs");
@@ -4637,10 +4971,17 @@ mod tests {
             fail: true,
             gate: None,
         });
-        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
-            .build(&Upstream::OpenaiDirect { base_url: None })
-            .await
-            .expect("OpenAI signer");
+        let signer = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        )
+        .build(&Upstream::OpenaiDirect { base_url: None })
+        .await
+        .expect("OpenAI signer");
         let error = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
             .await
             .expect_err("refresh failure must terminate signing");

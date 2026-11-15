@@ -142,6 +142,27 @@ pub struct GeminiPeriodUnknownQuotaRecord {
     pub binding: GeminiRawQuotaBinding,
     pub gemini: Option<GeminiPeriodUnknownGroupRecord>,
     pub third_party: Option<GeminiPeriodUnknownGroupRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_responses: Option<GeminiRawQuotaResponses>,
+}
+
+/// Provider JSON retained as evidence, never interpreted as quota windows.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GeminiRawQuotaResponses {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_profile: Option<cc_lb_aead::GeminiOAuthProfile>,
+    /// Merge-order watermark, not the observation time of both retained bodies.
+    pub observed_at_unix_millis: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Successful receipt time of `summary`, independent of `fallback`.
+    pub summary_observed_at_unix_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Successful receipt time of `fallback`, independent of `summary`.
+    pub fallback_observed_at_unix_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -258,6 +279,7 @@ pub fn merge_gemini_period_unknown_quota(
             third_party,
             GeminiQuotaGroupKind::ThirdParty,
         ),
+        raw_responses: base.and_then(|record| record.raw_responses.clone()),
     }
 }
 
@@ -279,28 +301,87 @@ fn parse_record(raw: &str) -> Option<GeminiPeriodUnknownQuotaRecord> {
     Some(record)
 }
 
-pub async fn persist_gemini_period_unknown_quota(
+/// Persist one owner-scoped observation, including at most one fallback body.
+/// Only object bodies with explicit per-response receipt times update raw evidence.
+pub async fn persist_gemini_quota_observation(
     store: &dyn MetaStore,
     upstream_id: Uuid,
     binding: GeminiRawQuotaBinding,
     gemini: GeminiGroupPollUpdate,
     third_party: GeminiGroupPollUpdate,
+    responses: Option<GeminiRawQuotaResponses>,
 ) -> StorageResult<()> {
+    if binding.identity_sha256.is_none() && (!binding.is_unscoped() || responses.is_some()) {
+        return Ok(());
+    }
+    let responses = responses.and_then(|mut responses| {
+        // Composite completion is not the receipt time of either provider body.
+        if responses
+            .summary
+            .as_ref()
+            .is_none_or(|body| !body.is_object())
+            || responses.summary_observed_at_unix_millis.is_none()
+        {
+            responses.summary = None;
+            responses.summary_observed_at_unix_millis = None;
+        }
+        if responses
+            .fallback
+            .as_ref()
+            .is_none_or(|body| !body.is_object())
+            || responses.fallback_observed_at_unix_millis.is_none()
+        {
+            responses.fallback = None;
+            responses.fallback_observed_at_unix_millis = None;
+        }
+        (responses.summary.is_some() || responses.fallback.is_some()).then_some(responses)
+    });
     if matches!(
         (&gemini, &third_party),
         (
             GeminiGroupPollUpdate::Unchanged,
             GeminiGroupPollUpdate::Unchanged
         )
-    ) {
+    ) && responses.is_none()
+    {
         return Ok(());
     }
     let key = gemini_period_unknown_quota_meta_key(upstream_id);
     for _ in 0..8 {
         let raw = store.get_meta_value(&key).await?;
         let existing = raw.as_deref().and_then(parse_record);
-        let merged =
+        let mut merged =
             merge_gemini_period_unknown_quota(existing.as_ref(), &binding, &gemini, &third_party);
+        if merged.binding == binding
+            && let Some(incoming) = responses.as_ref()
+        {
+            let mut next = incoming.clone();
+            if let Some(current) = merged
+                .raw_responses
+                .as_ref()
+                .filter(|current| current.oauth_profile == incoming.oauth_profile)
+            {
+                next.observed_at_unix_millis = next
+                    .observed_at_unix_millis
+                    .max(current.observed_at_unix_millis);
+                if next.summary.is_none()
+                    || current.summary_observed_at_unix_millis
+                        > next.summary_observed_at_unix_millis
+                {
+                    next.summary = current.summary.clone();
+                    next.summary_observed_at_unix_millis = current.summary_observed_at_unix_millis;
+                }
+                if next.fallback.is_none()
+                    || current.fallback_observed_at_unix_millis
+                        > next.fallback_observed_at_unix_millis
+                {
+                    next.fallback = current.fallback.clone();
+                    next.fallback_observed_at_unix_millis =
+                        current.fallback_observed_at_unix_millis;
+                }
+            }
+            merged.raw_responses = Some(next);
+        }
         if Some(&merged) == existing.as_ref() {
             return Ok(());
         }

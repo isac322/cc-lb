@@ -144,9 +144,11 @@ async fn build(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &std::path::Path,
 ) -> Arc<DynamicView> {
+    let (gemini_config, antigravity_config) = catalog_configs();
     build_dynamic_view(
         stores,
-        None,
+        Some(&gemini_config),
+        Some(&antigravity_config),
         Arc::new(AeadService::from_master_key([1; 32])),
         None,
         current_generation,
@@ -160,6 +162,164 @@ async fn build(
     )
     .await
     .expect("dynamic view builds")
+}
+
+pub(super) fn catalog_configs() -> (
+    cc_lb_config::GeminiOAuthConfig,
+    cc_lb_config::AntigravityOAuthConfig,
+) {
+    (
+        cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: "https://cli-metadata.example.test/tenant/cli?tenant=cli#discard"
+                .parse()
+                .expect("CLI metadata URL"),
+            ..Default::default()
+        },
+        cc_lb_config::AntigravityOAuthConfig {
+            code_assist_url: "https://agy-metadata.example.test/tenant/agy?tenant=agy#discard"
+                .parse()
+                .expect("Antigravity metadata URL"),
+            ..Default::default()
+        },
+    )
+}
+
+pub(super) async fn create_catalog_upstreams(
+    storage: &SqliteStorage,
+    aead: &AeadService,
+) -> Vec<(cc_lb_storage_api::UpstreamRecord, &'static str)> {
+    use cc_lb_aead::GeminiOAuthProfile::{Antigravity, GeminiCli};
+
+    let mut upstreams = Vec::new();
+    for (name, profile, base_url, expected_url) in [
+        (
+            "catalog-cli-config",
+            GeminiCli,
+            None,
+            "https://cli-metadata.example.test/tenant/cli/v1internal:fetchAvailableModels?tenant=cli",
+        ),
+        (
+            "catalog-agy-config",
+            Antigravity,
+            None,
+            "https://agy-metadata.example.test/tenant/agy/v1internal:fetchAvailableModels?tenant=agy",
+        ),
+        (
+            "catalog-cli-override",
+            GeminiCli,
+            Some("https://cloudcode-pa.googleapis.com/stored/cli?tenant=stored-cli#discard"),
+            "https://cloudcode-pa.googleapis.com/stored/cli:fetchAvailableModels?tenant=stored-cli",
+        ),
+        (
+            "catalog-agy-override",
+            Antigravity,
+            Some("https://stored-metadata.example.test/stored/agy?tenant=stored-agy#discard"),
+            "https://stored-metadata.example.test/stored/agy:fetchAvailableModels?tenant=stored-agy",
+        ),
+    ] {
+        let created = UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: name.to_owned(),
+                kind: UpstreamKind::GeminiOauth,
+                base_url: base_url.map(|url| url.parse().expect("stored metadata URL")),
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("catalog upstream created");
+        let tokens = OAuthTokenBundle {
+            access_token: "synthetic-catalog-access".to_owned(),
+            refresh_token: String::new(),
+            account_id: None,
+            project_id: Some("synthetic-catalog-project".to_owned()),
+            oauth_profile: profile,
+            expires_at_unix_secs: u64::MAX,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: Vec::new(),
+            never_refresh: true,
+        };
+        let encrypted = EncryptedOAuthTokens::encrypt(aead, &tokens, created.id.as_bytes())
+            .expect("encrypt synthetic catalog credential");
+        let record = UpstreamStore::store_oauth_tokens(
+            storage,
+            created.id,
+            created.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("catalog credential stored");
+        upstreams.push((record, expected_url));
+    }
+    upstreams
+}
+
+pub(super) async fn assert_catalog_urls(
+    view: &DynamicView,
+    upstreams: &[(cc_lb_storage_api::UpstreamRecord, &str)],
+) {
+    for (record, expected_url) in upstreams {
+        let upstream = cc_lb_domain::Upstream::GeminiDirect {
+            base_url: record.base_url.clone(),
+        };
+        let dialect = cc_lb_engine::lifecycle::native_route_dialect(record);
+        let context = cc_lb_upstream::DialectShapeContext {
+            request_id: "catalog-rebuild-request".to_owned(),
+            downstream_headers: http::HeaderMap::new(),
+            method: http::Method::GET,
+            path: "/v1beta/models".to_owned(),
+            query: None,
+            body_bytes: bytes::Bytes::new(),
+        };
+        let principal = cc_lb_domain::Principal {
+            id: "catalog-rebuild-principal".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+        };
+        let shaped =
+            cc_lb_upstream::shape_request(dialect.as_ref(), &context, &upstream, &principal)
+                .expect("shape native catalog request");
+        let factory = view.signer_factory.with_router_choice(record.name.clone());
+        let signer = factory
+            .build(&upstream)
+            .await
+            .expect("build catalog signer from dynamic view");
+        let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+            .await
+            .expect("sign native catalog request");
+        assert_eq!(signed.url().as_str(), *expected_url, "{}", record.name);
+        assert_eq!(signed.method(), &http::Method::POST);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(signed.body()).expect("catalog JSON"),
+            serde_json::json!({"project": "synthetic-catalog-project"}),
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalog_metadata_endpoints_survive_changed_revision_rebind() {
+    let (dir, storage) = storage_fixture().await;
+    let upstreams =
+        create_catalog_upstreams(&storage, &AeadService::from_master_key([1; 32])).await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let initial = build(&stores, 0, &runtime, dir.path()).await;
+    assert_catalog_urls(&initial, &upstreams).await;
+
+    create_principal(&storage, "catalog-rebind-revision").await;
+    let rebuilt = build(&stores, initial.generation, &runtime, dir.path()).await;
+    assert_eq!(rebuilt.generation, initial.generation + 1);
+    assert_ne!(
+        rebuilt.upstream_status_snapshot.revision_hash,
+        initial.upstream_status_snapshot.revision_hash,
+    );
+    assert_catalog_urls(&rebuilt, &upstreams).await;
 }
 
 #[tokio::test]

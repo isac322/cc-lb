@@ -143,6 +143,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         None,
+        None,
         fixture.aead.clone(),
         Some(lazy),
         0,

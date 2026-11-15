@@ -28,6 +28,8 @@ mod drain;
 #[cfg(not(loom))]
 mod error_format;
 #[cfg(not(loom))]
+mod gemini_oauth_catalog;
+#[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
 pub mod instrumented_connector;

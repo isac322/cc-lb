@@ -326,6 +326,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         None,
+        None,
         fixture.aead.clone(),
         Some(lazy),
         0,
@@ -450,6 +451,7 @@ async fn routable_upstream_ids(fixture: &Fixture, principal: &str) -> Vec<Uuid> 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         None,
         fixture.aead.clone(),
         None,
@@ -662,6 +664,7 @@ async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         None,
         fixture.aead.clone(),
         Some(lazy_handle),

@@ -1189,6 +1189,7 @@ async fn build_app_with_storage_inner(
         });
     let initial_view = build_dynamic_view(
         &stores,
+        config.oauth.gemini.as_ref(),
         config.oauth.antigravity.as_ref(),
         aead.clone(),
         lazy_refresher.clone(),
@@ -1221,6 +1222,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        gemini_config: config.oauth.gemini.clone(),
         antigravity_config: config.oauth.antigravity.clone(),
     }));
     let notify_rx = notify_listener.subscribe_with_retry().await;
@@ -1550,6 +1552,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        gemini_config: config.oauth.gemini.clone(),
         antigravity_config: config.oauth.antigravity.clone(),
     });
     let signals = signal::install(
@@ -1766,6 +1769,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        gemini_config: config.oauth.gemini.clone(),
         antigravity_config: config.oauth.antigravity.clone(),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
@@ -2138,6 +2142,7 @@ struct ServerDynamicViewRebinder {
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
+    gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
@@ -2149,6 +2154,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
     ) -> anyhow::Result<Arc<DynamicView>> {
         Ok(build_dynamic_view(
             &self.stores,
+            self.gemini_config.as_ref(),
             self.antigravity_config.as_ref(),
             self.aead.clone(),
             self.lazy_refresher.clone(),
@@ -2178,6 +2184,7 @@ struct ReconcilerParams {
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
+    gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
@@ -2195,6 +2202,7 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.prompt_cache_observation_sink,
         params.subscription_quota_routing_max_staleness_secs,
         params.clock,
+        params.gemini_config,
         params.antigravity_config,
     ));
     tokio::spawn(reconciler.run());

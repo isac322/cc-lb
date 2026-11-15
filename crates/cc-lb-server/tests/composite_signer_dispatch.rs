@@ -675,6 +675,7 @@ impl Fixture {
         let view = build_dynamic_view(
             self.stores.as_ref(),
             None,
+            None,
             self.aead.clone(),
             None,
             0,

@@ -98,11 +98,16 @@ impl Provider {
 }
 
 fn raw_quota() -> Value {
-    json!({"buckets":[
-        {"modelId":"gemini-2.5-pro","remainingFraction":0.4,"resetTime":"2023-11-14T23:13:20Z","remainingAmount":"40"},
-        {"modelId":"claude-sonnet","remainingFraction":0.3,"resetTime":"2023-11-20T22:13:20Z"},
-        {"modelId":"gpt-oss","remainingFraction":0.6}
-    ]})
+    json!({
+        "description": "Provider-native quota description",
+        "groups": [{"opaqueGroup": {"unknown": true}}],
+        "futureField": {"nested": [1, "two", null]},
+        "buckets":[
+            {"modelId":"gemini-2.5-pro","remainingFraction":0.4,"resetTime":"2023-11-14T23:13:20Z","remainingAmount":"40","unknownBucketField":true},
+            {"modelId":"claude-sonnet","remainingFraction":0.3,"resetTime":"2023-11-20T22:13:20Z"},
+            {"modelId":"gpt-oss","remainingFraction":0.6}
+        ]
+    })
 }
 
 fn healthy_summary() -> Value {
@@ -124,7 +129,11 @@ async fn seed(
             profile,
             project_id: Some("synthetic-project"),
         },
-        &serde_json::to_vec(&json!({"summary":healthy_summary()})).unwrap(),
+        &serde_json::to_vec(&json!({
+            "summary": healthy_summary(),
+            "summary_observed_at_unix_millis": 1_699_999_000_000_u64
+        }))
+        .unwrap(),
         1_699_999_000_000,
     )
     .unwrap();
@@ -140,9 +149,11 @@ async fn seed(
             profile,
             project_id: Some("synthetic-project"),
         },
-        &serde_json::to_vec(
-            &json!({"summary":null,"fallback":{"gemini":raw_quota(),"third_party":raw_quota()}}),
-        )
+        &serde_json::to_vec(&json!({
+            "summary": null,
+            "fallback": raw_quota(),
+            "fallback_observed_at_unix_millis": 1_699_999_000_000_u64
+        }))
         .unwrap(),
         1_699_999_000_000,
     )
@@ -158,12 +169,13 @@ async fn seed(
         bundle.project_id.as_deref(),
         upstream.oauth_token_generation,
     );
-    persist_gemini_period_unknown_quota(
+    persist_gemini_quota_observation(
         fixture.storage.as_ref(),
         id,
         binding,
         raw.gemini,
         raw.third_party,
+        raw.responses,
     )
     .await
     .unwrap();
@@ -238,6 +250,26 @@ async fn gemini_poll_fallback_matrix() {
         );
         assert_eq!(raw.gemini.as_ref().unwrap().meters.len(), 1);
         assert_eq!(raw.third_party.as_ref().unwrap().meters.len(), 2);
+        let responses = raw.raw_responses.as_ref().unwrap();
+        assert_eq!(responses.summary, Some(json!({"groups":[]})));
+        assert_eq!(responses.fallback, Some(raw_quota()));
+        let serialized = serde_json::to_value(&raw).unwrap();
+        assert!(serialized["gemini"].get("fallback").is_none());
+        assert!(serialized["third_party"].get("fallback").is_none());
+        assert!(
+            serialized["raw_responses"]["fallback"]
+                .get("gemini")
+                .is_none()
+        );
+        assert!(
+            serialized["raw_responses"]["fallback"]
+                .get("third_party")
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::from_value::<GeminiPeriodUnknownQuotaRecord>(serialized).unwrap(),
+            raw
+        );
 
         // Every failed fallback preserves durable canonical history and raw meters.
         let malformed_body = br#"{"k":LEAK99}"#;
@@ -252,6 +284,7 @@ async fn gemini_poll_fallback_matrix() {
             (403, "{}"),
             (429, "{}"),
             (200, std::str::from_utf8(malformed_body).unwrap()),
+            (200, "[]"),
         ] {
             provider.state.quota_status.store(status, Ordering::SeqCst);
             *provider.state.quota.lock().unwrap() = body.to_owned();
@@ -275,7 +308,7 @@ async fn gemini_poll_fallback_matrix() {
             let captured = String::from_utf8(logs.0.lock().expect("captured logs lock").clone())
                 .expect("UTF-8 tracing output");
             assert!(!captured.contains("LEAK99"));
-            if status == 200 {
+            if status == 200 && body != "[]" {
                 assert!(captured.contains("Gemini quota fallback JSON parse failed"));
             }
             assert_eq!(
@@ -284,11 +317,22 @@ async fn gemini_poll_fallback_matrix() {
             );
             assert!(fixture._quota_rx.try_recv().is_err());
             assert_eq!(latest(&fixture, upstream.id).await, legacy);
+            let after = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.gemini, raw.gemini);
+            assert_eq!(after.third_party, raw.third_party);
+            let responses = after.raw_responses.as_ref().unwrap();
+            let before = raw.raw_responses.as_ref().unwrap();
+            assert_eq!(responses.summary, before.summary);
+            assert_eq!(responses.fallback, before.fallback);
             assert_eq!(
-                load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
-                    .await
-                    .unwrap(),
-                Some(raw.clone())
+                responses.fallback_observed_at_unix_millis,
+                before.fallback_observed_at_unix_millis
+            );
+            assert!(
+                responses.summary_observed_at_unix_millis >= before.summary_observed_at_unix_millis
             );
         }
         provider.state.quota_status.store(200, Ordering::SeqCst);
@@ -334,6 +378,15 @@ async fn gemini_poll_fallback_matrix() {
             before_calls
         );
         assert!(fixture._quota_rx.try_recv().is_err());
+        let before_healthy =
+            load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            before_healthy.raw_responses.as_ref().unwrap().fallback,
+            Some(raw_quota())
+        );
 
         // Both healthy summary groups avoid fallback and clear stale raw groups.
         provider.state.summary_status.store(200, Ordering::SeqCst);
@@ -355,8 +408,24 @@ async fn gemini_poll_fallback_matrix() {
             .await
             .unwrap()
             .unwrap();
-        assert!(cleared.gemini.unwrap().meters.is_empty());
-        assert!(cleared.third_party.unwrap().meters.is_empty());
+        assert!(cleared.gemini.as_ref().unwrap().meters.is_empty());
+        assert!(cleared.third_party.as_ref().unwrap().meters.is_empty());
+        assert_eq!(
+            cleared.raw_responses.as_ref().unwrap().summary,
+            Some(healthy_summary())
+        );
+        assert_eq!(
+            cleared
+                .raw_responses
+                .as_ref()
+                .unwrap()
+                .fallback_observed_at_unix_millis,
+            before_healthy
+                .raw_responses
+                .as_ref()
+                .unwrap()
+                .fallback_observed_at_unix_millis
+        );
         let mut published = Vec::new();
         while let Ok(record) = fixture._quota_rx.try_recv() {
             published.push(record);
@@ -539,6 +608,12 @@ async fn gemini_raw_quota_replacement_rejects_delayed_old_subject_poll() {
             Some("gemini-replacement")
         );
         assert!(current_raw.third_party.as_ref().unwrap().meters.is_empty());
+        assert_eq!(
+            current_raw.raw_responses.as_ref().unwrap().fallback,
+            Some(json!({"buckets":[
+                {"modelId":"gemini-replacement","remainingFraction":0.9}
+            ]}))
+        );
         provider.state.release.notify_one();
         assert!(old_poll.await.is_err());
         assert!(fixture._quota_rx.try_recv().is_err());
@@ -548,5 +623,357 @@ async fn gemini_raw_quota_replacement_rejects_delayed_old_subject_poll() {
                 .unwrap(),
             Some(current_raw)
         );
+    }
+}
+
+#[tokio::test]
+async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
+    let fixture = DispatchFixture::new().await;
+    let id = Uuid::new_v4();
+    let binding =
+        GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 3);
+    let summary = json!({
+        "description": "Opaque provider summary",
+        "groups": [{"unknownGroup": true}],
+        "buckets": [{"unrecognized": [1, 2]}],
+        "future": {"preserve": true}
+    });
+    let responses = GeminiRawQuotaResponses {
+        oauth_profile: None,
+        observed_at_unix_millis: 100,
+        summary: Some(summary.clone()),
+        fallback: Some(raw_quota()),
+        summary_observed_at_unix_millis: Some(100),
+        fallback_observed_at_unix_millis: Some(100),
+    };
+    persist_gemini_quota_observation(
+        fixture.storage.as_ref(),
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(responses.clone()),
+    )
+    .await
+    .unwrap();
+    let persisted = load_gemini_period_unknown_quota(fixture.storage.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.raw_responses, Some(responses.clone()));
+    assert!(persisted.gemini.is_none());
+    assert!(persisted.third_party.is_none());
+
+    for (incoming_binding, incoming) in [
+        (
+            binding.clone(),
+            GeminiRawQuotaResponses {
+                observed_at_unix_millis: 99,
+                summary_observed_at_unix_millis: Some(99),
+                fallback_observed_at_unix_millis: Some(99),
+                summary: Some(json!({"older": true})),
+                fallback: Some(json!({})),
+                ..Default::default()
+            },
+        ),
+        (
+            GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 2),
+            GeminiRawQuotaResponses {
+                observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
+                ..responses.clone()
+            },
+        ),
+        (
+            GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), None, 4),
+            GeminiRawQuotaResponses {
+                observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
+                ..responses.clone()
+            },
+        ),
+        (
+            binding.clone(),
+            GeminiRawQuotaResponses {
+                observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
+                summary: Some(json!([])),
+                fallback: Some(Value::Null),
+                ..Default::default()
+            },
+        ),
+    ] {
+        persist_gemini_quota_observation(
+            fixture.storage.as_ref(),
+            id,
+            incoming_binding,
+            GeminiGroupPollUpdate::Unchanged,
+            GeminiGroupPollUpdate::Unchanged,
+            Some(incoming),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_gemini_period_unknown_quota(fixture.storage.as_ref(), id)
+                .await
+                .unwrap(),
+            Some(persisted.clone())
+        );
+    }
+
+    // Each retained successful body keeps its own observation time.
+    for (observed_at, summary, fallback, summary_at, fallback_at) in [
+        (200, Some(json!({"new_summary": true})), None, 200, 100),
+        (250, None, Some(json!({"new_fallback": true})), 200, 250),
+        (260, Some(json!({"new_summary": true})), None, 260, 250),
+        (270, None, Some(json!({"new_fallback": true})), 260, 270),
+    ] {
+        persist_gemini_quota_observation(
+            fixture.storage.as_ref(),
+            id,
+            binding.clone(),
+            GeminiGroupPollUpdate::Unchanged,
+            GeminiGroupPollUpdate::Unchanged,
+            Some(GeminiRawQuotaResponses {
+                observed_at_unix_millis: observed_at,
+                summary_observed_at_unix_millis: summary.as_ref().map(|_| observed_at),
+                fallback_observed_at_unix_millis: fallback.as_ref().map(|_| observed_at),
+                summary,
+                fallback,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let current = load_gemini_period_unknown_quota(fixture.storage.as_ref(), id)
+            .await
+            .unwrap()
+            .unwrap()
+            .raw_responses
+            .unwrap();
+        assert_eq!(current.summary_observed_at_unix_millis, Some(summary_at));
+        assert_eq!(current.fallback_observed_at_unix_millis, Some(fallback_at));
+        assert_eq!(current.summary, Some(json!({"new_summary": true})));
+        if fallback_at == 100 {
+            assert_eq!(current.fallback, Some(raw_quota()));
+        } else {
+            assert_eq!(current.fallback, Some(json!({"new_fallback": true})));
+        }
+    }
+
+    let replacement = GeminiRawQuotaBinding::from_credential(
+        Some("replacement@example.test"),
+        Some("project"),
+        4,
+    );
+    persist_gemini_quota_observation(
+        fixture.storage.as_ref(),
+        id,
+        replacement.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 300,
+            summary_observed_at_unix_millis: Some(300),
+            summary: Some(json!({"replacement": true})),
+            fallback: None,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let current = load_gemini_period_unknown_quota(fixture.storage.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.binding, replacement);
+    assert_eq!(
+        current.raw_responses.as_ref().unwrap().summary,
+        Some(json!({"replacement": true}))
+    );
+    assert!(current.raw_responses.as_ref().unwrap().fallback.is_none());
+}
+
+#[tokio::test]
+async fn gemini_poll_persists_provider_json_without_group_duplication() {
+    let provider = Provider::new().await;
+    let summary = json!({
+        "groups": [],
+        "buckets": [{"opaque": true}],
+        "description": "Summary description",
+        "futureSummaryField": {"nested": [1, "two"]}
+    });
+    let fallback = json!({
+        "groups": [{"unknown": true}],
+        "buckets": [
+            {"modelId": "gemini-synthetic", "remainingFraction": 0.4, "opaque": true},
+            {"modelId": "claude-synthetic", "remainingFraction": 0.6}
+        ],
+        "description": "Fallback description",
+        "futureFallbackField": [true, null]
+    });
+    *provider.state.summary.lock().unwrap() = summary.clone();
+    *provider.state.quota.lock().unwrap() = fallback.to_string();
+    let mut fixture = DispatchFixture::new().await;
+    Arc::make_mut(&mut fixture.dispatch.config).oauth.gemini =
+        Some(cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+    let upstream = provider_metadata::create_provider(
+        &fixture,
+        UpstreamKind::GeminiOauth,
+        provider.base.clone(),
+        GeminiOAuthProfile::GeminiCli,
+    )
+    .await;
+    assert!(matches!(
+        fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .unwrap(),
+        OAuthUsagePollObservation::Success { .. }
+    ));
+    let stored = fixture
+        .storage
+        .get_meta_value(&gemini_period_unknown_quota_meta_key(upstream.id))
+        .await
+        .unwrap()
+        .unwrap();
+    let record: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(record["raw_responses"]["summary"], summary);
+    assert_eq!(record["raw_responses"]["fallback"], fallback);
+    assert!(record["gemini"].get("fallback").is_none());
+    assert!(record["third_party"].get("fallback").is_none());
+    assert!(record["raw_responses"]["fallback"].get("gemini").is_none());
+    assert!(
+        record["raw_responses"]["fallback"]
+            .get("third_party")
+            .is_none()
+    );
+    assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
+    assert!(fixture._quota_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn gemini_delayed_fallback_preserves_newer_summary_receipt() {
+    for profile in [
+        GeminiOAuthProfile::GeminiCli,
+        GeminiOAuthProfile::Antigravity,
+    ] {
+        let provider = Provider::new().await;
+        let summary_a = json!({
+            "description": "summary A",
+            "groups": [{
+                "displayName": "Gemini models",
+                "buckets": [{"bucketId": "gemini-unlabeled", "remainingFraction": 0.1}]
+            }]
+        });
+        let summary_b = json!({
+            "description": "summary B",
+            "groups": [
+                {
+                    "displayName": "Gemini models",
+                    "buckets": [{"bucketId": "gemini-unlabeled", "remainingFraction": 0.8}]
+                },
+                {
+                    "displayName": "Claude models",
+                    "buckets": [{"bucketId": "3p-unlabeled", "remainingFraction": 0.7}]
+                }
+            ]
+        });
+        let fallback_a = json!({
+            "description": "fallback A",
+            "buckets": [{"modelId": "claude-delayed", "remainingFraction": 0.3}]
+        });
+        *provider.state.summary.lock().unwrap() = summary_a;
+        *provider.state.quota.lock().unwrap() = fallback_a.to_string();
+        provider.state.delay_quota.store(true, Ordering::SeqCst);
+        let mut fixture = DispatchFixture::new().await;
+        let config = Arc::make_mut(&mut fixture.dispatch.config);
+        config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+        config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+        let upstream = provider_metadata::create_provider(
+            &fixture,
+            UpstreamKind::GeminiOauth,
+            provider.base.clone(),
+            profile,
+        )
+        .await;
+        let receipt = |millis: u64| {
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000 + millis)
+        };
+        fixture.clock.set(receipt(100));
+        let poll_a = fixture.dispatch.poll_usage(upstream.id, None);
+        tokio::pin!(poll_a);
+        tokio::select! {
+            result = &mut poll_a => panic!("poll A completed before fallback release: {result:?}"),
+            _ = provider.state.entered.notified() => {}
+        }
+
+        // A's summary is fully received before its fallback handler is entered.
+        fixture.clock.set(receipt(200));
+        *provider.state.summary.lock().unwrap() = summary_b.clone();
+        assert!(matches!(
+            fixture
+                .dispatch
+                .poll_usage(upstream.id, None)
+                .await
+                .unwrap(),
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        let published_b = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let responses_b = published_b.raw_responses.as_ref().unwrap();
+        assert_eq!(responses_b.summary, Some(summary_b.clone()));
+        assert_eq!(
+            responses_b.summary_observed_at_unix_millis,
+            Some(1_700_000_000_200)
+        );
+        assert!(responses_b.fallback.is_none());
+        assert!(responses_b.fallback_observed_at_unix_millis.is_none());
+        assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
+
+        fixture.clock.set(receipt(300));
+        provider.state.release.notify_one();
+        assert!(matches!(
+            poll_a.await.unwrap(),
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        let merged = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let responses = merged.raw_responses.as_ref().unwrap();
+        assert_eq!(responses.oauth_profile, Some(profile));
+        assert_eq!(responses.observed_at_unix_millis, 1_700_000_000_300);
+        assert_eq!(responses.summary, Some(summary_b));
+        assert_eq!(
+            responses.summary_observed_at_unix_millis,
+            Some(1_700_000_000_200)
+        );
+        assert_eq!(responses.fallback, Some(fallback_a));
+        assert_eq!(
+            responses.fallback_observed_at_unix_millis,
+            Some(1_700_000_000_300)
+        );
+        assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
+        assert!(fixture._quota_rx.try_recv().is_err());
+        assert!(latest(&fixture, upstream.id).await.is_empty());
     }
 }

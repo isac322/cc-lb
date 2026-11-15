@@ -538,7 +538,10 @@ impl RequestKind {
                     | Self::OpenaiModels
                     | Self::OpenaiCodexAuxiliary
             ),
-            K::GeminiOauth => matches!(self, Self::GeminiGenerateContent | Self::GeminiCountTokens),
+            K::GeminiOauth => matches!(
+                self,
+                Self::GeminiGenerateContent | Self::GeminiCountTokens | Self::GeminiModels
+            ),
         }
     }
 
@@ -6543,19 +6546,24 @@ impl Lifecycle {
         // `stream` flag. Buffered transforms apply to semantic JSON media
         // types and Gemini OAuth envelopes, not arbitrary streamed bytes.
         let response_is_json = has_json_content_type(response.headers());
+        let gemini_catalog = transform_ctx.gemini_oauth
+            && response_affinity_context.capability == ProviderCapability::GeminiModels;
+        let response_is_sse = is_sse_response(
+            response.headers(),
+            stream_requested,
+            response_affinity_context.capability,
+        );
+        let unexpected_catalog_sse = gemini_catalog && status.is_success() && response_is_sse;
         let audio_stream = response_affinity_context.capability == ProviderCapability::OpenaiAudio
             && !response_is_json;
         let stream_response = stream_requested || audio_stream;
         let buffered_transform_required = transform_ctx.gemini_oauth
             || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
-        let force_buffered_response =
-            response_affinity_context.capability == ProviderCapability::GeminiCachedContentsCreate;
+        let force_buffered_response = (gemini_catalog && status.is_success())
+            || response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate;
         if !force_buffered_response
-            && (is_sse_response(
-                response.headers(),
-                stream_requested,
-                response_affinity_context.capability,
-            ) || (stream_response && !buffered_transform_required))
+            && (response_is_sse || (stream_response && !buffered_transform_required))
         {
             let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
@@ -6579,6 +6587,11 @@ impl Lifecycle {
         }
 
         let (mut parts, mut body) = response.into_parts();
+        if unexpected_catalog_sse {
+            // The headers already violate the catalog protocol. Drop the stream
+            // without polling it; it may be unbounded or never produce a frame.
+            body = Body::empty();
+        }
         strip_hop_by_hop(&mut parts.headers);
         let body_collect_started = Instant::now();
         let response_body_timing = BodyIoTiming::default();
@@ -6598,7 +6611,9 @@ impl Lifecycle {
         };
         let mut body_collect_failed = false;
         let mut body_limit_terminal = false;
-        while let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await {
+        while !unexpected_catalog_sse
+            && let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await
+        {
             match frame {
                 Ok(frame) => {
                     if let Ok(data) = frame.into_data() {
@@ -6652,7 +6667,7 @@ impl Lifecycle {
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
-        let semantic_body = if body_collect_failed {
+        let semantic_body = if body_collect_failed || unexpected_catalog_sse {
             None
         } else {
             match decode_full_body(
@@ -6687,8 +6702,7 @@ impl Lifecycle {
                 }
             }
         };
-        let gemini_unwrapped_body = transform_ctx
-            .gemini_oauth
+        let gemini_unwrapped_body = (!gemini_catalog && transform_ctx.gemini_oauth)
             .then_some(semantic_body.as_ref())
             .flatten()
             .and_then(|body| unwrap_gemini_code_assist_body(body).ok().flatten());
@@ -6784,10 +6798,25 @@ impl Lifecycle {
                 None,
             );
         }
+        if gemini_catalog
+            && status.is_success()
+            && !body_collect_failed
+            && let Some(decoded) = semantic_body.as_ref()
+        {
+            downstream_body = decoded.clone();
+            parts.headers = sanitize_downstream_response_headers(
+                std::mem::take(&mut parts.headers),
+                downstream_body.len(),
+                None,
+            );
+        }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
         let mut keepalive_transformed_json = None;
         let mut keepalive_body_replaced = false;
+        let mut catalog_body_replaced = false;
+        let mut catalog_error = None;
         if !body_collect_failed
+            && !unexpected_catalog_sse
             && (transform_ctx.gemini_oauth || response_is_json)
             && let (Some(hook), Some(semantic_body)) = (
                 transform_ctx.dialect.response_transform_hook(),
@@ -6806,6 +6835,11 @@ impl Lifecycle {
                 body: semantic_body.clone(),
             }) {
                 Ok(result) => {
+                    catalog_body_replaced = gemini_catalog
+                        && matches!(
+                            &result,
+                            cc_lb_upstream::TransformResponseResult::Replace { body: Some(_), .. }
+                        );
                     if keepalive_completion
                         .as_ref()
                         .is_some_and(|context| context.observes_response())
@@ -6834,6 +6868,57 @@ impl Lifecycle {
                         "response transform failed open to original upstream response"
                     );
                     buffered_transform_error = Some(error);
+                }
+            }
+        }
+        if gemini_catalog
+            && status.is_success()
+            && !body_collect_failed
+            && (!catalog_body_replaced || parts.status.is_success())
+        {
+            let replacement_json = catalog_body_replaced
+                .then(|| sonic_rs::from_slice::<Value>(&downstream_body).ok())
+                .flatten();
+            let catalog_json = if catalog_body_replaced {
+                replacement_json.as_ref()
+            } else {
+                response_body_json.as_ref()
+            };
+            match catalog_json
+                .filter(|_| !unexpected_catalog_sse)
+                .ok_or(crate::gemini_oauth_catalog::CatalogError::InvalidModels)
+                .and_then(crate::gemini_oauth_catalog::project_fetch_available_models)
+                .and_then(|native| {
+                    serde_json::to_vec(&native)
+                        .map_err(|_| crate::gemini_oauth_catalog::CatalogError::InvalidModels)
+                }) {
+                Ok(native) => {
+                    downstream_body = Bytes::from(native);
+                    parts.headers = sanitize_downstream_response_headers(
+                        std::mem::take(&mut parts.headers),
+                        downstream_body.len(),
+                        None,
+                    );
+                }
+                Err(_) => {
+                    let message = "invalid Gemini OAuth catalog response";
+                    catalog_error = Some(message);
+                    parts.status = StatusCode::BAD_GATEWAY;
+                    downstream_body = provider_error_body(
+                        response_affinity_context.capability,
+                        parts.status,
+                        "api_error",
+                        message,
+                        None,
+                    );
+                    parts.headers = sanitize_downstream_response_headers(
+                        std::mem::take(&mut parts.headers),
+                        downstream_body.len(),
+                        None,
+                    );
+                    parts
+                        .headers
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 }
             }
         }
@@ -6993,6 +7078,12 @@ impl Lifecycle {
                     error_message: UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE.to_owned(),
                     ..Default::default()
                 })
+            } else if let Some(message) = catalog_error {
+                Err(cc_lb_lifecycle::StreamError {
+                    error_type: "api_error".to_owned(),
+                    error_message: message.to_owned(),
+                    ..Default::default()
+                })
             } else if affinity_bind_failed {
                 Err(affinity_stream_error())
             } else if let Some(error) = buffered_transform_error.as_ref() {
@@ -7063,6 +7154,17 @@ impl Lifecycle {
                 };
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
+                o.set_upstream_error(client_status, UpstreamErrorCode::StreamError);
+            } else if let Some(message) = catalog_error {
+                o.emit_lifecycle(
+                    cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        event_id: o.event_id().to_owned(),
+                        error_type: "api_error".to_owned(),
+                        error_message: message.to_owned(),
+                        upstream_error_code: None,
+                        retry_after: None,
+                    },
+                );
                 o.set_upstream_error(client_status, UpstreamErrorCode::StreamError);
             } else if affinity_bind_failed {
                 o.set_failure(InternalFailure {
@@ -14392,7 +14494,10 @@ mod tests {
             (RequestKind::OpenaiCodexAuxiliary, &[K::OpenaiOauth]),
             (RequestKind::GeminiEmbedContent, &[K::GeminiApiKey]),
             (RequestKind::GeminiPredict, &[K::GeminiApiKey]),
-            (RequestKind::GeminiModels, &[K::GeminiApiKey]),
+            (
+                RequestKind::GeminiModels,
+                &[K::GeminiApiKey, K::GeminiOauth],
+            ),
             (RequestKind::GeminiOpenaiChatCompletions, &[K::GeminiApiKey]),
             (RequestKind::GeminiOpenaiEmbeddings, &[K::GeminiApiKey]),
             (RequestKind::GeminiOpenaiImages, &[K::GeminiApiKey]),

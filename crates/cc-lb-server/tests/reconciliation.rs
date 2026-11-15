@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::dynamic_view_rebind::{assert_catalog_urls, catalog_configs, create_catalog_upstreams};
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_control::DynamicViewHolder;
@@ -146,9 +147,11 @@ async fn initial_holder(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &std::path::Path,
 ) -> Arc<DynamicViewHolder> {
+    let (gemini_config, antigravity_config) = catalog_configs();
     let view = build_dynamic_view(
         stores,
-        None,
+        Some(&gemini_config),
+        Some(&antigravity_config),
         Arc::new(AeadService::from_master_key([25; 32])),
         None,
         0,
@@ -172,6 +175,7 @@ fn reconciler(
     cancel: CancellationToken,
     data_dir: &std::path::Path,
 ) -> Arc<Reconciler> {
+    let (gemini_config, antigravity_config) = catalog_configs();
     Arc::new(Reconciler::new(
         stores,
         holder,
@@ -185,7 +189,8 @@ fn reconciler(
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         Arc::new(cc_lb_clock::SystemClock),
-        None,
+        Some(gemini_config),
+        Some(antigravity_config),
     ))
 }
 
@@ -239,6 +244,44 @@ async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     assert!(holder.load().generation > generation);
     let after = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "changed");
     assert!(after > before);
+}
+
+#[tokio::test]
+async fn reconcile_changed_revision_preserves_configured_catalog_metadata_endpoints() {
+    let (dir, storage) = storage_fixture().await;
+    let upstreams =
+        create_catalog_upstreams(&storage, &AeadService::from_master_key([25; 32])).await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let holder = initial_holder(&stores, &runtime, dir.path()).await;
+    let initial = holder.load();
+    assert_catalog_urls(&initial, &upstreams).await;
+    let reconciler = reconciler(
+        stores,
+        holder.clone(),
+        runtime,
+        CancellationToken::new(),
+        dir.path(),
+    );
+
+    create_principal(&storage, "catalog-reconcile-revision").await;
+    tokio::time::timeout(Duration::from_secs(2), reconciler.reconcile_once())
+        .await
+        .expect("reconcile completes within deadline")
+        .expect("reconcile changed revision");
+    let rebuilt = holder.load();
+    assert_eq!(rebuilt.generation, initial.generation + 1);
+    assert_ne!(
+        rebuilt.upstream_status_snapshot.revision_hash,
+        initial.upstream_status_snapshot.revision_hash,
+    );
+    assert_catalog_urls(&rebuilt, &upstreams).await;
+
+    tokio::time::timeout(Duration::from_secs(2), reconciler.reconcile_once())
+        .await
+        .expect("unchanged reconcile completes within deadline")
+        .expect("unchanged reconcile");
+    assert_eq!(holder.generation(), rebuilt.generation);
 }
 
 #[tokio::test]

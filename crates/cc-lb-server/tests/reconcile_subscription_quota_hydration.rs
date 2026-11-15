@@ -245,6 +245,7 @@ async fn peer_with_kind(
     let initial = build_dynamic_view(
         &stores,
         None,
+        None,
         aead.clone(),
         None,
         0,
@@ -272,6 +273,7 @@ async fn peer_with_kind(
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         STALENESS_SECS,
         Arc::new(cc_lb_clock::SystemClock),
+        None,
         None,
     );
     (

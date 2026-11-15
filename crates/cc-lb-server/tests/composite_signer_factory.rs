@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, HeaderValue, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_config::{AntigravityOAuthConfig, GeminiOAuthConfig};
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -234,6 +235,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         None,
+        None,
         fixture.aead.clone(),
         None,
         0,
@@ -277,6 +279,7 @@ async fn empty_router_choice_errors() {
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         None,
+        None,
         fixture.aead.clone(),
         None,
         0,
@@ -306,6 +309,145 @@ async fn empty_router_choice_errors() {
         }
         Ok(_) => panic!("expected MissingCredentials error, got Ok"),
         Err(other) => panic!("expected MissingCredentials error, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn dynamic_factory_catalog_retains_profile_metadata_prefix_and_stored_override() {
+    let fixture = Fixture::new().await;
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let gemini = GeminiOAuthConfig {
+        code_assist_url: Url::parse(
+            "https://gemini-metadata.invalid/metadata/cli?tenant=cli#discard",
+        )
+        .expect("Gemini metadata URL"),
+        ..Default::default()
+    };
+    let antigravity = AntigravityOAuthConfig {
+        code_assist_url: Url::parse(
+            "https://antigravity-metadata.invalid/metadata/agy?tenant=agy#discard",
+        )
+        .expect("Antigravity metadata URL"),
+        ..Default::default()
+    };
+    for (profile, expected_default) in [
+        (
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+            "https://gemini-metadata.invalid/metadata/cli/v1internal:fetchAvailableModels?tenant=cli",
+        ),
+        (
+            cc_lb_aead::GeminiOAuthProfile::Antigravity,
+            "https://antigravity-metadata.invalid/metadata/agy/v1internal:fetchAvailableModels?tenant=agy",
+        ),
+    ] {
+        for (index, (stored_base, expected_url)) in [
+            (None, expected_default),
+            (
+                Some(
+                    "https://cloudcode-pa.googleapis.com/stored/metadata:loadCodeAssist?tenant=stored#discard",
+                ),
+                "https://cloudcode-pa.googleapis.com/stored/metadata:fetchAvailableModels?tenant=stored",
+            ),
+            (
+                Some("http://override.invalid/gateway/v1internal/?tenant=override#discard"),
+                "http://override.invalid/gateway/v1internal:fetchAvailableModels?tenant=override",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = fixture
+                .storage
+                .create(UpstreamCreate {
+                    id: Uuid::new_v4(),
+                    name: format!("catalog-{profile:?}-{index}"),
+                    kind: UpstreamKind::GeminiOauth,
+                    base_url: stored_base.map(|value| Url::parse(value).expect("stored base URL")),
+                    api_key_ciphertext: None,
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    api_key_access: None,
+                })
+                .await
+                .expect("Gemini upstream created");
+            let tokens = OAuthTokenBundle {
+                access_token: "catalog-provider-token".to_owned(),
+                refresh_token: "catalog-refresh-token".to_owned(),
+                account_id: None,
+                project_id: Some("catalog-project".to_owned()),
+                oauth_profile: profile,
+                expires_at_unix_secs: now_secs() + 3600,
+                refresh_token_expires_at_unix_secs: None,
+                scopes: vec!["openid".to_owned()],
+                never_refresh: false,
+            };
+            fixture
+                .storage
+                .store_oauth_tokens(
+                    record.id,
+                    record.revision,
+                    encrypted(&fixture.aead, record.id, &tokens),
+                    false,
+                )
+                .await
+                .expect("Gemini tokens stored");
+            let view = build_dynamic_view(
+                fixture._stores.as_ref(),
+                Some(&gemini),
+                Some(&antigravity),
+                fixture.aead.clone(),
+                None,
+                0,
+                &runtime,
+                fixture._dir.path(),
+                Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+                30,
+                Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+                1800,
+                Arc::new(cc_lb_clock::SystemClock),
+            )
+            .await
+            .expect("dynamic view builds");
+            let signer = view
+                .signer_factory
+                .with_router_choice(record.name)
+                .build(&Upstream::GeminiDirect { base_url: None })
+                .await
+                .expect("catalog signer");
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                Url::parse("https://downstream.invalid/v1beta/models").expect("models URL"),
+            );
+            shaped.set_method(Method::GET);
+            shaped.set_body(Bytes::new());
+            for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                shaped
+                    .headers_mut()
+                    .insert(name, HeaderValue::from_static("downstream-credential"));
+            }
+            let signed = sign_request(signer.as_ref(), shaped)
+                .await
+                .expect("catalog request signed");
+            assert_eq!(
+                signed.url().as_str(),
+                expected_url,
+                "profile={profile:?}, stored_base={stored_base:?}"
+            );
+            assert_eq!(signed.method(), Method::POST);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(signed.body()).expect("catalog body"),
+                serde_json::json!({"project": "catalog-project"})
+            );
+            assert_eq!(
+                signed.headers()["authorization"],
+                "Bearer catalog-provider-token"
+            );
+            for name in ["x-api-key", "x-goog-api-key", "api-key"] {
+                assert!(!signed.headers().contains_key(name));
+            }
+        }
     }
 }
 
