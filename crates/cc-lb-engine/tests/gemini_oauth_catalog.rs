@@ -38,6 +38,7 @@ struct Recorder {
     raw_response: Mutex<Option<Bytes>>,
     hook_headers: Mutex<bool>,
     hook_fails: Mutex<bool>,
+    catalog_endpoint: Mutex<Option<Url>>,
 }
 
 struct CatalogDialect(Arc<Recorder>);
@@ -51,6 +52,7 @@ impl UpstreamDialect for CatalogDialect {
     ) -> Result<ShapedRequest, DialectError> {
         let mut url = Url::parse("http://original.local/").unwrap();
         url.set_path(&context.path);
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
             context.method.clone(),
@@ -107,12 +109,14 @@ impl ResponseTransformHook for CatalogDialect {
 struct Factory {
     project: Option<&'static str>,
     api_key: bool,
+    catalog_endpoint: Url,
 }
 impl ApiKeyAwareSignerFactory for Factory {
     fn with_router_choice(&self, _: String) -> Arc<dyn SignerFactory> {
         Arc::new(Factory {
             project: self.project,
             api_key: self.api_key,
+            catalog_endpoint: self.catalog_endpoint.clone(),
         })
     }
 }
@@ -134,7 +138,7 @@ impl SignerFactory for Factory {
                 None,
                 Arc::new(cc_lb_clock::SystemClock),
             )?
-            .with_catalog_endpoint(Url::parse(ENDPOINT).unwrap()),
+            .with_catalog_endpoint(self.catalog_endpoint.clone()),
         ))
     }
 }
@@ -231,7 +235,16 @@ fn lifecycle_with_owner(
         Arc::new(PrincipalView::from_db(&[principal], chains)),
     );
     let view = DynamicViewBuilder::new(0)
-        .signer_factory(Arc::new(Factory { project, api_key }))
+        .signer_factory(Arc::new(Factory {
+            project,
+            api_key,
+            catalog_endpoint: recorder
+                .catalog_endpoint
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Url::parse(ENDPOINT).unwrap()),
+        }))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![record])
         .build();
@@ -587,4 +600,36 @@ async fn replacement_header_only_and_failed_hooks_keep_catalog_projection_contra
             assert_eq!(headers["x-catalog-hook"], "observed");
         }
     }
+}
+
+#[tokio::test]
+async fn resolved_catalog_query_keeps_tenant_but_strips_api_keys_before_dispatch() {
+    let recorder = Arc::new(Recorder::default());
+    *recorder.catalog_endpoint.lock().unwrap() = Some(Url::parse(
+        "http://catalog.local/prefix/v1internal:fetchAvailableModels?tenant=one&key=synthetic-provider-key",
+    ).unwrap());
+    let lifecycle = lifecycle(
+        recorder.clone(),
+        Some("stored-project"),
+        StatusCode::OK,
+        json!({"models": {"gemini-test": {}}}),
+    );
+    let request = request("/v1beta/models?key=dummy-principal", Bytes::new());
+    let auth = lifecycle.authenticate(request.headers()).await.unwrap();
+    let (status, _, _) = collect_body(lifecycle.handle(request, &auth).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method(), Method::POST);
+    assert_eq!(
+        requests[0].url().query_pairs().collect::<Vec<_>>(),
+        vec![(
+            std::borrow::Cow::Borrowed("tenant"),
+            std::borrow::Cow::Borrowed("one")
+        )]
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(requests[0].body()).unwrap(),
+        json!({"project": "stored-project"})
+    );
 }
