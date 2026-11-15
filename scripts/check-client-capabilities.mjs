@@ -65,6 +65,7 @@ function scanPrivateData(value, errors, location = 'ledger') {
       if (/^(?:token|access_token|refresh_token|api_key|password|private_key|client_secret|authorization|cookie|signed_url|email|account_id|workspace_id|principal_id|session_id|device_id)$/i.test(key)) {
         errors.push(`${location}: credential or private identifier field is forbidden`);
       }
+      scanPrivateData(key, errors, location);
       scanPrivateData(entry, errors, location);
     }
   }

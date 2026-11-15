@@ -207,6 +207,16 @@ test('public credentials, signed queries, private identifiers and local paths ar
   rejects((_, row) => { row.access_token = 'synthetic'; }, /credential or private identifier/);
 });
 
+test('private-shaped source keys with valid source values are rejected without echo', () => {
+  for (const key of ['sk-syntheticsecret123456', 'synthetic@example.invalid']) {
+    const ledger = pendingLedger();
+    ledger.sources[key] = structuredClone(Object.values(ledger.sources)[0]);
+    const errors = validateClientCapabilities(ledger);
+    assert.ok(errors.some((error) => /credential or private data/.test(error)));
+    assert.ok(errors.every((error) => !error.includes(key)));
+  }
+});
+
 test('untrusted family identifiers and malformed source keys never appear in diagnostics', () => {
   const planted = 'sk-syntheticsecret123456';
   for (const place of ['family-id', 'source-key']) {

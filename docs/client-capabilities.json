@@ -68,8 +68,8 @@
     },
     "cloudPreview": {
       "kind": "pinned-source",
-      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/cloud-client/src/discovery.rs#L97",
-      "scope": "Preview discovery, distinct from ordinary REST task workflows and internal ThreadService."
+      "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/cloud-client/src/lib.rs#L210-L264",
+      "scope": "Account-scoped /v2/models preview catalog, distinct from ordinary REST task workflows and internal ThreadService."
     },
     "agyChangelog": {
       "kind": "pinned-source",
