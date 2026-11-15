@@ -72,9 +72,11 @@ Anthropic-only.
 A `filter` hook returns a decision for each upstream candidate. The host keeps
 a candidate only when its `decision` is `"accept"`; every candidate absent from
 `results` is rejected, so an empty `results` rejects the whole set. A `shape`
-hook changes the outgoing request. Response, SSE, and Realtime/Live
-transformations are independent optional hooks; omit hooks the plugin does
-not need.
+hook changes the outgoing request. Provider-qualified response, SSE, and
+Realtime/Live transformations are independent optional hooks; omit those
+hooks when the plugin does not need them. A legacy bare `shape` handler must
+also declare `transform_response` and `transform_sse_event`, using explicit
+no-op handlers when it does not transform responses.
 
 ## Choose a wire version
 
