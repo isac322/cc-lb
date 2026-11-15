@@ -339,6 +339,7 @@ export async function startReplayServer({ fixture, scratchDir, ledger, authorize
         observe({ event: 'local-rejection', status: rejection, body_read: false, harness_only: true });
         res.writeHead(rejection, { 'content-length': '0', ...(isGrpc ? {} : { connection: 'close' }) }); res.end(); return;
       }
+      if (!isGrpc && req.headers.expect?.toLowerCase() === '100-continue') res.writeContinue();
       const chunks = []; let bytes = 0;
       stats.bodyReadCalls += 1;
       for await (const chunk of req) {
@@ -387,7 +388,7 @@ export async function startReplayServer({ fixture, scratchDir, ledger, authorize
         const termination = terminalKind(safeFixture.response.termination);
         observe({ event: 'replay-termination', termination, frame_count: safeFixture.response.frames.length, provider_verified: false });
         if (isInterruptedTermination(termination) || termination === 'close:1006') socket.destroy();
-        else if (termination === 'close' || termination === 'ws-close' || termination.startsWith('close:')) {
+        else if (['close', 'ws-close', 'eof', 'complete', 'completed'].includes(termination) || termination.startsWith('close:')) {
           const code = safeFixture.response.close_code ?? (termination.startsWith('close:') ? Number(termination.slice(6)) : 1000);
           const payload = Buffer.alloc(2); payload.writeUInt16BE(code);
           socket.end(websocketFrame(8, payload));
@@ -406,7 +407,11 @@ export async function startReplayServer({ fixture, scratchDir, ledger, authorize
             const mask = buffered.subarray(offset, offset + 4); offset += 4;
             const payload = Buffer.from(buffered.subarray(offset, offset + length)); buffered = buffered.subarray(offset + length);
             for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-            if (opcode === 8) { socket.end(websocketFrame(8, payload)); return; }
+            if (opcode === 8) {
+              if (!socket.writableEnded) socket.end(websocketFrame(8, payload));
+              else socket.destroy();
+              return;
+            }
             if (opcode === 9) { socket.write(websocketFrame(10, payload)); continue; }
             if (opcode === 10) continue;
             if (![0, 1, 2].includes(opcode) || (opcode === 0 && messageOpcode === null) || (opcode !== 0 && messageOpcode !== null)) throw fail('QHARNESS_WS_BAD_FRAME');
@@ -429,14 +434,22 @@ export async function startReplayServer({ fixture, scratchDir, ledger, authorize
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const port = server.address().port;
   const listener = { kind: 'listener', identifier: `127.0.0.1:${port}`, owner_pid: process.pid, close_identity: `startReplayServer:${fixture.id}:${process.pid}:${port}`, delete_command: 'await replay.close()', cleanup_language: 'javascript-in-owning-process' };
-  await resource(ledger, scratchDir, { ...listener, state: 'active' });
+  const closeServer = async () => {
+    for (const session of sessions) session.destroy();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  };
+  try { await resource(ledger, scratchDir, { ...listener, state: 'active' }); }
+  catch {
+    await closeServer();
+    try { await resource(ledger, scratchDir, { ...listener, state: 'removed' }); } catch { /* Registration error remains the primary safe failure. */ }
+    throw fail('QHARNESS_LISTENER_REGISTRATION_FAILED');
+  }
   return {
     origin: `http://127.0.0.1:${port}`, port, fixture: safeFixture, observations, stats,
     async close() {
       if (closed) return; closed = true;
-      for (const session of sessions) session.destroy();
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(resolve));
+      await closeServer();
       let failure;
       try { await resource(ledger, scratchDir, { ...listener, state: 'removed' }); }
       catch { failure = fail('QHARNESS_CLEANUP_LEDGER_FAILED'); }
@@ -456,7 +469,78 @@ export function buildSandboxProfile({ scratchDir, originalHome, recorderPort, de
   return `(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip "localhost:${recorderPort}"))\n${bind}(deny file-read* (subpath ${q(originalHome)}) (subpath "/Library/Keychains") (subpath ${q(deniedProbe)}))\n(deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))\n(deny file-write*)\n(allow file-write* (subpath ${q(scratchDir)}) (literal "/dev/null"))\n`;
 }
 
-export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, deadlineMs = 20_000, maxBytes = MAX_BYTES }) {
+export function parseOwnedListenerSnapshot(raw, processGroup) {
+  if (!Number.isInteger(processGroup) || processGroup < 1 || Buffer.byteLength(raw) > MAX_BYTES) throw fail('QHARNESS_LISTENER_AUDIT_INVALID');
+  let pid; let group;
+  const listeners = [];
+  for (const line of raw.split('\n')) {
+    if (/^p\d+$/.test(line)) { pid = Number(line.slice(1)); group = null; }
+    else if (/^g\d+$/.test(line)) group = Number(line.slice(1));
+    else if (line.startsWith('n')) {
+      const address = line.slice(1).match(/^(127\.0\.0\.1|\[::1\]):(\d+)$/);
+      if (!pid || group !== processGroup || !address || Number(address[2]) < 1 || Number(address[2]) > 65535) throw fail('QHARNESS_OWNED_LISTENER_SCOPE_REJECTED');
+      listeners.push({ owner_pid: pid, owner_process_group: group, address: address[1] === '[::1]' ? '::1' : address[1], port: Number(address[2]) });
+    }
+  }
+  return listeners;
+}
+
+/** Ownership evidence only. Polling cannot prove absence of transient listeners. */
+export function createOwnedListenerAudit({ scratchDir, ledger, maxDurationMs = 35_000 }) {
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 120_000) return { status: 'BLOCKED', reason: 'QHARNESS_LISTENER_AUDIT_DEADLINE_INVALID' };
+  const executable = findExecutable('lsof') ?? (existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : null);
+  if (!executable) return { status: 'BLOCKED', reason: 'QHARNESS_LISTENER_INSPECTOR_UNAVAILABLE' };
+  const seen = new Map();
+  let stopped = false; let running; let failure = null; let group;
+  const snapshot = () => ({
+    status: failure ? 'FAIL' : 'OBSERVED', reason: failure, processGroup: group,
+    sampled: true, intervalMs: 50, continuousIngressEnforcement: false,
+    listeners: [...seen.values()],
+  });
+  return {
+    status: 'READY',
+    snapshot,
+    start({ pid, terminate }) {
+      group = pid;
+      const deadline = Date.now() + maxDurationMs;
+      running = (async () => {
+        while (!stopped) {
+          if (Date.now() > deadline) throw fail('QHARNESS_LISTENER_AUDIT_DEADLINE');
+          const result = await runBoundedProcess(executable, ['-nP', '-a', '-g', String(pid), '-iTCP', '-sTCP:LISTEN', '-F', 'pgn'], {
+            env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: scratchDir }, cwd: scratchDir, scratchDir, ledger, deadlineMs: 1500,
+          });
+          if (result.error || result.timedOut || (result.exitCode !== 0 && !(result.exitCode === 1 && result.stdout.length === 0 && result.stderr.length === 0))) throw fail('QHARNESS_LISTENER_INSPECTION_FAILED');
+          const listeners = parseOwnedListenerSnapshot(result.stdout.toString('utf8'), pid);
+          const now = new Date().toISOString();
+          for (const listener of listeners) {
+            const key = `${listener.owner_pid}:${listener.address}:${listener.port}`;
+            const prior = seen.get(key);
+            if (prior) { prior.last_seen_utc = now; continue; }
+            const entry = { ...listener, first_seen_utc: now, last_seen_utc: now };
+            seen.set(key, entry);
+            await resource(ledger, scratchDir, { kind: 'owned-listener-observation', identifier: key, ...entry, sampled: true, delete_command: `kill -TERM -- -${pid}`, state: 'active' });
+          }
+          if (!stopped) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      })().catch((error) => {
+        failure = error.code?.startsWith('QHARNESS_') ? error.code : 'QHARNESS_LISTENER_AUDIT_FAILED';
+        stopped = true; terminate();
+      });
+    },
+    async stop() {
+      stopped = true;
+      await running;
+      const closedUpperBound = new Date().toISOString();
+      for (const [key, entry] of seen) await resource(ledger, scratchDir, {
+        kind: 'owned-listener-observation', identifier: key, ...entry, sampled: true,
+        closed_upper_bound_utc: closedUpperBound, delete_command: `kill -TERM -- -${group}`, state: 'removed',
+      });
+      return snapshot();
+    },
+  };
+}
+
+export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, listenerAudit, deadlineMs = 20_000, maxBytes = MAX_BYTES }) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { env, cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const out = []; const err = []; let bytes = 0; let timedOut = false; let overflow = false; let finished = false;
@@ -464,6 +548,7 @@ export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, l
     const entry = { kind: 'process-group', identifier: String(child.pid), owner_pid: process.pid, command, argv: args, started_utc: new Date().toISOString(), delete_command: `kill -TERM -- -${child.pid}` };
     const registration = child.pid ? resource(ledger, scratchDir, { ...entry, state: 'active' }) : Promise.resolve();
     registration.catch(() => kill('SIGKILL'));
+    if (listenerAudit && child.pid) listenerAudit.start({ pid: child.pid, terminate: () => kill('SIGTERM') });
     const timer = setTimeout(() => { timedOut = true; kill('SIGTERM'); }, deadlineMs);
     const hardTimer = setTimeout(() => kill('SIGKILL'), deadlineMs + 1000);
     const reap = setTimeout(() => { void finish(null, 'SIGKILL', 'QHARNESS_REAP_DEADLINE'); }, deadlineMs + 3000);
@@ -477,11 +562,16 @@ export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, l
       if (finished) return; finished = true;
       clearTimeout(timer); clearTimeout(hardTimer); clearTimeout(reap);
       kill('SIGKILL'); child.stdout.destroy(); child.stderr.destroy();
+      let audit;
+      if (listenerAudit) {
+        try { audit = await listenerAudit.stop(); if (audit.status === 'FAIL') error = audit.reason; }
+        catch { error = 'QHARNESS_LISTENER_AUDIT_FAILED'; }
+      }
       try {
         await registration;
         if (child.pid) await resource(ledger, scratchDir, { ...entry, state: 'removed' });
       } catch { error = 'QHARNESS_RESOURCE_LEDGER_FAILED'; }
-      resolve({ pid: child.pid ?? null, exitCode, signal, timedOut, overflow, error, stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
+      resolve({ pid: child.pid ?? null, exitCode, signal, timedOut, overflow, error, listenerAudit: audit, stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
     }
     child.on('error', () => { void finish(null, null, 'QHARNESS_SPAWN_FAILED'); });
     child.on('exit', () => kill('SIGKILL'));
@@ -538,15 +628,21 @@ export async function preflightIsolation({ scratchDir, recorderPort, ledger, pla
   await new Promise((resolve, reject) => { canary.once('error', reject); canary.listen(0, '127.0.0.1', resolve); });
   const canaryPort = canary.address().port;
   const canaryResource = { kind: 'listener', identifier: `127.0.0.1:${canaryPort}`, owner_pid: process.pid, close_identity: `preflightIsolation:canary:${process.pid}:${canaryPort}`, delete_command: 'await new Promise(resolve => canary.close(resolve))', cleanup_language: 'javascript-in-owning-process' };
-  await resource(ledger, scratchDir, { ...canaryResource, state: 'active' });
   let other;
+  let canaryFailure;
   try {
+    try { await resource(ledger, scratchDir, { ...canaryResource, state: 'active' }); }
+    catch { throw fail('QHARNESS_CANARY_REGISTRATION_FAILED'); }
     const probe = await runBoundedProcess('/usr/bin/sandbox-exec', ['-f', profilePath, process.execPath, '-e', `const n=require('node:net');const s=n.connect({host:'127.0.0.1',port:${canaryPort}});s.on('connect',()=>{s.destroy();process.exit(2)});s.on('error',e=>process.exit(['EPERM','EACCES'].includes(e.code)?0:3));s.setTimeout(1500,()=>{s.destroy();process.exit(4)})`], { env: { PATH: '/usr/bin:/bin', HOME: scratchDir }, cwd: scratchDir, scratchDir, ledger, deadlineMs: 3000 });
     other = probe.exitCode === 0 && !probe.timedOut;
+  } catch (error) {
+    canaryFailure = error.code?.startsWith('QHARNESS_') ? error : fail('QHARNESS_CANARY_PROBE_FAILED');
   } finally {
     await new Promise((resolve) => canary.close(resolve));
-    await resource(ledger, scratchDir, { ...canaryResource, state: 'removed' });
+    try { await resource(ledger, scratchDir, { ...canaryResource, state: 'removed' }); }
+    catch { canaryFailure ??= fail('QHARNESS_CLEANUP_LEDGER_FAILED'); }
   }
+  if (canaryFailure) throw canaryFailure;
   return other ? { status: 'READY', profilePath, proof: { authStoreDenied: true, externalDenied: true, otherLoopbackDenied: true, recorderAllowed: true, ...bindProof } } : { status: 'BLOCKED', reason: 'QHARNESS_LOOPBACK_SCOPE_NOT_ENFORCED', spawnedClient: false, preflightProof: { ...preflightProof, otherLoopbackDenied: false } };
 }
 
@@ -626,6 +722,8 @@ export async function runPinnedConsumer({ fixture, executable, scratchDir, ledge
   try {
     const isolation = await preflightIsolation({ scratchDir, recorderPort: replay.port, ledger, allowEphemeralBind: fixture.client.name === 'agy' });
     if (isolation.status !== 'READY') return { ...base, ...isolation };
+    const listenerAudit = fixture.client.name === 'agy' ? createOwnedListenerAudit({ scratchDir, ledger, maxDurationMs: deadlineMs + 2000 }) : null;
+    if (listenerAudit?.status === 'BLOCKED') return { ...base, status: 'BLOCKED', reason: listenerAudit.reason, spawnedClient: false };
     const environment = {
       PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, TMPDIR: tmp, LANG: 'C.UTF-8', TERM: 'dumb', NO_COLOR: '1',
       XDG_CONFIG_HOME: path.join(home, '.config'), XDG_CACHE_HOME: path.join(home, '.cache'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'),
@@ -647,14 +745,15 @@ export async function runPinnedConsumer({ fixture, executable, scratchDir, ledge
       Object.assign(environment, launch.environment);
       argv = launch.argv;
     }
-    result = await runBoundedProcess('/usr/bin/sandbox-exec', ['-f', isolation.profilePath, executable, ...argv], { env: environment, cwd: work, scratchDir, ledger, deadlineMs });
+    result = await runBoundedProcess('/usr/bin/sandbox-exec', ['-f', isolation.profilePath, executable, ...argv], { env: environment, cwd: work, scratchDir, ledger, listenerAudit, deadlineMs });
     // Only decoded, completed consumer output counts. Request/debug echo cannot satisfy this.
     // Raw stdout/stderr remain in memory and are never returned or persisted.
     const decoded = observeDecodedConsumerOutput({ client: fixture.client.name, stdout: result.stdout, marker: consumer.marker });
     const gatewayAuthVerified = gateway ? gatewayAccepted > 0 && gatewayRejected === 0 : null;
-    const passed = decoded.markerObserved && decoded.completed && result.exitCode === 0 && !result.timedOut && !result.overflow && !result.error && (!gateway || gatewayAuthVerified);
-    const failure = passed ? null : classifyConsumerFailure(result) ?? (gateway && !gatewayAuthVerified ? 'QHARNESS_GATEWAY_AUTH_NOT_VERIFIED' : !decoded.markerObserved ? 'QHARNESS_CONSUMER_MARKER_NOT_OBSERVED' : 'QHARNESS_CONSUMER_TURN_INCOMPLETE');
-    const summary = { ...base, client: fixture.client, status: passed ? 'PASS' : 'FAIL', ...decoded, reason: failure, gatewayAuthVerified, deniedOperations: passed ? [] : classifyDeniedOperations({ ...result, scratchDir }), denialSignals: passed ? null : classifyDenialSignals({ ...result, scratchDir }), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, outputOverflow: result.overflow, requestsObserved: replay.observations.length, requestTargets: replay.stats.requestTargets, isolation: isolation.proof, databaseCreated: true };
+    const listenerObserved = !listenerAudit || result.listenerAudit?.listeners.length > 0;
+    const passed = decoded.markerObserved && decoded.completed && result.exitCode === 0 && !result.timedOut && !result.overflow && !result.error && (!gateway || gatewayAuthVerified) && listenerObserved;
+    const failure = passed ? null : classifyConsumerFailure(result) ?? (!listenerObserved ? 'QHARNESS_OWNED_LISTENER_NOT_OBSERVED' : gateway && !gatewayAuthVerified ? 'QHARNESS_GATEWAY_AUTH_NOT_VERIFIED' : !decoded.markerObserved ? 'QHARNESS_CONSUMER_MARKER_NOT_OBSERVED' : 'QHARNESS_CONSUMER_TURN_INCOMPLETE');
+    const summary = { ...base, client: fixture.client, status: passed ? 'PASS' : 'FAIL', ...decoded, reason: failure, gatewayAuthVerified, ownedListenerAudit: result.listenerAudit, deniedOperations: passed ? [] : classifyDeniedOperations({ ...result, scratchDir }), denialSignals: passed ? null : classifyDenialSignals({ ...result, scratchDir }), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, outputOverflow: result.overflow, requestsObserved: replay.observations.length, requestTargets: replay.stats.requestTargets, isolation: isolation.proof, databaseCreated: true };
     // Completion includes durable safe evidence and teardown, not only a decoded answer.
     try { await replay.close(); }
     catch (error) { summary.status = 'FAIL'; summary.reason = error.code ?? 'QHARNESS_REPLAY_CLOSE_FAILED'; }

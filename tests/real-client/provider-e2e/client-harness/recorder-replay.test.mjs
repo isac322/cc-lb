@@ -7,8 +7,8 @@ import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  assertTerminalOrder, buildAgyLaunch, buildSandboxProfile, classifyConsumerFailure, classifyDenialSignals, classifyDeniedOperations, createResourceLedger, encodeReplayFrames, websocketReplayFrames,
-  evaluateHarnessOwner, matchesSyntheticGatewayAuth, observeDecodedConsumerOutput, preflightIsolation, runBoundedProcess,
+  assertTerminalOrder, buildAgyLaunch, buildSandboxProfile, classifyConsumerFailure, classifyDenialSignals, classifyDeniedOperations, createOwnedListenerAudit, createResourceLedger, encodeReplayFrames, websocketReplayFrames,
+  evaluateHarnessOwner, matchesSyntheticGatewayAuth, observeDecodedConsumerOutput, parseOwnedListenerSnapshot, preflightIsolation, runBoundedProcess,
   startReplayServer, validateReplayFixture,
 } from './recorder-replay.mjs';
 import { runHermeticFixture } from './run.mjs';
@@ -405,4 +405,149 @@ test('QH-WIRE-001: gateway consumer proof requires Bearer-only wire auth and dec
   const marker = 'AGY159_SYNTHETIC_GATEWAY_BEARER_OK';
   assert.deepEqual(observeDecodedConsumerOutput({ client: 'agy', stdout: Buffer.from(JSON.stringify({ status: 'SUCCESS', response: marker }, null, 2)), marker }), { markerObserved: true, completed: true });
   assert.deepEqual(observeDecodedConsumerOutput({ client: 'agy', stdout: Buffer.from(JSON.stringify({ status: 'ERROR', response: marker })), marker }), { markerObserved: false, completed: false });
+});
+
+test('QH-ISO-001: owned listener parser accepts only exact group PID and numeric loopback addresses', () => {
+  assert.deepEqual(parseOwnedListenerSnapshot(['p123', 'g100', 'n127.0.0.1:43210', 'n[::1]:43211', ''].join('\n'), 100), [
+    { owner_pid: 123, owner_process_group: 100, address: '127.0.0.1', port: 43210 },
+    { owner_pid: 123, owner_process_group: 100, address: '::1', port: 43211 },
+  ]);
+  for (const raw of [['p123', 'g100', 'n*:43210'], ['p123', 'g100', 'n0.0.0.0:43210'], ['p123', 'g101', 'n127.0.0.1:43210']].map((lines) => lines.join('\n'))) {
+    assert.throws(() => parseOwnedListenerSnapshot(raw, 100), { code: 'QHARNESS_OWNED_LISTENER_SCOPE_REJECTED' });
+  }
+});
+
+test('QH-ISO-001/004: bounded owned-group watcher records actual loopback child and rejects adversarial wildcard child', async (t) => {
+  const owned = await workspace('owned-listener');
+  for (const host of ['127.0.0.1', '0.0.0.0']) {
+    const audit = createOwnedListenerAudit({ ...owned, maxDurationMs: 6000 });
+    if (audit.status === 'BLOCKED') {
+      assert.equal(audit.reason, 'QHARNESS_LISTENER_INSPECTOR_UNAVAILABLE');
+      t.diagnostic('Listener inspector unavailable: audit BLOCKED before synthetic child spawn.');
+      return;
+    }
+    const program = `const s=require('node:net').createServer(c=>c.destroy());s.listen(0,${JSON.stringify(host)},()=>setTimeout(()=>s.close(),1500));`;
+    const result = await runBoundedProcess(process.execPath, ['-e', program], {
+      env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: owned.scratchDir },
+      cwd: owned.scratchDir, scratchDir: owned.scratchDir, ledger: owned.ledger, listenerAudit: audit, deadlineMs: 4000,
+    });
+    if (host === '127.0.0.1') {
+      assert.equal(result.error, null); assert.equal(result.exitCode, 0);
+      assert(result.listenerAudit.listeners.length > 0);
+      assert(result.listenerAudit.listeners.every((entry) => entry.address === '127.0.0.1' && entry.owner_process_group === result.pid));
+      assert.equal(result.listenerAudit.sampled, true);
+      assert.equal(result.listenerAudit.continuousIngressEnforcement, false);
+    } else {
+      assert.equal(result.error, 'QHARNESS_OWNED_LISTENER_SCOPE_REJECTED');
+      assert.equal(result.listenerAudit.status, 'FAIL');
+    }
+  }
+});
+
+test('QH-WIRE-004 regression: authorized Expect100 receives continue before the client sends its body', async () => {
+  const owned = await workspace('continue'); const value = fixture();
+  const replay = await startReplayServer({ ...owned, fixture: value, authorize: () => true });
+  try {
+    const result = await new Promise((resolve) => {
+      let continued = false; let settled = false;
+      const child = request({ hostname: '127.0.0.1', port: replay.port, path: value.request.path, method: 'POST',
+        headers: { Host: `127.0.0.1:${replay.port}`, Expect: '100-continue', 'content-type': 'application/json', 'content-length': 13 } });
+      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); child.destroy(); resolve(result); };
+      const timer = setTimeout(() => finish({ timedOut: true, continued }), 2000);
+      child.once('continue', () => { continued = true; child.end('{"safe":true}'); });
+      child.once('response', (response) => {
+        response.resume();
+        response.once('end', () => finish({ timedOut: false, continued, status: response.statusCode }));
+      });
+      child.once('error', () => finish({ timedOut: false, continued, status: 0 }));
+      child.flushHeaders();
+    });
+    assert.equal(result.timedOut, false, 'authorized request must not deadlock waiting for a body gated by100Continue');
+    assert.equal(result.continued, true);
+    assert.equal(result.status, 200);
+    assert.equal(replay.stats.bodyBytesRead, 13);
+  } finally { await replay.close(); }
+});
+
+test('QH-ISO-004 regression: rejected replay listener registration does not leave a child alive with an inaccessible handle', async () => {
+  const owned = await workspace('registration-failure'); const value = fixture();
+  const moduleUrl = new URL('./recorder-replay.mjs', import.meta.url).href;
+  const program = `
+    const {startReplayServer,createResourceLedger}=await import(${JSON.stringify(moduleUrl)});
+    const fixture=${JSON.stringify(value)};
+    const scratchDir=${JSON.stringify(owned.scratchDir)};
+    const record=createResourceLedger(scratchDir);
+    let port=null;let rejected=false;let removed=false;
+    try{await startReplayServer({fixture,scratchDir,ledger:async entry=>{
+      await record(entry);
+      if(entry.kind==='listener'&&entry.state==='active'){port=Number(entry.identifier.split(':').at(-1));throw new Error('synthetic-registration-failure')}
+      if(entry.kind==='listener'&&entry.state==='removed')removed=true;
+    }})}catch{rejected=true}
+    console.log(JSON.stringify({rejected,port,removed}));`;
+  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: owned.scratchDir, ...(process.env.CC_LB_QA_LEDGER ? { CC_LB_QA_LEDGER: process.env.CC_LB_QA_LEDGER } : {}) };
+  const result = await runBoundedProcess(process.execPath, ['--input-type=module', '-e', program], { ...owned, env, cwd: owned.scratchDir, deadlineMs: 2500 });
+  assert.equal(result.timedOut, false, 'registration rejection must close the newly bound listener without parent deadline intervention');
+  assert.equal(result.exitCode, 0);
+  const observation = JSON.parse(result.stdout);
+  assert.equal(observation.rejected, true);
+  assert(Number.isInteger(observation.port) && observation.port > 0);
+  assert.equal(observation.removed, true);
+});
+
+test('QH-ISO-004 regression: rejected preflight canary registration closes the canary before propagating', async (t) => {
+  if (process.platform !== 'darwin') {
+    const unavailable = await preflightIsolation({ platform: 'unsupported', scratchDir: '/unused', recorderPort: 1 });
+    assert.equal(unavailable.status, 'BLOCKED'); assert.equal(unavailable.spawnedClient, false);
+    t.diagnostic('Canary requires macOS Seatbelt; unsupported host remains BLOCKED without spawning.');
+    return;
+  }
+  const owned = await workspace('canary-registration'); const value = fixture();
+  const moduleUrl = new URL('./recorder-replay.mjs', import.meta.url).href;
+  const program = `
+    const {startReplayServer,preflightIsolation,createResourceLedger}=await import(${JSON.stringify(moduleUrl)});
+    const fixture=${JSON.stringify(value)};
+    const scratchDir=${JSON.stringify(owned.scratchDir)};
+    const record=createResourceLedger(scratchDir);
+    const replay=await startReplayServer({fixture,scratchDir,ledger:record});
+    let rejected=false;let port=null;let removed=false;
+    try{await preflightIsolation({scratchDir,recorderPort:replay.port,ledger:async entry=>{
+      await record(entry);
+      if(entry.close_identity?.startsWith('preflightIsolation:canary:')){
+        if(entry.state==='active'){port=Number(entry.identifier.split(':').at(-1));throw new Error('synthetic-canary-registration-failure')}
+        if(entry.state==='removed')removed=true;
+      }
+    }})}catch{rejected=true}finally{await replay.close()}
+    console.log(JSON.stringify({rejected,port,removed}));`;
+  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin', HOME: owned.scratchDir, ...(process.env.CC_LB_QA_LEDGER ? { CC_LB_QA_LEDGER: process.env.CC_LB_QA_LEDGER } : {}) };
+  const result = await runBoundedProcess(process.execPath, ['--input-type=module', '-e', program], { ...owned, env, cwd: owned.scratchDir, deadlineMs: 8000 });
+  assert.equal(result.timedOut, false, 'canary registration failure must not leak its listening handle');
+  assert.equal(result.exitCode, 0);
+  const observation = JSON.parse(result.stdout);
+  assert.equal(observation.rejected, true);
+  assert(Number.isInteger(observation.port) && observation.port > 0);
+  assert.equal(observation.removed, true);
+});
+
+test('QH-WIRE-003 regression: websocket completion reports the peer close rather than self-closing after data', async () => {
+  const owned = await workspace('ws-peer-close');
+  for (const [termination, closeCode, complete, wasClean] of [['close:1000', 1000, true, true], ['close:1006', 1006, false, false]]) {
+    const value = fixture([{ kind: 'ws-text', data: { safe: true } }]);
+    value.request.method = 'GET'; value.response.status = 101; value.response.headers = []; value.response.termination = termination;
+    const result = await runHermeticFixture({ fixture: value, scratchDir: path.join(owned.scratchDir, String(closeCode)), ledger: owned.ledger });
+    assert.equal(result.status, 'PASS', 'matching an explicitly expected abnormal close is fidelity, not successful completion');
+    assert.equal(result.complete, complete);
+    assert.equal(result.closeCode, closeCode);
+    assert.equal(result.wasClean, wasClean);
+    assert.equal(result.providerAcceptance, 'NOT-RUN');
+  }
+});
+
+test('QH-WIRE-003 regression: mismatched websocket control close cannot pass on matching empty data', async () => {
+  const owned = await workspace('ws-wrong-close');
+  const value = fixture([{ kind: 'ws-close', encoding: 'base64', syntheticContent: true, data: Buffer.from([3, 234]).toString('base64') }]);
+  value.request.method = 'GET'; value.response.status = 101; value.response.headers = []; value.response.termination = 'close:1000';
+  const result = await runHermeticFixture({ ...owned, fixture: value });
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.closeCode, 1002);
+  assert.equal(result.consumerAcceptance, 'NOT-RUN');
 });

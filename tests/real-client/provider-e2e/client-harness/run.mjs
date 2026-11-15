@@ -53,21 +53,24 @@ async function observeHttp(fixture, replay) {
 async function observeWs(fixture, replay) {
   return new Promise((resolve) => {
     const client = new WebSocket(`${replay.origin.replace(/^http/, 'ws')}${localReplayPath(fixture.request.path)}`);
-    const chunks = []; let settled = false;
+    const chunks = []; let settled = false; let socketError = false;
     const expectedFrames = websocketReplayFrames(fixture.response.frames).filter((frame) => frame.opcode < 8 && frame.fin).length;
-    const timer = setTimeout(() => finish(false, true), 5000);
-    function finish(complete, timedOut = false) {
-      if (settled) return; settled = true; clearTimeout(timer); client.close();
-      resolve({ complete, timedOut, bytes: Buffer.concat(chunks) });
+    const timer = setTimeout(() => finish({ complete: false, timedOut: true, closeCode: null, wasClean: false }), 5000);
+    function finish(observation) {
+      if (settled) return; settled = true; clearTimeout(timer);
+      if (client.readyState !== WebSocket.CLOSED) client.close();
+      resolve({ ...observation, socketError, bytes: Buffer.concat(chunks) });
     }
     client.binaryType = 'arraybuffer';
     client.addEventListener('open', () => client.send(JSON.stringify(fixture.request.body ?? { type: 'response.create' })));
     client.addEventListener('message', (event) => {
       chunks.push(typeof event.data === 'string' ? Buffer.from(event.data) : Buffer.from(event.data));
-      if (chunks.length === expectedFrames) finish(true);
     });
-    client.addEventListener('error', () => finish(false));
-    client.addEventListener('close', () => finish(chunks.length === expectedFrames));
+    client.addEventListener('error', () => { socketError = true; });
+    client.addEventListener('close', (event) => finish({
+      complete: event.wasClean && event.code === 1000 && chunks.length === expectedFrames,
+      timedOut: false, closeCode: event.code, wasClean: event.wasClean,
+    }));
   });
 }
 
@@ -84,7 +87,10 @@ export async function runHermeticFixture({ fixture, scratchDir, ledger }) {
     const interrupted = isInterruptedTermination(termination) || termination === 'close:1006';
     const expected = encodeReplayFrames(sanitized, { websocket });
     const bytesMatch = observation.bytes.equals(expected);
-    const fidelityPassed = !observation.timedOut && (bytesMatch || (interrupted && !observation.complete && observation.bytes.length > 0 && expected.subarray(0, observation.bytes.length).equals(observation.bytes)));
+    const payloadMatches = bytesMatch || (interrupted && !observation.complete && observation.bytes.length > 0 && expected.subarray(0, observation.bytes.length).equals(observation.bytes));
+    const expectedClose = interrupted ? 1006 : sanitized.response.close_code ?? (termination?.startsWith('close:') ? Number(termination.slice(6)) : 1000);
+    const terminalMatches = !websocket || (observation.closeCode === expectedClose && (expectedClose === 1006 ? !observation.wasClean : observation.wasClean && !observation.socketError));
+    const fidelityPassed = !observation.timedOut && payloadMatches && terminalMatches;
     return {
       fixtureId: fixture.id,
       classification: 'synthetic-replay-fidelity-only',
@@ -95,6 +101,7 @@ export async function runHermeticFixture({ fixture, scratchDir, ledger }) {
       nextProof: fixture.provenance === 'descriptor-only' ? 'Feature owner must demonstrate the pinned consumer action and decoder for this descriptor candidate.' : null,
       target: sanitized.request.path,
       bytesMatch, interrupted, complete: observation.complete,
+      ...(websocket ? { closeCode: observation.closeCode, wasClean: observation.wasClean, socketError: observation.socketError, terminalMatches } : {}),
       consumerAcceptance: 'NOT-RUN', providerAcceptance: 'NOT-RUN', runtimeAcceptance: 'NOT-RUN', fullClientAcceptance: false,
     };
   } finally { await replay.close(); }
