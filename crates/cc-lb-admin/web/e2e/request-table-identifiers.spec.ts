@@ -7,6 +7,9 @@ const rows = [
   { event_id: 'captured-gemini', principal_id: 'principal-gemini', upstream_id: 'upstream-gemini', upstream_name: 'dashboard-gemini', event_kind: 'gemini_generate_content', model: 'gemini-3.5-flash', status: 403 },
   { event_id: 'anthropic-control', principal_id: 'principal-anthropic', upstream_id: 'upstream-anthropic', upstream_name: 'anthropic-control', event_kind: 'messages', model: 'claude-opus-4-7', status: 200 },
 ].map((row) => ({ ...row, request_id: row.event_id, ts: 1794683225, ts_ms: 1794683225000, source_kind: 'proxy', request_kind: 'unknown', duration_ms: 254 }));
+const history = [...rows, ...Array.from({ length: 30 }, (_, index) => ({
+  ...rows[0], event_id: `history-${index}`, request_id: `history-${index}`,
+}))];
 
 for (const theme of ['light', 'dark']) {
   for (const width of [390, 768, 1440]) {
@@ -21,7 +24,7 @@ for (const theme of ['light', 'dark']) {
         const path = new URL(route.request().url()).pathname;
         const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
         if (path === '/admin/v1/auth/session') return json({ authority: 'e2e', subject: 'operator', kind: 'human', provider_id: 'static', email: null, display_name: 'QA', expires_at_unix_secs: null, auth_mode: 'static_token' });
-        if (path === '/admin/v1/events/recent') return json({ events: rows, observed: true, count: rows.length, limit: 200 });
+        if (path === '/admin/v1/events/recent') return json({ events: history, observed: true, count: history.length, limit: 200 });
         if (path === '/admin/v1/events/detail') return json(rows.find((row) => row.event_id === new URL(route.request().url()).searchParams.get('id')));
         if (path === '/admin/v1/events/histogram') return json({ buckets: [], bucket_ms: 60000, bucket_count: 0 });
         if (path === '/admin/v1/principals') return json({ principals: rows.map((row) => ({ id: row.principal_id, name: row.upstream_name })) });
@@ -81,6 +84,21 @@ for (const theme of ['light', 'dark']) {
           }
           expect(await cells.count()).toBeGreaterThan(0);
         }
+      }
+      if (width >= 768) {
+        const header = page.locator('thead');
+        const before = await header.boundingBox();
+        expect(before).not.toBeNull();
+        await page.locator('table').evaluate((table) => {
+          let viewport = table.parentElement;
+          while (viewport && !(viewport.scrollHeight > viewport.clientHeight &&
+            ['auto', 'scroll'].includes(getComputedStyle(viewport).overflowY))) {
+            viewport = viewport.parentElement;
+          }
+          if (!viewport) throw new Error('Expected a vertically scrollable request viewport');
+          viewport.scrollTop = 120;
+        });
+        await expect.poll(async () => (await header.boundingBox())?.y).toBe(before!.y);
       }
       await page.screenshot({ path: testInfo.outputPath(`identifiers-${width}-${theme}.png`), fullPage: true });
     });

@@ -248,10 +248,17 @@ export function selectCodexCredits(
         (latestAvailability == null ||
           (unavailable.observed_at_unix_millis ?? -1) >=
             latestAvailability.observedAt)));
+  // Availability is not simply the newest field: a fresh positive unlimited
+  // or has-credits flag can win over a newer negative sibling.
+  const availabilityEvidence =
+    availabilityStatus === 'Unlimited'
+      ? unlimited
+      : availabilityStatus === 'Available' ||
+          availabilityStatus === 'Unavailable'
+        ? hasCredits
+        : latestAvailability;
   const statusEvidence =
-    limit ??
-    (fallbackUnavailable ? undefined : latestAvailability) ??
-    (availabilityStatus === 'Stale' ? latestAvailability : undefined);
+    limit ?? (fallbackUnavailable ? undefined : availabilityEvidence);
   const statusObservation =
     limit?.snapshot ??
     (fallbackUnavailable ? unavailable : undefined) ??

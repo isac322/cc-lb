@@ -684,6 +684,33 @@ describe('D1: selected credit evidence in the actual upstream route', () => {
     expectCaptionTimestamp(expectCaption(true), headerAt);
   });
 
+  it.each(['Unlimited', 'Available'] as const)(
+    'D1-03 caption follows winning %s evidence instead of a newer negative sibling',
+    (status) => {
+      const windows = structuredClone(capturedWindows).filter(
+        (snapshot) => snapshot.credits != null,
+      );
+      const api = windows.find((snapshot) => snapshot.window === 'overage')!;
+      const header = windows.find((snapshot) => snapshot.window === 'unified')!;
+      api.observed_at_unix_millis = capturedNow * 1000;
+      api.credits!.has_credits = status === 'Unlimited' ? false : null;
+      api.credits!.unlimited = status === 'Available' ? false : null;
+      api.fallback_available = false;
+      header.state = 'fresh';
+      header.observed_at_unix_millis = (capturedNow - 100) * 1000;
+      header.credits!.has_credits = status === 'Available' ? true : null;
+      header.credits!.unlimited = status === 'Unlimited' ? true : null;
+      header.credits!.balance = null;
+      const section = show(windows);
+      const facts = within(section.getByTestId('codex-credit-facts'));
+      expect(facts.getByText(status)).not.toBeNull();
+      expect(facts.getByText('12500.1234000000 credits')).not.toBeNull();
+      expect(facts.getByText('Balance: Usage API')).not.toBeNull();
+      expectCaptionTimestamp(expectCaption(false), (capturedNow - 100) * 1000);
+      expect(facts.getByText('Status: Response headers')).not.toBeNull();
+    },
+  );
+
   it('D1-C preserves Anthropic 5h, 7d and extra usage facts and freshness', () => {
     const section = show(
       [

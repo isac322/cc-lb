@@ -604,7 +604,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
       (k !== 'upstream' || showUpstream),
   );
   const colCount = visible.length;
-  // Preserve each column's readable floor; the container owns overflow.
+  // The feed's scroll viewport preserves readable floors and sticky headers.
   const minWidthRem = visible.reduce(
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
@@ -625,7 +625,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
 
   return (
     <>
-      <div className="@container/events overflow-x-auto">
+      <div className="@container/events">
         <Table
           className="table-fixed @min-[42rem]/events:min-w-(--events-min-w) @max-[42rem]/events:block"
           style={
