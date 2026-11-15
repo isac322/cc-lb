@@ -7,9 +7,10 @@ pub(crate) enum CatalogError {
     InvalidModels,
 }
 
-
 pub(crate) fn project_fetch_available_models(raw: &Value) -> Result<Value, CatalogError> {
-    let models = raw.get("models").and_then(Value::as_object)
+    let models = raw
+        .get("models")
+        .and_then(Value::as_object)
         .ok_or(CatalogError::InvalidModels)?;
     let mut native = Vec::with_capacity(models.len());
     for (id, details) in models {
@@ -40,30 +41,38 @@ mod tests {
         let raw = json!({
             "models": {"model": {"displayName": "Model", "description": "Description",
                 "supportsImages": true, "maxTokens": 123, "maxOutputTokens": 45,
-                "vertexModelId": "vertex", "modelExperimentIds": [1],
+                "vertexModelId": "vertex", "modelExperimentIds": ["experiment"],
                 "futureSupport": {"nested": true}}},
             "defaultAgentModelId": "model", "agentModelSorts": [{"futureSort": 1}],
             "commandModelIds": ["model"], "tabModelIds": [],
             "imageGenerationModelIds": [], "mqueryModelIds": [], "webSearchModelIds": [],
             "commitMessageModelIds": [], "audioTranscriptionModelIds": [],
-            "deprecatedModelIds": {"old": "model"}, "tieredModelIds": {"flash": ["model"]},
+            "deprecatedModelIds": {"old": {"newModelId": "model"}}, "tieredModelIds": {"flash": ["model"]},
             "experimentIds": [123], "sharedModelExperiments": {"shared": {}},
             "groupedModels": {"group": {}}, "futureField": [1, {"x": true}]
         });
         let native = project_fetch_available_models(&raw).unwrap();
-        assert_eq!(native, json!({"models": [{
-            "name": "models/model", "displayName": "Model", "description": "Description"
-        }]}));
+        assert_eq!(
+            native,
+            json!({"models": [{
+                "name": "models/model", "displayName": "Model", "description": "Description"
+            }]})
+        );
     }
 
     #[test]
     fn separates_list_model_configs_and_array_models() {
-        for raw in [json!({"modelConfigs": []}), json!({"models": []}),
-            json!({"models": {"bad": []}})] {
-            assert!(matches!(project_fetch_available_models(&raw), Err(CatalogError::InvalidModels)));
+        for raw in [
+            json!({"modelConfigs": []}),
+            json!({"models": []}),
+            json!({"models": {"bad": []}}),
+        ] {
+            assert!(matches!(
+                project_fetch_available_models(&raw),
+                Err(CatalogError::InvalidModels)
+            ));
         }
     }
-
 
     #[test]
     fn map_keys_supply_names_without_vertex_aliases_or_fake_fields() {
@@ -72,7 +81,8 @@ mod tests {
                 "vertexModelId": "other", "displayName": 1, "description": null,
                 "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 123
             }
-        }})).unwrap();
+        }}))
+        .unwrap();
         assert_eq!(native, json!({"models": [{"name": "models/model"}]}));
     }
 }

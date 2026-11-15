@@ -808,23 +808,32 @@ impl Signer for GeminiSubscriptionSigner {
         if shaped.method() == http::Method::GET
             && matches!(shaped.url().path(), "/v1beta/models" | "/v1/models")
         {
-            let project = self.project_id.as_deref()
+            let project = self
+                .project_id
+                .as_deref()
                 .filter(|project| !project.trim().is_empty())
                 .ok_or_else(|| SignerError::SigningFailed {
                     reason: "Gemini OAuth catalog requires a stored project".to_owned(),
                 })?;
-            let endpoint = self.catalog_endpoint.clone()
-                .ok_or_else(|| SignerError::SigningFailed {
-                    reason: "Gemini OAuth catalog endpoint was not resolved".to_owned(),
-                })?;
+            let endpoint =
+                self.catalog_endpoint
+                    .clone()
+                    .ok_or_else(|| SignerError::SigningFailed {
+                        reason: "Gemini OAuth catalog endpoint was not resolved".to_owned(),
+                    })?;
             shaped.set_url(endpoint);
             shaped.set_method(http::Method::POST);
-            shaped.set_body(Bytes::from(serde_json::to_vec(&json!({"project": project}))
-                .map_err(|_| SignerError::SigningFailed {
-                    reason: "Gemini OAuth catalog body could not be serialized".to_owned(),
-                })?));
+            shaped.set_body(Bytes::from(
+                serde_json::to_vec(&json!({"project": project})).map_err(|_| {
+                    SignerError::SigningFailed {
+                        reason: "Gemini OAuth catalog body could not be serialized".to_owned(),
+                    }
+                })?,
+            ));
             shaped.headers_mut().remove(CONTENT_LENGTH);
-            shaped.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            shaped
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
         let wrapped = wrap_gemini_code_assist_request(
             &mut shaped,

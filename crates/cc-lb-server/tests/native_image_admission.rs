@@ -571,34 +571,44 @@ async fn multiple_unavailable_pixel_references_exceed_cap_before_provider_dispat
 async fn native_image_routes_authenticate_before_reading_a_body() {
     for provider in [Provider::OpenAi, Provider::Gemini] {
         let harness = Harness::start(provider).await;
-        let mut socket = TcpStream::connect(harness.server.proxy_addr)
-            .await
-            .expect("connect auth probe");
-        // Deliberately send no body, despite a length exceeding the body cap.
-        // Waiting for or validating the image body before auth would hang or 413.
-        let headers = format!(
-            "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            provider.path(),
-            BODY_CAP + 1
-        );
-        socket
-            .write_all(headers.as_bytes())
-            .await
-            .expect("send unauthenticated headers");
-        let mut reader = BufReader::new(socket);
-        let mut response = String::new();
-        tokio::time::timeout(DEADLINE, reader.read_line(&mut response))
-            .await
-            .expect("authentication must not wait for a body")
-            .expect("read auth response status line");
-        assert!(
-            response.starts_with("HTTP/1.1 401"),
-            "{provider:?}: {response}"
-        );
-        assert_eq!(
-            harness.state.request_count(),
-            0,
-            "unauthenticated requests never dispatch"
-        );
+        let mut routes = vec![("POST", provider.path())];
+        if matches!(provider, Provider::Gemini) {
+            routes.extend([
+                ("GET", "/gemini/v1beta/models"),
+                ("GET", "/gemini/v1/models"),
+            ]);
+        }
+        for (method, path) in routes {
+            for auth_header in ["", "Authorization: Bearer invalid-principal\r\n"] {
+                let mut socket = TcpStream::connect(harness.server.proxy_addr)
+                    .await
+                    .expect("connect auth probe");
+                // Deliberately send no body, despite a length exceeding the body cap.
+                // Waiting for or validating the image body before auth would hang or 413.
+                let headers = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    BODY_CAP + 1
+                );
+                socket
+                    .write_all(headers.as_bytes())
+                    .await
+                    .expect("send unauthenticated headers");
+                let mut reader = BufReader::new(socket);
+                let mut response = String::new();
+                tokio::time::timeout(DEADLINE, reader.read_line(&mut response))
+                    .await
+                    .expect("authentication must not wait for a body")
+                    .expect("read auth response status line");
+                assert!(
+                    response.starts_with("HTTP/1.1 401"),
+                    "{provider:?}: {response}"
+                );
+                assert_eq!(
+                    harness.state.request_count(),
+                    0,
+                    "unauthenticated requests never dispatch"
+                );
+            }
+        }
     }
 }
