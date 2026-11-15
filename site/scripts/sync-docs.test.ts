@@ -95,6 +95,18 @@ describe('source documentation consumers', () => {
     expect(rendered).toContain('`:streamGenerateContent`');
   });
 
+  test('keeps the committed runtime mirror equal to the rendered source', async () => {
+    const [source, mirror] = await Promise.all([
+      readFile(new URL('../../docs/runtime-management.md', import.meta.url), 'utf8'),
+      readFile(
+        new URL('../src/content/docs/reference/source/runtime-management.md', import.meta.url),
+        'utf8',
+      ),
+    ]);
+
+    expect(mirror).toBe(renderSourceNotes(source, runtimeSource));
+  });
+
   test('selects technical sections, sanitizes local paths, and rewrites relative links', () => {
     const source = [
       '## Admin v1 REST API',
