@@ -412,6 +412,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
+            target.base.as_str(),
+            "http://localhost:8123/gateway:custom?old=1"
+        );
+        assert_eq!(
             target
                 .endpoint_for(GeminiOAuthOperation::RetrieveUserQuota)
                 .as_str(),

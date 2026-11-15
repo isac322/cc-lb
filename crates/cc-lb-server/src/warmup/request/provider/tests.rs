@@ -285,68 +285,82 @@ async fn gemini_profiles_reuse_proxy_envelope_host_and_headers() {
         GeminiOAuthProfile::GeminiCli,
         GeminiOAuthProfile::Antigravity,
     ] {
-        let mut server = MockServer::start(StatusCode::OK, HeaderMap::new(), "{}", None).await;
-        let aead = AeadService::from_master_key([9; 32]);
-        let is_antigravity = profile == GeminiOAuthProfile::Antigravity;
-        let base_url = if is_antigravity {
-            "https://cloudcode-pa.googleapis.com/v1internal"
-                .parse()
-                .expect("legacy host")
-        } else {
-            server.base_url.clone()
-        };
-        let record = upstream(UpstreamKind::GeminiOauth, profile, base_url, &aead);
-        let mut config = Config::default();
-        config.warmup.gemini_model = "custom-gemini-model".to_owned();
-        config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
-            code_assist_url: server.base_url.clone(),
-            user_agent: "antigravity/mock".to_owned(),
-            ..Default::default()
-        });
-        let client = http_client();
-        let result =
-            dispatch_provider_warmup_attempt(params(&client, &record, &aead, &config)).await;
-        let WarmupRequestAttempt::Response {
-            status,
-            observations,
-            ..
-        } = result
-        else {
-            panic!("expected response: {result:?}");
-        };
-        assert_eq!(status, StatusCode::OK);
-        assert!(observations.is_empty());
-        let request = server.request().await;
-        assert_eq!(request.method, Method::POST);
-        assert_eq!(request.uri.path(), "/v1internal:generateContent");
-        assert!(request.uri.query().is_none());
-        for header in ["authorization", "content-type"] {
-            assert!(request.headers.contains_key(header), "missing {header}");
-        }
-        assert_eq!(request.body["model"], "custom-gemini-model");
-        assert_eq!(request.body["project"], "mock-project");
-        assert_eq!(
-            request.body["request"]["contents"],
-            json!([{
-                "role": "user", "parts": [{"text": "."}],
-            }])
-        );
-        assert_eq!(
-            request.body["request"]["generationConfig"]["maxOutputTokens"],
-            1
-        );
-        if is_antigravity {
-            assert!(request.headers.contains_key("user-agent"));
-            assert_eq!(request.body["userAgent"], "antigravity");
-            assert!(request.body.get("requestType").is_none());
-            assert!(
-                request.body["requestId"]
-                    .as_str()
-                    .is_some_and(|id| id.starts_with("agent-"))
+        for (suffix, expected_path) in [
+            ("", "/v1internal:generateContent"),
+            ("v1internal", "/v1internal:generateContent"),
+            ("v1internal:countTokens", "/v1internal:generateContent"),
+            ("gateway", "/gateway:generateContent"),
+            ("gateway/v1internal", "/gateway/v1internal:generateContent"),
+            (
+                "gateway/v1internal:streamGenerateContent",
+                "/gateway/v1internal:generateContent",
+            ),
+        ] {
+            let mut server = MockServer::start(StatusCode::OK, HeaderMap::new(), "{}", None).await;
+            let aead = AeadService::from_master_key([9; 32]);
+            let is_antigravity = profile == GeminiOAuthProfile::Antigravity;
+            let base_url = server
+                .base_url
+                .join(&format!("./{suffix}"))
+                .expect("explicit mock target");
+            assert_eq!(base_url.scheme(), "http");
+            assert_eq!(base_url.host_str(), server.base_url.host_str());
+            let record = upstream(UpstreamKind::GeminiOauth, profile, base_url, &aead);
+            let mut config = Config::default();
+            config.warmup.gemini_model = "custom-gemini-model".to_owned();
+            config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+                code_assist_url: server.base_url.clone(),
+                user_agent: "antigravity/mock".to_owned(),
+                ..Default::default()
+            });
+            let client = http_client();
+            let result =
+                dispatch_provider_warmup_attempt(params(&client, &record, &aead, &config)).await;
+            let WarmupRequestAttempt::Response {
+                status,
+                observations,
+                ..
+            } = result
+            else {
+                panic!("expected response: {result:?}");
+            };
+            assert_eq!(status, StatusCode::OK);
+            assert!(observations.is_empty());
+            let request = server.request().await;
+            assert_eq!(request.method, Method::POST);
+            assert_eq!(request.uri.path(), expected_path, "{profile:?}, {suffix}");
+            assert!(request.uri.query().is_none());
+            for header in ["authorization", "content-type"] {
+                assert!(request.headers.contains_key(header), "missing {header}");
+            }
+            assert_eq!(request.body["model"], "custom-gemini-model");
+            assert_eq!(request.body["project"], "mock-project");
+            assert_eq!(
+                request.body["request"]["contents"],
+                json!([{
+                    "role": "user", "parts": [{"text": "."}],
+                }])
             );
-        } else {
-            assert!(request.body.get("userAgent").is_none());
-            assert!(request.body.get("requestType").is_none());
+            assert_eq!(
+                request.body["request"]["generationConfig"]["maxOutputTokens"],
+                1
+            );
+            if is_antigravity {
+                assert_eq!(
+                    request.headers.get("user-agent"),
+                    Some(&http::HeaderValue::from_static("antigravity/mock"))
+                );
+                assert_eq!(request.body["userAgent"], "antigravity");
+                assert!(request.body.get("requestType").is_none());
+                assert!(
+                    request.body["requestId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("agent-"))
+                );
+            } else {
+                assert!(request.body.get("userAgent").is_none());
+                assert!(request.body.get("requestType").is_none());
+            }
         }
     }
 }
@@ -358,9 +372,7 @@ async fn gemini_third_party_lane_uses_third_party_model_through_antigravity_enve
     let record = upstream(
         UpstreamKind::GeminiOauth,
         GeminiOAuthProfile::Antigravity,
-        "https://cloudcode-pa.googleapis.com/v1internal"
-            .parse()
-            .expect("legacy host"),
+        server.base_url.clone(),
         &aead,
     );
     let mut config = Config::default();

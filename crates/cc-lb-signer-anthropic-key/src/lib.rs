@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::{ANTHROPIC_WORKSPACE_ID_HEADER, Upstream};
+use cc_lb_oauth_protocol::{
+    GeminiOAuthOperation, GeminiOAuthProfile, GeminiOAuthTarget, resolve_gemini_oauth_target,
+};
 use cc_lb_upstream::{
     GeminiEnvelopeRequest, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, UpstreamError, scrub_secret, scrub_url_query_api_key,
@@ -423,12 +426,12 @@ pub struct GeminiSubscriptionSigner {
     expires_at_unix_secs: Option<u64>,
     never_refresh: bool,
     clock: ClockHandle,
+    content_target: GeminiOAuthTarget,
     antigravity: Option<AntigravityRequestProfile>,
 }
 
 #[derive(Clone)]
 struct AntigravityRequestProfile {
-    base_url: Url,
     user_agent: HeaderValue,
     content_type: HeaderValue,
 }
@@ -467,6 +470,34 @@ impl GeminiSubscriptionSigner {
         never_refresh: bool,
         clock: ClockHandle,
     ) -> Result<Self, SignerError> {
+        let target = resolve_gemini_oauth_target(
+            GeminiOAuthProfile::GeminiCli,
+            None,
+            None,
+            None,
+            GeminiOAuthOperation::GenerateContent,
+        )
+        .map_err(|_| SignerError::SigningFailed {
+            reason: "Gemini Code Assist URL is invalid".to_owned(),
+        })?;
+        Self::new_with_target_policy(
+            access_token,
+            project_id,
+            expires_at_unix_secs,
+            never_refresh,
+            clock,
+            target,
+        )
+    }
+
+    fn new_with_target_policy(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        never_refresh: bool,
+        clock: ClockHandle,
+        content_target: GeminiOAuthTarget,
+    ) -> Result<Self, SignerError> {
         let mut authorization_header = HeaderValue::from_str(&format!("Bearer {access_token}"))
             .map_err(|_| SignerError::SigningFailed {
                 reason: "gemini access token is not a valid header value".to_owned(),
@@ -479,8 +510,58 @@ impl GeminiSubscriptionSigner {
             expires_at_unix_secs,
             never_refresh,
             clock,
+            content_target,
             antigravity: None,
         })
+    }
+
+    /// Builds an access-only signer with a target resolved at upstream construction.
+    pub fn new_for_target(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        clock: ClockHandle,
+        target: GeminiOAuthTarget,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_target_policy(
+            access_token,
+            project_id,
+            expires_at_unix_secs,
+            true,
+            clock,
+            target,
+        )
+    }
+
+    /// Builds a rotating-credential signer with the usual refresh-skew check.
+    pub fn new_refreshing_for_target(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: u64,
+        clock: ClockHandle,
+        target: GeminiOAuthTarget,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_target_policy(
+            access_token,
+            project_id,
+            Some(expires_at_unix_secs),
+            false,
+            clock,
+            target,
+        )
+    }
+
+    /// Applies Antigravity headers and envelope metadata without changing the target.
+    pub fn with_antigravity_user_agent(mut self, user_agent: &str) -> Result<Self, SignerError> {
+        let user_agent =
+            HeaderValue::from_str(user_agent).map_err(|_| SignerError::SigningFailed {
+                reason: "antigravity user agent is not a valid header value".to_owned(),
+            })?;
+        self.antigravity = Some(AntigravityRequestProfile {
+            user_agent,
+            content_type: HeaderValue::from_static("application/json"),
+        });
+        Ok(self)
     }
 
     /// Builds the Antigravity profile with endpoint and headers parsed once.
@@ -534,24 +615,25 @@ impl GeminiSubscriptionSigner {
         let base_url = Url::parse(code_assist_url).map_err(|_| SignerError::SigningFailed {
             reason: "antigravity Code Assist URL is invalid".to_owned(),
         })?;
-        let user_agent =
-            HeaderValue::from_str(user_agent).map_err(|_| SignerError::SigningFailed {
-                reason: "antigravity user agent is not a valid header value".to_owned(),
-            })?;
-        let content_type = HeaderValue::from_static("application/json");
-        let mut signer = Self::new_with_policy(
+        let target = resolve_gemini_oauth_target(
+            GeminiOAuthProfile::Antigravity,
+            None,
+            Some(&base_url),
+            None,
+            GeminiOAuthOperation::GenerateContent,
+        )
+        .map_err(|_| SignerError::SigningFailed {
+            reason: "antigravity Code Assist URL is invalid".to_owned(),
+        })?;
+        Self::new_with_target_policy(
             access_token,
             project_id,
             expires_at_unix_secs,
             never_refresh,
             clock,
-        )?;
-        signer.antigravity = Some(AntigravityRequestProfile {
-            base_url,
-            user_agent,
-            content_type,
-        });
-        Ok(signer)
+            target,
+        )?
+        .with_antigravity_user_agent(user_agent)
     }
 }
 
@@ -609,11 +691,8 @@ fn wrap_gemini_code_assist_request(
     shaped: &mut ShapedRequest,
     project_id: Option<&str>,
     antigravity: Option<&AntigravityRequestProfile>,
+    target: &GeminiOAuthTarget,
 ) -> Result<bool, SignerError> {
-    let mut url = shaped.url().clone();
-    scrub_url_query_api_key(&mut url);
-    shaped.set_url(url);
-
     let path = shaped.url().path();
     let is_stream =
         path == "/v1internal:streamGenerateContent" || path.ends_with(":streamGenerateContent");
@@ -728,24 +807,26 @@ fn wrap_gemini_code_assist_request(
         reason: "Gemini Code Assist request could not be serialized".to_owned(),
     })?;
     let is_antigravity_host = shaped.url().host_str() == Some("daily-cloudcode-pa.googleapis.com");
-    let mut url = antigravity
-        .map(|profile| {
-            let mut url = profile.base_url.clone();
-            url.set_query(shaped.url().query());
-            url
-        })
-        .unwrap_or_else(|| shaped.url().clone());
-    url.set_path(if is_stream {
-        "/v1internal:streamGenerateContent"
+    let operation = if is_stream {
+        GeminiOAuthOperation::StreamGenerateContent
     } else if is_count {
-        "/v1internal:countTokens"
+        GeminiOAuthOperation::CountTokens
     } else {
-        "/v1internal:generateContent"
-    });
-    shaped.set_url(url);
-    if is_stream {
-        ensure_gemini_stream_alt_sse(shaped);
+        GeminiOAuthOperation::GenerateContent
+    };
+    let mut url = target.endpoint_for(operation);
+    url.set_query(shaped.url().query());
+    scrub_url_query_api_key(&mut url);
+    if is_stream
+        && !url.query().is_some_and(|query| {
+            query
+                .split('&')
+                .any(|pair| pair == "alt" || pair.starts_with("alt="))
+        })
+    {
+        url.query_pairs_mut().append_pair("alt", "sse");
     }
+    shaped.set_url(url);
     shaped.set_body(Bytes::from(body));
     let headers = shaped.headers_mut();
     headers.remove(CONTENT_LENGTH);
@@ -780,9 +861,6 @@ impl Signer for GeminiSubscriptionSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
-        let mut url = shaped.url().clone();
-        scrub_url_query_api_key(&mut url);
-        shaped.set_url(url);
         check_access_token_expiry(
             self.expires_at_unix_secs,
             self.never_refresh,
@@ -792,7 +870,13 @@ impl Signer for GeminiSubscriptionSigner {
             &mut shaped,
             self.project_id.as_deref(),
             self.antigravity.as_ref(),
+            &self.content_target,
         )?;
+        if !wrapped {
+            let mut url = shaped.url().clone();
+            scrub_url_query_api_key(&mut url);
+            shaped.set_url(url);
+        }
         if wrapped && let Some(hook) = shaped.take_gemini_envelope_hook() {
             let result = hook.shape_envelope_gemini(GeminiEnvelopeRequest {
                 url: shaped.url(),
@@ -2365,5 +2449,80 @@ mod tests {
             "/v1internal:streamGenerateContent"
         );
         assert_eq!(signed_oauth.url().query(), Some("keep=1&alt=sse"));
+    }
+
+    #[tokio::test]
+    async fn gemini_resolved_content_target_preserves_query_and_operation_envelopes() {
+        let base: Url =
+            "http://gateway.invalid/gateway/v1internal:loadCodeAssist?base=discard#discard"
+                .parse()
+                .expect("override URL");
+        for profile in [
+            GeminiOAuthProfile::GeminiCli,
+            GeminiOAuthProfile::Antigravity,
+        ] {
+            let target = resolve_gemini_oauth_target(
+                profile,
+                Some(&base),
+                None,
+                None,
+                GeminiOAuthOperation::GenerateContent,
+            )
+            .expect("resolved target");
+            let signer = GeminiSubscriptionSigner::new_for_target(
+                "access-token",
+                None,
+                None,
+                Arc::new(cc_lb_clock::SystemClock),
+                target,
+            )
+            .expect("signer");
+            let signer = if profile == GeminiOAuthProfile::Antigravity {
+                signer
+                    .with_antigravity_user_agent("antigravity/test")
+                    .expect("Antigravity headers")
+            } else {
+                signer
+            };
+            for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+                for (query, expected_query) in [
+                    ("key=downstream&keep=a%2Bb", "keep=a%2Bb"),
+                    ("alt=json&key=downstream&keep=1", "alt=json&keep=1"),
+                    ("alt&keep=1", "alt&keep=1"),
+                ] {
+                    let shaped = gemini_generation_request(
+                        &format!("/v1beta/models/gemini-3-pro:{action}?{query}"),
+                        &json!({"contents": []}),
+                    );
+                    let signed = sign_request(&signer, shaped).await.expect("signed request");
+                    assert_eq!(signed.url().scheme(), "http");
+                    assert_eq!(signed.url().host_str(), Some("gateway.invalid"));
+                    assert_eq!(signed.url().path(), format!("/gateway/v1internal:{action}"));
+                    assert!(signed.url().fragment().is_none());
+                    let expected_query =
+                        if action == "streamGenerateContent" && !query.starts_with("alt") {
+                            format!("{expected_query}&alt=sse")
+                        } else {
+                            expected_query.to_owned()
+                        };
+                    assert_eq!(signed.url().query(), Some(expected_query.as_str()));
+                    let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+                    assert!(body.get("project").is_none());
+                    if action == "countTokens" {
+                        assert_eq!(
+                            body,
+                            json!({"request": {"model": "models/gemini-3-pro", "contents": []}})
+                        );
+                    } else {
+                        assert_eq!(body["model"], "gemini-3-pro");
+                        assert_eq!(body["request"], json!({"contents": []}));
+                        assert_eq!(
+                            body.get("userAgent").and_then(Value::as_str),
+                            (profile == GeminiOAuthProfile::Antigravity).then_some("antigravity")
+                        );
+                    }
+                }
+            }
+        }
     }
 }

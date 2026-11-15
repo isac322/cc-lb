@@ -465,9 +465,14 @@ impl SchedulerDispatch {
                 if recent && !missing {
                     return;
                 }
-                let (load, userinfo) =
-                    fetch_gemini_account_metadata(&self.http, &self.config, bundle, &self.cancel)
-                        .await;
+                let (load, userinfo) = fetch_gemini_account_metadata(
+                    &self.http,
+                    &self.config,
+                    upstream.base_url.as_ref(),
+                    bundle,
+                    &self.cancel,
+                )
+                .await;
                 merge_gemini_account_metadata(
                     &mut identity,
                     bundle,
@@ -693,6 +698,7 @@ impl SchedulerDispatch {
             return self
                 .complete_gemini_usage(
                     &base_url,
+                    bundle.oauth_profile,
                     &bundle.access_token,
                     bundle.project_id.as_deref(),
                     user_agent,
@@ -706,6 +712,7 @@ impl SchedulerDispatch {
     async fn complete_gemini_usage(
         &self,
         base_url: &url::Url,
+        profile: GeminiOAuthProfile,
         access_token: &str,
         project_id: Option<&str>,
         user_agent: &str,
@@ -727,6 +734,7 @@ impl SchedulerDispatch {
             match fetch_gemini_quota(
                 &self.http,
                 base_url,
+                profile,
                 access_token,
                 project_id,
                 user_agent,
