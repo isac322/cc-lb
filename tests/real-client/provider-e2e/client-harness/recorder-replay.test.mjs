@@ -6,10 +6,13 @@ import { connect as connectTcp } from 'node:net';
 import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { fixtures as pinnedCodexFixtures } from '../codex169/fixtures.mjs';
 import {
-  assertTerminalOrder, buildAgyLaunch, buildSandboxProfile, classifyConsumerFailure, classifyDenialSignals, classifyDeniedOperations, createOwnedListenerAudit, createResourceLedger, encodeReplayFrames, websocketReplayFrames,
+  assertTerminalOrder, boundedProcessSucceeded, buildAgyLaunch, buildSandboxProfile, classifyConsumerFailure, classifyDenialSignals, classifyDeniedOperations, createOwnedListenerAudit, createResourceLedger, encodeReplayFrames, websocketReplayFrames,
   evaluateHarnessOwner, matchesSyntheticGatewayAuth, observeDecodedConsumerOutput, parseOwnedListenerSnapshot, preflightIsolation, runBoundedProcess,
-  startReplayServer, validateReplayFixture,
+  runPinnedConsumer, startReplayServer, validateReplayFixture,
 } from './recorder-replay.mjs';
 import { runHermeticFixture } from './run.mjs';
 
@@ -640,4 +643,84 @@ test('QH-ISO-004 cleanup regression: primary registration error remains distinct
   assert.equal(result.cleanupError, 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED');
   assert.equal(result.processGroupCleanup.status, 'unresolved');
   assert.deepEqual(states, ['active', 'unresolved']);
+});
+
+async function assertRejectedProbeCleanup(t, targetOrdinal) {
+  if (process.platform !== 'darwin') {
+    const unsupported = await preflightIsolation({ platform: 'unsupported', scratchDir: '/unused', recorderPort: 1 });
+    assert.equal(unsupported.status, 'BLOCKED'); assert.equal(unsupported.spawnedClient, false);
+    t.diagnostic('Actual Seatbelt probe unavailable on this host; unsupported path remains BLOCKED.');
+    return;
+  }
+  const owned = await workspace(`probe-cleanup-${targetOrdinal}`);
+  const replay = await startReplayServer({ ...owned, fixture: fixture() });
+  let ordinal = 0; let targetGroup; let injected = false;
+  const ledger = async (entry) => {
+    await owned.ledger(entry);
+    if (entry.kind !== 'process-group') return;
+    if (entry.state === 'active' && ++ordinal === targetOrdinal) targetGroup = entry.identifier;
+    if (entry.state === 'removed' && entry.identifier === targetGroup) {
+      injected = true;
+      throw new Error('synthetic completed-probe ledger rejection');
+    }
+  };
+  try {
+    const result = await preflightIsolation({ scratchDir: owned.scratchDir, recorderPort: replay.port, ledger });
+    assert.equal(injected, true, 'the real probe must finish and reach its removed-ledger callback');
+    assert.equal(result.status, 'BLOCKED', 'exit0 and valid proof cannot override a failed evidence lifecycle');
+    assert.equal(result.spawnedClient, false);
+  } finally { await replay.close(); }
+}
+
+test('QH-ISO-004 probe cleanup regression: initial completed probe with rejected removed ledger cannot admit a client', async (t) => {
+  await assertRejectedProbeCleanup(t, 1);
+});
+
+test('QH-ISO-004 probe cleanup regression: canary completed probe with rejected removed ledger cannot admit a client', async (t) => {
+  await assertRejectedProbeCleanup(t, 2);
+});
+
+test('QH-ISO-004 probe cleanup regression: completed SQLite helper with rejected removed ledger blocks before any client startup', async (t) => {
+  const owned = await workspace('sqlite-cleanup');
+  const selected = pinnedCodexFixtures.find((value) => value.expected?.consumer?.transport === 'sse');
+  let injected = false; let startupAttempts = 0;
+  const ledger = async (entry) => {
+    await owned.ledger(entry);
+    if (entry.kind === 'process-group' && entry.state === 'removed' && entry.argv?.some((value) => typeof value === 'string' && value.includes('sqlite3.connect'))) {
+      injected = true;
+      throw new Error('synthetic completed-SQLite ledger rejection');
+    }
+  };
+  const spawn = childProcess.spawn;
+  t.mock.method(childProcess, 'spawn', (command, args, options) => {
+    if (command === '/usr/bin/sandbox-exec') { startupAttempts++; throw new Error('QHARNESS_TEST_NO_CLIENT_STARTUP'); }
+    return spawn(command, args, options);
+  });
+  syncBuiltinESMExports();
+  let result; let failure;
+  try {
+    result = await runPinnedConsumer({ fixture: selected, scratchDir: owned.scratchDir, ledger, deadlineMs: 1000 });
+  } catch (error) { failure = error; }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  if (!injected && result?.status === 'BLOCKED' && ['QHARNESS_CLIENT_UNAVAILABLE', 'QHARNESS_CLIENT_HASH_MISMATCH', 'QHARNESS_SQLITE_PYTHON_UNAVAILABLE'].includes(result.reason)) {
+    assert.equal(startupAttempts, 0);
+    t.diagnostic('Pinned client or SQLite helper prerequisite unavailable: blocked before client startup.');
+    return;
+  }
+  assert.equal(injected, true, 'real SQLite helper must reach the completed removed-ledger callback');
+  assert.equal(startupAttempts, 0, 'failed SQLite helper lifecycle must block before sandbox/client startup');
+  assert.equal(failure, undefined);
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(result.reason, 'QHARNESS_SQLITE_CREATION_FAILED');
+});
+
+test('QH-ISO-004: common bounded process success requires exit and complete lifecycle proof', () => {
+  const healthy = { exitCode: 0, timedOut: false, overflow: false, error: null, cleanupError: null, processGroupCleanup: { status: 'gone' } };
+  assert.equal(boundedProcessSucceeded(healthy), true);
+  for (const mutation of [
+    { exitCode: 1 }, { timedOut: true }, { overflow: true },
+    { error: 'QHARNESS_RESOURCE_LEDGER_FAILED' }, { cleanupError: 'QHARNESS_RESOURCE_LEDGER_FAILED' },
+    { processGroupCleanup: { status: 'unresolved' } }, { processGroupCleanup: undefined },
+  ]) assert.equal(boundedProcessSucceeded({ ...healthy, ...mutation }), false);
+  assert.equal(boundedProcessSucceeded(undefined), false);
 });

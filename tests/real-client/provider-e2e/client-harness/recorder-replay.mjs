@@ -509,7 +509,8 @@ export function createOwnedListenerAudit({ scratchDir, ledger, maxDurationMs = 3
           const result = await runBoundedProcess(executable, ['-nP', '-a', '-g', String(pid), '-iTCP', '-sTCP:LISTEN', '-F', 'pgn'], {
             env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: scratchDir }, cwd: scratchDir, scratchDir, ledger, deadlineMs: 1500,
           });
-          if (result.error || result.timedOut || (result.exitCode !== 0 && !(result.exitCode === 1 && result.stdout.length === 0 && result.stderr.length === 0))) throw fail('QHARNESS_LISTENER_INSPECTION_FAILED');
+          const emptySnapshot = result.exitCode === 1 && result.stdout.length === 0 && result.stderr.length === 0;
+          if (!boundedProcessSettled(result) || (result.exitCode !== 0 && !emptySnapshot)) throw fail('QHARNESS_LISTENER_INSPECTION_FAILED');
           const listeners = parseOwnedListenerSnapshot(result.stdout.toString('utf8'), pid);
           const now = new Date().toISOString();
           for (const listener of listeners) {
@@ -539,6 +540,14 @@ export function createOwnedListenerAudit({ scratchDir, ledger, maxDurationMs = 3
       return snapshot();
     },
   };
+}
+
+function boundedProcessSettled(result) {
+  return Boolean(result && !result.timedOut && !result.overflow && !result.error && !result.cleanupError && result.processGroupCleanup?.status === 'gone');
+}
+
+export function boundedProcessSucceeded(result) {
+  return result?.exitCode === 0 && boundedProcessSettled(result);
 }
 
 async function waitForOwnedProcessGroup(group, probe, timeoutMs) {
@@ -622,11 +631,12 @@ export async function preflightIsolation({ scratchDir, recorderPort, ledger, pla
   const denied = (value) => ['EPERM', 'EACCES'].includes(value);
   const preflightProof = {
     processExitedZero: result.exitCode === 0, timedOut: result.timedOut, resultDecoded: Boolean(proof),
+    processSucceeded: boundedProcessSucceeded(result), processGroupGone: result.processGroupCleanup?.status === 'gone',
     recorderAllowed: proof?.allowed === 'CONNECTED', authStoreDenied: denied(proof?.auth), externalDenied: denied(proof?.foreign),
     policySyntaxRejected: /syntax error|parse error|invalid port|unbound variable|unrecognized.*(?:filter|operation)|illegal.*(?:profile|port)/i.test(result.stderr.toString('utf8')),
     denialSignals: classifyDenialSignals({ ...result, scratchDir }),
   };
-  if (result.exitCode !== 0 || result.timedOut || !proof || proof.allowed !== 'CONNECTED' || !denied(proof.auth) || !denied(proof.foreign)) {
+  if (!boundedProcessSucceeded(result) || !proof || proof.allowed !== 'CONNECTED' || !denied(proof.auth) || !denied(proof.foreign)) {
     return { status: 'BLOCKED', reason: preflightProof.policySyntaxRejected ? 'QHARNESS_SANDBOX_PROFILE_REJECTED' : 'QHARNESS_SANDBOX_PREFLIGHT_FAILED', spawnedClient: false, preflightProof };
   }
   let bindProof;
@@ -640,10 +650,10 @@ export async function preflightIsolation({ scratchDir, recorderPort, ledger, pla
     let observed; try { observed = JSON.parse(bound.stdout.toString('utf8')); } catch { observed = null; }
     const loopbackAllowed = observed?.loopback?.status === 'BOUND' && Number.isInteger(observed.loopback.port) && observed.loopback.port > 0 && observed.loopback.port <= 65535;
     const nonLoopbackDenied = denied(observed?.nonloopback?.status);
-    if (loopbackAllowed) {
+    if (loopbackAllowed && boundedProcessSucceeded(bound)) {
       await resource(ledger, scratchDir, { kind: 'child-listener-probe', identifier: `127.0.0.1:${observed.loopback.port}`, owner_process_group: bound.pid, created_utc: observed.loopback.created_utc, delete_command: `kill -TERM -- -${bound.pid}`, state: 'removed' });
     }
-    if (bound.exitCode !== 0 || bound.timedOut || bound.error || !loopbackAllowed || !nonLoopbackDenied) {
+    if (!boundedProcessSucceeded(bound) || !loopbackAllowed || !nonLoopbackDenied) {
       return { status: 'BLOCKED', reason: 'QHARNESS_EPHEMERAL_BIND_SCOPE_NOT_ENFORCED', spawnedClient: false, preflightProof, bindProof: { processExitedZero: bound.exitCode === 0, timedOut: bound.timedOut, resultDecoded: Boolean(observed), loopbackAllowed, loopbackDenied: denied(observed?.loopback?.status), nonLoopbackDenied, nonLoopbackAllowed: observed?.nonloopback?.status === 'BOUND', denialSignals: classifyDenialSignals({ ...bound, scratchDir }) } };
     }
     bindProof = { ephemeralLoopbackBindAllowed: true, nonLoopbackBindDenied: true, observedProbePort: observed.loopback.port };
@@ -659,7 +669,7 @@ export async function preflightIsolation({ scratchDir, recorderPort, ledger, pla
     try { await resource(ledger, scratchDir, { ...canaryResource, state: 'active' }); }
     catch { throw fail('QHARNESS_CANARY_REGISTRATION_FAILED'); }
     const probe = await runBoundedProcess('/usr/bin/sandbox-exec', ['-f', profilePath, process.execPath, '-e', `const n=require('node:net');const s=n.connect({host:'127.0.0.1',port:${canaryPort}});s.on('connect',()=>{s.destroy();process.exit(2)});s.on('error',e=>process.exit(['EPERM','EACCES'].includes(e.code)?0:3));s.setTimeout(1500,()=>{s.destroy();process.exit(4)})`], { env: { PATH: '/usr/bin:/bin', HOME: scratchDir }, cwd: scratchDir, scratchDir, ledger, deadlineMs: 3000 });
-    other = probe.exitCode === 0 && !probe.timedOut;
+    other = boundedProcessSucceeded(probe);
   } catch (error) {
     canaryFailure = error.code?.startsWith('QHARNESS_') ? error : fail('QHARNESS_CANARY_PROBE_FAILED');
   } finally {
@@ -734,7 +744,7 @@ export async function runPinnedConsumer({ fixture, executable, scratchDir, ledge
   const python = findExecutable('python3');
   if (!python) return { ...base, status: 'BLOCKED', reason: 'QHARNESS_SQLITE_PYTHON_UNAVAILABLE' };
   const database = await runBoundedProcess(python, ['-c', 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("CREATE TABLE IF NOT EXISTS harness_run (fixture_id TEXT NOT NULL)"); c.execute("INSERT INTO harness_run VALUES (?)",(sys.argv[2],)); c.commit(); c.close()', databasePath, fixture.id], { cwd: work, env: { PATH: '/usr/bin:/bin', HOME: home }, scratchDir, ledger, deadlineMs: 5000 });
-  if (database.exitCode !== 0) return { ...base, status: 'BLOCKED', reason: 'QHARNESS_SQLITE_CREATION_FAILED' };
+  if (!boundedProcessSucceeded(database)) return { ...base, status: 'BLOCKED', reason: 'QHARNESS_SQLITE_CREATION_FAILED' };
   const fakeKey = 'qharness-synthetic-local-only';
   const gateway = consumer.authMode === 'gateway-bearer';
   let gatewayAccepted = 0; let gatewayRejected = 0;
@@ -776,8 +786,8 @@ export async function runPinnedConsumer({ fixture, executable, scratchDir, ledge
     const decoded = observeDecodedConsumerOutput({ client: fixture.client.name, stdout: result.stdout, marker: consumer.marker });
     const gatewayAuthVerified = gateway ? gatewayAccepted > 0 && gatewayRejected === 0 : null;
     const listenerObserved = !listenerAudit || result.listenerAudit?.listeners.length > 0;
-    const passed = decoded.markerObserved && decoded.completed && result.exitCode === 0 && !result.timedOut && !result.overflow && !result.error && (!gateway || gatewayAuthVerified) && listenerObserved;
-    const failure = passed ? null : classifyConsumerFailure(result) ?? (!listenerObserved ? 'QHARNESS_OWNED_LISTENER_NOT_OBSERVED' : gateway && !gatewayAuthVerified ? 'QHARNESS_GATEWAY_AUTH_NOT_VERIFIED' : !decoded.markerObserved ? 'QHARNESS_CONSUMER_MARKER_NOT_OBSERVED' : 'QHARNESS_CONSUMER_TURN_INCOMPLETE');
+    const passed = decoded.markerObserved && decoded.completed && boundedProcessSucceeded(result) && (!gateway || gatewayAuthVerified) && listenerObserved;
+    const failure = passed ? null : classifyConsumerFailure(result) ?? (!boundedProcessSettled(result) ? 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED' : !listenerObserved ? 'QHARNESS_OWNED_LISTENER_NOT_OBSERVED' : gateway && !gatewayAuthVerified ? 'QHARNESS_GATEWAY_AUTH_NOT_VERIFIED' : !decoded.markerObserved ? 'QHARNESS_CONSUMER_MARKER_NOT_OBSERVED' : 'QHARNESS_CONSUMER_TURN_INCOMPLETE');
     const summary = { ...base, client: fixture.client, status: passed ? 'PASS' : 'FAIL', ...decoded, reason: failure, gatewayAuthVerified, ownedListenerAudit: result.listenerAudit, deniedOperations: passed ? [] : classifyDeniedOperations({ ...result, scratchDir }), denialSignals: passed ? null : classifyDenialSignals({ ...result, scratchDir }), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, outputOverflow: result.overflow, requestsObserved: replay.observations.length, requestTargets: replay.stats.requestTargets, isolation: isolation.proof, databaseCreated: true };
     // Completion includes durable safe evidence and teardown, not only a decoded answer.
     try { await replay.close(); }
