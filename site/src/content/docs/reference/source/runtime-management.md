@@ -113,6 +113,8 @@ OpenAI-compatible Gemini requests retain their `/v1beta/openai/...` path and use
 
 OAuth model-list requests call FetchAvailableModels with the selected upstream's stored project. The native response exposes only `name` from each model-map key and observed string `displayName` and `description` fields. The existing scoped response hook receives the raw metadata before projection; this does not add a durable catalog cache. OAuth single-model lookup is unsupported, and ListModelConfigs consumer support remains unverified. These routes do not establish a new raw Code Assist gateway or actual-client acceptance.
 
+For native `streamGenerateContent` requests with an explicit `alt=sse` query pair and a Gemini API-key upstream, a successful upstream `application/json` response produces the existing Gemini SSE `api_error` and records `upstream_response_framing_error`. cc-lb rejects this framing mismatch without reading or parsing the upstream JSON body. OAuth envelopes, native `alt=json` or absent-`alt` JSON arrays, and non-2xx provider errors retain their existing behavior.
+
 On proxy request timeout, Gemini HTTP routes return HTTP `504` with a Gemini `DEADLINE_EXCEEDED` JSON error. Other HTTP routes return plain `request timed out`.
 
 Realtime and Live WebSockets authenticate the proxy client before upgrade and select one eligible API-key upstream for the connection lifetime; OAuth subscriptions are not eligible. A connection never reconnects or fails over to another credential. Text, binary, ping, and pong frames retain their payloads; client/provider close frames retain their explicit code and reason while propagating tunnel shutdown. A later connection failure closes the tunnel rather than returning a new HTTP response.
