@@ -850,6 +850,7 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("wasm runtime"));
     let view = build_dynamic_view(
         &stores,
+        stage.config.oauth.gemini.as_ref(),
         None,
         stage.aead.clone(),
         None,

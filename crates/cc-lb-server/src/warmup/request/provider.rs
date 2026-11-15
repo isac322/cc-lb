@@ -150,6 +150,7 @@ pub(crate) async fn build_provider_warmup_request(
         upstream,
         bundle,
         params.clock.clone(),
+        params.config.oauth.gemini.as_ref(),
         params.config.oauth.antigravity.as_ref(),
     )
     .map_err(|error| error.to_string())?;

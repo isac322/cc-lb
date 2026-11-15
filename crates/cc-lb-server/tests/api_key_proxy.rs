@@ -209,6 +209,7 @@ impl ProxyHarness {
         let view = build_dynamic_view(
             &stores,
             None,
+            None,
             self.aead.clone(),
             None,
             0,

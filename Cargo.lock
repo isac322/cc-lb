@@ -1223,6 +1223,7 @@ dependencies = [
  "bytes",
  "cc-lb-clock",
  "cc-lb-domain",
+ "cc-lb-oauth-protocol",
  "cc-lb-upstream",
  "fake-anthropic",
  "http",

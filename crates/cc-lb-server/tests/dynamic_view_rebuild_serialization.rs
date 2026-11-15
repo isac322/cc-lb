@@ -286,6 +286,7 @@ impl DynamicViewRebinder for ServerLikeRebinder {
         Ok(build_dynamic_view(
             &self.stores,
             None,
+            None,
             self.aead.clone(),
             None,
             current_generation,
@@ -466,6 +467,7 @@ async fn fixture() -> Fixture {
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         Arc::new(cc_lb_clock::SystemClock),
+        None,
         None,
     ));
     let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::dynamic_view_rebind::{assert_catalog_urls, catalog_configs, create_catalog_upstreams};
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
 use cc_lb_control::DynamicViewHolder;
@@ -226,6 +227,8 @@ struct Fixture {
     runtime: Arc<WasmtimeRuntime>,
     holder: Arc<DynamicViewHolder>,
     quota_cache: Arc<cc_lb_server::SubscriptionQuotaCache>,
+    gemini_config: cc_lb_config::GeminiOAuthConfig,
+    antigravity_config: cc_lb_config::AntigravityOAuthConfig,
 }
 
 async fn fixture() -> Fixture {
@@ -255,9 +258,11 @@ async fn fixture() -> Fixture {
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let quota_cache = Arc::new(cc_lb_server::SubscriptionQuotaCache::new());
+    let (gemini_config, antigravity_config) = catalog_configs();
     let initial = build_dynamic_view(
         &stores,
-        None,
+        Some(&gemini_config),
+        Some(&antigravity_config),
         aead.clone(),
         None,
         0,
@@ -280,6 +285,8 @@ async fn fixture() -> Fixture {
         runtime,
         quota_cache,
         holder,
+        gemini_config,
+        antigravity_config,
     }
 }
 
@@ -303,7 +310,8 @@ async fn spawn_listener(
         prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
         clock: Arc::new(cc_lb_clock::SystemClock),
-        antigravity_config: None,
+        gemini_config: Some(fixture.gemini_config.clone()),
+        antigravity_config: Some(fixture.antigravity_config.clone()),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -343,6 +351,56 @@ async fn single_notify_triggers_single_rebuild() {
     assert_eq!(fixture.holder.generation(), start + 1);
     cancel.cancel();
     task.await.expect("listener exits");
+}
+
+#[tokio::test]
+async fn notify_rebuild_preserves_configured_catalog_metadata_endpoints() {
+    let fixture = fixture().await;
+    let upstreams = create_catalog_upstreams(&fixture.storage, &fixture.aead).await;
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let task = spawn_listener(
+        &fixture,
+        notifier.clone(),
+        cancel.clone(),
+        fixture.stores.clone(),
+    )
+    .await;
+    let initial_hash = fixture.holder.load().upstream_status_snapshot.revision_hash;
+    let generation = fixture.holder.generation();
+    notifier.send(ChangeChannel::Upstream);
+    wait_for_generation(&fixture.holder, generation + 1).await;
+    let initial = fixture.holder.load();
+    assert_ne!(initial.upstream_status_snapshot.revision_hash, initial_hash);
+    assert_catalog_urls(&initial, &upstreams).await;
+
+    let mut revised_upstreams = upstreams;
+    let record = &revised_upstreams[0].0;
+    let revised = UpstreamStore::update(
+        &*fixture.storage,
+        record.id,
+        record.revision,
+        UpstreamUpdate {
+            name: Some("catalog-cli-config-revised".to_owned()),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("update catalog revision");
+    revised_upstreams[0].0 = revised;
+    notifier.send(ChangeChannel::Upstream);
+    wait_for_generation(&fixture.holder, initial.generation + 1).await;
+    let rebuilt = fixture.holder.load();
+    assert_ne!(
+        rebuilt.upstream_status_snapshot.revision_hash,
+        initial.upstream_status_snapshot.revision_hash,
+    );
+    assert_catalog_urls(&rebuilt, &revised_upstreams).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("listener stops within deadline")
+        .expect("listener exits");
 }
 
 #[tokio::test]

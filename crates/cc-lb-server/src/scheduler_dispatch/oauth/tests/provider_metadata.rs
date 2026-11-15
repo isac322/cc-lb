@@ -357,7 +357,7 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile, project_only_i
                     {"displayName": "Gemini models", "buckets": [{"bucketId": "gemini-5h", "remainingFraction": 0.75, "resetTime": "2026-11-01T13:00:00Z"}]},
                     {"displayName": "Claude and GPT models", "buckets": [{"bucketId": "3p-5h", "remainingFraction": 0.5, "resetTime": "2026-11-01T13:00:00Z"}]}
                 ]}))
-            } else if path == "/metadata/v1internal:loadCodeAssist" {
+            } else if path == "/inference:loadCodeAssist" {
                 let body = axum::body::to_bytes(request.into_body(), 4096).await.expect("request body");
                 let body: Value = serde_json::from_slice(&body).expect("load JSON");
                 if profile == GeminiOAuthProfile::Antigravity {
@@ -597,7 +597,7 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile, project_only_i
     assert!(requests.lock().expect("log").iter().all(|path| {
         [
             "/inference:retrieveUserQuotaSummary",
-            "/metadata/v1internal:loadCodeAssist",
+            "/inference:loadCodeAssist",
             "/metadata/userinfo",
         ]
         .contains(&path.as_str())
@@ -608,7 +608,7 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile, project_only_i
 }
 
 #[tokio::test]
-async fn gemini_existing_poll_enriches_on_configured_hosts_and_failure_keeps_quota() {
+async fn gemini_existing_poll_enriches_on_explicit_host_and_failure_keeps_quota() {
     assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity, false).await;
 }
 
@@ -621,6 +621,702 @@ async fn gemini_cli_existing_poll_uses_its_own_config_and_core_metadata() {
 async fn gemini_project_only_import_backfills_metadata_and_respects_cadence() {
     assert_gemini_poll_metadata(GeminiOAuthProfile::GeminiCli, true).await;
     assert_gemini_poll_metadata(GeminiOAuthProfile::Antigravity, true).await;
+}
+
+#[tokio::test]
+async fn gemini_metadata_without_override_preserves_profile_config_prefix_and_userinfo() {
+    for profile in [
+        GeminiOAuthProfile::Antigravity,
+        GeminiOAuthProfile::GeminiCli,
+    ] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = requests.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let path = request.uri().path().to_owned();
+            request_log.lock().expect("log").push(path.clone());
+            async move {
+                let value = match path.as_str() {
+                    "/metadata/v1internal:loadCodeAssist" => json!({
+                        "cloudaicompanionProject": "synthetic-project",
+                        "currentTier": {"id": "free-tier"}
+                    }),
+                    "/metadata/userinfo" => json!({"email": "member@example.test"}),
+                    _ => return (http::StatusCode::NOT_FOUND, axum::Json(Value::Null)),
+                };
+                (http::StatusCode::OK, axum::Json(value))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let root = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+        let mut fixture = DispatchFixture::new().await;
+        let config = Arc::make_mut(&mut fixture.dispatch.config);
+        let antigravity_path = if profile == GeminiOAuthProfile::Antigravity {
+            "metadata"
+        } else {
+            "wrong-profile"
+        };
+        let cli_path = if profile == GeminiOAuthProfile::GeminiCli {
+            "metadata"
+        } else {
+            "wrong-profile"
+        };
+        config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+            code_assist_url: format!("{root}/{antigravity_path}").parse().expect("URL"),
+            userinfo_url: format!("{root}/{antigravity_path}/userinfo")
+                .parse()
+                .expect("URL"),
+            ..Default::default()
+        });
+        config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: format!("{root}/{cli_path}/v1internal")
+                .parse()
+                .expect("URL"),
+            userinfo_url: format!("{root}/{cli_path}/userinfo").parse().expect("URL"),
+            ..Default::default()
+        });
+        let mut credential = bundle(UpstreamKind::GeminiOauth);
+        credential.oauth_profile = profile;
+        let (load, userinfo) = super::super::super::http::fetch_gemini_account_metadata(
+            &fixture.dispatch.http,
+            &fixture.dispatch.config,
+            None,
+            &credential,
+            &fixture.dispatch.cancel,
+        )
+        .await;
+        assert_eq!(
+            load.expect("load metadata")["currentTier"]["id"],
+            "free-tier"
+        );
+        assert_eq!(userinfo.expect("userinfo")["email"], "member@example.test");
+        let mut paths = requests.lock().expect("log").clone();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            ["/metadata/userinfo", "/metadata/v1internal:loadCodeAssist"]
+        );
+        assert_eq!(fixture.refresh_entry_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+}
+
+async fn assert_gemini_explicit_control_destination(
+    profile: GeminiOAuthProfile,
+    base_path: &str,
+    expected_prefix: &str,
+    summary_status: http::StatusCode,
+) {
+    assert_gemini_explicit_destination_matrix(
+        profile,
+        base_path,
+        expected_prefix,
+        summary_status,
+        false,
+    )
+    .await;
+}
+
+async fn assert_gemini_explicit_destination_matrix(
+    profile: GeminiOAuthProfile,
+    base_path: &str,
+    expected_prefix: &str,
+    summary_status: http::StatusCode,
+    include_content_and_warmup: bool,
+) {
+    assert_gemini_explicit_destination_matrix_with_query(
+        profile,
+        base_path,
+        expected_prefix,
+        summary_status,
+        include_content_and_warmup,
+        None,
+    )
+    .await;
+}
+
+async fn assert_gemini_explicit_destination_matrix_with_query(
+    profile: GeminiOAuthProfile,
+    base_path: &str,
+    expected_prefix: &str,
+    summary_status: http::StatusCode,
+    include_content_and_warmup: bool,
+    expected_control_query: Option<&str>,
+) {
+    let summary_path = format!("{expected_prefix}:retrieveUserQuotaSummary");
+    let quota_path = format!("{expected_prefix}:retrieveUserQuota");
+    let load_path = format!("{expected_prefix}:loadCodeAssist");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = requests.clone();
+    let expected_summary = summary_path.clone();
+    let expected_quota = quota_path.clone();
+    let expected_load = load_path.clone();
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let request_log = request_log.clone();
+        let summary_path = expected_summary.clone();
+        let quota_path = expected_quota.clone();
+        let load_path = expected_load.clone();
+        let load_prefix = expected_load
+            .strip_suffix(":loadCodeAssist")
+            .expect("load action")
+            .to_owned();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            let query = request.uri().query().map(str::to_owned);
+            let authority = request
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let user_agent = request
+                .headers()
+                .get(http::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let content_type = request
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            // Record presence only: never retain or print the bearer credential.
+            let bearer_present = request
+                .headers()
+                .get(http::header::AUTHORIZATION)
+                .is_some_and(|value| value.as_bytes().starts_with(b"Bearer "));
+            let body = axum::body::to_bytes(request.into_body(), 4096)
+                .await
+                .expect("request body");
+            let body: Value = if body.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&body).expect("control request JSON")
+            };
+            request_log.lock().expect("log").push((
+                method,
+                authority,
+                path.clone(),
+                user_agent,
+                content_type,
+                bearer_present,
+                body,
+                query,
+            ));
+            let (status, value) = if [
+                format!("{load_prefix}:generateContent"),
+                format!("{load_prefix}:streamGenerateContent"),
+                format!("{load_prefix}:countTokens"),
+            ]
+            .contains(&path)
+            {
+                (
+                    http::StatusCode::OK,
+                    json!({"response": {"candidates": []}, "totalTokens": 7}),
+                )
+            } else if path == summary_path {
+                (summary_status, json!({"groups": []}))
+            } else if path == quota_path {
+                (
+                    http::StatusCode::OK,
+                    json!({"buckets": [
+                        {"modelId": "gemini-2.5-pro", "remainingFraction": 0.4},
+                        {"modelId": "claude-sonnet", "remainingFraction": 0.3}
+                    ]}),
+                )
+            } else if path == load_path {
+                (
+                    http::StatusCode::OK,
+                    json!({
+                        "cloudaicompanionProject": "synthetic-project",
+                        "currentTier": {"id": "free-tier", "name": "Synthetic Tier"}
+                    }),
+                )
+            } else if path == "/config-only/userinfo" {
+                (
+                    http::StatusCode::OK,
+                    json!({"email": "member@example.test", "name": "Synthetic Member"}),
+                )
+            } else {
+                (
+                    http::StatusCode::NOT_FOUND,
+                    json!({"error": "unexpected destination"}),
+                )
+            };
+            (status, axum::Json(value))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let authority = listener.local_addr().expect("address").to_string();
+    let root = format!("http://{authority}");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let mut fixture = DispatchFixture::new().await;
+    let config = Arc::make_mut(&mut fixture.dispatch.config);
+    let userinfo_query = expected_control_query.map(|_| "identity=own");
+    let userinfo_url: Url = format!(
+        "{root}/config-only/userinfo{}",
+        if userinfo_query.is_some() {
+            "?identity=own"
+        } else {
+            ""
+        }
+    )
+    .parse()
+    .expect("userinfo URL");
+    config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+        code_assist_url: format!("{root}/config-only").parse().expect("URL"),
+        userinfo_url: userinfo_url.clone(),
+        ..Default::default()
+    });
+    config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+        code_assist_url: format!("{root}/config-only/v1internal")
+            .parse()
+            .expect("URL"),
+        userinfo_url,
+        ..Default::default()
+    });
+    let upstream = create_provider(
+        &fixture,
+        UpstreamKind::GeminiOauth,
+        format!("{root}{base_path}").parse().expect("URL"),
+        profile,
+    )
+    .await;
+    let observation = fixture
+        .dispatch
+        .poll_usage(upstream.id, None)
+        .await
+        .expect("poll");
+    let terminal = matches!(
+        summary_status,
+        http::StatusCode::UNAUTHORIZED | http::StatusCode::TOO_MANY_REQUESTS
+    );
+    match summary_status {
+        http::StatusCode::UNAUTHORIZED => assert!(matches!(
+            observation,
+            OAuthUsagePollObservation::StatusFailure { status: 401, .. }
+        )),
+        http::StatusCode::TOO_MANY_REQUESTS => assert!(matches!(
+            observation,
+            OAuthUsagePollObservation::Throttled { .. }
+        )),
+        _ => assert!(matches!(
+            observation,
+            OAuthUsagePollObservation::Success { .. }
+        )),
+    }
+    // Use the same persisted upstream, signer builder, HTTP client and recorder as quota/load.
+    // This exercises signed wire requests, not just resolver or request-builder output.
+    let generate_path = format!("{expected_prefix}:generateContent");
+    let stream_path = format!("{expected_prefix}:streamGenerateContent");
+    let count_path = format!("{expected_prefix}:countTokens");
+    if include_content_and_warmup && !terminal {
+        let credential = upstream
+            .oauth_credentials
+            .as_ref()
+            .expect("stored OAuth credential")
+            .decrypt(fixture.aead.as_ref(), upstream.id.as_bytes())
+            .expect("decrypt stored credential");
+        let signer = crate::dynamic_view_builder::build_subscription_signer(
+            &upstream,
+            &credential,
+            fixture.clock.clone(),
+            fixture.dispatch.config.oauth.gemini.as_ref(),
+            fixture.dispatch.config.oauth.antigravity.as_ref(),
+        )
+        .expect("real content signer");
+        let dialect = cc_lb_engine::lifecycle::native_route_dialect(&upstream);
+        let api = cc_lb_domain::Upstream::GeminiDirect {
+            base_url: upstream.base_url.clone(),
+        };
+        let principal = cc_lb_domain::Principal {
+            id: upstream.id.to_string(),
+            kind: cc_lb_domain::PrincipalKind::OAuthSubject,
+        };
+        for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                http::header::USER_AGENT,
+                http::HeaderValue::from_static("GeminiCLI/cc-lb"),
+            );
+            let context = cc_lb_upstream::DialectShapeContext {
+                request_id: Uuid::new_v4().to_string(),
+                downstream_headers: headers,
+                method: http::Method::POST,
+                path: format!("/v1beta/models/gemini-2.5-flash:{action}"),
+                query: Some("keep=a%2Bb&trace=1".to_owned()),
+                body_bytes: bytes::Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "contents": [{"role": "user", "parts": [{"text": "recorder content"}]}]
+                    }))
+                    .expect("native content JSON"),
+                ),
+            };
+            let shaped =
+                cc_lb_upstream::shape_request(dialect.as_ref(), &context, &api, &principal)
+                    .expect("native content shape");
+            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+                .await
+                .expect("real content signing");
+            let mut request = http::Request::builder()
+                .method(signed.method().clone())
+                .uri(signed.url().as_str());
+            for (name, value) in signed.headers() {
+                request = request.header(name, value);
+            }
+            let response = fixture
+                .dispatch
+                .http
+                .request(
+                    request
+                        .body(http_body_util::Full::new(signed.body().clone()))
+                        .expect("signed HTTP request"),
+                )
+                .await
+                .expect("content loopback response");
+            assert_eq!(response.status(), http::StatusCode::OK, "{action}");
+            let response = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .expect("content response body")
+                .to_bytes();
+            let response: Value = serde_json::from_slice(&response).expect("response JSON");
+            if action == "countTokens" {
+                assert_eq!(response["totalTokens"], 7);
+            } else {
+                assert_eq!(response["response"]["candidates"], json!([]));
+            }
+        }
+        for lane in [
+            cc_lb_storage_api::WarmupLane::Primary,
+            cc_lb_storage_api::WarmupLane::ThirdParty,
+        ] {
+            let warmup = crate::warmup::request::dispatch_provider_warmup_attempt(
+                crate::warmup::request::ProviderWarmupDispatchParams {
+                    http: &fixture.dispatch.http,
+                    upstream: &upstream,
+                    lane,
+                    aead: fixture.aead.as_ref(),
+                    config: &fixture.dispatch.config,
+                    clock: fixture.clock.clone(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(
+                    warmup,
+                    crate::warmup::request::WarmupRequestAttempt::Response {
+                        status: http::StatusCode::OK,
+                        ref observations,
+                        ref error_detail,
+                    } if observations.is_empty() && error_detail.is_none()
+                ),
+                "real provider warmup response for {lane:?}: {warmup:?}"
+            );
+        }
+    }
+    // All destinations must be observed, including the sibling fallback action.
+    // The fake deliberately rejects doubled action suffixes rather than accepting ends_with.
+    server.abort();
+    let records = requests.lock().expect("log");
+    let mut paths: Vec<_> = records.iter().map(|record| record.2.as_str()).collect();
+    assert_eq!(paths.first().copied(), Some(summary_path.as_str()));
+    if !terminal {
+        assert_eq!(paths.get(1).copied(), Some(quota_path.as_str()));
+    }
+    let mut expected = if terminal {
+        vec![summary_path.as_str()]
+    } else {
+        vec![
+            summary_path.as_str(),
+            quota_path.as_str(),
+            load_path.as_str(),
+            "/config-only/userinfo",
+        ]
+    };
+    if include_content_and_warmup && !terminal {
+        expected.extend([
+            generate_path.as_str(),
+            stream_path.as_str(),
+            count_path.as_str(),
+            generate_path.as_str(),
+            generate_path.as_str(),
+        ]);
+    }
+    // loadCodeAssist and userinfo run concurrently; their arrival order is immaterial.
+    paths.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        paths, expected,
+        "control destinations for {profile:?} and {base_path}"
+    );
+    if include_content_and_warmup && !terminal {
+        let mut warmup_models: Vec<_> = records
+            .iter()
+            .filter(|record| record.6["request"]["contents"][0]["parts"][0]["text"] == ".")
+            .map(|record| record.6["model"].as_str().expect("warmup model"))
+            .collect();
+        let mut expected_models = vec![
+            fixture.dispatch.config.warmup.gemini_model.as_str(),
+            fixture
+                .dispatch
+                .config
+                .warmup
+                .gemini_third_party_model
+                .as_str(),
+        ];
+        warmup_models.sort_unstable();
+        expected_models.sort_unstable();
+        assert_eq!(warmup_models, expected_models, "both real warmup lanes");
+    }
+    for (method, host, path, user_agent, content_type, bearer_present, body, query) in
+        records.iter()
+    {
+        assert_eq!(host, &authority, "no alternate-host retry");
+        assert!(*bearer_present, "authenticated control request");
+        let is_warmup = body["request"]["contents"][0]["parts"][0]["text"] == ".";
+        let expected_query = if path == &stream_path {
+            Some("keep=a%2Bb&trace=1&alt=sse")
+        } else if path == &count_path || (path == &generate_path && !is_warmup) {
+            Some("keep=a%2Bb&trace=1")
+        } else if path == "/config-only/userinfo" {
+            userinfo_query
+        } else if path == &summary_path || path == &quota_path || path == &load_path {
+            expected_control_query
+        } else {
+            None
+        };
+        assert_eq!(
+            query.as_deref(),
+            expected_query,
+            "wire query for {profile:?} and {path}"
+        );
+        if path == "/config-only/userinfo" {
+            assert_eq!(method, http::Method::GET);
+            continue;
+        }
+        assert_eq!(method, http::Method::POST);
+        assert_eq!(content_type, "application/json");
+        if profile == GeminiOAuthProfile::Antigravity {
+            assert_eq!(
+                user_agent,
+                cc_lb_oauth_protocol::ANTIGRAVITY_OAUTH_USER_AGENT
+            );
+        }
+        if path == &load_path {
+            let expected_body = match profile {
+                GeminiOAuthProfile::Antigravity => json!({"metadata": {"ideType": "ANTIGRAVITY"}}),
+                GeminiOAuthProfile::GeminiCli => json!({
+                    "cloudaicompanionProject": "synthetic-project",
+                    "metadata": {
+                        "ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED",
+                        "pluginType": "GEMINI", "duetProject": "synthetic-project"
+                    }
+                }),
+            };
+            assert_eq!(body, &expected_body);
+            if profile == GeminiOAuthProfile::GeminiCli {
+                assert_eq!(user_agent, "GeminiCLI/cc-lb");
+            }
+        } else if [
+            generate_path.as_str(),
+            stream_path.as_str(),
+            count_path.as_str(),
+        ]
+        .contains(&path.as_str())
+        {
+            let request = &body["request"];
+            if path == &count_path {
+                assert_eq!(
+                    body,
+                    &json!({"request": {
+                        "model": "models/gemini-2.5-flash",
+                        "contents": [{"role": "user", "parts": [{"text": "recorder content"}]}]
+                    }}),
+                    "count omits project, top-level model and Antigravity envelope fields"
+                );
+            } else {
+                let is_warmup = request["contents"][0]["parts"][0]["text"] == ".";
+                assert_eq!(body["project"], "synthetic-project");
+                if is_warmup {
+                    assert!(
+                        [
+                            fixture.dispatch.config.warmup.gemini_model.as_str(),
+                            fixture
+                                .dispatch
+                                .config
+                                .warmup
+                                .gemini_third_party_model
+                                .as_str(),
+                        ]
+                        .contains(&body["model"].as_str().expect("warmup model"))
+                    );
+                } else {
+                    assert_eq!(body["model"], "gemini-2.5-flash");
+                }
+                assert_eq!(
+                    request["contents"],
+                    json!([{"role": "user", "parts": [{
+                        "text": if is_warmup { "." } else { "recorder content" }
+                    }]}])
+                );
+                if is_warmup {
+                    assert_eq!(path, &generate_path);
+                    assert_eq!(request["generationConfig"]["maxOutputTokens"], 1);
+                }
+                if profile == GeminiOAuthProfile::Antigravity {
+                    assert_eq!(body["userAgent"], "antigravity");
+                    assert!(
+                        body["requestId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("agent-"))
+                    );
+                } else {
+                    assert!(body.get("userAgent").is_none());
+                    assert!(body.get("requestId").is_none());
+                }
+            }
+            if profile == GeminiOAuthProfile::GeminiCli
+                && request["contents"][0]["parts"][0]["text"] != "."
+            {
+                assert_eq!(user_agent, "GeminiCLI/cc-lb");
+            }
+        } else {
+            assert_eq!(body, &json!({"project": "synthetic-project"}));
+        }
+    }
+    assert_eq!(fixture.refresh_entry_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn gemini_explicit_base_overrides_profile_metadata_root_version_and_action() {
+    for profile in [
+        GeminiOAuthProfile::Antigravity,
+        GeminiOAuthProfile::GeminiCli,
+    ] {
+        for (base, prefix) in [
+            ("", "/v1internal"),
+            ("/upstream/v1internal", "/upstream/v1internal"),
+            (
+                "/upstream/v1internal:generateContent",
+                "/upstream/v1internal",
+            ),
+            (
+                "/upstream/v1internal:loadCodeAssist",
+                "/upstream/v1internal",
+            ),
+            (
+                "/upstream/v1internal:retrieveUserQuotaSummary",
+                "/upstream/v1internal",
+            ),
+        ] {
+            assert_gemini_explicit_control_destination(profile, base, prefix, http::StatusCode::OK)
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn gemini_explicit_action_fallback_stays_on_host_and_auth_or_rate_limit_stops() {
+    for profile in [
+        GeminiOAuthProfile::Antigravity,
+        GeminiOAuthProfile::GeminiCli,
+    ] {
+        for status in [
+            http::StatusCode::NOT_FOUND,
+            http::StatusCode::UNAUTHORIZED,
+            http::StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert_gemini_explicit_control_destination(
+                profile,
+                "/upstream/v1internal:retrieveUserQuotaSummary",
+                "/upstream/v1internal",
+                status,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn gemini_explicit_base_query_survives_quota_fallback_and_load_without_replacing_userinfo_query()
+ {
+    for profile in [
+        GeminiOAuthProfile::Antigravity,
+        GeminiOAuthProfile::GeminiCli,
+    ] {
+        for (base, prefix) in [
+            ("/?tenant=one", "/v1internal"),
+            (
+                "/upstream/v1internal:retrieveUserQuotaSummary?tenant=one",
+                "/upstream/v1internal",
+            ),
+            (
+                "/upstream/v1internal:loadCodeAssist?tenant=one",
+                "/upstream/v1internal",
+            ),
+        ] {
+            assert_gemini_explicit_destination_matrix_with_query(
+                profile,
+                base,
+                prefix,
+                http::StatusCode::NOT_FOUND,
+                false,
+                Some("tenant=one"),
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn gemini_explicit_override_records_content_quota_metadata_and_warmup_on_one_listener() {
+    for profile in [
+        GeminiOAuthProfile::Antigravity,
+        GeminiOAuthProfile::GeminiCli,
+    ] {
+        for (base, prefix) in [
+            ("", "/v1internal"),
+            ("/upstream/v1internal", "/upstream/v1internal"),
+            (
+                "/upstream/v1internal:generateContent",
+                "/upstream/v1internal",
+            ),
+            (
+                "/upstream/v1internal:streamGenerateContent",
+                "/upstream/v1internal",
+            ),
+            ("/upstream/v1internal:countTokens", "/upstream/v1internal"),
+            (
+                "/upstream/v1internal:loadCodeAssist",
+                "/upstream/v1internal",
+            ),
+            (
+                "/upstream/v1internal:retrieveUserQuotaSummary",
+                "/upstream/v1internal",
+            ),
+        ] {
+            assert_gemini_explicit_destination_matrix(
+                profile,
+                base,
+                prefix,
+                http::StatusCode::OK,
+                true,
+            )
+            .await;
+        }
+    }
 }
 
 async fn assert_reconnect_metadata_publication(
