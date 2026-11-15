@@ -8,6 +8,7 @@ members = [
     "plugins/test-fixtures/wasmtime-shape-passthrough",
     "plugins/test-fixtures/wasmtime-filter-service-tier",
     "plugins/test-fixtures/wasmtime-filter-openai",
+    "plugins/test-fixtures/wasmtime-dual-slot",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",

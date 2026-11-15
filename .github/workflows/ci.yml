@@ -449,6 +449,7 @@ jobs:
             --release \
             -p wasmtime-shape-passthrough \
             -p wasmtime-filter-service-tier \
+            -p wasmtime-dual-slot \
             -p cache-aware-wasmtime
       - name: Verify canonical wasm fixtures
         run: |
@@ -456,6 +457,7 @@ jobs:
           for fixture in \
             wasmtime_shape_passthrough.wasm \
             wasmtime_filter_service_tier.wasm \
+            wasmtime_dual_slot.wasm \
             cache_aware_wasmtime.wasm; do
             test -s "target/wasm32-unknown-unknown/release/$fixture"
           done
@@ -774,6 +776,20 @@ jobs:
         run: tests/real-client/install.sh
       - name: Run real-client matrix
         run: tests/real-client/matrix.sh
+      - name: Verify independent plugin slots over HTTP
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown -p wasmtime-dual-slot
+          CC_LB_BIN="$PWD/target/debug/cc-lb" \
+          CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
+          CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots" \
+          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
+            node tests/real-client/provider-e2e/plugin-slots.mjs
+          CC_LB_BIN="$PWD/target/debug/cc-lb" \
+          CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
+          CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots-lifecycle" \
+          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
+            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs
       - name: Show sccache stats
         if: always()
         run: |

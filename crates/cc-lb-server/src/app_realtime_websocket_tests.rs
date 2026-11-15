@@ -2037,7 +2037,11 @@ async fn realtime_and_live_frame_only_shape_transforms_setup_and_both_relay_dire
         upstream.kind = if gemini { UpstreamKind::GeminiApiKey } else { UpstreamKind::OpenaiApiKey };
         let provider = if gemini { ProviderFamily::Gemini } else { ProviderFamily::Openai };
         let slot = runtime.register_shape(
-            RuntimeSlotKey::new(TEST_PRINCIPAL, provider.as_str()),
+            RuntimeSlotKey::new(
+                TEST_PRINCIPAL,
+                provider.as_str(),
+                cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
+            ),
             "frame-only-loopback",
             &realtime_frame_only_fixture(gemini, false),
         ).expect("frame-only Shape admission");
@@ -2164,7 +2168,11 @@ async fn realtime_and_live_noop_frame_only_shape_preserves_native_frames() {
         upstream.kind = if gemini { UpstreamKind::GeminiApiKey } else { UpstreamKind::OpenaiApiKey };
         let provider = if gemini { ProviderFamily::Gemini } else { ProviderFamily::Openai };
         let slot = runtime.register_shape(
-            RuntimeSlotKey::new(TEST_PRINCIPAL, provider.as_str()),
+            RuntimeSlotKey::new(
+                TEST_PRINCIPAL,
+                provider.as_str(),
+                cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
+            ),
             "noop-frame-only-loopback",
             &realtime_frame_only_fixture(gemini, true),
         ).expect("noop frame-only Shape must admit without invoking its trapping export");

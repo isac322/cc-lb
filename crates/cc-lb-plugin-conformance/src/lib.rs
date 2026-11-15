@@ -76,8 +76,8 @@ use cc_lb_plugin_wire::{
     v1, v2, v3,
 };
 use cc_lb_runtime_wasmtime::{
-    HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, WasmPluginWireDispatch,
-    WasmtimeRuntime, admit_wasm, inspect_wasm,
+    HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, RuntimeSlotRole,
+    WasmPluginWireDispatch, WasmtimeRuntime, admit_wasm, inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -353,7 +353,11 @@ impl<'a> ConformanceSuite<'a> {
     pub fn session(&self) -> PluginSession {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
-        let slot_key = RuntimeSlotKey::global(self.plugin_name.clone());
+        let slot_role = match self.kind {
+            ConformanceKind::Filter => RuntimeSlotRole::Filter,
+            ConformanceKind::Shape => RuntimeSlotRole::Shape,
+        };
+        let slot_key = RuntimeSlotKey::global(self.plugin_name.clone(), slot_role);
         let slot = match self.kind {
             ConformanceKind::Filter => runtime
                 .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)

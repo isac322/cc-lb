@@ -9,7 +9,14 @@ use serde::{Deserialize, Serialize};
 /// normal dependency on the unpublished `cc-lb-domain` crate.
 pub const GLOBAL_PRINCIPAL: &str = "__global__";
 
-/// Composite key identifying a loaded plugin slot per principal × plugin name.
+/// Independently registered runtime roles. All transform hooks belong to Shape.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum RuntimeSlotRole {
+    Filter,
+    Shape,
+}
+
+/// Composite key identifying a loaded slot per principal × plugin name × role.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSlotKey {
     /// Principal id this slot is bound to, or [`GLOBAL_PRINCIPAL`] for
@@ -17,19 +24,26 @@ pub struct RuntimeSlotKey {
     pub principal: String,
     /// Stable plugin name.
     pub plugin: String,
+    /// Registration role, independent of the module's exported ABI hooks.
+    pub role: RuntimeSlotRole,
 }
 
 impl RuntimeSlotKey {
     /// Build a per-principal runtime slot key.
-    pub fn new(principal: impl Into<String>, plugin: impl Into<String>) -> Self {
+    pub fn new(
+        principal: impl Into<String>,
+        plugin: impl Into<String>,
+        role: RuntimeSlotRole,
+    ) -> Self {
         Self {
             principal: principal.into(),
             plugin: plugin.into(),
+            role,
         }
     }
 
     /// Build a proxy-wide global runtime slot key.
-    pub fn global(plugin: impl Into<String>) -> Self {
-        Self::new(GLOBAL_PRINCIPAL, plugin)
+    pub fn global(plugin: impl Into<String>, role: RuntimeSlotRole) -> Self {
+        Self::new(GLOBAL_PRINCIPAL, plugin, role)
     }
 }

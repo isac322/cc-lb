@@ -18,8 +18,8 @@ use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
     UpstreamCandidate,
 };
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 
@@ -116,7 +116,7 @@ fn cache_aware_wasmtime_round_trips_filter() {
     };
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime");
+    let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot_key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("inspect + register must accept the plugin");
@@ -156,7 +156,7 @@ fn cache_aware_wasmtime_default_keep_k_keeps_one() {
     };
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime-default");
+    let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime-default", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot_key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");

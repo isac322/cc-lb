@@ -4,7 +4,9 @@ use std::sync::Arc;
 use cc_lb_plugin_wire::{
     ArchivedShapeResponse, Header, Principal, ShapeRequest, ShapeResponse, Upstream as WireUpstream,
 };
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -31,7 +33,7 @@ fn scoped_shape_returns_owned_bytes_after_store_drop() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("scoped-shape"),
+            RuntimeSlotKey::global("scoped-shape", RuntimeSlotRole::Shape),
             "scoped-shape",
             &wasm_bytes,
         )

@@ -30,7 +30,7 @@ pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_
 pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm, inspect_wasm_agnostic};
 pub use module::{admit_wasm, admit_wasm_agnostic};
-pub use slot::RuntimeSlotKey;
+pub use slot::{RuntimeSlotKey, RuntimeSlotRole};
 pub use wire_dispatch::WasmPluginWireDispatch;
 
 use std::collections::{HashMap, HashSet};
@@ -123,6 +123,17 @@ impl WasmtimeRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
+        let expected_role = match kind {
+            HookKind::Filter => RuntimeSlotRole::Filter,
+            HookKind::Shape => RuntimeSlotRole::Shape,
+            _ => unreachable!("only filter and shape are registration roles"),
+        };
+        if slot_key.role != expected_role {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("slot {slot_key:?} cannot be registered as {kind:?}"),
+            });
+        }
+
         let new_content_hash = module::compute_content_hash(&self.engine, &self.config, wasm_bytes);
 
         // Fast path: skip the compile entirely when the slot is

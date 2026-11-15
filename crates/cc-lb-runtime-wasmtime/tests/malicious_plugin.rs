@@ -1,7 +1,7 @@
 use cc_lb_plugin_wire::schema::WireSchema;
 use cc_lb_plugin_wire::{FilterResponse, PerCandidateReason};
 use cc_lb_runtime_wasmtime::{
-    RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
 use rkyv::rancor::Error as RkyvError;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ fn test_null_ptr_behavior() {
 
     // When: We register the filter hook
     let result = runtime.register_filter(
-        RuntimeSlotKey::global("null-ptr-test"),
+        RuntimeSlotKey::global("null-ptr-test", RuntimeSlotRole::Filter),
         "null-ptr-test",
         &wasm_bytes,
     );
@@ -115,7 +115,7 @@ fn test_zero_len_behavior() {
 
     // When: We register the filter hook
     let result = runtime.register_filter(
-        RuntimeSlotKey::global("zero-len-test"),
+        RuntimeSlotKey::global("zero-len-test", RuntimeSlotRole::Filter),
         "zero-len-test",
         &wasm_bytes,
     );
@@ -156,7 +156,7 @@ fn test_oob_output_behavior() {
 
     // When: We register the filter hook
     let result = runtime.register_filter(
-        RuntimeSlotKey::global("oob-output-test"),
+        RuntimeSlotKey::global("oob-output-test", RuntimeSlotRole::Filter),
         "oob-output-test",
         &wasm_bytes,
     );
@@ -196,7 +196,7 @@ fn test_ptr_len_overflow_behavior() {
 
     // When: We register the filter hook
     let result = runtime.register_filter(
-        RuntimeSlotKey::global("overflow-test"),
+        RuntimeSlotKey::global("overflow-test", RuntimeSlotRole::Filter),
         "overflow-test",
         &wasm_bytes,
     );
@@ -266,7 +266,7 @@ fn test_memory_grow_before_return_behavior() {
     // When: We register the filter hook
     let slot = runtime
         .register_filter(
-            RuntimeSlotKey::global("grow-test"),
+            RuntimeSlotKey::global("grow-test", RuntimeSlotRole::Filter),
             "grow-test",
             &wasm_bytes,
         )
@@ -324,7 +324,7 @@ fn test_misaligned_valid_rkyv() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_filter(
-            RuntimeSlotKey::global("misaligned-test"),
+            RuntimeSlotKey::global("misaligned-test", RuntimeSlotRole::Filter),
             "misaligned-test",
             &wasm_bytes,
         )
@@ -387,7 +387,7 @@ fn test_corrupt_rkyv() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_filter(
-            RuntimeSlotKey::global("corrupt-test"),
+            RuntimeSlotKey::global("corrupt-test", RuntimeSlotRole::Filter),
             "corrupt-test",
             &wasm_bytes,
         )

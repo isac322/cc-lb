@@ -7,7 +7,7 @@ use cc_lb_config::Config;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_plugin_wire::schema::ProviderFamily;
 use cc_lb_runtime_wasmtime::{
-    RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
 
 use crate::PluginManifest;
@@ -142,7 +142,11 @@ pub async fn dispatch_warmup_with_dialect(
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let slot = params.runtime.register_shape(
-        RuntimeSlotKey::new(synth_name.clone(), manifest.name.clone()),
+        RuntimeSlotKey::new(
+            synth_name.clone(),
+            manifest.name.clone(),
+            RuntimeSlotRole::Shape,
+        ),
         manifest.name.clone(),
         &wasm_bytes,
     )?;

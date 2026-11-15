@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `RuntimeSlotKey::new` and `RuntimeSlotKey::global` require an explicit `RuntimeSlotRole`. Filter and Shape registrations of the same module now have independent slots; response, SSE, realtime, and envelope hooks remain in the Shape slot.
 - **Breaking:** all legacy unqualified hooks, including router filters, now apply only to Anthropic. Plugins used with OpenAI or Gemini must export qualified hooks for those providers.
 - Reject overlapping legacy and qualified Anthropic entrypoints. Legacy hooks may coexist with qualified OpenAI and Gemini hooks.
 

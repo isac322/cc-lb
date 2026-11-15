@@ -189,6 +189,107 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
 }
 
 #[test]
+fn same_module_registers_both_slot_roles_in_either_order() {
+    let wasm = plugin_wasm(&[
+        (HookKind::Filter, "active"),
+        (HookKind::Shape, "active"),
+        (HookKind::TransformResponse, "noop"),
+        (HookKind::TransformSseEvent, "noop"),
+    ]);
+    for shape_first in [true, false] {
+        let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
+        let filter_key = crate::RuntimeSlotKey::new(
+            "dual-slot",
+            "agnostic-test",
+            crate::RuntimeSlotRole::Filter,
+        );
+        let shape_key =
+            crate::RuntimeSlotKey::new("dual-slot", "agnostic-test", crate::RuntimeSlotRole::Shape);
+        if shape_first {
+            runtime
+                .register_shape(shape_key.clone(), "agnostic-test", &wasm)
+                .expect("shape registration");
+            runtime
+                .register_filter(filter_key.clone(), "agnostic-test", &wasm)
+                .expect("filter registration must not collide with shape");
+        } else {
+            runtime
+                .register_filter(filter_key.clone(), "agnostic-test", &wasm)
+                .expect("filter registration");
+            runtime
+                .register_shape(shape_key.clone(), "agnostic-test", &wasm)
+                .expect("shape registration must not collide with filter");
+        }
+        let filter = runtime.get_slot(&filter_key).expect("filter slot");
+        let shape = runtime.get_slot(&shape_key).expect("shape slot");
+        assert!(!std::sync::Arc::ptr_eq(&filter, &shape));
+        assert_eq!(runtime.slot_count(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &filter.current.load().instance_pre,
+            &shape.current.load().instance_pre,
+        ));
+        let same_filter = runtime
+            .register_filter(filter_key.clone(), "agnostic-test", &wasm)
+            .expect("unchanged filter");
+        assert!(std::sync::Arc::ptr_eq(&filter, &same_filter));
+        let old_shape_cell = shape.current.load_full();
+        let mut updated = wasm.clone();
+        append_custom_section(&mut updated, "test.replacement", b"new");
+        runtime
+            .register_filter(filter_key.clone(), "agnostic-test", &updated)
+            .expect("replace filter only");
+        assert!(std::sync::Arc::ptr_eq(
+            &old_shape_cell,
+            &shape.current.load_full(),
+        ));
+        assert_ne!(
+            filter.current.load().content_hash,
+            shape.current.load().content_hash,
+        );
+        let shape_dispatch = crate::WasmPluginWireDispatch::from_slot(shape, runtime.config_arc());
+        let evicted = runtime.retain_slots(&std::collections::HashSet::from([filter_key.clone()]));
+        assert_eq!(evicted, vec![shape_key.clone()]);
+        assert!(runtime.get_slot(&shape_key).is_none());
+        assert!(runtime.get_slot(&filter_key).is_some());
+        let output = shape_dispatch
+            .call_shape_scoped(&[], |bytes| {
+                rkyv::from_bytes::<ShapeResponse, rkyv::rancor::Error>(bytes)
+                    .expect("shape response")
+            })
+            .expect("retained dispatch remains callable");
+        assert_eq!(output.url.as_ref(), "https://example.test/v1/messages");
+        runtime
+            .register_shape(shape_key.clone(), "agnostic-test", &wasm)
+            .expect("reattach shape");
+        assert!(runtime.evict_slot(&filter_key));
+        assert!(runtime.get_slot(&shape_key).is_some());
+        assert_eq!(runtime.slot_count(), 1);
+    }
+}
+
+#[test]
+fn registration_rejects_wrong_role_before_loading_module() {
+    let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
+    for (role, filter) in [
+        (crate::RuntimeSlotRole::Shape, true),
+        (crate::RuntimeSlotRole::Filter, false),
+    ] {
+        let key = crate::RuntimeSlotKey::global("wrong-role", role);
+        let result = if filter {
+            runtime.register_filter(key, "wrong-role", &[])
+        } else {
+            runtime.register_shape(key, "wrong-role", &[])
+        };
+        assert!(matches!(
+            result,
+            Err(WasmtimeRuntimeError::ModuleRejected { reason })
+                if reason.contains("cannot be registered")
+        ));
+        assert_eq!(runtime.slot_count(), 0);
+    }
+}
+
+#[test]
 fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
     // Given: Shape is declared without either Shape-owned response hook.
     let wasm = plugin_wasm(&[(HookKind::Shape, "active")]);

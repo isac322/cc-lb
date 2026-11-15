@@ -5,7 +5,7 @@ use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_plugin_wire::ShapeResponse;
 use cc_lb_plugin_wire::schema::WireSchema;
 use cc_lb_runtime_wasmtime::{
-    HotEngineConfig, RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime,
+    HotEngineConfig, RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
     policy::ShapeOriginPolicy,
 };
 use cc_lb_server::wasm_host::WasmtimeUpstreamDialect;
@@ -100,7 +100,7 @@ fn shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
     );
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("origin-mismatch"),
+            RuntimeSlotKey::global("origin-mismatch", RuntimeSlotRole::Shape),
             "origin-mismatch",
             &origin_mismatch_plugin(),
         )
