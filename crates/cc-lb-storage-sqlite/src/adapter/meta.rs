@@ -240,7 +240,18 @@ fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct OverviewAttributionEvent {
+    id: i64,
+    list_ts_ms: i64,
+    upstream_id: Option<String>,
+    principal_id: Option<String>,
+    list_status: i64,
+}
+
 async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageResult<()> {
+    use super::usage_rollups::LEGACY_UNATTRIBUTED_UPSTREAM_ID;
+    use cc_lb_storage_api::normalize_usage_rollup_dimension;
     use std::collections::BTreeMap;
 
     loop {
@@ -305,24 +316,48 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
                 .map_err(map_sqlx_error)?;
             }
         } else {
-            let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
-                "SELECT r.id,r.list_ts_ms,
-                        COALESCE(r.upstream_id,
-                            (SELECT s.id FROM upstream_spec_v1 s
-                             WHERE s.deleted_at IS NULL AND s.name=COALESCE(r.upstream_name,'unknown')),
-                            '00000000-0000-0000-0000-000000000000'),
-                        r.list_status
+            let rows: Vec<OverviewAttributionEvent> = sqlx::query_as(
+                "SELECT r.id,r.list_ts_ms,r.upstream_id,r.principal_id,r.list_status
                  FROM request_events_v1 r WHERE r.id>? AND r.id<=?
                  ORDER BY r.id LIMIT 1000",
-            ).bind(cursor).bind(upper).fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+            )
+            .bind(cursor)
+            .bind(upper)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
             let mut deltas = BTreeMap::new();
-            for (_, ts_ms, upstream, status) in &rows {
-                if !matches!(*status, 401 | 403 | 404) {
+            // At most one entry per retained row in this bounded event batch.
+            let mut historical_owners = BTreeMap::new();
+            for event in &rows {
+                if !matches!(event.list_status, 401 | 403 | 404) {
                     continue;
                 }
+                let owner = if let Some(upstream) = &event.upstream_id {
+                    Some(uuid::Uuid::parse_str(upstream).map_err(|error| {
+                        StorageError::Corrupted {
+                            message: format!("invalid request event upstream_id: {error}"),
+                        }
+                    })?)
+                } else {
+                    let key = (
+                        event.list_ts_ms / 60_000 * 60,
+                        event.principal_id.as_deref(),
+                    );
+                    if let Some(owner) = historical_owners.get(&key) {
+                        *owner
+                    } else {
+                        let normalized_principal = normalize_usage_rollup_dimension(key.1);
+                        let owner =
+                            historical_overview_upstream(&mut tx, key.0, &normalized_principal)
+                                .await?;
+                        historical_owners.insert(key, owner);
+                        owner
+                    }
+                };
                 for (resolution, width) in [("minute", 60_000), ("hour", 3_600_000)] {
                     *deltas
-                        .entry((resolution, ts_ms / width * (width / 1000), upstream))
+                        .entry((resolution, event.list_ts_ms / width * (width / 1000), owner))
                         .or_insert(0_i64) += 1;
                 }
             }
@@ -351,20 +386,22 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
                     }
                     continue;
                 }
+                let upstream_id = upstream.map(|id| id.to_string());
                 sqlx::query(
                     "INSERT INTO overview_excluded_error_rollups_v1
                      (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
                      VALUES (?,?,?,?,unixepoch())
                      ON CONFLICT (resolution,bucket_start_unix_secs,upstream_id)
                      DO UPDATE SET error_count=error_count+excluded.error_count,updated_at=unixepoch()",
-                ).bind(resolution).bind(bucket).bind(upstream).bind(count)
+                ).bind(resolution).bind(bucket)
+                    .bind(upstream_id.as_deref().unwrap_or(LEGACY_UNATTRIBUTED_UPSTREAM_ID)).bind(count)
                     .execute(&mut *tx).await.map_err(map_sqlx_error)?;
                 sqlx::query(
                     "DELETE FROM overview_excluded_error_rollups_v1
                      WHERE resolution=? AND bucket_start_unix_secs=? AND upstream_id='' AND error_count=0",
                 ).bind(resolution).bind(bucket).execute(&mut *tx).await.map_err(map_sqlx_error)?;
             }
-            let next = rows.last().map_or(upper, |row| row.0);
+            let next = rows.last().map_or(upper, |row| row.id);
             sqlx::query(
                 "UPDATE overview_excluded_error_attribution_v1 SET cursor=?,phase=? WHERE id=1",
             )
@@ -380,4 +417,42 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
         }
         tx.commit().await.map_err(map_sqlx_error)?;
     }
+}
+
+async fn historical_overview_upstream(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    minute_start: i64,
+    principal: &str,
+) -> StorageResult<Option<uuid::Uuid>> {
+    // Names may be reused/overwritten and models reconciled. Only the persisted
+    // UUID within this principal's historical slice is evidence of ownership.
+    // Minute proof identifies the same event in both resolutions. Fall back to
+    // hour proof only when minute evidence is absent, never when ambiguous.
+    for (resolution, bucket) in [
+        ("minute", minute_start),
+        ("hour", minute_start / 3600 * 3600),
+    ] {
+        let candidates = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT upstream_id FROM usage_rollups_v2
+             WHERE resolution=? AND bucket_start_unix_secs=? AND principal_id=? LIMIT 2",
+        )
+        .bind(resolution)
+        .bind(bucket)
+        .bind(principal)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        match candidates.as_slice() {
+            [] => {}
+            [upstream] => {
+                return uuid::Uuid::parse_str(upstream).map(Some).map_err(|error| {
+                    StorageError::Corrupted {
+                        message: format!("invalid historical usage upstream_id: {error}"),
+                    }
+                });
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
 }

@@ -20,6 +20,11 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
 
+// Both keys are global-only. Empty holds unprocessed/unrecoverable old counts;
+// this key records retained events whose historical owner cannot be proven.
+// Keeping them distinct makes every retained event consume the old total once.
+pub(super) const LEGACY_UNATTRIBUTED_UPSTREAM_ID: &str = "legacy-unattributed";
+
 async fn cleanup_gemini_reconciliation_markers(
     tx: &mut Transaction<'_, Sqlite>,
 ) -> StorageResult<()> {
@@ -328,7 +333,9 @@ impl UsageRollupStore for SqliteStorage {
             .map(|(bucket_start, upstream_id, error_count)| {
                 Ok(OverviewExcludedErrorBucket {
                     bucket_start: i64_to_u64(bucket_start, "overview excluded error bucket")?,
-                    upstream_id: if upstream_id.is_empty() {
+                    upstream_id: if upstream_id.is_empty()
+                        || upstream_id == LEGACY_UNATTRIBUTED_UPSTREAM_ID
+                    {
                         None
                     } else {
                         Some(parse_uuid(&upstream_id, "overview excluded upstream_id")?)

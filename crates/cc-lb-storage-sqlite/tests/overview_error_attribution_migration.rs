@@ -220,6 +220,14 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                     ts_ms: Some(ts * 1000),
                     request_id: format!("identity-{index}"),
                     event_id: Some(format!("identity-{index}")),
+                    principal_id: Some(
+                        match index {
+                            0 | 3 => "principal-a",
+                            1 => "principal-b",
+                            _ => "principal-unknown",
+                        }
+                        .to_owned(),
+                    ),
                     upstream_id,
                     upstream_name: name.map(str::to_owned),
                     status,
@@ -235,7 +243,16 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
              INSERT INTO usage_rollup_checkpoints_v1 (id,value)
              VALUES ('high_water',4),('cost_components_backfill_upper',4),
                     ('cost_components_backfill_cursor',4);
-             UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
+             UPDATE usage_rollup_reconciliations_v1 SET status='complete';
+             INSERT INTO usage_rollups_v2
+             (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+             SELECT resolution,1800000000,principal_id,upstream_id,upstream_name,'unknown',requests,requests,0
+             FROM (SELECT 'minute' AS resolution UNION ALL SELECT 'hour')
+             CROSS JOIN (
+                 SELECT '00000000-0000-0000-0000-000000001300' AS upstream_id,'named' AS upstream_name,2 AS requests,'principal-a' AS principal_id
+                 UNION ALL SELECT '00000000-0000-0000-0000-000000001301','other',1,'principal-b'
+                 UNION ALL SELECT '00000000-0000-0000-0000-000000000000','unknown',1,'principal-unknown'
+             );",
         )
         .execute(storage.pool())
         .await
@@ -352,8 +369,8 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                 .query_usage_rollups_in_range(resolution, AT, AT + 60)
                 .await
                 .unwrap();
-            assert_eq!(usage.iter().map(|row| row.request_count).sum::<u64>(), 4);
-            assert_eq!(usage.iter().map(|row| row.error_count).sum::<u64>(), 4);
+            assert_eq!(usage.iter().map(|row| row.request_count).sum::<u64>(), 8);
+            assert_eq!(usage.iter().map(|row| row.error_count).sum::<u64>(), 8);
         }
     }
 }
@@ -377,7 +394,7 @@ async fn shape(storage: &SqliteStorage) -> Vec<(String, String)> {
 
 #[tokio::test]
 async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() {
-    for legacy_count in [1_i64, 1000] {
+    for (legacy_count, ambiguous) in [(1_i64, false), (1000, false), (1, true), (1000, true)] {
         let dir = tempfile::tempdir().unwrap();
         let url = format!(
             "sqlite://{}",
@@ -396,9 +413,10 @@ async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() 
              INSERT INTO request_events_v1
              (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,upstream_id)
              SELECT 'undercount-'||i,'undercount-'||i,1800000000,1800000000000,403,0,
-                    '00000000-0000-0000-0000-000000001300' FROM n",
+                    CASE WHEN ? THEN NULL ELSE '00000000-0000-0000-0000-000000001300' END FROM n",
         )
         .bind(legacy_count + 1)
+        .bind(ambiguous)
         .execute(&mut connection)
         .await
         .unwrap();
@@ -417,6 +435,19 @@ async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() 
             .execute(&mut connection)
             .await
             .unwrap();
+        if ambiguous {
+            sqlx::query(
+                "INSERT INTO usage_rollups_v2
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+                 SELECT resolution,1800000000,'unknown',upstream_id,'unknown','unknown',requests,requests,0
+                 FROM (SELECT 'minute' AS resolution UNION ALL SELECT 'hour')
+                 CROSS JOIN (
+                     SELECT '00000000-0000-0000-0000-000000001300' AS upstream_id,? AS requests
+                     UNION ALL SELECT '00000000-0000-0000-0000-000000001301',?
+                 )",
+            ).bind((legacy_count + 1) / 2).bind(legacy_count + 1 - (legacy_count + 1) / 2)
+                .execute(&mut connection).await.unwrap();
+        }
         connection.close().await.unwrap();
         let storage =
             cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
@@ -435,7 +466,13 @@ async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() 
             }
             other => panic!("expected explicit data inconsistency, not SQL/setup failure: {other}"),
         }
-        let expected_id = if legacy_count == 1 { "" } else { UPSTREAM };
+        let expected_id = if legacy_count == 1 {
+            ""
+        } else if ambiguous {
+            "legacy-unattributed"
+        } else {
+            UPSTREAM
+        };
         assert_eq!(
             snapshot(&storage).await,
             vec![
@@ -461,4 +498,310 @@ async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() 
         .unwrap();
         assert_eq!(cursor, if legacy_count == 1 { 0 } else { 1000 });
     }
+}
+
+#[tokio::test]
+async fn historical_name_only_attribution_uses_captured_identity_after_name_reuse() {
+    for scenario in [
+        "renamed",
+        "ambiguous",
+        "captured-unknown",
+        "model-drift",
+        "no-history",
+        "hour-distractor",
+        "hour-fallback",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}",
+            dir.path().join("name-reuse.sqlite").display()
+        );
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(125), &mut connection, false)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
+                .await
+                .unwrap();
+        let create = |id, name: &str, kind| UpstreamCreate {
+            id,
+            name: name.to_owned(),
+            kind,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        };
+        let original_id = Uuid::from_u128(0x1300);
+        let reused_id = Uuid::from_u128(0x1301);
+        let raw_model = if scenario == "model-drift" {
+            "models/gemini-captured"
+        } else {
+            "gpt-captured"
+        };
+        let captured_model = if scenario == "model-drift" {
+            "gemini-captured"
+        } else {
+            "gpt-captured"
+        };
+        storage
+            .append_request_event(&RequestEvent {
+                ts: AT + 10,
+                ts_ms: Some((AT + 10) * 1000),
+                request_id: "historical-name-only".to_owned(),
+                event_id: Some("historical-name-only".to_owned()),
+                principal_id: Some(" principal/a ".to_owned()),
+                upstream_name: Some("foo".to_owned()),
+                model: Some(raw_model.to_owned()),
+                status: 403,
+                ..RequestEvent::default()
+            })
+            .await
+            .unwrap();
+        let kind = if scenario == "model-drift" {
+            UpstreamKind::GeminiOauth
+        } else {
+            UpstreamKind::OpenaiOauth
+        };
+        let original = storage
+            .create(create(original_id, "foo", kind))
+            .await
+            .unwrap();
+        storage
+            .update(
+                original_id,
+                original.revision,
+                cc_lb_storage_api::UpstreamUpdate {
+                    name: Some("renamed-original".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if scenario != "captured-unknown" {
+            // A later event with the same rollup key overwrites its stored display name.
+            storage
+                .append_request_event(&RequestEvent {
+                    ts: AT + 10,
+                    ts_ms: Some((AT + 10) * 1000),
+                    request_id: "renamed-original-success".to_owned(),
+                    event_id: Some("renamed-original-success".to_owned()),
+                    principal_id: Some(" principal/a ".to_owned()),
+                    upstream_id: Some(original_id),
+                    upstream_name: Some("renamed-original".to_owned()),
+                    model: Some(raw_model.to_owned()),
+                    status: 200,
+                    ..RequestEvent::default()
+                })
+                .await
+                .unwrap();
+        }
+        storage
+            .create(create(reused_id, "foo", UpstreamKind::GeminiOauth))
+            .await
+            .unwrap();
+        storage
+            .append_request_event(&RequestEvent {
+                ts: AT + 10,
+                ts_ms: Some((AT + 10) * 1000),
+                request_id: "reused-name-server-error".to_owned(),
+                event_id: Some("reused-name-server-error".to_owned()),
+                principal_id: Some("other-principal".to_owned()),
+                upstream_id: Some(reused_id),
+                upstream_name: Some("foo".to_owned()),
+                model: Some("gemini-captured".to_owned()),
+                status: 500,
+                ..RequestEvent::default()
+            })
+            .await
+            .unwrap();
+        let captured_id = if scenario == "captured-unknown" {
+            Uuid::nil()
+        } else {
+            original_id
+        };
+        for resolution in ["minute", "hour"] {
+            if scenario != "no-history" && !(scenario == "hour-fallback" && resolution == "minute")
+            {
+                sqlx::query(
+                    "INSERT INTO usage_rollups_v2
+                     (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+                     VALUES (?,1800000000,'principal_a',?,'renamed-original',?,?,1,0)",
+                ).bind(resolution).bind(captured_id.to_string()).bind(captured_model)
+                    .bind(if scenario == "captured-unknown" { 1 } else { 2 })
+                    .execute(storage.pool()).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO usage_rollups_v2
+                 (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+                 VALUES (?,1800000000,'other-principal',?,'foo','gemini-captured',1,1,0)",
+            ).bind(resolution).bind(reused_id.to_string()).execute(storage.pool()).await.unwrap();
+            if matches!(scenario, "ambiguous" | "hour-distractor") {
+                sqlx::query(
+                    "INSERT INTO usage_rollups_v2
+                     (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+                     VALUES (?,?,'principal_a',?,'foo','different-model',1,1,0)",
+                ).bind(resolution).bind(if scenario == "hour-distractor" && resolution == "minute" { AT as i64 + 120 } else { AT as i64 })
+                    .bind(Uuid::from_u128(0x1302).to_string())
+                    .execute(storage.pool()).await.unwrap();
+            }
+        }
+        if matches!(scenario, "ambiguous" | "hour-distractor") {
+            let ts = AT
+                + if scenario == "hour-distractor" {
+                    130
+                } else {
+                    10
+                };
+            storage
+                .append_request_event(&RequestEvent {
+                    ts,
+                    ts_ms: Some(ts * 1000),
+                    request_id: "ambiguous-captured-name".to_owned(),
+                    event_id: Some("ambiguous-captured-name".to_owned()),
+                    principal_id: Some(" principal/a ".to_owned()),
+                    upstream_id: Some(Uuid::from_u128(0x1302)),
+                    upstream_name: Some("foo".to_owned()),
+                    model: Some("different-model".to_owned()),
+                    status: 500,
+                    ..RequestEvent::default()
+                })
+                .await
+                .unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id,value)
+             SELECT id,(SELECT MAX(id) FROM request_events_v1)
+             FROM (SELECT 'high_water' AS id UNION ALL SELECT 'cost_components_backfill_upper'
+                   UNION ALL SELECT 'cost_components_backfill_cursor');
+             INSERT INTO overview_excluded_error_rollups_v1
+             (resolution,bucket_start_unix_secs,error_count,updated_at)
+             VALUES ('minute',1800000000,1,0),('hour',1800000000,1,0);
+             UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        storage.initialize().await.unwrap();
+        for resolution in [
+            cc_lb_storage_api::UsageRollupResolution::Minute,
+            cc_lb_storage_api::UsageRollupResolution::Hour,
+        ] {
+            let usage = storage
+                .query_usage_rollups_in_range(resolution, AT, AT + 60)
+                .await
+                .unwrap();
+            let reused = usage
+                .iter()
+                .find(|row| row.upstream_id == reused_id)
+                .unwrap();
+            assert_eq!(reused.error_count, 1, "Gemini 500 remains an error");
+            let excluded = storage
+                .query_overview_excluded_error_buckets_in_range(resolution, AT, AT + 60)
+                .await
+                .unwrap();
+            assert_eq!(excluded.len(), 1, "{scenario}");
+            assert_eq!(
+                excluded[0].error_count, 1,
+                "{scenario}: global count is conserved"
+            );
+            let expected = if matches!(scenario, "ambiguous" | "no-history") {
+                None
+            } else {
+                Some(captured_id)
+            };
+            assert_eq!(
+                excluded[0].upstream_id, expected,
+                "{scenario}: captured identity must survive metadata/model changes without guessing"
+            );
+            assert!(
+                !excluded
+                    .iter()
+                    .any(|row| row.upstream_id == Some(reused_id))
+            );
+        }
+        let before = snapshot(&storage).await;
+        storage.initialize().await.unwrap();
+        assert_eq!(snapshot(&storage).await, before);
+    }
+}
+
+#[tokio::test]
+async fn global_only_sentinels_remain_distinct_from_unknown_uuid_and_invalid_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("sentinels.sqlite").display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&url, Arc::new(cc_lb_clock::SystemClock))
+        .await
+        .unwrap();
+    storage.initialize().await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO overview_excluded_error_rollups_v1
+         (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
+         VALUES ('minute',1800000000,'',2,0),
+                ('minute',1800000000,'legacy-unattributed',3,0),
+                ('minute',1800000000,'00000000-0000-0000-0000-000000000000',5,0);",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let buckets = storage
+        .query_overview_excluded_error_buckets_in_range(
+            cc_lb_storage_api::UsageRollupResolution::Minute,
+            AT,
+            AT + 60,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        buckets
+            .iter()
+            .filter(|row| row.upstream_id.is_none())
+            .map(|row| row.error_count)
+            .sum::<u64>(),
+        5
+    );
+    assert_eq!(
+        buckets
+            .iter()
+            .find(|row| row.upstream_id == Some(Uuid::nil()))
+            .unwrap()
+            .error_count,
+        5
+    );
+    assert_eq!(
+        storage
+            .prune_usage_rollups_before(AT + 60, AT + 60, 10)
+            .await
+            .unwrap(),
+        3
+    );
+    sqlx::query(
+        "INSERT INTO overview_excluded_error_rollups_v1
+         (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
+         VALUES ('minute',1800000000,'not-a-recognized-identity',1,0)",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let error = storage
+        .query_overview_excluded_error_buckets_in_range(
+            cc_lb_storage_api::UsageRollupResolution::Minute,
+            AT,
+            AT + 60,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        cc_lb_storage_api::StorageError::Corrupted { .. }
+    ));
 }
