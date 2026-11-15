@@ -48,6 +48,7 @@ struct Recorder {
     raw_response: Mutex<Option<Bytes>>,
     content_type: Mutex<Option<&'static str>>,
     body_poll_tripwire: Mutex<Option<Arc<AtomicUsize>>>,
+    pending_body: Mutex<Option<PendingBody>>,
     hook_headers: Mutex<bool>,
     hook_fails: Mutex<bool>,
     catalog_endpoint: Mutex<Option<Url>>,
@@ -175,6 +176,26 @@ impl http_body::Body for PollTripwireBody {
     }
 }
 
+#[derive(Clone)]
+struct PendingBody {
+    polled: Arc<tokio::sync::Notify>,
+    polls: Arc<AtomicUsize>,
+}
+
+impl http_body::Body for PendingBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        self.polled.notify_one();
+        Poll::Pending
+    }
+}
+
 #[async_trait]
 impl UpstreamDispatch for Dispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
@@ -196,6 +217,12 @@ impl UpstreamDispatch for Dispatch {
         );
         if let Some(polls) = self.recorder.body_poll_tripwire.lock().unwrap().clone() {
             return Ok(response.body(Body::new(PollTripwireBody(polls))).unwrap());
+        }
+        if let Some(body) = self.recorder.pending_body.lock().unwrap().clone() {
+            return Ok(response
+                .header("retry-after", "17")
+                .body(Body::new(body))
+                .unwrap());
         }
         if *self.recorder.gzip_response.lock().unwrap() {
             use std::io::Write;
@@ -375,6 +402,47 @@ async fn provider_errors_stay_unprojected() {
     let (status, _, body) = collect_body(lifecycle.handle(request, &auth).await.unwrap()).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), raw);
+}
+
+#[tokio::test]
+async fn error_sse_catalog_returns_status_before_pending_body() {
+    for api_key in [true, false] {
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let recorder = Arc::new(Recorder::default());
+            *recorder.api_key.lock().unwrap() = api_key;
+            *recorder.content_type.lock().unwrap() = Some("text/event-stream");
+            let polled = Arc::new(tokio::sync::Notify::new());
+            let polls = Arc::new(AtomicUsize::new(0));
+            *recorder.pending_body.lock().unwrap() = Some(PendingBody {
+                polled: polled.clone(),
+                polls: polls.clone(),
+            });
+            let lifecycle = lifecycle(
+                recorder.clone(),
+                Some("stored-project"),
+                status,
+                Value::Null,
+            );
+            let request = request("/v1/models", Bytes::new());
+            let auth = lifecycle.authenticate(request.headers()).await.unwrap();
+            let response = tokio::select! {
+                biased;
+                response = lifecycle.handle(request, &auth) => response.unwrap(),
+                () = polled.notified() => panic!(
+                    "catalog error headers must arrive before awaiting body EOF: {status}, api_key={api_key}"
+                ),
+            };
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()["content-type"], "text/event-stream");
+            assert_eq!(response.headers()["retry-after"], "17");
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(recorder.requests.lock().unwrap().len(), 1);
+            assert!(recorder.hooks.lock().unwrap().is_empty());
+        }
+    }
 }
 
 #[tokio::test]

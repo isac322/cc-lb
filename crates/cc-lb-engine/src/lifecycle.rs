@@ -6559,7 +6559,7 @@ impl Lifecycle {
         let stream_response = stream_requested || audio_stream;
         let buffered_transform_required = transform_ctx.gemini_oauth
             || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
-        let force_buffered_response = gemini_catalog
+        let force_buffered_response = (gemini_catalog && status.is_success())
             || response_affinity_context.capability
                 == ProviderCapability::GeminiCachedContentsCreate;
         if !force_buffered_response
