@@ -640,6 +640,7 @@ async fn build_principal_chains(
                 let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
                     principal.name.clone(),
                     manifest.name.clone(),
+                    cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
                 );
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
@@ -887,6 +888,7 @@ async fn build_router_pipeline(
         let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
             principal.name.clone(),
             manifest.name.clone(),
+            cc_lb_runtime_wasmtime::RuntimeSlotRole::Filter,
         );
         registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {

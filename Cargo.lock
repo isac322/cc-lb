@@ -6002,6 +6002,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtime-dual-slot"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk-wasmtime",
+]
+
+[[package]]
 name = "wasmtime-environ"
 version = "50.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

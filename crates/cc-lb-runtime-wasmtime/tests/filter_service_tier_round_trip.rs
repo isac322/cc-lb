@@ -4,7 +4,7 @@ use cc_lb_plugin_wire::v1::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
 };
 use cc_lb_plugin_wire::{HookKind, WireVersion};
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmtimeRuntime, admit_wasm};
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole, WasmtimeRuntime, admit_wasm};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -35,7 +35,7 @@ fn filter_plugin_admits_and_receives_service_tier() {
         Some(&WireVersion::V1)
     );
 
-    let slot = RuntimeSlotKey::global("filter-service-tier");
+    let slot = RuntimeSlotKey::global("filter-service-tier", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot.clone(), "wasmtime-filter-service-tier", &wasm)
         .expect("register filter service-tier");

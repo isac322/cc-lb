@@ -28,6 +28,10 @@ const FIXTURE_CRATES: &[Fixture] = &[
         crate_path: "../../plugins/test-fixtures/wasmtime-filter-service-tier",
     },
     Fixture {
+        crate_name: "wasmtime-dual-slot",
+        crate_path: "../../plugins/test-fixtures/wasmtime-dual-slot",
+    },
+    Fixture {
         crate_name: "cache-aware-wasmtime",
         crate_path: "../../plugins/router/cache-aware-wasmtime",
     },

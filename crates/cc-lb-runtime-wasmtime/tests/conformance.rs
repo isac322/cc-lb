@@ -24,8 +24,8 @@ use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
     UpstreamCandidate,
 };
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 
@@ -133,8 +133,8 @@ fn multi_slot_independent() {
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
-    let slot_a = RuntimeSlotKey::new("tenant-a", "cache-aware-wasmtime");
-    let slot_b = RuntimeSlotKey::new("tenant-b", "cache-aware-wasmtime");
+    let slot_a = RuntimeSlotKey::new("tenant-a", "cache-aware-wasmtime", RuntimeSlotRole::Filter);
+    let slot_b = RuntimeSlotKey::new("tenant-b", "cache-aware-wasmtime", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot_a.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register a");
@@ -164,7 +164,7 @@ fn concurrent_callers_each_build_their_own_worker() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = RuntimeSlotKey::global("concurrent");
+    let slot = RuntimeSlotKey::global("concurrent", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
@@ -194,7 +194,7 @@ fn large_payload_round_trips() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = RuntimeSlotKey::global("large-payload");
+    let slot = RuntimeSlotKey::global("large-payload", RuntimeSlotRole::Filter);
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");

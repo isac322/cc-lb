@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use cc_lb_server::wasm_host::WasmtimeUpstreamDialect;
 use cc_lb_upstream::{DialectShapeContext, shape_request};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
@@ -41,7 +43,7 @@ fn shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("test-shape"),
+            RuntimeSlotKey::global("test-shape", RuntimeSlotRole::Shape),
             "test-shape",
             &wasm_bytes,
         )

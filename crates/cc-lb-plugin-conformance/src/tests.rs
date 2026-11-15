@@ -122,6 +122,125 @@ fn run_exercises_cache_aware_filter() {
 }
 
 #[test]
+fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
+    use super::ShapeWireRequest;
+    use cc_lb_plugin_wire::v2;
+    use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch};
+
+    let wasm = std::fs::read(wasm_fixture_path("wasmtime_dual_slot.wasm"))
+        .expect("runtime build script must produce the dual-slot fixture");
+    let cases: [(ProviderFamily, &str, &[u8]); 2] = [
+        (
+            ProviderFamily::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-4.1","input":[{"role":"user","content":"keep  two spaces"}],"stream":false}"#,
+        ),
+        (
+            ProviderFamily::Gemini,
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            br#"{"contents":[{"role":"user","parts":[{"text":"keep  two spaces"}]}],"generationConfig":{"temperature":0.25}}"#,
+        ),
+    ];
+
+    for (provider, path, raw_body) in cases {
+        let suite = ConformanceSuite::for_filter_provider(&wasm, provider)
+            .with_plugin_name("dual-slot-conformance");
+        let session = suite.session();
+        let runtime = session.runtime();
+        let shape_key = RuntimeSlotKey::new(
+            session.slot_key().principal.clone(),
+            session.slot_key().plugin.clone(),
+            RuntimeSlotRole::Shape,
+        );
+        let shape_slot = runtime
+            .register_shape(shape_key.clone(), "dual-slot-conformance", &wasm)
+            .expect("same artifact and principal must register in both roles");
+        assert_eq!(runtime.slot_count(), 2);
+        assert_ne!(session.slot_key(), &shape_key);
+        let shape_dispatch = WasmPluginWireDispatch::from_slot(shape_slot, runtime.config_arc())
+            .for_provider(provider)
+            .expect("dual-slot fixture exports the selected shape provider");
+
+        let mut filter_request = fixtures::sample_filter_request_v2(provider);
+        filter_request.path = Box::from(path);
+        filter_request.body = Box::from(raw_body);
+        let accepted = session.call_filter_wire(filter_request.clone());
+        assert_eq!(accepted.results.len(), 1);
+        assert_eq!(
+            accepted.results[0].upstream_id.as_ref(),
+            "conformance-upstream"
+        );
+        assert_eq!(accepted.results[0].decision.as_ref(), "accept");
+        assert_eq!(
+            accepted.results[0].reason.as_ref(),
+            "qa-qualified-filter-v2"
+        );
+
+        let mut reject_headers = filter_request.headers.into_vec();
+        reject_headers.push(v2::Header {
+            name: Box::from("x-qa-reject"),
+            value: Box::from(b"1".as_slice()),
+        });
+        filter_request.headers = reject_headers.into_boxed_slice();
+        let rejected = session.call_filter_wire(filter_request);
+        assert_eq!(rejected.results.len(), 1);
+        assert_eq!(
+            rejected.results[0].upstream_id.as_ref(),
+            "conformance-upstream"
+        );
+        assert_eq!(rejected.results[0].decision.as_ref(), "reject");
+        assert_eq!(
+            rejected.results[0].reason.as_ref(),
+            "qa-qualified-filter-v2"
+        );
+
+        let mut shape_request = fixtures::sample_shape_request_v2(provider);
+        shape_request.path = Box::from(path);
+        shape_request.query = Some(Box::from("qa=keep%20spaces"));
+        shape_request.body = Box::from(raw_body);
+        shape_request.headers = Box::new([
+            v2::Header {
+                name: Box::from("content-type"),
+                value: Box::from(b"application/json".as_slice()),
+            },
+            v2::Header {
+                name: Box::from("x-qa-original"),
+                value: Box::from(b"preserve-me".as_slice()),
+            },
+        ]);
+        shape_request.upstream_identity.base_url = Some(Box::from("https://example.test"));
+        let encoded = shape_request.encode();
+        let assert_shape = || {
+            let shaped = shape_dispatch
+                .call_shape_scoped(&encoded, v2::ShapeRequest::decode)
+                .expect("shape must dispatch while the filter role shares this runtime");
+            assert_eq!(shaped.method.as_ref(), "POST");
+            assert_eq!(
+                shaped.url.as_ref(),
+                format!("https://example.test{path}?qa=keep%20spaces")
+            );
+            assert_eq!(shaped.body.as_ref(), raw_body);
+            assert_eq!(shaped.headers.len(), 3);
+            for (header, (name, value)) in shaped.headers.iter().zip([
+                ("content-type", b"application/json".as_slice()),
+                ("x-qa-original", b"preserve-me".as_slice()),
+                ("x-qa-shape", b"qualified-v2".as_slice()),
+            ]) {
+                assert_eq!(header.name.as_ref(), name);
+                assert_eq!(header.value.as_ref(), value);
+            }
+        };
+        assert_shape();
+
+        assert!(runtime.evict_slot(session.slot_key()));
+        assert!(runtime.get_slot(session.slot_key()).is_none());
+        assert!(runtime.get_slot(&shape_key).is_some());
+        assert_eq!(runtime.slot_count(), 1);
+        assert_shape();
+    }
+}
+
+#[test]
 fn provider_fixtures_use_native_upstreams_and_no_credentials() {
     let openai = fixtures::sample_openai_responses_shape_request();
     assert_eq!(openai.path.as_ref(), "/v1/responses");

@@ -54,7 +54,7 @@ fn format_hex(bytes: &[u8; 32]) -> String {
     out
 }
 
-/// A slot of pluggable behavior, identified by name + principal scope.
+/// A slot of pluggable behavior, identified by name, principal scope, and role.
 ///
 /// `current` is what hot-swap rotates. Old [`PluginCell`] arcs are dropped
 /// naturally as in-flight readers release their `ArcSwap::load_full()`

@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
 
 fn cache_aware_wasm() -> Option<Vec<u8>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,14 +34,22 @@ fn identical_bytes_share_compiled_artifact_across_principal_slots() {
 
     let slot_a = rt
         .register_filter(
-            RuntimeSlotKey::new("principal-a", "cache-aware-wasmtime"),
+            RuntimeSlotKey::new(
+                "principal-a",
+                "cache-aware-wasmtime",
+                RuntimeSlotRole::Filter,
+            ),
             "cache-aware-wasmtime",
             &wasm,
         )
         .expect("register slot A");
     let slot_b = rt
         .register_filter(
-            RuntimeSlotKey::new("principal-b", "cache-aware-wasmtime"),
+            RuntimeSlotKey::new(
+                "principal-b",
+                "cache-aware-wasmtime",
+                RuntimeSlotRole::Filter,
+            ),
             "cache-aware-wasmtime",
             &wasm,
         )
@@ -67,14 +75,14 @@ fn identical_bytes_share_compiled_artifact_across_separate_runtimes() {
 
     let slot_a = rt_a
         .register_filter(
-            RuntimeSlotKey::global("cache-aware-wasmtime"),
+            RuntimeSlotKey::global("cache-aware-wasmtime", RuntimeSlotRole::Filter),
             "cache-aware-wasmtime",
             &wasm,
         )
         .expect("register on runtime A");
     let slot_b = rt_b
         .register_filter(
-            RuntimeSlotKey::global("cache-aware-wasmtime"),
+            RuntimeSlotKey::global("cache-aware-wasmtime", RuntimeSlotRole::Filter),
             "cache-aware-wasmtime",
             &wasm,
         )
@@ -97,7 +105,7 @@ fn recompile_after_evict_reuses_cached_artifact_instead_of_recompiling() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = RuntimeSlotKey::global("evict-reregister-cache-probe");
+    let key = RuntimeSlotKey::global("evict-reregister-cache-probe", RuntimeSlotRole::Filter);
 
     let slot1 = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)

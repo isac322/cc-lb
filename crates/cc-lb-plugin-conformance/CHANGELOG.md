@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Typed V2 Realtime/Live frame calls and provider-native frame fixtures, including boundary smoke coverage for frame-only Shape plugins.
+- Exercise one provider-qualified module in both Filter and Shape slots on the same runtime, including request-byte preservation and independent eviction.
+
+### Changed
+
+- **Breaking:** runtime slot keys exposed by conformance sessions now include `RuntimeSlotRole`; integrations constructing keys must pass Filter or Shape explicitly.
 
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.3.0...cc-lb-plugin-conformance-v0.4.0) - 2026-10-31
 

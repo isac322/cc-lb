@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 use rkyv::rancor::Error;
 
@@ -92,7 +92,7 @@ fn evict_slot_drops_registration_and_returns_true() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = RuntimeSlotKey::global("evict-probe-A");
+    let key = RuntimeSlotKey::global("evict-probe-A", RuntimeSlotRole::Filter);
 
     rt.register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
@@ -113,7 +113,7 @@ fn evict_slot_drops_registration_and_returns_true() {
 #[test]
 fn evict_slot_is_idempotent_when_key_missing() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine");
-    let key = RuntimeSlotKey::global("never-registered");
+    let key = RuntimeSlotKey::global("never-registered", RuntimeSlotRole::Filter);
 
     let removed = rt.evict_slot(&key);
     assert!(!removed, "evict of absent key returns false");
@@ -131,7 +131,7 @@ fn evict_slot_leaves_prior_arc_dispatchable() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = RuntimeSlotKey::global("evict-probe-B");
+    let key = RuntimeSlotKey::global("evict-probe-B", RuntimeSlotRole::Filter);
 
     let slot = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)

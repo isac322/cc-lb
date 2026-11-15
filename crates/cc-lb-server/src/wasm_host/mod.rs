@@ -238,7 +238,10 @@ mod tests {
         let runtime = Arc::new(WasmtimeRuntime::new(config).expect("engine"));
         let slot = runtime
             .register_filter(
-                RuntimeSlotKey::global("oversized"),
+                RuntimeSlotKey::global(
+                    "oversized",
+                    cc_lb_runtime_wasmtime::RuntimeSlotRole::Filter,
+                ),
                 "oversized",
                 &wasm_bytes,
             )

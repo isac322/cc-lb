@@ -16,8 +16,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
 
 fn cache_aware_wasm() -> Option<Vec<u8>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,7 +35,7 @@ fn register_same_content_reuses_cell() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = RuntimeSlotKey::global("unchanged-short-circuit");
+    let key = RuntimeSlotKey::global("unchanged-short-circuit", RuntimeSlotRole::Filter);
 
     let slot1 = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)

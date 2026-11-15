@@ -4,7 +4,9 @@ use std::sync::Arc;
 use cc_lb_plugin_wire::{
     ArchivedShapeResponse, ShapeRequest, ShapeResponse, Upstream as WireUpstream,
 };
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -71,7 +73,7 @@ fn shape_passthrough_echoes_request_via_wire_dispatch() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("test-shape"),
+            RuntimeSlotKey::global("test-shape", RuntimeSlotRole::Shape),
             "test-shape",
             &wasm_bytes,
         )
@@ -120,7 +122,7 @@ fn legacy_shape_passthrough_is_not_selected_for_other_providers() {
     let runtime = WasmtimeRuntime::with_defaults().expect("engine build");
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("legacy-provider-shape"),
+            RuntimeSlotKey::global("legacy-provider-shape", RuntimeSlotRole::Shape),
             "legacy-provider-shape",
             &wasm_bytes,
         )

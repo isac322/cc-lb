@@ -1,6 +1,8 @@
 use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema};
 use cc_lb_plugin_wire::{ShapeRequest, ShapeResponse};
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use rkyv::rancor::Error as RkyvError;
 
 fn append_leb(bytes: &mut Vec<u8>, mut value: usize) {
@@ -151,7 +153,7 @@ fn dispatch(wasm: &[u8]) -> WasmPluginWireDispatch {
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("provider-test"),
+            RuntimeSlotKey::global("provider-test", RuntimeSlotRole::Shape),
             "provider-test",
             wasm,
         )
@@ -314,7 +316,7 @@ fn qualified_filter_is_provider_specific_and_legacy_filter_is_anthropic_only() {
         let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
         let slot = runtime
             .register_filter(
-                RuntimeSlotKey::global("filter-provider"),
+                RuntimeSlotKey::global("filter-provider", RuntimeSlotRole::Filter),
                 "filter-provider",
                 &shape_module(&hooks, metadata_version),
             )
