@@ -527,20 +527,35 @@ export function createOwnedListenerAudit({ scratchDir, ledger, maxDurationMs = 3
         stopped = true; terminate();
       });
     },
-    async stop() {
+    async stop({ processGroupGone = false } = {}) {
       stopped = true;
       await running;
       const closedUpperBound = new Date().toISOString();
       for (const [key, entry] of seen) await resource(ledger, scratchDir, {
         kind: 'owned-listener-observation', identifier: key, ...entry, sampled: true,
-        closed_upper_bound_utc: closedUpperBound, delete_command: `kill -TERM -- -${group}`, state: 'removed',
+        ...(processGroupGone ? { closed_upper_bound_utc: closedUpperBound } : { observation_ended_utc: closedUpperBound }),
+        delete_command: `kill -TERM -- -${group}`, state: processGroupGone ? 'removed' : 'unresolved',
       });
       return snapshot();
     },
   };
 }
 
-export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, listenerAudit, deadlineMs = 20_000, maxBytes = MAX_BYTES }) {
+async function waitForOwnedProcessGroup(group, probe, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { probe(group); }
+    catch (error) {
+      if (error.code === 'ESRCH') return { status: 'gone', reason: null };
+      return { status: 'unresolved', reason: ['EPERM', 'EACCES'].includes(error.code) ? 'probe-denied' : 'probe-failed' };
+    }
+    if (Date.now() >= deadline) return { status: 'unresolved', reason: 'cleanup-deadline' };
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10, deadline - Date.now())));
+  }
+}
+
+export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, ledger, listenerAudit, deadlineMs = 20_000, maxBytes = MAX_BYTES, groupProbe = (group) => process.kill(-group, 0), groupCleanupTimeoutMs = 1000 }) {
+  if (typeof groupProbe !== 'function' || !Number.isFinite(groupCleanupTimeoutMs) || groupCleanupTimeoutMs < 1 || groupCleanupTimeoutMs > 3000) throw fail('QHARNESS_PROCESS_GROUP_CLEANUP_BOUND_INVALID');
   return new Promise((resolve) => {
     const child = spawn(command, args, { env, cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const out = []; const err = []; let bytes = 0; let timedOut = false; let overflow = false; let finished = false;
@@ -562,16 +577,26 @@ export function runBoundedProcess(command, args, { env, cwd, scratchDir = cwd, l
       if (finished) return; finished = true;
       clearTimeout(timer); clearTimeout(hardTimer); clearTimeout(reap);
       kill('SIGKILL'); child.stdout.destroy(); child.stderr.destroy();
+      let cleanupError = null;
+      // Registration can persist the active entry and then reject. Settle it
+      // independently so it cannot prevent either cleanup or the final record.
+      try { await registration; } catch { error ??= 'QHARNESS_RESOURCE_LEDGER_FAILED'; }
+      const processGroupCleanup = child.pid
+        ? await waitForOwnedProcessGroup(child.pid, groupProbe, groupCleanupTimeoutMs)
+        : { status: 'not-created', reason: null };
+      if (processGroupCleanup.status === 'unresolved') cleanupError = 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED';
       let audit;
       if (listenerAudit) {
-        try { audit = await listenerAudit.stop(); if (audit.status === 'FAIL') error = audit.reason; }
-        catch { error = 'QHARNESS_LISTENER_AUDIT_FAILED'; }
+        try { audit = await listenerAudit.stop({ processGroupGone: processGroupCleanup.status === 'gone' }); if (audit.status === 'FAIL') error ??= audit.reason; }
+        catch { error ??= 'QHARNESS_LISTENER_AUDIT_FAILED'; }
       }
-      try {
-        await registration;
-        if (child.pid) await resource(ledger, scratchDir, { ...entry, state: 'removed' });
-      } catch { error = 'QHARNESS_RESOURCE_LEDGER_FAILED'; }
-      resolve({ pid: child.pid ?? null, exitCode, signal, timedOut, overflow, error, listenerAudit: audit, stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
+      if (child.pid) {
+        try {
+          await resource(ledger, scratchDir, { ...entry, state: processGroupCleanup.status === 'gone' ? 'removed' : 'unresolved', cleanup_reason: processGroupCleanup.reason });
+        } catch { cleanupError ??= 'QHARNESS_RESOURCE_LEDGER_FAILED'; }
+      }
+      error ??= cleanupError;
+      resolve({ pid: child.pid ?? null, exitCode, signal, timedOut, overflow, error, cleanupError, processGroupCleanup, listenerAudit: audit, stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
     }
     child.on('error', () => { void finish(null, null, 'QHARNESS_SPAWN_FAILED'); });
     child.on('exit', () => kill('SIGKILL'));

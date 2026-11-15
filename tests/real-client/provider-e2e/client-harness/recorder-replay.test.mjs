@@ -551,3 +551,93 @@ test('QH-WIRE-003 regression: mismatched websocket control close cannot pass on 
   assert.equal(result.closeCode, 1002);
   assert.equal(result.consumerAcceptance, 'NOT-RUN');
 });
+
+test('QH-ISO-004 cleanup regression: persisted active registration rejection still attempts removed record', async () => {
+  const owned = await workspace('group-registration'); let activePersisted = false; let removedAttempted = false;
+  const ledger = async (entry) => {
+    await owned.ledger(entry);
+    if (entry.kind === 'process-group' && entry.state === 'active') {
+      activePersisted = true;
+      throw new Error('QHARNESS_SYNTHETIC_PRIVATE_LEDGER_FAILURE');
+    }
+    if (entry.kind === 'process-group' && entry.state === 'removed') removedAttempted = true;
+  };
+  const result = await runBoundedProcess(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    ...owned, ledger, env: { PATH: '/usr/bin:/bin', HOME: owned.scratchDir }, cwd: owned.scratchDir, deadlineMs: 1000,
+  });
+  assert.equal(activePersisted, true);
+  assert.equal(removedAttempted, true, 'a callback may persist active state before rejecting');
+  assert.equal(result.error, 'QHARNESS_RESOURCE_LEDGER_FAILED');
+  assert(!JSON.stringify(result).includes('QHARNESS_SYNTHETIC_PRIVATE_LEDGER_FAILURE'));
+});
+
+test('QH-ISO-004 cleanup regression: descendant group ESRCH is observed before removed callback', async () => {
+  const owned = await workspace('group-esrch'); let probes = 0; let goneAtRemoval = false;
+  const groupProbe = (group) => {
+    probes++;
+    if (probes < 3) return;
+    return process.kill(-group, 0);
+  };
+  const ledger = async (entry) => {
+    if (entry.kind === 'process-group' && entry.state === 'removed') {
+      assert(probes >= 3, 'cleanup must consult the injected status probe until it confirms disappearance');
+      assert.throws(() => process.kill(-Number(entry.identifier), 0), { code: 'ESRCH' });
+      goneAtRemoval = true;
+    }
+    await owned.ledger(entry);
+  };
+  const program = 'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"inherit"});setTimeout(()=>process.exit(0),200)';
+  const result = await runBoundedProcess(process.execPath, ['-e', program], {
+    ...owned, ledger, groupProbe, groupCleanupTimeoutMs: 1000,
+    env: { PATH: '/usr/bin:/bin', HOME: owned.scratchDir }, cwd: owned.scratchDir, deadlineMs: 2000,
+  });
+  assert.equal(result.error, null);
+  assert.equal(goneAtRemoval, true);
+  assert(probes >= 3);
+});
+
+test('QH-ISO-004 cleanup regression: EPERM status probe cannot mark the exact group removed', async () => {
+  const owned = await workspace('group-eperm'); const states = [];
+  const ledger = async (entry) => { if (entry.kind === 'process-group') states.push(entry.state); await owned.ledger(entry); };
+  const groupProbe = () => { throw Object.assign(new Error('synthetic permission failure'), { code: 'EPERM' }); };
+  const result = await runBoundedProcess(process.execPath, ['-e', 'process.exit(0)'], {
+    ...owned, ledger, groupProbe, groupCleanupTimeoutMs: 30,
+    env: { PATH: '/usr/bin:/bin', HOME: owned.scratchDir }, cwd: owned.scratchDir, deadlineMs: 1000,
+  });
+  assert.equal(result.error, 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED');
+  assert(!states.includes('removed'));
+  assert(states.includes('unresolved'));
+});
+
+test('QH-ISO-004 cleanup regression: live status through the cleanup deadline remains unresolved', async () => {
+  const owned = await workspace('group-timeout'); const states = []; let probes = 0;
+  const ledger = async (entry) => { if (entry.kind === 'process-group') states.push(entry.state); await owned.ledger(entry); };
+  const groupProbe = () => { probes++; };
+  const result = await runBoundedProcess(process.execPath, ['-e', 'process.exit(0)'], {
+    ...owned, ledger, groupProbe, groupCleanupTimeoutMs: 30,
+    env: { PATH: '/usr/bin:/bin', HOME: owned.scratchDir }, cwd: owned.scratchDir, deadlineMs: 1000,
+  });
+  assert.equal(result.error, 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED');
+  assert(!states.includes('removed'));
+  assert(states.includes('unresolved'));
+  assert(probes >= 2);
+});
+
+test('QH-ISO-004 cleanup regression: primary registration error remains distinct from unresolved cleanup', async () => {
+  const owned = await workspace('group-dual-error'); const states = [];
+  const ledger = async (entry) => {
+    await owned.ledger(entry);
+    if (entry.kind !== 'process-group') return;
+    states.push(entry.state);
+    if (entry.state === 'active') throw new Error('synthetic registration failure');
+  };
+  const groupProbe = () => { throw Object.assign(new Error('synthetic probe denial'), { code: 'EPERM' }); };
+  const result = await runBoundedProcess(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    ...owned, ledger, groupProbe, groupCleanupTimeoutMs: 30,
+    env: { PATH: '/usr/bin:/bin', HOME: owned.scratchDir }, cwd: owned.scratchDir, deadlineMs: 1000,
+  });
+  assert.equal(result.error, 'QHARNESS_RESOURCE_LEDGER_FAILED');
+  assert.equal(result.cleanupError, 'QHARNESS_PROCESS_GROUP_CLEANUP_UNRESOLVED');
+  assert.equal(result.processGroupCleanup.status, 'unresolved');
+  assert.deepEqual(states, ['active', 'unresolved']);
+});
