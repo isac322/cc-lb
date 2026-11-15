@@ -3371,7 +3371,7 @@ async fn dispatch_responses_websocket(
 }
 
 struct WsDownstreamReader {
-    task: JoinHandle<()>,
+    task: JoinHandle<(bool, futures_util::stream::SplitStream<WebSocket>)>,
 }
 
 impl Drop for WsDownstreamReader {
@@ -3399,13 +3399,14 @@ async fn relay_responses_websocket(
     let mut client_reader = WsDownstreamReader {
         task: tokio::spawn(async move {
             let mut pending = VecDeque::new();
-            loop {
+            let peer_closed = loop {
                 if pending.is_empty() {
                     let Some(result) = downstream_stream.next().await else {
-                        break;
+                        break false;
                     };
                     let message = match result {
-                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(Message::Close(_)) => break true,
+                        Err(_) => break false,
                         Ok(message) => message,
                     };
                     match client_tx.try_send(message) {
@@ -3413,13 +3414,13 @@ async fn relay_responses_websocket(
                         Err(tokio::sync::mpsc::error::TrySendError::Full(message)) => {
                             pending.push_back(message);
                         }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break false,
                     }
                 } else {
                     tokio::select! {
                         permit = client_tx.reserve() => {
                             let Ok(permit) = permit else {
-                                return;
+                                break false;
                             };
                             if let Some(message) = pending.pop_front() {
                                 permit.send(message);
@@ -3427,13 +3428,14 @@ async fn relay_responses_websocket(
                         }
                         result = downstream_stream.next() => {
                             let Some(result) = result else {
-                                break;
+                                break false;
                             };
                             match result {
-                                Ok(Message::Close(_)) | Err(_) => break,
+                                Ok(Message::Close(_)) => break true,
+                                Err(_) => break false,
                                 Ok(message) => {
                                     if pending.len() >= capacity {
-                                        break;
+                                        break false;
                                     }
                                     pending.push_back(message);
                                 }
@@ -3441,8 +3443,10 @@ async fn relay_responses_websocket(
                         }
                     }
                 }
-            }
+            };
             reader_closed.cancel();
+            // Hold the read half until the owner flushes the queued close reply.
+            (peer_closed, downstream_stream)
         }),
     };
     let mut connections = HashMap::new();
@@ -3561,9 +3565,11 @@ async fn relay_responses_websocket(
                                     dispatches.extend(result.dispatches);
                                 }
                                 Err(error) => {
-                                    let native_connection_limit =
-                                        error.code == "websocket_connection_limit_reached";
-                                    if native_connection_limit {
+                                    let native_connection_error = matches!(
+                                        error.code,
+                                        "websocket_connection_limit_reached" | "unattributed_upstream_error"
+                                    );
+                                    if native_connection_error {
                                         let message = if text {
                                             Message::Text(bytes.try_into().expect("provider text is UTF-8"))
                                         } else {
@@ -3577,7 +3583,7 @@ async fn relay_responses_websocket(
                                     let result = gateway.connection_closed(connection_id, &error.message);
                                     // A native connection-level error already
                                     // represents all affected turns on the wire.
-                                    if !native_connection_limit {
+                                    if !native_connection_error {
                                         if result.errors.is_empty() {
                                             if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
                                                 break 'relay;
@@ -3636,13 +3642,27 @@ async fn relay_responses_websocket(
     }
     drop(client_rx);
     drop(dispatches);
-    client_reader.task.abort();
-    let _ = (&mut client_reader.task).await;
+    if client_closed.is_cancelled() {
+        if let Ok((peer_closed, _stream)) = (&mut client_reader.task).await
+            && peer_closed
+        {
+            // Reading Close queued the matching reply. Another send would
+            // fail with SendAfterClosing instead of flushing that reply.
+            let _ = tokio::time::timeout(Duration::from_secs(1), downstream_sink.flush()).await;
+        }
+    } else {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            downstream_sink.send(Message::Close(None)),
+        )
+        .await;
+        client_reader.task.abort();
+        let _ = (&mut client_reader.task).await;
+    }
     for (_, mut connection) in connections.drain() {
         connection.task.abort();
         let _ = (&mut connection.task).await;
     }
-    let _ = downstream_sink.send(Message::Close(None)).now_or_never();
 }
 
 async fn run_responses_websocket_until_cancelled<F>(
@@ -6992,6 +7012,408 @@ mod tests {
             .expect("the failed provider connection closes")
             .expect("provider task completes");
         let _ = client.close(None).await;
+        proxy_task.abort();
+    }
+
+    async fn ws1296_assert_client_close_echo(code: u16, completed_turn: bool) {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener binds");
+        let address = listener
+            .local_addr()
+            .expect("provider address is available");
+        let router = websocket_test_router(
+            vec![websocket_upstream(
+                1,
+                "openai",
+                Url::parse(&format!("http://{address}/")).expect("provider URL parses"),
+            )],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("downstream handshake succeeds");
+        let provider_task = if completed_turn {
+            let task = tokio::spawn(async move {
+                let (socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("provider connection arrives");
+                let mut websocket = accept_async(socket)
+                    .await
+                    .expect("provider handshake succeeds");
+                websocket
+                    .next()
+                    .await
+                    .expect("provider receives create")
+                    .expect("create decodes");
+                for event in [
+                    r#"{"type":"response.created","response":{"id":"resp-close","store":false}}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp-close","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                ] {
+                    websocket
+                        .send(UpstreamMessage::Text(event.into()))
+                        .await
+                        .expect("provider event sends");
+                }
+                while websocket.next().await.is_some() {}
+            });
+            client
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#
+                        .into(),
+                ))
+                .await
+                .expect("client create sends");
+            for kind in ["response.created", "response.completed"] {
+                let event = tokio::time::timeout(Duration::from_secs(5), client.next())
+                    .await
+                    .expect("turn event arrives")
+                    .expect("downstream remains open")
+                    .expect("turn event decodes");
+                let event: Value = serde_json::from_str(event.to_text().expect("event is text"))
+                    .expect("event is JSON");
+                assert_eq!(event["type"], kind);
+            }
+            Some(task)
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "an idle downstream must not connect a provider",
+            );
+            None
+        };
+        client
+            .close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: "".into(),
+            }))
+            .await
+            .expect("client close sends");
+        let reply = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("close acknowledgement arrives")
+            .expect("close acknowledgement must be a frame, not EOF")
+            .expect("close handshake must not reset the connection");
+        assert_eq!(
+            reply,
+            UpstreamMessage::Close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: "".into(),
+            })),
+            "the peer must echo the client's close code",
+        );
+        if let Some(task) = provider_task {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("provider connection retires on client close")
+                .expect("provider task completes");
+        }
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ws1296_idle_client_close_echoes_1000_and_1001() {
+        for code in [1000, 1001] {
+            ws1296_assert_client_close_echo(code, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ws1296_completed_turn_client_close_echoes_1000_and_1001() {
+        for code in [1000, 1001] {
+            ws1296_assert_client_close_echo(code, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ws1296_unattributed_native_error_retires_two_named_lanes_without_duplicates() {
+        const NATIVE_ERROR: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Unsupported parameter: stream_id"}}"#;
+        const RECOVERED: &str = r#"{"type":"response.completed","stream_id":"a","response":{"id":"resp-recovered","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener binds");
+        let address = listener
+            .local_addr()
+            .expect("provider address is available");
+        let (retired_tx, retired_rx) = tokio::sync::oneshot::channel();
+        let provider_task = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("first provider connection arrives");
+            let mut websocket = accept_async(socket)
+                .await
+                .expect("provider handshake succeeds");
+            for lane in ["a", "b"] {
+                let create = websocket
+                    .next()
+                    .await
+                    .expect("named create arrives")
+                    .expect("create decodes");
+                let create: Value = serde_json::from_str(create.to_text().expect("create is text"))
+                    .expect("create is JSON");
+                assert_eq!(create["stream_id"], lane);
+                let created = serde_json::json!({
+                    "type": "response.created", "stream_id": lane,
+                    "response": {"id": format!("resp-{lane}"), "store": false},
+                });
+                websocket
+                    .send(UpstreamMessage::Text(created.to_string().into()))
+                    .await
+                    .expect("created sends");
+            }
+            websocket
+                .send(UpstreamMessage::Text(NATIVE_ERROR.into()))
+                .await
+                .expect("native error sends");
+            let retired = tokio::time::timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .expect("unattributed error must retire the provider connection");
+            assert!(
+                matches!(
+                    retired,
+                    None | Some(Err(_)) | Some(Ok(UpstreamMessage::Close(_)))
+                ),
+                "no create may be replayed or sent on the failed provider connection",
+            );
+            retired_tx.send(()).expect("retirement is observed");
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("new turn opens a fresh provider connection");
+            let mut websocket = accept_async(socket)
+                .await
+                .expect("recovery handshake succeeds");
+            let create = websocket
+                .next()
+                .await
+                .expect("recovery create arrives")
+                .expect("create decodes");
+            let create: Value = serde_json::from_str(create.to_text().expect("create is text"))
+                .expect("create is JSON");
+            assert_eq!(create["stream_id"], "a");
+            websocket.send(UpstreamMessage::Text(
+                r#"{"type":"response.created","stream_id":"a","response":{"id":"resp-recovered","store":false}}"#.into(),
+            )).await.expect("recovery created sends");
+            websocket
+                .send(UpstreamMessage::Text(RECOVERED.into()))
+                .await
+                .expect("recovery completion sends");
+            while websocket.next().await.is_some() {}
+        });
+        let router = websocket_test_router(
+            vec![websocket_upstream(
+                1,
+                "openai",
+                Url::parse(&format!("http://{address}/")).expect("provider URL parses"),
+            )],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("downstream handshake succeeds");
+        for lane in ["a", "b"] {
+            let create = serde_json::json!({
+                "type": "response.create", "stream_id": lane,
+                "model": "gpt-4.1", "store": false, "input": [],
+            });
+            client
+                .send(UpstreamMessage::Text(create.to_string().into()))
+                .await
+                .expect("named create sends");
+            let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("created arrives")
+                .expect("downstream stays open")
+                .expect("created decodes");
+            let created: Value = serde_json::from_str(created.to_text().expect("created is text"))
+                .expect("created is JSON");
+            assert_eq!(created["type"], "response.created");
+            assert_eq!(created["stream_id"], lane);
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("native error arrives")
+            .expect("downstream stays open")
+            .expect("error decodes");
+        assert_eq!(
+            error,
+            UpstreamMessage::Text(NATIVE_ERROR.into()),
+            "native error bytes must be unchanged"
+        );
+        tokio::time::timeout(Duration::from_secs(5), retired_rx)
+            .await
+            .expect("provider retirement arrives")
+            .expect("provider retirement is confirmed");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.next())
+                .await
+                .is_err(),
+            "one native connection error must not produce per-lane duplicates or a downstream close",
+        );
+        client.send(UpstreamMessage::Text(
+            r#"{"type":"response.create","stream_id":"a","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        )).await.expect("downstream accepts a new turn on the released lane");
+        for expected in ["response.created", "response.completed"] {
+            let event = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("recovery event arrives")
+                .expect("downstream remains usable")
+                .expect("event decodes");
+            let value: Value = serde_json::from_str(event.to_text().expect("event is text"))
+                .expect("event is JSON");
+            assert_eq!(value["type"], expected);
+            if expected == "response.completed" {
+                assert_eq!(event, UpstreamMessage::Text(RECOVERED.into()));
+            }
+        }
+        let _ = client.close(None).await;
+        tokio::time::timeout(Duration::from_secs(5), provider_task)
+            .await
+            .expect("provider task ends")
+            .expect("provider assertions pass");
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ws1296_attributed_error_keeps_sibling_lane_and_provider_connection_usable() {
+        const ATTRIBUTED_ERROR: &str = r#"{"type":"error","stream_id":"a","status":400,"error":{"type":"invalid_request_error","message":"Invalid input"}}"#;
+        const SIBLING_COMPLETED: &str = r#"{"type":"response.completed","stream_id":"b","response":{"id":"resp-b","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        const RECOVERED: &str = r#"{"type":"response.completed","stream_id":"a","response":{"id":"resp-recovered","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener binds");
+        let address = listener
+            .local_addr()
+            .expect("provider address is available");
+        let provider_task = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("provider connection arrives");
+            let mut websocket = accept_async(socket)
+                .await
+                .expect("provider handshake succeeds");
+            for lane in ["a", "b"] {
+                let create = websocket
+                    .next()
+                    .await
+                    .expect("named create arrives")
+                    .expect("create decodes");
+                let create: Value = serde_json::from_str(create.to_text().expect("create is text"))
+                    .expect("create is JSON");
+                assert_eq!(create["stream_id"], lane);
+                let created = serde_json::json!({
+                    "type": "response.created", "stream_id": lane,
+                    "response": {"id": format!("resp-{lane}"), "store": false},
+                });
+                websocket
+                    .send(UpstreamMessage::Text(created.to_string().into()))
+                    .await
+                    .expect("created sends");
+            }
+            websocket
+                .send(UpstreamMessage::Text(ATTRIBUTED_ERROR.into()))
+                .await
+                .expect("attributed error sends");
+            websocket
+                .send(UpstreamMessage::Text(SIBLING_COMPLETED.into()))
+                .await
+                .expect("sibling completion sends");
+            let create = tokio::time::timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .expect("same connection receives recovery create")
+                .expect("attributed error must not retire the provider connection")
+                .expect("recovery create decodes");
+            let create: Value = serde_json::from_str(create.to_text().expect("create is text"))
+                .expect("create is JSON");
+            assert_eq!(create["type"], "response.create");
+            assert_eq!(create["stream_id"], "a");
+            websocket.send(UpstreamMessage::Text(
+                r#"{"type":"response.created","stream_id":"a","response":{"id":"resp-recovered","store":false}}"#.into(),
+            )).await.expect("recovery created sends");
+            websocket
+                .send(UpstreamMessage::Text(RECOVERED.into()))
+                .await
+                .expect("recovery completion sends");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "an attributed error must not force a fresh provider connection",
+            );
+            while websocket.next().await.is_some() {}
+        });
+        let router = websocket_test_router(
+            vec![websocket_upstream(
+                1,
+                "openai",
+                Url::parse(&format!("http://{address}/")).expect("provider URL parses"),
+            )],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("downstream handshake succeeds");
+        for lane in ["a", "b"] {
+            let create = serde_json::json!({
+                "type": "response.create", "stream_id": lane,
+                "model": "gpt-4.1", "store": false, "input": [],
+            });
+            client
+                .send(UpstreamMessage::Text(create.to_string().into()))
+                .await
+                .expect("named create sends");
+            let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("created arrives")
+                .expect("downstream stays open")
+                .expect("created decodes");
+            let created: Value = serde_json::from_str(created.to_text().expect("created is text"))
+                .expect("created is JSON");
+            assert_eq!(created["type"], "response.created");
+            assert_eq!(created["stream_id"], lane);
+        }
+        for expected in [ATTRIBUTED_ERROR, SIBLING_COMPLETED] {
+            let event = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("lane event arrives")
+                .expect("downstream stays open")
+                .expect("event decodes");
+            assert_eq!(event, UpstreamMessage::Text(expected.into()));
+        }
+        client.send(UpstreamMessage::Text(
+            r#"{"type":"response.create","stream_id":"a","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        )).await.expect("failed lane accepts a new turn");
+        for expected in ["response.created", "response.completed"] {
+            let event = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("recovery event arrives")
+                .expect("downstream remains usable")
+                .expect("event decodes");
+            let value: Value = serde_json::from_str(event.to_text().expect("event is text"))
+                .expect("event is JSON");
+            assert_eq!(value["type"], expected);
+            if expected == "response.completed" {
+                assert_eq!(event, UpstreamMessage::Text(RECOVERED.into()));
+            }
+        }
+        let _ = client.close(None).await;
+        tokio::time::timeout(Duration::from_secs(5), provider_task)
+            .await
+            .expect("provider task ends")
+            .expect("provider assertions pass");
         proxy_task.abort();
     }
 

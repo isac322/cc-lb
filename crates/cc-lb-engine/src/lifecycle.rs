@@ -114,9 +114,10 @@ use crate::terminal_observer::{
     numeric_attribute,
 };
 use crate::upstream_affinity::{
-    UpstreamAffinityExtractionError, extract_request_affinity_keys, extract_response_affinity_keys,
-    extract_response_affinity_keys_from_sse_event, gemini_cached_content_expiry,
-    request_observes_response_affinity,
+    OpenaiResponseReferenceScope, UpstreamAffinityExtractionError, extract_request_affinity_keys,
+    extract_request_affinity_keys_with_scope, extract_response_affinity_keys,
+    extract_response_affinity_keys_from_sse_event, extract_websocket_response_affinity_keys,
+    gemini_cached_content_expiry, request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -4802,10 +4803,15 @@ impl Lifecycle {
                 "model is not allowed for this principal",
             ));
         }
-        let mut keys = extract_request_affinity_keys(
+        let keys = extract_request_affinity_keys_with_scope(
             ProviderCapability::OpenaiResponses,
             body,
             auth.principal_id(),
+            if owner.is_some() {
+                OpenaiResponseReferenceScope::ConnectionLocal
+            } else {
+                OpenaiResponseReferenceScope::Durable
+            },
         )
         .map_err(|_| {
             WebSocketError::new(
@@ -4814,13 +4820,6 @@ impl Lifecycle {
                 UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
             )
         })?;
-        // A response id owned by this live connection need not exist in durable storage.
-        // Other recognized state still has to agree with that connection's owner.
-        if owner.is_some() {
-            keys.retain(|key| {
-                key.kind != cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId
-            });
-        }
         let affinity = self
             .resolve_request_affinities(&keys)
             .await
@@ -5131,12 +5130,18 @@ impl Lifecycle {
         auth: &crate::Authenticated,
         upstream_id: Uuid,
         response: &Value,
+        output_item: Option<&Value>,
         store: bool,
     ) -> Result<(), WebSocketError> {
-        let mut keys = extract_response_affinity_keys(
-            ProviderCapability::OpenaiResponses,
+        let keys = extract_websocket_response_affinity_keys(
             response,
+            output_item,
             auth.principal_id(),
+            if store {
+                OpenaiResponseReferenceScope::Durable
+            } else {
+                OpenaiResponseReferenceScope::ConnectionLocal
+            },
         )
         .map_err(|_| {
             WebSocketError::new(
@@ -5145,13 +5150,6 @@ impl Lifecycle {
                 "upstream response carries invalid provider state",
             )
         })?;
-        if !store {
-            // Only unstored response ids are connection-local; conversations
-            // retain their existing durable ownership across connections.
-            keys.retain(|key| {
-                key.kind != cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId
-            });
-        }
         let context = ResponseAffinityContext {
             capability: ProviderCapability::OpenaiResponses,
             store: self.upstream_affinity_store.clone(),
@@ -21159,7 +21157,7 @@ mod tests {
             "retained validation emits no extra lifecycle events"
         );
         lifecycle
-            .bind_websocket_response(&auth, first_id, &json!({"id":"resp_local"}), false)
+            .bind_websocket_response(&auth, first_id, &json!({"id":"resp_local"}), None, false)
             .await
             .expect("store:false response ids stay local to the gateway");
         assert!(
@@ -21168,6 +21166,7 @@ mod tests {
                     &auth,
                     first_id,
                     &json!({"id":"resp_local","conversation":{"id":"conv_durable"}}),
+                    None,
                     false,
                 )
                 .await
@@ -21176,7 +21175,7 @@ mod tests {
         );
         assert!(
             lifecycle
-                .bind_websocket_response(&auth, first_id, &json!({"id":"resp_stored"}), true)
+                .bind_websocket_response(&auth, first_id, &json!({"id":"resp_stored"}), None, true)
                 .await
                 .is_err(),
             "stored response state fails closed without durable affinity storage"

@@ -323,6 +323,30 @@ async fn upstream_affinity_other_provider_credential_mutation_keeps_epoch_zero()
 }
 
 #[tokio::test]
+async fn ws1296_legacy_openai_reasoning_digest_keeps_its_owner() {
+    let (_dir, storage) = open_storage("legacy-openai-reasoning").await;
+    let owner = create_upstream_kind(&storage, "reasoning-owner", UpstreamKind::OpenaiApiKey).await;
+    let key = UpstreamAffinityKey {
+        principal_id: "principal-openai".to_owned(),
+        provider: "openai".to_owned(),
+        kind: UpstreamAffinityKind::OpenaiResponseId,
+        value_sha256: digest("opaque-captured-reasoning"),
+    };
+    let legacy = binding(key.clone(), owner, 10, None);
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&legacy), 10, TTL_SECS)
+        .await
+        .expect("legacy digest binds without a new kind");
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(&[key], 11, TTL_SECS)
+            .await
+            .expect("legacy digest resolves"),
+        vec![legacy]
+    );
+}
+
+#[tokio::test]
 async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(

@@ -114,6 +114,22 @@ An unsupported operation under a provider prefix returns HTTP **404**, with a pr
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
 
+#### OpenAI Responses WebSocket continuation and errors
+
+An unstored response id belongs to its live WebSocket connection. Reusable reasoning
+`encrypted_content` remains pinned to its upstream across WebSocket and HTTP requests,
+including `store:false` turns. cc-lb records reasoning from `response.output_item.done`
+and later response snapshots before forwarding those events. Existing SHA-256 affinity
+rows keep their storage format.
+
+A live `previous_response_id` does not override another upstream's reasoning ownership:
+conflicting owners return `400 upstream_affinity_unavailable`; unknown or unavailable
+owners return `503`. Requests do not fail over across that ownership boundary.
+
+Client close frames receive a matching close reply. A valid provider error that cannot
+be assigned to a response is forwarded unchanged once, then its provider connection is
+retired. The downstream connection remains available for new turns.
+
 #### OpenAI Responses streaming failures
 
 Before a streaming `POST /v1/responses` response starts, a proxy-generated failure returns the route's provider-shaped JSON error envelope with the matching error status (500, 502, or 503). After streaming has begun, the HTTP status remains `200`, and a proxy-generated failure is sent as a `response.failed` SSE event. Its payload includes `sequence_number` and a failed `response` with safe `error.code` and `error.message`, plus the observed response id when one is known.

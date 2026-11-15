@@ -22,6 +22,40 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 #[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn ws1296_legacy_openai_reasoning_digest_keeps_its_owner() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+    let owner = create_upstream_kind(
+        &storage,
+        "reasoning-owner",
+        UpstreamKind::OpenaiApiKey,
+        Some(b"test-key".to_vec()),
+    )
+    .await?;
+    let key = affinity_key_with_kind(
+        "principal-openai",
+        digest("opaque-captured-reasoning"),
+        "openai",
+        UpstreamAffinityKind::OpenaiResponseId,
+    );
+    let legacy = binding(key.clone(), owner, 10, None);
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&legacy), 10, TTL_SECS)
+        .await?;
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(&[key], 11, TTL_SECS)
+            .await?,
+        vec![legacy]
+    );
+    fixture.drop_schema().await
+}
+
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
 async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() -> TestResult<()> {
     let Some(fixture) = Fixture::create().await? else {
         return Ok(());
