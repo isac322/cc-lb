@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod gemini_target;
+
+pub use gemini_target::{
+    GeminiOAuthOperation, GeminiOAuthTarget, GeminiOperationFamily, GeminiProjectPolicy,
+    resolve_gemini_oauth_target,
+};
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
