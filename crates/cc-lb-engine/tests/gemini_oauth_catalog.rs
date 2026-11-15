@@ -139,11 +139,24 @@ async fn provider_errors_stay_unprojected() {
 async fn unauthenticated_malformed_catalog_never_dispatches() {
     let recorder = Arc::new(Recorder::default());
     let lifecycle = lifecycle(recorder.clone(), Some("stored-project"), StatusCode::OK, json!({"models": {}}));
-    let mut request = request("/v1/models", Bytes::from_static(b"{"));
-    request.headers_mut().remove("authorization");
-    request.headers_mut().remove("x-api-key");
-    assert!(lifecycle.authenticate(request.headers()).await.is_err());
-    assert!(recorder.requests.lock().unwrap().is_empty());
+    for authorization in [None, Some("Bearer invalid-principal-token")] {
+        let mut request = request("/v1/models", Bytes::from_static(b"{"));
+        request.headers_mut().remove("authorization");
+        request.headers_mut().remove("x-api-key");
+        request.headers_mut().insert("content-length", http::HeaderValue::from_static("999999999"));
+        if let Some(authorization) = authorization {
+            request.headers_mut().insert("authorization", http::HeaderValue::from_static(authorization));
+        }
+        let error = match lifecycle.authenticate(request.headers()).await {
+            Ok(_) => panic!("invalid principal must not authenticate"),
+            Err(error) => error,
+        };
+        let rejection = cc_lb_engine::reject_unauthenticated_for_route(
+            &error, request.method(), request.uri().path(), Some(Provider::Gemini), None,
+        );
+        assert_eq!(rejection.status(), StatusCode::UNAUTHORIZED);
+        assert!(recorder.requests.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -167,7 +180,8 @@ async fn catalog_configuration_does_not_change_count_tokens_envelope() {
 #[tokio::test]
 async fn list_model_configs_shape_is_not_exposed_as_native_catalog() {
     let recorder = Arc::new(Recorder::default());
-    let raw = json!({"modelConfigs": [{"descriptionText": "different operation"}]});
+    let raw = json!({"allowedModelConfigs": [{"id": "separate", "displayName": "Separate", "descriptionText": "configuration", "future": true}],
+        "defaultAgentModelConfig": {"id": "separate", "descriptionText": "different operation"}, "futureConfig": [1]});
     let lifecycle = lifecycle(recorder.clone(), Some("stored-project"), StatusCode::OK, raw.clone());
     let request = request("/v1/models", Bytes::new());
     let auth = lifecycle.authenticate(request.headers()).await.unwrap();
@@ -187,4 +201,19 @@ async fn principal_cannot_dispatch_another_owners_catalog() {
     assert!(!response.status().is_success());
     assert!(recorder.requests.lock().unwrap().is_empty());
     assert!(recorder.hooks.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn single_model_metadata_is_explicitly_unsupported_before_dispatch() {
+    for path in ["/v1/models/gemini-test", "/v1beta/models/gemini-test"] {
+        let recorder = Arc::new(Recorder::default());
+        let lifecycle = lifecycle(recorder.clone(), Some("stored-project"), StatusCode::OK,
+            json!({"models": {"gemini-test": {}}}));
+        let request = request(path, Bytes::new());
+        let auth = lifecycle.authenticate(request.headers()).await.unwrap();
+        let response = lifecycle.handle(request, &auth).await.unwrap();
+        assert!(!response.status().is_success());
+        assert!(recorder.requests.lock().unwrap().is_empty());
+        assert!(recorder.hooks.lock().unwrap().is_empty());
+    }
 }

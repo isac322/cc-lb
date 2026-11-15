@@ -798,6 +798,14 @@ impl Signer for GeminiSubscriptionSigner {
             self.clock.as_ref(),
         )?;
         if shaped.method() == http::Method::GET
+            && (shaped.url().path().starts_with("/v1beta/models/")
+                || shaped.url().path().starts_with("/v1/models/"))
+        {
+            return Err(SignerError::SigningFailed {
+                reason: "Gemini OAuth single-model metadata is not supported".to_owned(),
+            });
+        }
+        if shaped.method() == http::Method::GET
             && matches!(shaped.url().path(), "/v1beta/models" | "/v1/models")
         {
             let project = self.project_id.as_deref()
