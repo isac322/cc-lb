@@ -719,6 +719,10 @@ impl SchedulerDispatch {
         user_agent: &str,
         summary_response: crate::scheduler_dispatch::http::UsageFetchResponse,
     ) -> FetchOutcome {
+        let summary_observed_at_unix_millis = summary_response
+            .status
+            .is_success()
+            .then(|| now_unix_millis(&*self.clock));
         if summary_response.status == http::StatusCode::UNAUTHORIZED
             || summary_response.status == http::StatusCode::TOO_MANY_REQUESTS
         {
@@ -730,6 +734,7 @@ impl SchedulerDispatch {
             (false, false)
         };
         let mut fallback = None;
+        let mut fallback_observed_at_unix_millis = None;
         let mut fallback_succeeded = false;
         if !present.0 || !present.1 {
             match fetch_gemini_quota(
@@ -747,9 +752,11 @@ impl SchedulerDispatch {
                     return FetchOutcome::Response(response);
                 }
                 Ok(response) if response.status.is_success() => {
+                    let received_at_unix_millis = now_unix_millis(&*self.clock);
                     match sonic_rs::from_slice::<serde_json::Value>(&response.body) {
                         Ok(value) if value.is_object() => {
                             fallback = Some(value);
+                            fallback_observed_at_unix_millis = Some(received_at_unix_millis);
                             fallback_succeeded = true;
                         }
                         Ok(_) => {
@@ -777,6 +784,8 @@ impl SchedulerDispatch {
         let body = match serde_json::to_vec(&serde_json::json!({
             "summary": summary,
             "fallback": fallback,
+            "summary_observed_at_unix_millis": summary_observed_at_unix_millis,
+            "fallback_observed_at_unix_millis": fallback_observed_at_unix_millis,
             "fallback_groups": {"gemini": !present.0, "third_party": !present.1},
         })) {
             Ok(body) => Bytes::from(body),

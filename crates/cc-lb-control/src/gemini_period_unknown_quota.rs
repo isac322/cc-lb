@@ -154,10 +154,10 @@ pub struct GeminiRawQuotaResponses {
     /// Merge-order watermark, not the observation time of both retained bodies.
     pub observed_at_unix_millis: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Successful observation time of `summary`, independent of `fallback`.
+    /// Successful receipt time of `summary`, independent of `fallback`.
     pub summary_observed_at_unix_millis: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Successful observation time of `fallback`, independent of `summary`.
+    /// Successful receipt time of `fallback`, independent of `summary`.
     pub fallback_observed_at_unix_millis: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<serde_json::Value>,
@@ -302,6 +302,7 @@ fn parse_record(raw: &str) -> Option<GeminiPeriodUnknownQuotaRecord> {
 }
 
 /// Persist one owner-scoped observation, including at most one fallback body.
+/// Only object bodies with explicit per-response receipt times update raw evidence.
 pub async fn persist_gemini_quota_observation(
     store: &dyn MetaStore,
     upstream_id: Uuid,
@@ -314,16 +315,25 @@ pub async fn persist_gemini_quota_observation(
         return Ok(());
     }
     let responses = responses.and_then(|mut responses| {
-        responses.summary = responses.summary.filter(serde_json::Value::is_object);
-        responses.fallback = responses.fallback.filter(serde_json::Value::is_object);
-        responses.summary_observed_at_unix_millis = responses
+        // Composite completion is not the receipt time of either provider body.
+        if responses
             .summary
             .as_ref()
-            .map(|_| responses.observed_at_unix_millis);
-        responses.fallback_observed_at_unix_millis = responses
+            .is_none_or(|body| !body.is_object())
+            || responses.summary_observed_at_unix_millis.is_none()
+        {
+            responses.summary = None;
+            responses.summary_observed_at_unix_millis = None;
+        }
+        if responses
             .fallback
             .as_ref()
-            .map(|_| responses.observed_at_unix_millis);
+            .is_none_or(|body| !body.is_object())
+            || responses.fallback_observed_at_unix_millis.is_none()
+        {
+            responses.fallback = None;
+            responses.fallback_observed_at_unix_millis = None;
+        }
         (responses.summary.is_some() || responses.fallback.is_some()).then_some(responses)
     });
     if matches!(

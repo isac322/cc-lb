@@ -129,7 +129,11 @@ async fn seed(
             profile,
             project_id: Some("synthetic-project"),
         },
-        &serde_json::to_vec(&json!({"summary":healthy_summary()})).unwrap(),
+        &serde_json::to_vec(&json!({
+            "summary": healthy_summary(),
+            "summary_observed_at_unix_millis": 1_699_999_000_000_u64
+        }))
+        .unwrap(),
         1_699_999_000_000,
     )
     .unwrap();
@@ -145,7 +149,12 @@ async fn seed(
             profile,
             project_id: Some("synthetic-project"),
         },
-        &serde_json::to_vec(&json!({"summary":null,"fallback":raw_quota()})).unwrap(),
+        &serde_json::to_vec(&json!({
+            "summary": null,
+            "fallback": raw_quota(),
+            "fallback_observed_at_unix_millis": 1_699_999_000_000_u64
+        }))
+        .unwrap(),
         1_699_999_000_000,
     )
     .unwrap();
@@ -660,6 +669,8 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
             binding.clone(),
             GeminiRawQuotaResponses {
                 observed_at_unix_millis: 99,
+                summary_observed_at_unix_millis: Some(99),
+                fallback_observed_at_unix_millis: Some(99),
                 summary: Some(json!({"older": true})),
                 fallback: Some(json!({})),
                 ..Default::default()
@@ -669,6 +680,8 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
             GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 2),
             GeminiRawQuotaResponses {
                 observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
                 ..responses.clone()
             },
         ),
@@ -676,6 +689,8 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
             GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), None, 4),
             GeminiRawQuotaResponses {
                 observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
                 ..responses.clone()
             },
         ),
@@ -683,6 +698,8 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
             binding.clone(),
             GeminiRawQuotaResponses {
                 observed_at_unix_millis: 200,
+                summary_observed_at_unix_millis: Some(200),
+                fallback_observed_at_unix_millis: Some(200),
                 summary: Some(json!([])),
                 fallback: Some(Value::Null),
                 ..Default::default()
@@ -722,6 +739,8 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
             GeminiGroupPollUpdate::Unchanged,
             Some(GeminiRawQuotaResponses {
                 observed_at_unix_millis: observed_at,
+                summary_observed_at_unix_millis: summary.as_ref().map(|_| observed_at),
+                fallback_observed_at_unix_millis: fallback.as_ref().map(|_| observed_at),
                 summary,
                 fallback,
                 ..Default::default()
@@ -758,6 +777,7 @@ async fn gemini_raw_response_persistence_is_subject_and_generation_scoped() {
         GeminiGroupPollUpdate::Unchanged,
         Some(GeminiRawQuotaResponses {
             observed_at_unix_millis: 300,
+            summary_observed_at_unix_millis: Some(300),
             summary: Some(json!({"replacement": true})),
             fallback: None,
             ..Default::default()
@@ -838,4 +858,122 @@ async fn gemini_poll_persists_provider_json_without_group_duplication() {
     );
     assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
     assert!(fixture._quota_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn gemini_delayed_fallback_preserves_newer_summary_receipt() {
+    for profile in [
+        GeminiOAuthProfile::GeminiCli,
+        GeminiOAuthProfile::Antigravity,
+    ] {
+        let provider = Provider::new().await;
+        let summary_a = json!({
+            "description": "summary A",
+            "groups": [{
+                "displayName": "Gemini models",
+                "buckets": [{"bucketId": "gemini-unlabeled", "remainingFraction": 0.1}]
+            }]
+        });
+        let summary_b = json!({
+            "description": "summary B",
+            "groups": [
+                {
+                    "displayName": "Gemini models",
+                    "buckets": [{"bucketId": "gemini-unlabeled", "remainingFraction": 0.8}]
+                },
+                {
+                    "displayName": "Claude models",
+                    "buckets": [{"bucketId": "3p-unlabeled", "remainingFraction": 0.7}]
+                }
+            ]
+        });
+        let fallback_a = json!({
+            "description": "fallback A",
+            "buckets": [{"modelId": "claude-delayed", "remainingFraction": 0.3}]
+        });
+        *provider.state.summary.lock().unwrap() = summary_a;
+        *provider.state.quota.lock().unwrap() = fallback_a.to_string();
+        provider.state.delay_quota.store(true, Ordering::SeqCst);
+        let mut fixture = DispatchFixture::new().await;
+        let config = Arc::make_mut(&mut fixture.dispatch.config);
+        config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+        config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
+            code_assist_url: provider.base.clone(),
+            userinfo_url: provider.base.clone(),
+            ..Default::default()
+        });
+        let upstream = provider_metadata::create_provider(
+            &fixture,
+            UpstreamKind::GeminiOauth,
+            provider.base.clone(),
+            profile,
+        )
+        .await;
+        let receipt = |millis: u64| {
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000 + millis)
+        };
+        fixture.clock.set(receipt(100));
+        let poll_a = fixture.dispatch.poll_usage(upstream.id, None);
+        tokio::pin!(poll_a);
+        tokio::select! {
+            result = &mut poll_a => panic!("poll A completed before fallback release: {result:?}"),
+            _ = provider.state.entered.notified() => {}
+        }
+
+        // A's summary is fully received before its fallback handler is entered.
+        fixture.clock.set(receipt(200));
+        *provider.state.summary.lock().unwrap() = summary_b.clone();
+        assert!(matches!(
+            fixture
+                .dispatch
+                .poll_usage(upstream.id, None)
+                .await
+                .unwrap(),
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        let published_b = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let responses_b = published_b.raw_responses.as_ref().unwrap();
+        assert_eq!(responses_b.summary, Some(summary_b.clone()));
+        assert_eq!(
+            responses_b.summary_observed_at_unix_millis,
+            Some(1_700_000_000_200)
+        );
+        assert!(responses_b.fallback.is_none());
+        assert!(responses_b.fallback_observed_at_unix_millis.is_none());
+        assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
+
+        fixture.clock.set(receipt(300));
+        provider.state.release.notify_one();
+        assert!(matches!(
+            poll_a.await.unwrap(),
+            OAuthUsagePollObservation::Success { .. }
+        ));
+        let merged = load_gemini_period_unknown_quota(fixture.storage.as_ref(), upstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let responses = merged.raw_responses.as_ref().unwrap();
+        assert_eq!(responses.oauth_profile, Some(profile));
+        assert_eq!(responses.observed_at_unix_millis, 1_700_000_000_300);
+        assert_eq!(responses.summary, Some(summary_b));
+        assert_eq!(
+            responses.summary_observed_at_unix_millis,
+            Some(1_700_000_000_200)
+        );
+        assert_eq!(responses.fallback, Some(fallback_a));
+        assert_eq!(
+            responses.fallback_observed_at_unix_millis,
+            Some(1_700_000_000_300)
+        );
+        assert_eq!(provider.state.quota_calls.load(Ordering::SeqCst), 1);
+        assert!(fixture._quota_rx.try_recv().is_err());
+        assert!(latest(&fixture, upstream.id).await.is_empty());
+    }
 }

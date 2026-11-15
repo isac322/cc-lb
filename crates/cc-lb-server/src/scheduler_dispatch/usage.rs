@@ -549,19 +549,32 @@ fn records_from_gemini_api(
 ) -> (Vec<SubscriptionQuotaSample>, GeminiRawUpdates) {
     let summary = value.get("summary").unwrap_or(&serde_json::Value::Null);
     let summary_groups = summary.get("groups").and_then(serde_json::Value::as_array);
+    let composite = value.get("summary").is_some();
+    let fallback = if composite {
+        value
+            .get("fallback")
+            .filter(|fallback| fallback.is_object())
+    } else {
+        value.is_object().then_some(value)
+    };
     let mut records = Vec::new();
     let mut updates = GeminiRawUpdates {
         responses: Some(GeminiRawQuotaResponses {
             observed_at_unix_millis,
             summary: summary.is_object().then(|| summary.clone()),
-            fallback: if value.get("summary").is_some() {
+            summary_observed_at_unix_millis: value
+                .get("summary_observed_at_unix_millis")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|_| summary.is_object()),
+            fallback_observed_at_unix_millis: if composite {
                 value
-                    .get("fallback")
-                    .filter(|fallback| fallback.is_object())
-                    .cloned()
+                    .get("fallback_observed_at_unix_millis")
+                    .and_then(serde_json::Value::as_u64)
             } else {
-                value.is_object().then(|| value.clone())
-            },
+                Some(observed_at_unix_millis)
+            }
+            .filter(|_| fallback.is_some()),
+            fallback: fallback.cloned(),
             ..Default::default()
         }),
         ..Default::default()

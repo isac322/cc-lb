@@ -3658,6 +3658,7 @@ async fn latest_raw_quota_is_fenced_to_captured_oauth_profile() {
         Some(GeminiRawQuotaResponses {
             oauth_profile: Some(GeminiOAuthProfile::Antigravity),
             observed_at_unix_millis: CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000 + 1,
+            summary_observed_at_unix_millis: Some(CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000 + 1),
             summary: Some(json!({"description": "synthetic AG summary", "groups": []})),
             ..Default::default()
         }),
@@ -3677,5 +3678,151 @@ async fn latest_raw_quota_is_fenced_to_captured_oauth_profile() {
     assert_eq!(
         period_unknown_upstream(&current, gemini)["period_unknown_meters"],
         meters
+    );
+}
+
+#[tokio::test]
+async fn latest_raw_quota_preserves_distinct_receipt_times_after_overlap() {
+    use cc_lb_aead::GeminiOAuthProfile;
+    use cc_lb_control::gemini_period_unknown_quota::{
+        GeminiGroupPollUpdate, GeminiRawQuotaBinding, GeminiRawQuotaResponses,
+        persist_gemini_quota_observation,
+    };
+
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "receipt-gemini", "gemini_oauth").await;
+    let upstream = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("project"),
+        "receipt-test-token",
+    )
+    .await;
+    let binding = GeminiRawQuotaBinding::from_credential(
+        Some("member@example.test"),
+        Some("project"),
+        upstream.oauth_token_generation,
+    );
+    let completed_at = CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000;
+    let summary_b = json!({"description": "summary B", "groups": []});
+    let fallback_a = json!({"description": "fallback A", "buckets": []});
+    for responses in [
+        GeminiRawQuotaResponses {
+            oauth_profile: Some(GeminiOAuthProfile::GeminiCli),
+            observed_at_unix_millis: completed_at - 100,
+            summary_observed_at_unix_millis: Some(completed_at - 100),
+            summary: Some(summary_b.clone()),
+            ..Default::default()
+        },
+        GeminiRawQuotaResponses {
+            oauth_profile: Some(GeminiOAuthProfile::GeminiCli),
+            observed_at_unix_millis: completed_at,
+            summary_observed_at_unix_millis: Some(completed_at - 200),
+            fallback_observed_at_unix_millis: Some(completed_at),
+            summary: Some(json!({"description": "summary A", "groups": []})),
+            fallback: Some(fallback_a.clone()),
+        },
+    ] {
+        persist_gemini_quota_observation(
+            server.storage.as_ref(),
+            gemini,
+            binding.clone(),
+            GeminiGroupPollUpdate::Unchanged,
+            GeminiGroupPollUpdate::Unchanged,
+            Some(responses),
+        )
+        .await
+        .unwrap();
+    }
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    let upstream = period_unknown_upstream(&body, gemini);
+    assert_eq!(
+        upstream["raw_summary"],
+        json!({
+            "observed_at_unix_millis": completed_at - 100,
+            "body": summary_b
+        })
+    );
+    assert_eq!(
+        upstream["raw_fallback"],
+        json!({
+            "observed_at_unix_millis": completed_at,
+            "body": fallback_a
+        })
+    );
+    assert!(upstream.get("period_unknown_meters").is_none());
+}
+
+#[tokio::test]
+async fn latest_same_poll_canonical_and_unlabeled_meters_remain_visible() {
+    use cc_lb_control::gemini_period_unknown_quota::GeminiRawQuotaBinding;
+
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    absence_set_cache(&server, Arc::new(cc_lb_control::NoopSubscriptionQuotaCache));
+    let gemini = create_kind_oauth_upstream(&server, "mixed-receipt-gemini", "gemini_oauth").await;
+    let credential = replace_gemini_credential(
+        &server,
+        gemini,
+        Some("member@example.test"),
+        Some("project"),
+        "mixed-receipt-test-token",
+    )
+    .await;
+    let completed_at = CHECKPOINT_TEST_NOW_UNIX_SECS * 1_000;
+    let binding = GeminiRawQuotaBinding::from_credential(
+        Some("member@example.test"),
+        Some("project"),
+        credential.oauth_token_generation,
+    );
+    let mut record =
+        period_unknown_record_for_binding(completed_at, serde_json::to_value(binding).unwrap());
+    record["gemini"]["meters"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("known_period");
+    record["gemini"]["meters"][0]["origin"] = json!("retrieve_user_quota_summary");
+    record["third_party"] = serde_json::Value::Null;
+    record["raw_responses"]["summary_observed_at_unix_millis"] = json!(completed_at - 200);
+    period_unknown_seed(&server, gemini, &record.to_string()).await;
+    let canonical = absence_sample(
+        gemini,
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        CHECKPOINT_TEST_NOW_UNIX_SECS,
+        SubscriptionQuotaSource::Api,
+        Some(0.2),
+    );
+    assert_eq!(canonical.observed_at_unix_millis, completed_at);
+    absence_set_cache(
+        &server,
+        Arc::new(AbsenceStaticCache(vec![(
+            gemini,
+            absence_snapshot(&canonical),
+        )])),
+    );
+    server
+        .storage
+        .record_subscription_quota_samples(&[canonical])
+        .await
+        .unwrap();
+    let body = period_unknown_latest(&server, &format!("upstream_ids={gemini}")).await;
+    let upstream = period_unknown_upstream(&body, gemini);
+    let meters = upstream["period_unknown_meters"].as_array().unwrap();
+    assert_eq!(meters.len(), 1);
+    assert_eq!(meters[0]["group"], "gemini");
+    assert_eq!(meters[0]["observed_at_unix_millis"], completed_at);
+    assert!(meters[0].get("known_period").is_none());
+    assert_eq!(
+        upstream["raw_summary"]["observed_at_unix_millis"],
+        completed_at - 200
+    );
+    assert!(
+        upstream["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|window| window["window"] == "gemini_5h"
+                && window["observed_at_unix_millis"] == completed_at)
     );
 }

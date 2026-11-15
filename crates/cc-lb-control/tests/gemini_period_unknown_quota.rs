@@ -431,6 +431,7 @@ async fn raw_quota_cas_conflict_merges_out_of_order_successes_per_response() {
         GeminiGroupPollUpdate::Unchanged,
         Some(GeminiRawQuotaResponses {
             observed_at_unix_millis: 100,
+            fallback_observed_at_unix_millis: Some(100),
             fallback: Some(json!({"fallback": "initial"})),
             ..Default::default()
         }),
@@ -457,6 +458,8 @@ async fn raw_quota_cas_conflict_merges_out_of_order_successes_per_response() {
         GeminiGroupPollUpdate::Unchanged,
         Some(GeminiRawQuotaResponses {
             observed_at_unix_millis: 200,
+            summary_observed_at_unix_millis: Some(200),
+            fallback_observed_at_unix_millis: Some(200),
             summary: Some(json!({"summary": "older"})),
             fallback: Some(json!({"fallback": "newest"})),
             ..Default::default()
@@ -485,6 +488,7 @@ async fn raw_quota_cas_conflict_merges_out_of_order_successes_per_response() {
         GeminiGroupPollUpdate::Unchanged,
         Some(GeminiRawQuotaResponses {
             observed_at_unix_millis: 150,
+            fallback_observed_at_unix_millis: Some(150),
             fallback: Some(json!({"fallback": "stale"})),
             ..Default::default()
         }),
@@ -494,5 +498,186 @@ async fn raw_quota_cas_conflict_merges_out_of_order_successes_per_response() {
     assert_eq!(
         load_gemini_period_unknown_quota(&store, id).await.unwrap(),
         Some(persisted)
+    );
+}
+
+#[tokio::test]
+async fn raw_quota_persistence_honors_supplied_receipt_times() {
+    use serde_json::json;
+
+    let store = ConflictStore::default();
+    let id = Uuid::nil();
+    let binding =
+        GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 1);
+    let delayed = GeminiRawQuotaResponses {
+        observed_at_unix_millis: 300,
+        summary_observed_at_unix_millis: Some(100),
+        fallback_observed_at_unix_millis: Some(300),
+        summary: Some(json!({"summary": "A"})),
+        fallback: Some(json!({"fallback": "A"})),
+        ..Default::default()
+    };
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(delayed.clone()),
+    )
+    .await
+    .unwrap();
+    let initial = load_gemini_period_unknown_quota(&store, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.raw_responses, Some(delayed));
+
+    // The composite watermark300 must not reject a later summary receipt200.
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 200,
+            summary_observed_at_unix_millis: Some(200),
+            fallback_observed_at_unix_millis: Some(900),
+            summary: Some(json!({"summary": "B"})),
+            fallback: None,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let merged = load_gemini_period_unknown_quota(&store, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let responses = merged.raw_responses.as_ref().unwrap();
+    assert_eq!(responses.observed_at_unix_millis, 300);
+    assert_eq!(responses.summary, Some(json!({"summary": "B"})));
+    assert_eq!(responses.summary_observed_at_unix_millis, Some(200));
+    assert_eq!(responses.fallback, Some(json!({"fallback": "A"})));
+    assert_eq!(responses.fallback_observed_at_unix_millis, Some(300));
+
+    // Timestamps without object bodies cannot advance either retained response.
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding,
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 900,
+            summary_observed_at_unix_millis: Some(900),
+            fallback_observed_at_unix_millis: Some(900),
+            summary: Some(json!([])),
+            fallback: None,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        load_gemini_period_unknown_quota(&store, id).await.unwrap(),
+        Some(merged)
+    );
+}
+
+#[tokio::test]
+async fn raw_quota_persistence_does_not_invent_missing_receipts() {
+    use serde_json::json;
+
+    let store = ConflictStore::default();
+    let id = Uuid::nil();
+    let binding =
+        GeminiRawQuotaBinding::from_credential(Some("owner@example.test"), Some("project"), 1);
+    let initial = GeminiRawQuotaResponses {
+        observed_at_unix_millis: 200,
+        summary_observed_at_unix_millis: Some(100),
+        fallback_observed_at_unix_millis: Some(200),
+        summary: Some(json!({"summary": "known"})),
+        fallback: Some(json!({"fallback": "known"})),
+        ..Default::default()
+    };
+    persist_gemini_quota_observation(
+        &store,
+        id,
+        binding.clone(),
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(initial),
+    )
+    .await
+    .unwrap();
+    for (summary_at, fallback_at, expected_summary, expected_fallback) in [
+        (
+            None,
+            Some(300),
+            json!({"summary": "known"}),
+            json!({"fallback": "incoming"}),
+        ),
+        (
+            Some(400),
+            None,
+            json!({"summary": "incoming"}),
+            json!({"fallback": "incoming"}),
+        ),
+    ] {
+        persist_gemini_quota_observation(
+            &store,
+            id,
+            binding.clone(),
+            GeminiGroupPollUpdate::Unchanged,
+            GeminiGroupPollUpdate::Unchanged,
+            Some(GeminiRawQuotaResponses {
+                observed_at_unix_millis: summary_at.or(fallback_at).unwrap(),
+                summary_observed_at_unix_millis: summary_at,
+                fallback_observed_at_unix_millis: fallback_at,
+                summary: Some(json!({"summary": "incoming"})),
+                fallback: Some(json!({"fallback": "incoming"})),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let persisted = load_gemini_period_unknown_quota(&store, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .raw_responses
+            .unwrap();
+        assert_eq!(persisted.summary, Some(expected_summary));
+        assert_eq!(persisted.fallback, Some(expected_fallback));
+        assert_eq!(
+            persisted.summary_observed_at_unix_millis,
+            summary_at.or(Some(100))
+        );
+        assert_eq!(persisted.fallback_observed_at_unix_millis, Some(300));
+    }
+
+    let unknown_store = ConflictStore::default();
+    persist_gemini_quota_observation(
+        &unknown_store,
+        id,
+        binding,
+        GeminiGroupPollUpdate::Unchanged,
+        GeminiGroupPollUpdate::Unchanged,
+        Some(GeminiRawQuotaResponses {
+            observed_at_unix_millis: 900,
+            summary: Some(json!({"summary": "unknown receipt"})),
+            fallback: Some(json!({"fallback": "unknown receipt"})),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        load_gemini_period_unknown_quota(&unknown_store, id)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
