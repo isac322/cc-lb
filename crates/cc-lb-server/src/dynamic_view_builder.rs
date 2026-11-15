@@ -1885,6 +1885,409 @@ mod tests {
         .expect("principal")
     }
 
+    fn dual_role_provider_fixture() -> Vec<u8> {
+        use cc_lb_plugin_wire::schema::WireSchema;
+
+        let filter = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::FilterResponse {
+            results: Box::new([]),
+        })
+        .expect("filter response");
+        let shape = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::ShapeResponse {
+            url: Box::from("https://dual-role.example.test/v1/messages"),
+            method: Box::from("POST"),
+            headers: Box::new([]),
+            body: Box::from(&b"dual-role-shaped"[..]),
+        })
+        .expect("shape response");
+        let filter_data: String = filter.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let shape_data: String = shape.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let filter_packed = cc_lb_plugin_wire::schema::pack_ret(4096, filter.len() as u32);
+        let shape_packed = cc_lb_plugin_wire::schema::pack_ret(8192, shape.len() as u32);
+        let mut wasm = wat::parse_str(format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 4096) "{filter_data}")
+                (data (i32.const 8192) "{shape_data}")
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 16384)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const {filter_packed})
+                (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const {shape_packed})
+            )"#
+        ))
+        .expect("dual-role module");
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.filter.v1",
+            &<cc_lb_plugin_wire::FilterRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.shape.v1",
+            &<cc_lb_plugin_wire::ShapeRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.plugin.v2",
+            br#"{
+            "name":"dual-role-provider","version":"1.0.0","description":"dual role","usage":"test",
+            "hooks":{
+                "filter_anthropic":{"wire_version":1,"description":"filter","usage":"test","mode":"active"},
+                "shape_anthropic":{"wire_version":1,"description":"shape","usage":"test","mode":"active"}
+            }
+        }"#,
+        );
+        wasm
+    }
+
+    async fn install_dual_role_provider(storage: &Storage) -> Uuid {
+        use cc_lb_storage_api::{WasmBlob, WasmRegistryEntryInput};
+
+        let wasm = dual_role_provider_fixture();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("dual-role inspection")
+            .metadata;
+        let (registry, _) = storage
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256: [242; 32],
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm,
+                },
+                WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: "dual-role-provider.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Router, PluginSlotKind::Shape],
+                },
+            )
+            .await
+            .expect("dual-role registry");
+        registry.id
+    }
+
+    async fn attach_dual_role_provider(
+        storage: &Storage,
+        principal_id: Uuid,
+        registry_id: Uuid,
+        slot: PluginSlotKind,
+    ) -> PluginChainEntry {
+        storage
+            .insert_chain_entry(cc_lb_storage_api::PluginChainEntryInput {
+                principal_id,
+                slot,
+                order: 1000,
+                wasm_registry_id: registry_id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("dual-role chain entry")
+    }
+
+    fn assert_dual_role_artifacts(
+        chains: &HashMap<String, PrincipalRoutingArtifacts>,
+        principal: &PrincipalRecord,
+        upstream: &UpstreamRecord,
+        router_entry: Option<Uuid>,
+        has_shape: bool,
+    ) {
+        let (router, dialect) = chains.get(&principal.name).expect("principal artifacts");
+        if let Some(entry_id) = router_entry {
+            let router = router.as_ref().expect("router pipeline");
+            assert!(
+                router.instantiation_error.is_none(),
+                "router failed to instantiate: {:?}",
+                router.instantiation_error
+            );
+            assert!(
+                router
+                    .filters_for(Provider::Anthropic)
+                    .iter()
+                    .any(|filter| filter.plugin_id() == entry_id),
+                "attached router must remain installed"
+            );
+            let filter = router
+                .filters_for(Provider::Anthropic)
+                .iter()
+                .find(|filter| filter.plugin_id() == entry_id)
+                .expect("attached filter");
+            let context = cc_lb_routing::RoutingContext {
+                request_id: "dual-role-filter-request".to_owned(),
+                thread_id: None,
+                requested_service_tier: None,
+                downstream_headers: http::HeaderMap::new(),
+                method: http::Method::POST,
+                path: "/v1/messages".to_owned(),
+                query: None,
+                body_bytes: bytes::Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+                canonical_model_id: "claude-test".to_owned(),
+                cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+            };
+            let identity = cc_lb_domain::Principal {
+                id: principal.name.clone(),
+                kind: cc_lb_domain::PrincipalKind::ApiKey,
+            };
+            let output = filter
+                .filter(&context, &identity, &[])
+                .expect("retained filter executes");
+            assert!(output.kept_upstream_ids.is_empty());
+        } else if let Some(router) = router {
+            assert!(router.instantiation_error.is_none());
+            assert!(
+                router
+                    .filters_for(Provider::Anthropic)
+                    .iter()
+                    .all(|filter| filter.plugin_name() != "dual-role-provider"),
+                "detached plugin must not remain in the router"
+            );
+        }
+        if has_shape {
+            let DialectCache::PerUpstream(dialects) = dialect else {
+                panic!("attached shape must install a dialect rather than inherit");
+            };
+            let dialect = dialects.get(&upstream.id).expect("shape dialect");
+            let context = cc_lb_upstream::DialectShapeContext {
+                request_id: "dual-role-request".to_owned(),
+                downstream_headers: http::HeaderMap::new(),
+                method: http::Method::POST,
+                path: "/v1/messages".to_owned(),
+                query: None,
+                body_bytes: bytes::Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+            };
+            let identity = cc_lb_domain::Principal {
+                id: principal.name.clone(),
+                kind: cc_lb_domain::PrincipalKind::ApiKey,
+            };
+            let shaped = cc_lb_upstream::shape_request(
+                dialect.as_ref(),
+                &context,
+                &cc_lb_domain::Upstream::AnthropicDirect { base_url: None },
+                &identity,
+            )
+            .expect("shape executes");
+            assert_eq!(
+                shaped.url().as_str(),
+                "https://dual-role.example.test/v1/messages"
+            );
+            assert_eq!(shaped.body().as_ref(), b"dual-role-shaped");
+        } else {
+            assert!(matches!(dialect, DialectCache::Inherit));
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_role_principal_build_installs_both_roles_and_unchanged_rebuild() {
+        let (dir, storage) = storage_fixture(53).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+        let principal = create_machine_principal(&storage, "dual-role-both").await;
+        let upstream = create_upstream(&storage, "dual-role-both-upstream").await;
+        let upstream = UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
+            .await
+            .expect("enabled upstream");
+        let registry = install_dual_role_provider(&storage).await;
+        let router =
+            attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
+                .await;
+        attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Shape).await;
+        let aead = AeadService::from_master_key([19; 32]);
+        let mut previous_keys = None;
+        for _ in 0..2 {
+            let (chains, keys) = build_principal_chains(
+                &stores,
+                &runtime,
+                dir.path(),
+                std::slice::from_ref(&principal),
+                std::slice::from_ref(&upstream),
+                &aead,
+            )
+            .await
+            .expect("dual-role build");
+            assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), true);
+            assert_eq!(keys.len(), 2);
+            assert_eq!(runtime.slot_count(), 2);
+            assert!(runtime.retain_slots(&keys).is_empty());
+            if let Some(previous) = &previous_keys {
+                assert_eq!(
+                    &keys, previous,
+                    "unchanged rebuild must preserve both role keys"
+                );
+            }
+            previous_keys = Some(keys);
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_role_principal_filter_then_shape_does_not_silently_inherit() {
+        let (dir, storage) = storage_fixture(54).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+        let principal = create_machine_principal(&storage, "dual-role-filter-first").await;
+        let upstream = create_upstream(&storage, "dual-role-filter-first-upstream").await;
+        let upstream = UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
+            .await
+            .expect("enabled upstream");
+        let registry = install_dual_role_provider(&storage).await;
+        let router =
+            attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
+                .await;
+        let aead = AeadService::from_master_key([19; 32]);
+        let (chains, filter_keys) = build_principal_chains(
+            &stores,
+            &runtime,
+            dir.path(),
+            std::slice::from_ref(&principal),
+            std::slice::from_ref(&upstream),
+            &aead,
+        )
+        .await
+        .expect("filter-only build");
+        assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), false);
+        assert_eq!(runtime.slot_count(), 1);
+        assert!(runtime.retain_slots(&filter_keys).is_empty());
+        attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Shape).await;
+        for _ in 0..2 {
+            let (chains, keys) = build_principal_chains(
+                &stores,
+                &runtime,
+                dir.path(),
+                std::slice::from_ref(&principal),
+                std::slice::from_ref(&upstream),
+                &aead,
+            )
+            .await
+            .expect("filter then shape build");
+            assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), true);
+            assert_eq!(keys.len(), 2);
+            assert!(filter_keys.is_subset(&keys));
+            assert_eq!(runtime.slot_count(), 2);
+            assert!(runtime.retain_slots(&keys).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_role_principal_detach_retains_other_role_and_sibling() {
+        for (seed, removed_role) in [(55, PluginSlotKind::Router), (56, PluginSlotKind::Shape)] {
+            let (dir, storage) = storage_fixture(seed).await;
+            let stores = stores(
+                storage.clone(),
+                Arc::new(FakePromptCacheObservationStore::new()),
+            );
+            let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+            let principal = create_machine_principal(&storage, "dual-role-detach").await;
+            let sibling = create_machine_principal(&storage, "dual-role-sibling").await;
+            let upstream = create_upstream(&storage, "dual-role-detach-upstream").await;
+            let upstream =
+                UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
+                    .await
+                    .expect("enabled upstream");
+            let registry = install_dual_role_provider(&storage).await;
+            let router =
+                attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
+                    .await;
+            let shape =
+                attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Shape)
+                    .await;
+            let sibling_router =
+                attach_dual_role_provider(&storage, sibling.id, registry, PluginSlotKind::Router)
+                    .await;
+            let principals = [principal, sibling];
+            let aead = AeadService::from_master_key([19; 32]);
+            let (chains, original_keys) = build_principal_chains(
+                &stores,
+                &runtime,
+                dir.path(),
+                &principals,
+                std::slice::from_ref(&upstream),
+                &aead,
+            )
+            .await
+            .expect("initial detach build");
+            assert_dual_role_artifacts(&chains, &principals[0], &upstream, Some(router.id), true);
+            assert_dual_role_artifacts(
+                &chains,
+                &principals[1],
+                &upstream,
+                Some(sibling_router.id),
+                false,
+            );
+            assert_eq!(runtime.slot_count(), 3);
+            assert!(runtime.retain_slots(&original_keys).is_empty());
+            let removed = if removed_role == PluginSlotKind::Router {
+                &router
+            } else {
+                &shape
+            };
+            storage
+                .delete_chain_entry(removed.id, removed.revision)
+                .await
+                .expect("detach role")
+                .expect("existing role");
+            let (chains, retained_keys) = build_principal_chains(
+                &stores,
+                &runtime,
+                dir.path(),
+                &principals,
+                std::slice::from_ref(&upstream),
+                &aead,
+            )
+            .await
+            .expect("post-detach build");
+            assert_dual_role_artifacts(
+                &chains,
+                &principals[0],
+                &upstream,
+                (removed_role != PluginSlotKind::Router).then_some(router.id),
+                removed_role != PluginSlotKind::Shape,
+            );
+            assert_dual_role_artifacts(
+                &chains,
+                &principals[1],
+                &upstream,
+                Some(sibling_router.id),
+                false,
+            );
+            assert_eq!(retained_keys.len(), 2);
+            assert!(retained_keys.is_subset(&original_keys));
+            assert_eq!(
+                runtime.slot_count(),
+                3,
+                "building alone must not evict active-view slots"
+            );
+            let evicted = runtime.retain_slots(&retained_keys);
+            assert_eq!(evicted.len(), 1);
+            assert!(original_keys.contains(&evicted[0]));
+            assert!(!retained_keys.contains(&evicted[0]));
+            assert_eq!(runtime.slot_count(), 2);
+            assert!(runtime.retain_slots(&retained_keys).is_empty());
+            assert_dual_role_artifacts(
+                &chains,
+                &principals[0],
+                &upstream,
+                (removed_role != PluginSlotKind::Router).then_some(router.id),
+                removed_role != PluginSlotKind::Shape,
+            );
+            assert_dual_role_artifacts(
+                &chains,
+                &principals[1],
+                &upstream,
+                Some(sibling_router.id),
+                false,
+            );
+        }
+    }
+
     #[tokio::test]
     async fn real_principal_chains_select_provider_hooks_and_preserve_native_response_only_shaping()
     {
