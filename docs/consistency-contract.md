@@ -223,10 +223,6 @@ Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on 
 
 `GET /admin/v1/dashboard/usage` reads the same rollups. Per-principal category costs come directly from `usage_rollups_v2`; principal totals use a 2 s in-process coalescing cache (`PRINCIPAL_TOTALS_CACHE_TTL`).
 
-Summary error counts exclude HTTP 401, 403 and 404 in both global and provider-filtered views. Excluded counts retain the same upstream identity as the usage rollup, so one provider's exclusions cannot reduce another provider's errors. The usage endpoint retains its existing count of all HTTP errors.
-
-Upgrades reconstruct upstream attribution from retained request events through the existing rollup checkpoint. Initialization commits bounded batches and resumes after interruption before serving requests. Legacy events without a stable upstream ID use a unique historical bucket/principal owner; current upstream names and reconciled model names do not establish historical ownership. Missing raw events or ambiguous historical owners retain a global-only exclusion count. Global totals remain intact, but exact provider-filtered errors cannot be recovered for those legacy cases. Normally completed pruning removes expired orphan buckets left by an interrupted prune.
-
 ### Rollup pricing completeness
 
 Local rollups retain three additive event counters: `priced_event_count`,
