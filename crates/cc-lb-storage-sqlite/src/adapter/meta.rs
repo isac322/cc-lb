@@ -245,13 +245,11 @@ struct OverviewAttributionEvent {
     id: i64,
     list_ts_ms: i64,
     upstream_id: Option<String>,
-    principal_id: Option<String>,
     list_status: i64,
 }
 
 async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageResult<()> {
     use super::usage_rollups::LEGACY_UNATTRIBUTED_UPSTREAM_ID;
-    use cc_lb_storage_api::normalize_usage_rollup_dimension;
     use std::collections::BTreeMap;
 
     loop {
@@ -317,7 +315,7 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
             }
         } else {
             let rows: Vec<OverviewAttributionEvent> = sqlx::query_as(
-                "SELECT r.id,r.list_ts_ms,r.upstream_id,r.principal_id,r.list_status
+                "SELECT r.id,r.list_ts_ms,r.upstream_id,r.list_status
                  FROM request_events_v1 r WHERE r.id>? AND r.id<=?
                  ORDER BY r.id LIMIT 1000",
             )
@@ -327,8 +325,6 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
             .await
             .map_err(map_sqlx_error)?;
             let mut deltas = BTreeMap::new();
-            // At most one entry per retained row in this bounded event batch.
-            let mut historical_owners = BTreeMap::new();
             for event in &rows {
                 if !matches!(event.list_status, 401 | 403 | 404) {
                     continue;
@@ -340,20 +336,9 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
                         }
                     })?)
                 } else {
-                    let key = (
-                        event.list_ts_ms / 60_000 * 60,
-                        event.principal_id.as_deref(),
-                    );
-                    if let Some(owner) = historical_owners.get(&key) {
-                        *owner
-                    } else {
-                        let normalized_principal = normalize_usage_rollup_dimension(key.1);
-                        let owner =
-                            historical_overview_upstream(&mut tx, key.0, &normalized_principal)
-                                .await?;
-                        historical_owners.insert(key, owner);
-                        owner
-                    }
+                    // Prunable/mutable aggregates cannot prove ownership of a
+                    // legacy event whose captured UUID is missing.
+                    None
                 };
                 for (resolution, width) in [("minute", 60_000), ("hour", 3_600_000)] {
                     *deltas
@@ -417,42 +402,4 @@ async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageRe
         }
         tx.commit().await.map_err(map_sqlx_error)?;
     }
-}
-
-async fn historical_overview_upstream(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    minute_start: i64,
-    principal: &str,
-) -> StorageResult<Option<uuid::Uuid>> {
-    // Names may be reused/overwritten and models reconciled. Only the persisted
-    // UUID within this principal's historical slice is evidence of ownership.
-    // Minute proof identifies the same event in both resolutions. Fall back to
-    // hour proof only when minute evidence is absent, never when ambiguous.
-    for (resolution, bucket) in [
-        ("minute", minute_start),
-        ("hour", minute_start / 3600 * 3600),
-    ] {
-        let candidates = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT upstream_id FROM usage_rollups_v2
-             WHERE resolution=? AND bucket_start_unix_secs=? AND principal_id=? LIMIT 2",
-        )
-        .bind(resolution)
-        .bind(bucket)
-        .bind(principal)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        match candidates.as_slice() {
-            [] => {}
-            [upstream] => {
-                return uuid::Uuid::parse_str(upstream).map(Some).map_err(|error| {
-                    StorageError::Corrupted {
-                        message: format!("invalid historical usage upstream_id: {error}"),
-                    }
-                });
-            }
-            _ => return Ok(None),
-        }
-    }
-    Ok(None)
 }

@@ -21,8 +21,9 @@ const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
 
 // Both keys are global-only. Empty holds unprocessed/unrecoverable old counts;
-// this key records retained events whose historical owner cannot be proven.
-// Keeping them distinct makes every retained event consume the old total once.
+// this key records retained legacy events without a captured upstream UUID.
+// Names and surviving aggregates cannot prove ownership after rename/pruning.
+// Keeping the keys distinct makes every retained event consume the old total once.
 pub(super) const LEGACY_UNATTRIBUTED_UPSTREAM_ID: &str = "legacy-unattributed";
 
 async fn cleanup_gemini_reconciliation_markers(

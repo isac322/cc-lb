@@ -210,7 +210,7 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
         for (index, upstream_id, name, status) in [
             (0, Some(Uuid::from_u128(0x1300)), Some("named"), 401),
             (1, Some(Uuid::from_u128(0x1301)), Some("other"), 403),
-            (2, None, None, 404),
+            (2, Some(Uuid::nil()), None, 404),
             (3, None, Some("named"), 403),
         ] {
             let ts = AT + if index == 0 { 1 } else { 10 };
@@ -285,16 +285,19 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                 expected.push((resolution.to_owned(), AT as i64, String::new(), 1));
             }
             expected.push((resolution.to_owned(), AT as i64, Uuid::nil().to_string(), 1));
-            expected.push((
-                resolution.to_owned(),
-                AT as i64,
-                UPSTREAM.to_owned(),
-                if prune_history { 1 } else { 2 },
-            ));
+            if !prune_history {
+                expected.push((resolution.to_owned(), AT as i64, UPSTREAM.to_owned(), 1));
+            }
             expected.push((
                 resolution.to_owned(),
                 AT as i64,
                 Uuid::from_u128(0x1301).to_string(),
+                1,
+            ));
+            expected.push((
+                resolution.to_owned(),
+                AT as i64,
+                "legacy-unattributed".to_owned(),
                 1,
             ));
         }
@@ -315,9 +318,10 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
             assert_eq!(
                 buckets
                     .iter()
-                    .find(|bucket| bucket.upstream_id.is_none())
-                    .map(|bucket| bucket.error_count),
-                if prune_history { Some(1) } else { None },
+                    .filter(|bucket| bucket.upstream_id.is_none())
+                    .map(|bucket| bucket.error_count)
+                    .sum::<u64>(),
+                if prune_history { 2 } else { 1 },
             );
         }
         assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), Some(4));
@@ -501,11 +505,12 @@ async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() 
 }
 
 #[tokio::test]
-async fn historical_name_only_attribution_uses_captured_identity_after_name_reuse() {
+async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candidates() {
     for scenario in [
         "renamed",
         "ambiguous",
         "captured-unknown",
+        "explicit-nil",
         "model-drift",
         "no-history",
         "hour-distractor",
@@ -560,6 +565,11 @@ async fn historical_name_only_attribution_uses_captured_identity_after_name_reus
                 request_id: "historical-name-only".to_owned(),
                 event_id: Some("historical-name-only".to_owned()),
                 principal_id: Some(" principal/a ".to_owned()),
+                upstream_id: if scenario == "explicit-nil" {
+                    Some(Uuid::nil())
+                } else {
+                    None
+                },
                 upstream_name: Some("foo".to_owned()),
                 model: Some(raw_model.to_owned()),
                 status: 403,
@@ -587,7 +597,7 @@ async fn historical_name_only_attribution_uses_captured_identity_after_name_reus
             )
             .await
             .unwrap();
-        if scenario != "captured-unknown" {
+        if !matches!(scenario, "captured-unknown" | "explicit-nil") {
             // A later event with the same rollup key overwrites its stored display name.
             storage
                 .append_request_event(&RequestEvent {
@@ -624,7 +634,7 @@ async fn historical_name_only_attribution_uses_captured_identity_after_name_reus
             })
             .await
             .unwrap();
-        let captured_id = if scenario == "captured-unknown" {
+        let captured_id = if matches!(scenario, "captured-unknown" | "explicit-nil") {
             Uuid::nil()
         } else {
             original_id
@@ -637,7 +647,7 @@ async fn historical_name_only_attribution_uses_captured_identity_after_name_reus
                      (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
                      VALUES (?,1800000000,'principal_a',?,'renamed-original',?,?,1,0)",
                 ).bind(resolution).bind(captured_id.to_string()).bind(captured_model)
-                    .bind(if scenario == "captured-unknown" { 1 } else { 2 })
+                    .bind(if matches!(scenario, "captured-unknown" | "explicit-nil") { 1 } else { 2 })
                     .execute(storage.pool()).await.unwrap();
             }
             sqlx::query(
@@ -714,14 +724,14 @@ async fn historical_name_only_attribution_uses_captured_identity_after_name_reus
                 excluded[0].error_count, 1,
                 "{scenario}: global count is conserved"
             );
-            let expected = if matches!(scenario, "ambiguous" | "no-history") {
-                None
+            let expected = if scenario == "explicit-nil" {
+                Some(Uuid::nil())
             } else {
-                Some(captured_id)
+                None
             };
             assert_eq!(
                 excluded[0].upstream_id, expected,
-                "{scenario}: captured identity must survive metadata/model changes without guessing"
+                "{scenario}: only the captured raw UUID proves ownership; aggregates cannot fill it in"
             );
             assert!(
                 !excluded
@@ -804,4 +814,176 @@ async fn global_only_sentinels_remain_distinct_from_unknown_uuid_and_invalid_ids
         error,
         cc_lb_storage_api::StorageError::Corrupted { .. }
     ));
+}
+
+#[tokio::test]
+async fn partial_retention_batch_cannot_certify_a_name_only_event_owner() {
+    for partial_prune in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}",
+            dir.path().join("partial-retention.sqlite").display()
+        );
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(125), &mut connection, false)
+            .await
+            .unwrap();
+        // The retention cutoff lies inside the current minute. Old raw events
+        // expire, but events at +30/+40/+90 seconds remain legitimate history.
+        sqlx::raw_sql(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<999)
+             INSERT INTO request_events_v1
+             (request_id,event_id,ts,list_ts_ms,list_status,list_duration_ms,principal_id)
+             SELECT 'expired-'||i,'expired-'||i,1799999940,1799999940000,200,0,'filler-'||i FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<999)
+             INSERT INTO usage_rollups_v2
+             (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+             SELECT 'minute',1799999940,'filler-'||i,'00000000-0000-0000-0000-000000000000','unknown','unknown',1,0,0 FROM n;
+             INSERT INTO usage_rollups_v2
+             (resolution,bucket_start_unix_secs,principal_id,upstream_id,upstream_name,model,request_count,error_count,updated_at)
+             VALUES
+             ('minute',1800000000,'boundary-principal','00000000-0000-0000-0000-000000001300','original','model',1,1,0),
+             ('minute',1800000000,'boundary-principal','00000000-0000-0000-0000-000000001301','stable','model',1,1,0),
+             ('minute',1800000060,'boundary-principal','00000000-0000-0000-0000-000000001300','original','model',1,1,0),
+             ('hour',1800000000,'boundary-principal','00000000-0000-0000-0000-000000001300','original','model',2,2,0),
+             ('hour',1800000000,'boundary-principal','00000000-0000-0000-0000-000000001301','stable','model',1,1,0);",
+        ).execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
+                .await
+                .unwrap();
+        let original = Uuid::from_u128(0x1300);
+        let stable = Uuid::from_u128(0x1301);
+        for (id, offset, upstream_id, name, status) in [
+            ("legacy-name-only", 30, None, "original", 403),
+            ("stable-server-error", 40, Some(stable), "stable", 500),
+            ("stable-original-id", 90, Some(original), "original", 403),
+        ] {
+            storage
+                .append_request_event(&RequestEvent {
+                    ts: AT + offset,
+                    ts_ms: Some((AT + offset) * 1000),
+                    request_id: id.to_owned(),
+                    event_id: Some(id.to_owned()),
+                    principal_id: Some("boundary-principal".to_owned()),
+                    upstream_id,
+                    upstream_name: Some(name.to_owned()),
+                    model: Some("model".to_owned()),
+                    status,
+                    ..RequestEvent::default()
+                })
+                .await
+                .unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id,value)
+             SELECT id,(SELECT MAX(id) FROM request_events_v1)
+             FROM (SELECT 'high_water' AS id UNION ALL SELECT 'cost_components_backfill_upper'
+                   UNION ALL SELECT 'cost_components_backfill_cursor');
+             INSERT INTO overview_excluded_error_rollups_v1
+             (resolution,bucket_start_unix_secs,error_count,updated_at)
+             VALUES ('minute',1800000000,1,0),('minute',1800000060,1,0),('hour',1800000000,2,0);
+             UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .prune_request_events_before((AT + 20) * 1_000_000_000, 1000)
+                .await
+                .unwrap(),
+            999
+        );
+        if partial_prune {
+            assert_eq!(
+                storage
+                    .prune_usage_rollups_before(AT + 20, AT + 20, 1000)
+                    .await
+                    .unwrap(),
+                1000
+            );
+        }
+        let before = storage
+            .query_usage_rollups_in_range(
+                cc_lb_storage_api::UsageRollupResolution::Minute,
+                AT,
+                AT + 60,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .filter(|row| row.upstream_id == original)
+                .count(),
+            if partial_prune { 0 } else { 1 }
+        );
+        assert_eq!(
+            before
+                .iter()
+                .find(|row| row.upstream_id == stable)
+                .unwrap()
+                .error_count,
+            1
+        );
+        storage.initialize().await.unwrap();
+        for resolution in [
+            cc_lb_storage_api::UsageRollupResolution::Minute,
+            cc_lb_storage_api::UsageRollupResolution::Hour,
+        ] {
+            let excluded = storage
+                .query_overview_excluded_error_buckets_in_range(resolution, AT, AT + 120)
+                .await
+                .unwrap();
+            assert_eq!(
+                excluded.iter().map(|row| row.error_count).sum::<u64>(),
+                2,
+                "global total is conserved"
+            );
+            assert_eq!(
+                excluded
+                    .iter()
+                    .filter(|row| row.upstream_id.is_none())
+                    .map(|row| row.error_count)
+                    .sum::<u64>(),
+                1,
+                "partial_prune={partial_prune}: missing event identity is not proved by prunable aggregates"
+            );
+            assert_eq!(
+                excluded
+                    .iter()
+                    .filter(|row| row.upstream_id == Some(original))
+                    .map(|row| row.error_count)
+                    .sum::<u64>(),
+                1,
+                "explicit UUID control remains exact"
+            );
+            assert!(
+                !excluded.iter().any(|row| row.upstream_id == Some(stable)),
+                "partial_prune={partial_prune}: never subtract A's legacy 403 from B's 500"
+            );
+            let usage = storage
+                .query_usage_rollups_in_range(resolution, AT, AT + 120)
+                .await
+                .unwrap();
+            assert_eq!(
+                usage
+                    .iter()
+                    .filter(|row| row.upstream_id == stable)
+                    .map(|row| row.error_count)
+                    .sum::<u64>(),
+                1
+            );
+        }
+        let migrated = snapshot(&storage).await;
+        storage.initialize().await.unwrap();
+        assert_eq!(snapshot(&storage).await, migrated);
+        storage.pool().close().await;
+    }
 }
