@@ -5,8 +5,9 @@ use bytes::{Bytes, BytesMut};
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_oauth_protocol::{
-    ANTIGRAVITY_OAUTH_USER_AGENT, GeminiOAuthProfile, TokenEndpointResponse,
+    ANTIGRAVITY_OAUTH_USER_AGENT, GeminiOAuthOperation, GeminiOAuthProfile, TokenEndpointResponse,
     parse_token_endpoint_response, refresh_token_form_body, refresh_token_json_body,
+    resolve_gemini_oauth_target,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::UpstreamRecord;
@@ -24,7 +25,6 @@ const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
-const DEFAULT_GEMINI_CODE_ASSIST_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const GEMINI_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -285,7 +285,15 @@ fn usage_request<'a>(
             let body = serde_json::to_vec(&serde_json::json!({ "project": project })).map_err(
                 |error| SchedulerError::Job(format!("Gemini quota body encode failed: {error}")),
             )?;
-            let url = gemini_summary_url(base_url)?;
+            let url = resolve_gemini_oauth_target(
+                profile,
+                Some(base_url),
+                None,
+                None,
+                GeminiOAuthOperation::RetrieveUserQuotaSummary,
+            )
+            .map_err(|error| SchedulerError::Job(error.to_string()))?
+            .into_endpoint();
             (
                 url,
                 http::Method::POST,
@@ -322,6 +330,7 @@ fn usage_request<'a>(
 pub(super) async fn fetch_gemini_quota(
     http: &JsonHttpClient,
     base_url: &Url,
+    profile: GeminiOAuthProfile,
     access_token: &str,
     project_id: Option<&str>,
     user_agent: &str,
@@ -334,7 +343,15 @@ pub(super) async fn fetch_gemini_quota(
     fetch_json_request(
         http,
         JsonRequest {
-            url: gemini_quota_url(base_url)?,
+            url: resolve_gemini_oauth_target(
+                profile,
+                Some(base_url),
+                None,
+                None,
+                GeminiOAuthOperation::RetrieveUserQuota,
+            )
+            .map_err(|error| SchedulerError::Job(error.to_string()))?
+            .into_endpoint(),
             method: http::Method::POST,
             body: Bytes::from(body),
             content_type: "application/json",
@@ -349,11 +366,13 @@ pub(super) async fn fetch_gemini_quota(
     .await
 }
 
-/// Best-effort display enrichment, using only the configured OAuth metadata
-/// endpoints. Never follows a 401 into token refresh or account onboarding.
+/// Best-effort display enrichment. The stored upstream base overrides the
+/// profile's load endpoint; userinfo remains configured independently.
+/// Never follows a 401 into token refresh or account onboarding.
 pub(super) async fn fetch_gemini_account_metadata(
     http: &JsonHttpClient,
     config: &cc_lb_config::Config,
+    stored_base: Option<&Url>,
     bundle: &OAuthTokenBundle,
     cancel: &CancellationToken,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
@@ -403,16 +422,17 @@ pub(super) async fn fetch_gemini_account_metadata(
             )
         }
     };
-    let base = code_assist_url.as_str().trim_end_matches('/');
-    let endpoint = format!(
-        "{}/v1internal:loadCodeAssist",
-        base.trim_end_matches("/v1internal")
-    );
-    let Ok(load_url) = Url::parse(&endpoint) else {
+    let Ok(target) = resolve_gemini_oauth_target(
+        bundle.oauth_profile,
+        stored_base,
+        None,
+        Some(code_assist_url),
+        GeminiOAuthOperation::LoadCodeAssist,
+    ) else {
         return (None, None);
     };
     let load = JsonRequest {
-        url: load_url,
+        url: target.into_endpoint(),
         method: http::Method::POST,
         body,
         content_type: "application/json",
@@ -559,28 +579,30 @@ pub(super) fn gemini_summary_groups(body: &[u8]) -> Option<(bool, bool)> {
     Some((gemini, third_party))
 }
 
+#[cfg(test)]
 fn gemini_summary_url(base_url: &Url) -> SchedulerResult<Url> {
-    let base_path = base_url.path().trim_end_matches('/');
-    let path = if base_path.is_empty() {
-        "/v1internal:retrieveUserQuotaSummary".to_owned()
-    } else {
-        format!("{base_path}:retrieveUserQuotaSummary")
-    };
-    let mut url = base_url.clone();
-    url.set_path(&path);
-    Ok(url)
+    resolve_gemini_oauth_target(
+        GeminiOAuthProfile::GeminiCli,
+        Some(base_url),
+        None,
+        None,
+        GeminiOAuthOperation::RetrieveUserQuotaSummary,
+    )
+    .map(|target| target.into_endpoint())
+    .map_err(|error| SchedulerError::Job(error.to_string()))
 }
 
+#[cfg(test)]
 fn gemini_quota_url(base_url: &Url) -> SchedulerResult<Url> {
-    let base_path = base_url.path().trim_end_matches('/');
-    let path = if base_path.is_empty() {
-        "/v1internal:retrieveUserQuota".to_owned()
-    } else {
-        format!("{base_path}:retrieveUserQuota")
-    };
-    let mut url = base_url.clone();
-    url.set_path(&path);
-    Ok(url)
+    resolve_gemini_oauth_target(
+        GeminiOAuthProfile::GeminiCli,
+        Some(base_url),
+        None,
+        None,
+        GeminiOAuthOperation::RetrieveUserQuota,
+    )
+    .map(|target| target.into_endpoint())
+    .map_err(|error| SchedulerError::Job(error.to_string()))
 }
 
 pub(super) fn decrypt_bundle(
@@ -605,7 +627,15 @@ pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> SchedulerResult<Ur
         cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_CODEX_BASE_URL,
         cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey => DEFAULT_OPENAI_BASE_URL,
         cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth => {
-            DEFAULT_GEMINI_CODE_ASSIST_BASE_URL
+            return resolve_gemini_oauth_target(
+                GeminiOAuthProfile::GeminiCli,
+                None,
+                None,
+                None,
+                GeminiOAuthOperation::RetrieveUserQuotaSummary,
+            )
+            .map(|target| target.base)
+            .map_err(|error| SchedulerError::Job(error.to_string()));
         }
         cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
     };
@@ -768,6 +798,38 @@ mod tests {
             gemini_summary_url(&base).unwrap().as_str(),
             "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
         );
+    }
+
+    #[test]
+    fn gemini_quota_actions_replace_existing_action_and_preserve_origin_and_prefix() {
+        for (base_path, expected_prefix) in [
+            ("", "/v1internal"),
+            ("/v1internal", "/v1internal"),
+            ("/gateway/v1internal", "/gateway/v1internal"),
+            ("/gateway/v1internal/", "/gateway/v1internal"),
+            ("/gateway/v1internal:generateContent", "/gateway/v1internal"),
+            ("/gateway/v1internal:loadCodeAssist", "/gateway/v1internal"),
+            (
+                "/gateway/v1internal:retrieveUserQuotaSummary",
+                "/gateway/v1internal",
+            ),
+            (
+                "/gateway/v1internal:retrieveUserQuota",
+                "/gateway/v1internal",
+            ),
+        ] {
+            let base = Url::parse(&format!("http://127.0.0.1:18181{base_path}")).unwrap();
+            assert_eq!(
+                gemini_summary_url(&base).unwrap().as_str(),
+                format!("http://127.0.0.1:18181{expected_prefix}:retrieveUserQuotaSummary"),
+                "summary destination for {base_path}"
+            );
+            assert_eq!(
+                gemini_quota_url(&base).unwrap().as_str(),
+                format!("http://127.0.0.1:18181{expected_prefix}:retrieveUserQuota"),
+                "fallback destination for {base_path}"
+            );
+        }
     }
 
     #[test]

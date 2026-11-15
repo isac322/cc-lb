@@ -38,7 +38,7 @@ Public wording must be English, direct, and evidence-backed. Use [`positioning.y
 
 When a change alters behavior, configuration, or a supported claim, update the code, the repository docs, the documentation site, and the registry and repository listings together so they describe the same contract.
 
-Run `bun scripts/public-metadata.mjs --check` and `bun scripts/check-docs-provider-parity.mjs` from the repository root for public-surface changes, then build the documentation site as described above.
+Run `bun scripts/public-metadata.mjs --check`, `bun scripts/check-docs-provider-parity.mjs`, and `bun scripts/check-client-capabilities.mjs` from the repository root for public-surface changes, then build the documentation site as described above. Run `node --test scripts/test-client-capabilities.mjs` and `bun test site/scripts/sync-docs.test.ts` when changing client capability claims or their evidence rules.
 
 ## Pull requests
 

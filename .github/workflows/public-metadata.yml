@@ -35,3 +35,9 @@ jobs:
         run: bun scripts/public-metadata.mjs --check
       - name: Check docs provider parity
         run: bun scripts/check-docs-provider-parity.mjs
+      - name: Check client capability claims
+        run: bun scripts/check-client-capabilities.mjs
+      - name: Test client capability evidence rules
+        run: node --test scripts/test-client-capabilities.mjs
+      - name: Test documentation source boundaries
+        run: bun test site/scripts/sync-docs.test.ts

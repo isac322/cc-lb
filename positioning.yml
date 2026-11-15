@@ -145,6 +145,7 @@ evidence:
       - Internal deployment with 10 connected accounts — owner confirmation
     not_claimable:
       - Universal multi-provider gateway — current working-tree source includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds and routes stateless provider operations under `/anthropic`, `/openai`, and `/gemini`, but account-bound resource APIs (files, batches, cached contents, skills, vector stores, containers), Bedrock, and Vertex remain unsupported
+      - Full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients remains unverified; shipped route support and credential eligibility do not establish client parity. Exact-client, per-feature evidence must cover the selected upstream credential class and required entitlement; source or descriptors, recorders, and API-key controls cannot establish OAuth, remote-session, or voice success (docs/runtime-management.md; docs/client-capabilities.json)
       - 100% cache-hit or zero-overhead guarantee — scheduler is best effort
       - Enterprise HA, SLA, global scale, or battle-tested maturity — no public evidence at that scope
       - Official Anthropic/Claude partnership or certification — no such relationship is evidenced

@@ -1352,58 +1352,47 @@ fn build_subscription_signer_with_policy(
             Ok(Arc::new(signer))
         }
         UpstreamKind::GeminiOauth => {
+            let target = cc_lb_oauth_protocol::resolve_gemini_oauth_target(
+                match tokens.oauth_profile {
+                    cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                        cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli
+                    }
+                    cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                        cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity
+                    }
+                },
+                record.base_url.as_ref(),
+                antigravity_config.map(|config| &config.code_assist_url),
+                None,
+                cc_lb_oauth_protocol::GeminiOAuthOperation::GenerateContent,
+            )
+            .map_err(|_| SignerError::SigningFailed {
+                reason: "Gemini Code Assist URL is invalid".to_owned(),
+            })?;
+            let signer = if tokens.never_refresh || !refreshing {
+                cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_for_target(
+                    tokens.access_token.as_str(),
+                    tokens.project_id.as_deref(),
+                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                    clock,
+                    target,
+                )?
+            } else {
+                cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_refreshing_for_target(
+                    tokens.access_token.as_str(),
+                    tokens.project_id.as_deref(),
+                    tokens.expires_at_unix_secs,
+                    clock,
+                    target,
+                )?
+            };
             let signer = match tokens.oauth_profile {
-                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
-                    if tokens.never_refresh || !refreshing {
-                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
-                            tokens.access_token.as_str(),
-                            tokens.project_id.as_deref(),
-                            tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                            clock,
-                        )?
-                    } else {
-                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_refreshing(
-                            tokens.access_token.as_str(),
-                            tokens.project_id.as_deref(),
-                            tokens.expires_at_unix_secs,
-                            clock,
-                        )?
-                    }
-                }
-                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
-                    let default_config;
-                    let antigravity_config = match antigravity_config {
-                        Some(config) => config,
-                        None => {
-                            default_config = cc_lb_config::AntigravityOAuthConfig::default();
-                            &default_config
-                        }
-                    };
-                    let base_url = record
-                        .base_url
-                        .as_ref()
-                        .filter(|url| url.host_str() != Some("cloudcode-pa.googleapis.com"))
-                        .unwrap_or(&antigravity_config.code_assist_url);
-                    if tokens.never_refresh || !refreshing {
-                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity(
-                            tokens.access_token.as_str(),
-                            tokens.project_id.as_deref(),
-                            tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                            clock,
-                            base_url.as_str(),
-                            &antigravity_config.user_agent,
-                        )?
-                    } else {
-                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity_refreshing(
-                            tokens.access_token.as_str(),
-                            tokens.project_id.as_deref(),
-                            tokens.expires_at_unix_secs,
-                            clock,
-                            base_url.as_str(),
-                            &antigravity_config.user_agent,
-                        )?
-                    }
-                }
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => signer,
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => signer.with_antigravity_user_agent(
+                    antigravity_config
+                        .map(|config| config.user_agent.as_str())
+                        .unwrap_or(cc_lb_oauth_protocol::ANTIGRAVITY_OAUTH_USER_AGENT),
+                )?,
             };
             Ok(Arc::new(signer))
         }
@@ -3349,38 +3338,74 @@ mod tests {
         let (_dir, storage) = storage_fixture(27).await;
         let stored = create_upstream(&storage, "gemini-profile").await;
         let aead = Arc::new(AeadService::from_master_key([19; 32]));
-        for (profile, configured_endpoint, override_endpoint, expected_host) in [
+        let mut cases = vec![
             (
                 cc_lb_aead::GeminiOAuthProfile::GeminiCli,
                 None,
                 None,
                 "cloudcode-pa.googleapis.com",
+                "/v1internal",
             ),
             (
                 cc_lb_aead::GeminiOAuthProfile::Antigravity,
                 None,
                 None,
                 "daily-cloudcode-pa.googleapis.com",
+                "/v1internal",
             ),
             (
                 cc_lb_aead::GeminiOAuthProfile::Antigravity,
                 None,
                 Some("https://cloudcode-pa.googleapis.com/v1internal"),
-                "daily-cloudcode-pa.googleapis.com",
+                "cloudcode-pa.googleapis.com",
+                "/v1internal",
             ),
             (
                 cc_lb_aead::GeminiOAuthProfile::Antigravity,
                 Some("https://configured.invalid/"),
                 None,
                 "configured.invalid",
+                "/v1internal",
             ),
             (
                 cc_lb_aead::GeminiOAuthProfile::Antigravity,
                 Some("https://configured.invalid/"),
                 Some("http://override.invalid/"),
                 "override.invalid",
+                "/v1internal",
             ),
+        ];
+        for profile in [
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+            cc_lb_aead::GeminiOAuthProfile::Antigravity,
         ] {
+            for (endpoint, prefix) in [
+                ("http://override.invalid/", "/v1internal"),
+                ("http://override.invalid/v1internal", "/v1internal"),
+                (
+                    "http://override.invalid/v1internal:generateContent",
+                    "/v1internal",
+                ),
+                ("http://override.invalid/gateway", "/gateway"),
+                (
+                    "http://override.invalid/gateway/v1internal",
+                    "/gateway/v1internal",
+                ),
+                (
+                    "http://override.invalid/gateway/v1internal:streamGenerateContent",
+                    "/gateway/v1internal",
+                ),
+                (
+                    "http://override.invalid/gateway/v1internal:countTokens",
+                    "/gateway/v1internal",
+                ),
+            ] {
+                cases.push((profile, None, Some(endpoint), "override.invalid", prefix));
+            }
+        }
+        for (profile, configured_endpoint, override_endpoint, expected_host, expected_prefix) in
+            cases
+        {
             let mut record = stored.clone();
             record.kind = UpstreamKind::GeminiOauth;
             record.base_url = override_endpoint.map(|url| url.parse().expect("override URL"));
@@ -3415,45 +3440,78 @@ mod tests {
                 .build(&Upstream::GeminiDirect { base_url: None })
                 .await
                 .expect("Gemini signer");
-            let mut shaped = shaped_request();
-            shaped.set_url(
-                "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+            for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+                let mut shaped = shaped_request();
+                shaped.set_url(
+                    format!(
+                        "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:{action}"
+                    )
                     .parse()
                     .expect("request URL"),
-            );
-            shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
-            shaped.headers_mut().insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_static("GeminiCLI/existing"),
-            );
-            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
-                .await
-                .expect("signed Gemini request");
-            assert_eq!(signed.url().host_str(), Some(expected_host));
-            let body: serde_json::Value = serde_json::from_slice(signed.body()).expect("envelope");
-            assert_eq!(body["project"], "project-123");
-            match profile {
-                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
-                    assert!(body.get("userAgent").is_none());
-                    assert!(body.get("requestId").is_none());
+                );
+                shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+                shaped.headers_mut().insert(
+                    http::header::USER_AGENT,
+                    http::HeaderValue::from_static("GeminiCLI/existing"),
+                );
+                let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+                    .await
+                    .expect("signed Gemini request");
+                assert_eq!(signed.url().host_str(), Some(expected_host));
+                assert_eq!(
+                    signed.url().scheme(),
+                    if expected_host == "override.invalid" {
+                        "http"
+                    } else {
+                        "https"
+                    }
+                );
+                assert_eq!(
+                    signed.url().path(),
+                    format!("{expected_prefix}:{action}"),
+                    "profile={profile:?}, override={override_endpoint:?}"
+                );
+                assert_eq!(
+                    signed.url().query(),
+                    (action == "streamGenerateContent").then_some("alt=sse")
+                );
+                let body: serde_json::Value =
+                    serde_json::from_slice(signed.body()).expect("envelope");
+                assert_eq!(body["request"]["contents"], serde_json::json!([]));
+                if action == "countTokens" {
                     assert_eq!(
-                        signed.headers().get(http::header::USER_AGENT),
-                        Some(&http::HeaderValue::from_static("GeminiCLI/existing"))
+                        body,
+                        serde_json::json!({"request": {
+                            "model": "models/gemini-3-pro", "contents": []
+                        }})
                     );
+                } else {
+                    assert_eq!(body["project"], "project-123");
+                    assert_eq!(body["model"], "gemini-3-pro");
+                    match profile {
+                        cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                            assert!(body.get("userAgent").is_none());
+                            assert!(body.get("requestId").is_none());
+                        }
+                        cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                            assert_eq!(body["userAgent"], "antigravity");
+                            assert!(body.get("requestType").is_none());
+                            assert!(
+                                body["requestId"]
+                                    .as_str()
+                                    .is_some_and(|id| id.starts_with("agent-"))
+                            );
+                        }
+                    }
                 }
-                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
-                    assert_eq!(body["userAgent"], "antigravity");
-                    assert!(body.get("requestType").is_none());
-                    assert!(
-                        body["requestId"]
-                            .as_str()
-                            .is_some_and(|id| id.starts_with("agent-"))
-                    );
-                    assert_eq!(
-                        signed.headers().get(http::header::USER_AGENT),
-                        Some(&http::HeaderValue::from_static("antigravity/custom-config"))
-                    );
-                }
+                let expected_ua = match profile {
+                    cc_lb_aead::GeminiOAuthProfile::GeminiCli => "GeminiCLI/existing",
+                    cc_lb_aead::GeminiOAuthProfile::Antigravity => "antigravity/custom-config",
+                };
+                assert_eq!(
+                    signed.headers().get(http::header::USER_AGENT),
+                    Some(&http::HeaderValue::from_static(expected_ua))
+                );
             }
         }
     }
