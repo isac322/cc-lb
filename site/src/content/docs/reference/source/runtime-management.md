@@ -26,6 +26,29 @@ Administrative operations use the providers configured in `admin.auth.providers`
 
 The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the examples below. Proxy traffic uses a separate listener on port 8080 (`http://localhost:8080/v1/messages`).
 
+### Current-mode client acceptance
+
+The proxy route tables below describe shipped operations and upstream credential eligibility. Full client acceptance remains unverified for the pinned Codex 0.169.0 and agy 1.5.9 clients; route support does not establish it. A principal's proxy key authenticates the client to cc-lb; routing independently selects an eligible OAuth or API-key upstream. Native agy client mode can be tested with either upstream class. An API-key control does not establish OAuth success.
+
+The [client capability ledger](https://github.com/isac322/cc-lb/blob/master/docs/client-capabilities.json) records acceptance boundaries and evidence. Its reference inputs are Codex source commit `d32063f96c2dff1dc96af839b3952abb6acfeda4` and the agy 1.5.9 installed binary SHA-256 `fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a`. Source and descriptor coverage does not establish execution. Acceptance requires the exact client, upstream class, required entitlement, and real feature execution; a recorder or substitute API request cannot establish that result.
+
+| Endpoint family | Current-mode boundary |
+|---|---|
+| Vendor OAuth issuer flows | Authorization, device authorization, token exchange, refresh, and revocation retain the vendor issuer contract; a proxy principal key does not replace vendor identity. |
+| Telemetry, Statsig, and feedback | Configured analytics-events can follow `chatgpt_base_url`; genuinely direct Statsig and feedback requests require separate vendor-service evidence. Configured client OpenTelemetry export is a separate destination and contract. |
+| Updates, install, and pets | Distribution and asset retrieval are separate from generation-route acceptance. |
+| GitHub archives | Archive retrieval retains the GitHub download and authorization contract. |
+| Signed bytes | Fetch the signed destination under its own authorization contract; proxy or upstream credentials must not be forwarded automatically. |
+| Cloud internal ThreadService and preview models | Codex internal HTTP/2 ThreadService and `/v2/models` preview access require their own service contracts and entitlements; REST Cloud tasks and generation results do not establish either. |
+| Identity and JWKS | Default-off identity paths require explicit enablement and separate validation. |
+| Configured remote environment, Noise, messageboard, and MCP | Require the configured remote service and real session execution; local or recorded traffic does not establish remote acceptance. |
+| Authenticated plugins and remote-control | Codex plugins are enabled by default; authenticated plugin and remote-control acceptance remains pending with the respective feature owners. |
+| Workspace-switch-token | Authentication and account-management feature owners own the account-switching contract and evidence; this is separate from vendor issuer OAuth flows. |
+
+Raw Code Assist traffic, remote sessions, and voice each require separate acceptance evidence. The existing Code Assist envelope used for supported Gemini OAuth generation, background admin operations, and quota polling do not establish an inbound raw Code Assist client contract. Shipped API-key Realtime and Live tunnels retain their contracts; they do not establish subscription voice acceptance. Local microphone access is a client/device boundary; an audio HTTP request or WebSocket upgrade does not establish a working microphone or voice session. Missing usage or quota evidence remains unknown, never an invented success or zero.
+
+These boundaries preserve the supported operations and credential classes below. The [Antigravity terms warning](https://cc-lb.bhyoo.com/docs/reference/admin-api/#oauth-flow) still applies.
+
 ### Proxy capability boundary
 
 Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/openai/v1/...`, and `/gemini/v1beta/...` (plus Gemini `/gemini/v1/...` model catalogs). The tables below list supported operations and eligible credentials. Shared unprefixed routes are kept for backward compatibility and retain their existing operation set only: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Every other unprefixed operation returns `404 operation_not_supported`; new operations require a matching provider prefix.
