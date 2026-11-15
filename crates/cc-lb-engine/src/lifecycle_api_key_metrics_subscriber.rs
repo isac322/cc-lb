@@ -2,8 +2,8 @@
 //!
 //! Owns `record_api_key_request_metric` and `record_api_key_usage_metrics`
 //! emissions off the `LifecycleEvent` stream. Consumes `RequestStarted`,
-//! `UsageObserved` / `StreamCompleted`, and `RequestTerminated` per
-//! `event_id` and fires the metrics on termination.
+//! `UsageObserved` / `StreamCompleted`, `RequestTerminated`, and `Priced` per
+//! `event_id`. Requests/tokens emit at termination; cost joins the pricing result.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,6 +67,8 @@ struct Partial {
     cache_read_input_tokens: u64,
     usage_seen: bool,
     cost_micros: Option<u64>,
+    priced_seen: bool,
+    terminated: bool,
 }
 
 impl Partial {
@@ -106,6 +108,9 @@ async fn subscriber_loop(
     while let Ok(event) = rx.try_recv() {
         handle_event(&mut partials, map_cap, event);
     }
+    for partial in partials.values().filter(|partial| partial.terminated) {
+        record_eviction(partial, "shutdown");
+    }
 }
 
 fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event: LifecycleEvent) {
@@ -114,8 +119,21 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
 
     if let LifecycleEvent::RequestTerminated { client_status, .. } = &event {
         let status = *client_status;
-        if let Some(partial) = partials.remove(&event_id) {
-            emit_metrics(&partial, status);
+        if let Some(partial) = partials.get_mut(&event_id) {
+            if partial.terminated {
+                return;
+            }
+            emit_metrics(partial, status);
+            partial.terminated = true;
+            partial.inserted_at = Some(now);
+            if partial.priced_seen
+                || !partial.usage_seen
+                || partial.model.is_none()
+                || partial.key_id.is_none()
+            {
+                emit_cost_metrics(partial);
+                partials.remove(&event_id);
+            }
         } else {
             metrics::counter!(
                 "cc_lb_lifecycle_api_key_metrics_events_total",
@@ -126,9 +144,25 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
         return;
     }
 
+    if matches!(event, LifecycleEvent::Priced { .. }) {
+        // A price without attribution cannot contribute, including a duplicate
+        // arriving after completion or an evicted join.
+        if let Some(partial) = partials.get_mut(&event_id) {
+            merge(partial, event);
+            if partial.terminated {
+                emit_cost_metrics(partial);
+                partials.remove(&event_id);
+            }
+        }
+        return;
+    }
+
     let partial = partials
         .entry(event_id)
         .or_insert_with(|| Partial::new(now));
+    if partial.terminated {
+        return;
+    }
     partial.inserted_at = Some(now);
     merge(partial, event);
 
@@ -197,9 +231,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.usage_seen = true;
         }
         LifecycleEvent::Priced { cost, .. } => {
-            if let Some(total) = cost.total_micros {
-                partial.cost_micros = Some(total.max(0) as u64);
-            }
+            partial.priced_seen = true;
+            partial.cost_micros = cost.total_micros.map(|total| total.max(0) as u64);
         }
         _ => {}
     }
@@ -241,15 +274,6 @@ fn emit_metrics(partial: &Partial, status: u16) {
     );
     increment_token_metric(key_id, "cache_read", partial.cache_read_input_tokens);
 
-    let cost_micros = partial.cost_micros.unwrap_or(0);
-    if cost_micros > 0 {
-        metrics::counter!(
-            "cclb_api_key_cost_usd_micro_total",
-            "key_id" => key_id.to_owned()
-        )
-        .increment(cost_micros);
-    }
-
     metrics::counter!(
         "cc_lb_tokens_total",
         "principal" => principal_id.to_owned(),
@@ -266,6 +290,25 @@ fn emit_metrics(partial: &Partial, status: u16) {
         "direction" => "output"
     )
     .increment(partial.output_tokens);
+}
+
+fn emit_cost_metrics(partial: &Partial) {
+    let (Some(key_id), Some(cost_micros)) = (partial.key_id.as_deref(), partial.cost_micros) else {
+        return;
+    };
+    if !partial.usage_seen {
+        return;
+    }
+    if cost_micros > 0 {
+        metrics::counter!(
+            "cclb_api_key_cost_usd_micro_total",
+            "key_id" => key_id.to_owned()
+        )
+        .increment(cost_micros);
+    }
+    let principal_id = partial.principal_id.as_deref().unwrap_or("");
+    let model = partial.model.as_deref().unwrap_or("unknown");
+    let upstream_name = partial.upstream_name.as_deref().unwrap_or("unknown");
     metrics::counter!(
         "cc_lb_virtual_cost_usd_total",
         "principal" => principal_id.to_owned(),
@@ -289,30 +332,36 @@ fn increment_token_metric(key_id: &str, kind: &'static str, value: u64) {
 
 fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let now = Instant::now();
-    let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
-    let removed = before.saturating_sub(partials.len());
-    if removed > 0 {
-        metrics::counter!(
-            "cc_lb_lifecycle_api_key_metrics_events_total",
-            "outcome" => "orphan_ttl_evicted"
-        )
-        .increment(removed as u64);
-    }
+    partials.retain(|_, partial| {
+        let keep = partial
+            .inserted_at
+            .is_none_or(|t| now.duration_since(t) < ttl);
+        if !keep {
+            record_eviction(partial, "orphan_ttl_evicted");
+        }
+        keep
+    });
 }
 
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
-    let Some((oldest_key, _)) = partials
+    let Some(oldest_key) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        // Completed requests have already contributed request/token metrics.
+        // Prefer losing their unresolved cost over an entire in-flight request.
+        .min_by_key(|(_, p)| (!p.terminated, p.inserted_at))
+        .map(|(k, _)| k.clone())
     else {
         return;
     };
-    partials.remove(&oldest_key);
+    if let Some(partial) = partials.remove(&oldest_key) {
+        record_eviction(&partial, "cap_evicted");
+    }
+}
+
+fn record_eviction(partial: &Partial, orphan_outcome: &'static str) {
     metrics::counter!(
         "cc_lb_lifecycle_api_key_metrics_events_total",
-        "outcome" => "cap_evicted"
+        "outcome" => if partial.terminated { "cost_unresolved" } else { orphan_outcome }
     )
     .increment(1);
 }
@@ -327,7 +376,7 @@ mod tests {
         s.to_owned()
     }
 
-    fn terminated(event_id: &str, status: u16) -> LifecycleEvent {
+    pub(super) fn terminated(event_id: &str, status: u16) -> LifecycleEvent {
         LifecycleEvent::RequestTerminated {
             event_id: eid(event_id),
             reason: TerminationReason::Success,
@@ -417,3 +466,7 @@ mod tests {
         handle.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_api_key_metrics_subscriber_tests.rs"]
+mod join_tests;

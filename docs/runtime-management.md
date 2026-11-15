@@ -244,6 +244,15 @@ only measured request/token usage is added; the monetary accumulator is unchange
 No unavailable cost is reported as a known zero, and finalized rows are not
 re-priced later.
 
+Request and token counters update once at request termination. Cost counters
+join that termination with the asynchronous pricing result, so a delayed price
+can still contribute once. Unknown prices do not create a zero-cost series.
+The metrics subscriber bounds pending state to 4,096 requests and a five-minute
+idle TTL, checked every 30 seconds. If capacity, expiry, or shutdown discards a
+completed request's missing price, it increments
+`cc_lb_lifecycle_api_key_metrics_events_total{outcome="cost_unresolved"}`.
+These best-effort counters cannot recover prices dropped by a full event channel.
+
 Keep-alive renewals retain their token usage, hit identity, and history when
 actual cost is unavailable; their monetary PNL stays unknown. An automatic
 storage upgrade records price availability separately from signed cost values
