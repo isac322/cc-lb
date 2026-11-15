@@ -89,6 +89,7 @@ fn with_action(mut base: Url, operation: GeminiOAuthOperation) -> Url {
 
 /// Resolve a stored override without inferring provenance from its host.
 /// Absent overrides retain the existing operation-specific configuration semantics.
+/// The selected URL's query is preserved; fragments are removed.
 pub fn resolve_gemini_oauth_target(
     profile: GeminiOAuthProfile,
     stored_base: Option<&Url>,
@@ -120,7 +121,6 @@ pub fn resolve_gemini_oauth_target(
     if base.cannot_be_a_base() {
         return Err(url::ParseError::RelativeUrlWithCannotBeABaseBase);
     }
-    base.set_query(None);
     base.set_fragment(None);
     if stored_base.is_none()
         && !metadata
@@ -250,14 +250,14 @@ mod tests {
                     assert_eq!(target.base.host_str(), Some(expected_host));
                     assert_eq!(target.base.port(), None);
                     assert_eq!(target.base.path(), path);
-                    assert_eq!(target.base.query(), None);
+                    assert_eq!(target.base.query(), stored.as_ref().and_then(Url::query));
                     assert_eq!(target.base.fragment(), None);
                     assert_eq!(target.profile, profile);
                     assert_eq!(target.operation, operation);
                     assert_eq!(target.explicit_override, stored.is_some());
                     let endpoint = target.endpoint();
                     assert_eq!(endpoint.path(), format!("{path}:{}", operation.action()));
-                    assert_eq!(endpoint.query(), None);
+                    assert_eq!(endpoint.query(), stored.as_ref().and_then(Url::query));
                     assert_eq!(target.clone().into_endpoint(), endpoint);
                     let omitted = operation == GeminiOAuthOperation::CountTokens
                         || (profile == GeminiOAuthProfile::Antigravity
@@ -269,6 +269,50 @@ mod tests {
                         } else {
                             GeminiProjectPolicy::Optional
                         }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_override_preserves_tenant_query_across_control_endpoints() {
+        for profile in PROFILES {
+            for (path, canonical_path) in [
+                ("/", "/v1internal"),
+                ("/v1internal", "/v1internal"),
+                ("/gateway/v1internal:generateContent", "/gateway/v1internal"),
+            ] {
+                let stored =
+                    Url::parse(&format!("https://example.com{path}?tenant=one#fragment")).unwrap();
+                for operation in [
+                    GeminiOAuthOperation::RetrieveUserQuotaSummary,
+                    GeminiOAuthOperation::RetrieveUserQuota,
+                    GeminiOAuthOperation::LoadCodeAssist,
+                ] {
+                    let target =
+                        resolve_gemini_oauth_target(profile, Some(&stored), None, None, operation)
+                            .unwrap();
+                    assert_eq!(target.base.path(), canonical_path);
+                    assert_eq!(target.base.query(), Some("tenant=one"));
+                    assert_eq!(target.base.fragment(), None);
+                    for endpoint in [
+                        target.endpoint(),
+                        target.endpoint_for(GeminiOAuthOperation::RetrieveUserQuota),
+                        target.clone().into_endpoint(),
+                    ] {
+                        assert_eq!(endpoint.query(), Some("tenant=one"));
+                        assert_eq!(endpoint.fragment(), None);
+                    }
+                    assert_eq!(
+                        target.endpoint().path(),
+                        format!("{canonical_path}:{}", operation.action())
+                    );
+                    assert_eq!(
+                        target
+                            .endpoint_for(GeminiOAuthOperation::RetrieveUserQuota)
+                            .path(),
+                        format!("{canonical_path}:retrieveUserQuota")
                     );
                 }
             }
@@ -342,7 +386,13 @@ mod tests {
                     assert_eq!(target.base.host_str(), Some(host));
                     assert_eq!(target.base.port(), port);
                     assert_eq!(target.base.path(), path);
-                    assert_eq!(target.base.query(), None);
+                    let expected_query = if host == "cloudcode-pa.googleapis.com" {
+                        None
+                    } else {
+                        Some("old=1")
+                    };
+                    assert_eq!(target.base.query(), expected_query);
+                    assert_eq!(target.endpoint().query(), expected_query);
                     assert_eq!(target.base.fragment(), None);
                     assert!(!target.explicit_override);
                 }
@@ -361,12 +411,11 @@ mod tests {
             GeminiOAuthOperation::RetrieveUserQuotaSummary,
         )
         .unwrap();
-        assert_eq!(target.base.as_str(), "http://localhost:8123/gateway:custom");
         assert_eq!(
             target
                 .endpoint_for(GeminiOAuthOperation::RetrieveUserQuota)
                 .as_str(),
-            "http://localhost:8123/gateway:custom:retrieveUserQuota"
+            "http://localhost:8123/gateway:custom:retrieveUserQuota?old=1"
         );
         assert_eq!(
             target.operation,
