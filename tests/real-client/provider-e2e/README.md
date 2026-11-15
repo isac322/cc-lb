@@ -32,6 +32,55 @@ Runs the budget guard, `gpt-6.1-sol` catalog parser, WebSocket `service_tier: "a
 ./tests/real-client/run-provider-e2e.sh --self-test
 ```
 
+#### Offline client-harness inventory and replay (#1324)
+
+The test-only `client-harness` validates the immutable canonical inventory;
+it does not create a replacement inventory. Preserve source evidence, original
+readiness/results, feature owners, contract/account blockers, and the distinction
+between actual and candidate reachability. A candidate is not a supported feature.
+Validation checks inventory integrity, not client or provider acceptance.
+Its `livePass: 0` is harness validation output, not a live-provider measurement.
+
+Run these commands from the repository root after the matching harness changes
+are integrated. Both environment variables are mandatory caller inputs:
+`CC_LB_QA_LEDGER` must name the existing shared cleanup ledger outside the
+repository; `CC_LB_QA_OUTPUT` must name an existing task-owned scratch directory
+outside the repository, already recorded in that ledger. Its parent and the
+ledger's parent must exist. These recipes install nothing and create no
+untracked scratch parent directories.
+
+```sh
+: "${CC_LB_QA_LEDGER:?Set the existing shared cleanup ledger}"
+: "${CC_LB_QA_OUTPUT:?Set the existing ledger-recorded owned scratch directory}"
+test -f "$CC_LB_QA_LEDGER" && test -d "$CC_LB_QA_OUTPUT" || exit 1
+
+node tests/real-client/provider-e2e/client-harness/import-coverage.mjs --validate
+CC_LB_QA_LEDGER="$CC_LB_QA_LEDGER" \
+  node tests/real-client/provider-e2e/client-harness/run.mjs \
+  --mode fixtures --scratch "$CC_LB_QA_OUTPUT"
+CC_LB_QA_LEDGER="$CC_LB_QA_LEDGER" \
+  node tests/real-client/provider-e2e/client-harness/run.mjs \
+  --mode consumers --client codex --scratch "$CC_LB_QA_OUTPUT"
+```
+
+Fixture replay checks deterministic synthetic protocol cases; inspect per-case
+`DEFERRED` results even when the summary is `PASS`. Pinned-consumer mode checks
+whether the selected installed client decodes the synthetic response. Neither
+mode proves provider success, runtime support, or full-client/subscription
+acceptance. Captured opaque content is suppressed; sanitized semantic wire
+reconstruction and synthetic fixtures are not original provider wire evidence.
+
+Consumer mode requires macOS (`darwin`), Seatbelt (`/usr/bin/sandbox-exec`),
+Python 3, and a Codex binary on `PATH` matching the harness's pinned SHA-256.
+Missing prerequisites or failed isolation produce `BLOCKED` and a nonzero exit;
+provider and runtime acceptance remain `NOT-RUN`. Review retained artifacts
+before sharing them; redaction checks do not prove unknown secrets are absent.
+Launch only after isolation preflight succeeds. A blocked agy preflight
+establishes neither a provider failure nor consumer success. Runs isolate client
+state, use loopback replay, append ledger records, and bound process/listener teardown.
+The harness retains its owned run directory and `summary.json` under the supplied
+scratch directory for evidence review and explicitly authorized cleanup.
+
 ### Offline installed-SDK cached-input pricing regression
 
 `cached-input-pricing-sdk.py` runs the installed Python `openai` Responses SDK and
