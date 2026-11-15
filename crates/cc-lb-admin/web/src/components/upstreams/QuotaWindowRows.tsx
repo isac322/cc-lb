@@ -456,7 +456,7 @@ function CodexCreditsRow({
   const facts = selectCodexCredits(
     observations,
     maxStalenessSecs,
-    nowUnixSecs * 1000,
+    Math.round(nowUnixSecs * 1000),
   );
   if (facts == null) return null;
   return (

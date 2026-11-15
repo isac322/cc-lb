@@ -326,6 +326,44 @@ describe('QuotaWindowRow', () => {
     },
   );
 
+  it.each([
+    [1_794_752_625_004, 300_000, 'Available'],
+    [1_794_752_625_004, 300_001, 'Stale'],
+    [2_147_483_648_004, 300_000, 'Available'],
+    [2_147_483_648_004, 300_001, 'Stale'],
+  ] as const)(
+    'keeps millisecond precision at the credit age boundary (%i, %i)',
+    (nowMillis, ageMillis, expectedStatus) => {
+      vi.setSystemTime(nowMillis);
+      const observedAt = nowMillis - ageMillis;
+      render(
+        <QuotaWindowRow
+          snap={snap({
+            window: 'overage',
+            observed_at_unix_millis: observedAt,
+            credits: {
+              has_credits: true,
+              unlimited: null,
+              limit_reached: null,
+              balance: null,
+              approx_local_messages: null,
+              approx_cloud_messages: null,
+              observations: {
+                has_credits: {
+                  source: 'api',
+                  observed_at_unix_millis: observedAt,
+                },
+              },
+            },
+          })}
+          nowUnixSecs={nowMillis / 1000}
+          maxStalenessSecs={300}
+        />,
+      );
+      expect(screen.getByText(expectedStatus, { exact: true })).not.toBeNull();
+    },
+  );
+
   it('marks stale Codex credits without treating them as fresh availability', () => {
     const row = renderRow(
       snap({
