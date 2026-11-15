@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { REQUIRED_FAMILIES, validateClientCapabilities } from './check-client-capabilities.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { REQUIRED_FAMILIES, checkClientCapabilities, validateClientCapabilities } from './check-client-capabilities.mjs';
 
 // Entirely synthetic objects: these references and passing outcomes are test
 // controls, not provider evidence, public ledger entries or a Q-HARNESS API.
@@ -33,6 +36,34 @@ function pendingLedger() {
     })),
   };
 }
+
+test('entrypoint validates the typed ledger without classifying public English wording', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'cc-lb-client-capabilities-'));
+  try {
+    mkdirSync(path.join(root, 'docs'), { recursive: true });
+    writeFileSync(path.join(root, 'docs/client-capabilities.json'), JSON.stringify(pendingLedger()));
+    const publicFiles = [
+      'docs/runtime-management.md',
+      'site/src/content/docs/reference/source/runtime-management.md',
+      'README.md',
+      'positioning.yml',
+    ];
+    const caveat = 'Shipped native routes do not establish pinned client acceptance. Exact CLI verification remains pending.';
+    for (const statement of [
+      'Codex CLI is supported for Responses SSE only; account and cloud features remain unverified.',
+      'Full support for Codex CLI remains unverified.',
+    ]) {
+      for (const file of publicFiles) {
+        const target = path.join(root, file);
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, `${caveat}\n\n${statement}\n`);
+      }
+      assert.deepEqual(checkClientCapabilities(root), [], statement);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function promote(ledger, id = 'agy-native-oauth') {
   const row = ledger.families.find((family) => family.id === id);
