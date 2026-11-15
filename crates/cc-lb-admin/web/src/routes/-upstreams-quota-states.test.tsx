@@ -14,12 +14,14 @@ import {
 import type {
   DashboardUsageResponse,
   LatestResponse,
+  QuotaSnapshot,
   SeriesResponse,
   SubscriptionMetadataResponse,
   UpstreamKeyUsageResponse,
   UpstreamLatestSnapshots,
   UpstreamOAuthStatusResponse,
 } from '../lib/api';
+import { formatAbsolute } from '../lib/locale';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
 import {
@@ -27,6 +29,7 @@ import {
   pendingQuery,
   successQuery,
 } from '../lib/test-utils/hook-results';
+import naturalFreshness from './natural-freshness-evidence.fixture.json';
 import { Route } from './upstreams';
 
 const Component = Route.options.component as ComponentType;
@@ -471,5 +474,248 @@ describe('Gemini reading retained from an earlier poll', () => {
       .getByTestId('upstream-row-quota')
       .querySelector('[data-window="gemini_5h"]');
     expect(cell?.textContent).toBe('Gemini 5h20%');
+  });
+});
+
+describe('D1: selected credit evidence in the actual upstream route', () => {
+  // Sanitized projection of dashboard/natural-freshness-evidence.json.
+  // Values and expectations below are captured facts, not selector output.
+  const capturedWindows = naturalFreshness.windows.map((window) =>
+    quotaSnapshot(window as Partial<QuotaSnapshot>),
+  );
+  const capturedNow = 1794683845;
+  const apiAt = 1794683808816;
+  const headerAt = 1794681978789;
+
+  function show(
+    windows = structuredClone(capturedWindows),
+    maxStalenessSecs = 1800,
+    kind: Upstream['kind'] = 'openai_oauth',
+    meters: Parameters<typeof latestRow>[1] = [],
+  ) {
+    vi.setSystemTime(capturedNow * 1000);
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      successQuery<UpstreamsData>({ upstreams: [{ ...upstream, kind }] }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      successQuery<QuotaLatestData>({
+        now_unix_secs: capturedNow,
+        max_staleness_secs: maxStalenessSecs,
+        upstreams: [latestRow(windows, meters)],
+      }),
+    );
+    render(element());
+    return quotaSection();
+  }
+
+  function expectCaption(stale: boolean) {
+    const caption = quotaSection().getByTestId('quota-freshness');
+    expect(within(caption).queryByText('Stale:') != null).toBe(stale);
+    return caption;
+  }
+
+  function expectCaptionTimestamp(caption: HTMLElement, timestamp: number) {
+    const title = formatAbsolute(
+      new Date(timestamp),
+      window.navigator.language || 'en-US',
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
+    expect(within(caption).getByTitle(title)).not.toBeNull();
+  }
+
+  it.each([false, true])(
+    'D1-01 captured fresh API credits ignore unrelated stale header (reversed=%s)',
+    (reversed) => {
+      const windows = structuredClone(capturedWindows);
+      const section = show(reversed ? windows.reverse() : windows);
+      const facts = within(section.getByTestId('codex-credit-facts'));
+      expect(facts.getByText('Available')).not.toBeNull();
+      expect(facts.getByText('12500.1234000000 credits')).not.toBeNull();
+      expect(facts.getByText('Status: Usage API')).not.toBeNull();
+      expect(facts.getByText('Balance: Usage API')).not.toBeNull();
+      expect(section.getByRole('meter').getAttribute('aria-valuenow')).toBe(
+        '60',
+      );
+      expect(facts.queryByRole('meter')).toBeNull();
+      const caption = expectCaption(false);
+      expectCaptionTimestamp(caption, apiAt);
+    },
+  );
+
+  it.each(['limit', 'fallback', 'availability', 'window', 'raw'] as const)(
+    'D1-02 keeps stale selected %s evidence in the caption',
+    (restriction) => {
+      const windows = structuredClone(capturedWindows);
+      const api = windows.find((window) => window.window === 'overage')!;
+      const header = windows.find((window) => window.window === 'unified')!;
+      if (restriction === 'limit') {
+        // The newer captured API explicitly clears the old limit. Omit that
+        // field here so this control actually selects the stale header limit.
+        api.credits!.limit_reached = null;
+        header.credits!.limit_reached = true;
+      }
+      if (restriction === 'fallback') {
+        header.fallback_available = false;
+        header.credits = undefined;
+        api.credits!.has_credits = null;
+        api.credits!.unlimited = null;
+      }
+      if (restriction === 'availability') {
+        api.credits!.has_credits = null;
+        api.credits!.unlimited = null;
+      }
+      if (restriction === 'window') {
+        const weekly = windows.find((window) => window.window === '7d')!;
+        weekly.state = 'stale';
+        weekly.observed_at_unix_millis = headerAt;
+      }
+      const section = show(
+        windows,
+        1800,
+        'openai_oauth',
+        restriction === 'raw'
+          ? [rawMeter({ state: 'stale', observed_at_unix_millis: headerAt })]
+          : [],
+      );
+      expectCaption(true);
+      const facts = within(section.getByTestId('codex-credit-facts'));
+      expect(facts.getByText('12500.1234000000 credits')).not.toBeNull();
+      expect(facts.getByText('Balance: Usage API')).not.toBeNull();
+      if (restriction === 'limit' || restriction === 'fallback') {
+        expect(
+          facts.getByText(restriction === 'limit' ? 'Blocked' : 'Unavailable'),
+        ).not.toBeNull();
+        expect(
+          facts.getByText('Status: Response headers · stale'),
+        ).not.toBeNull();
+      }
+      if (restriction === 'availability') {
+        expect(facts.getByText('Stale')).not.toBeNull();
+        expect(
+          facts.getByText('Status: Response headers · stale'),
+        ).not.toBeNull();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'D1-03 field request order wins over clock order (reversed=%s)',
+    (reversed) => {
+      const windows = structuredClone(capturedWindows);
+      const api = windows.find((window) => window.window === 'overage')!;
+      const header = windows.find((window) => window.window === 'unified')!;
+      api.credits!.observations = {
+        has_credits: {
+          source: 'api',
+          observed_at_unix_millis: apiAt,
+          request_order: { publisher: 'captured-account', sequence: 2 },
+        },
+        balance: {
+          source: 'api',
+          observed_at_unix_millis: apiAt,
+          request_order: { publisher: 'captured-account', sequence: 2 },
+        },
+      };
+      header.credits!.has_credits = false;
+      header.credits!.balance = '1.0000';
+      header.credits!.observations = {
+        has_credits: {
+          source: 'header',
+          observed_at_unix_millis: apiAt + 1000,
+          request_order: { publisher: 'captured-account', sequence: 1 },
+        },
+        balance: {
+          source: 'header',
+          observed_at_unix_millis: apiAt + 1000,
+          request_order: { publisher: 'captured-account', sequence: 1 },
+        },
+      };
+      const section = show(reversed ? windows.reverse() : windows);
+      const facts = within(section.getByTestId('codex-credit-facts'));
+      expect(facts.getByText('Available')).not.toBeNull();
+      expect(facts.getByText('12500.1234000000 credits')).not.toBeNull();
+      expect(facts.getByText('Balance: Usage API')).not.toBeNull();
+      expectCaption(false);
+    },
+  );
+
+  it.each([
+    [1800, false, 'Available', 'Status: Usage API'],
+    [300, true, 'Stale', 'Status: Usage API · stale'],
+  ] as const)(
+    'D1-03 uses field timestamp and actual max staleness %s',
+    (maxStaleness, stale, status, source) => {
+      const windows = structuredClone(capturedWindows);
+      const api = windows.find((window) => window.window === 'overage')!;
+      api.credits!.observations = {
+        has_credits: {
+          source: 'api',
+          observed_at_unix_millis: (capturedNow - 600) * 1000,
+        },
+        unlimited: {
+          source: 'api',
+          observed_at_unix_millis: (capturedNow - 600) * 1000,
+        },
+      };
+      const section = show(windows, maxStaleness);
+      const facts = within(section.getByTestId('codex-credit-facts'));
+      expect(facts.getByText(status)).not.toBeNull();
+      expect(facts.getByText(source)).not.toBeNull();
+      expect(facts.getByText('Balance: Usage API')).not.toBeNull();
+      expectCaptionTimestamp(expectCaption(stale), (capturedNow - 600) * 1000);
+    },
+  );
+
+  it('D1-03 keeps selected stale balance provenance separate from fresh status', () => {
+    const windows = structuredClone(capturedWindows);
+    const api = windows.find((window) => window.window === 'overage')!;
+    api.credits!.observations = {
+      balance: { source: 'header', observed_at_unix_millis: headerAt },
+    };
+    // No other balance candidate: availability still comes from the fresh API.
+    windows.find((window) => window.window === 'unified')!.credits!.balance =
+      null;
+    const section = show(windows);
+    const facts = within(section.getByTestId('codex-credit-facts'));
+    expect(facts.getByText('Available')).not.toBeNull();
+    expect(facts.getByText('Status: Usage API')).not.toBeNull();
+    expect(facts.getByText('12500.1234000000 credits')).not.toBeNull();
+    expect(facts.getByText('Balance: Response headers · stale')).not.toBeNull();
+    expectCaptionTimestamp(expectCaption(true), headerAt);
+  });
+
+  it('D1-C preserves Anthropic 5h, 7d and extra usage facts and freshness', () => {
+    const section = show(
+      [
+        quotaSnapshot({
+          window: '5h',
+          utilization: 0.2,
+          observed_at_unix_millis: apiAt,
+        }),
+        quotaSnapshot({
+          window: '7d',
+          utilization: 0.4,
+          observed_at_unix_millis: apiAt,
+        }),
+        quotaSnapshot({
+          window: 'overage',
+          utilization: 0.5,
+          observed_at_unix_millis: apiAt,
+          extra_usage_enabled: true,
+          extra_usage_monthly_limit: 4000,
+          extra_usage_used_credits: 2000,
+        }),
+      ],
+      1800,
+      'anthropic_oauth',
+    );
+    expect(
+      section
+        .getAllByRole('meter')
+        .map((meter) => meter.getAttribute('aria-valuenow')),
+    ).toEqual(['20', '40', '50']);
+    expect(section.queryByTestId('codex-credit-facts')).toBeNull();
+    expect(section.getByText('Extra usage')).not.toBeNull();
+    expectCaption(false);
   });
 });

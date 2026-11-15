@@ -81,7 +81,10 @@ import {
   buildQuotaChartData,
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
-import { CodexCreditMini } from '../components/upstreams/codexCredits';
+import {
+  CodexCreditMini,
+  selectCodexCredits,
+} from '../components/upstreams/codexCredits';
 import {
   isAnthropicBaseUrl,
   usageFixLine,
@@ -1385,6 +1388,26 @@ export function DetailView({
         ),
       };
     }, [selectedLatest, upstream.kind, nowUnixSecs]);
+  const quotaFreshnessObservations = useMemo(() => {
+    const credits = selectCodexCredits(
+      selectedLatest?.windows ?? [],
+      quotaLatest.data?.max_staleness_secs,
+      nowUnixSecs * 1000,
+    );
+    return [
+      ...quotaCards.filter(
+        (snapshot) => snapshot.credits == null && snapshot.window !== 'unified',
+      ),
+      ...(credits?.freshnessObservations ?? []),
+      ...rawMeters,
+    ];
+  }, [
+    selectedLatest,
+    quotaLatest.data?.max_staleness_secs,
+    nowUnixSecs,
+    quotaCards,
+    rawMeters,
+  ]);
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
     windows: quotaWindows,
@@ -1686,9 +1709,7 @@ export function DetailView({
         <span className="flex flex-wrap items-center gap-x-2">
           Used per window and when it resets
           {!quotaLatestPending && quotaDetailState === 'rows' ? (
-            <QuotaFreshnessCaption
-              snapshots={[...(selectedLatest?.windows ?? []), ...rawMeters]}
-            />
+            <QuotaFreshnessCaption snapshots={quotaFreshnessObservations} />
           ) : null}
           {!quotaLatestPending &&
           quotaDetailState === 'rows' &&

@@ -103,12 +103,9 @@ const SESSION_FLOOR_REM = 4.125;
 /** Session baseline width at the desktop threshold before desktop slack. */
 const SESSION_DESKTOP_REM = 7;
 
-// The 43.75rem ten-column minimum (700px) fits inside a 768px portrait tablet
-// card (`PageContainer` 2×32px gutter + 2×2px card border = 700px clientWidth);
-// the 39.6875rem nine-column minimum (635px) fits single-entity detail tables.
-// At the 65.5rem (1048px) / 59rem (944px) desktop baseline, Tokens caps at
-// 12rem (192px) and extra desktop width goes to Session, Principal, Upstream
-// and Model. Below 42rem (672px) rows stack into three-line M4 mobile cards.
+// Tablet tables keep readable identity columns and scroll within their panel
+// when all columns cannot fit. Numeric columns retain their compact budgets.
+// Below 42rem rows stack into the existing three-line mobile cards.
 const COLUMNS = {
   time: {
     label: 'Timestamp',
@@ -118,8 +115,8 @@ const COLUMNS = {
   },
   principal: {
     label: 'Principal',
-    rem: 4.0625,
-    remDesktop: 6.5,
+    rem: 8,
+    remDesktop: 8,
     grow: 1.75,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     cardBoth:
@@ -127,8 +124,8 @@ const COLUMNS = {
   },
   upstream: {
     label: 'Upstream',
-    rem: 4.0625,
-    remDesktop: 6.5,
+    rem: 8,
+    remDesktop: 8,
     grow: 1.45,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     // Reads "principal → upstream" when both cells are shown.
@@ -150,8 +147,8 @@ const COLUMNS = {
   },
   model: {
     label: 'Model',
-    rem: 4.625,
-    remDesktop: 7,
+    rem: 8.5,
+    remDesktop: 8.5,
     grow: 1,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-4 @max-[42rem]/events:col-span-2 @max-[42rem]/events:text-left @max-[42rem]/events:text-caption',
   },
@@ -383,9 +380,8 @@ const RequestEventRow = memo(function RequestEventRow({
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const thinkingLevel = event.thinking_level?.trim() || null;
   const modelName = event.model?.replace(CLAUDE_PREFIX_RE, '') ?? null;
-  // 9ch of the mono font keeps "opus-5-5", "haiku-5-5", "sonnet-4…" in compact
-  // tablet columns while yielding space before thinking/tier badges.
-  const modelFloorCh = modelName == null ? 0 : Math.min(modelName.length, 9);
+  // Keep the model family and version visible before optional badges.
+  const modelFloorCh = modelName == null ? 0 : Math.min(modelName.length, 11);
   const at = eventTime(event);
   const bothEntities = showPrincipal && showUpstream;
 
@@ -608,8 +604,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
       (k !== 'upstream' || showUpstream),
   );
   const colCount = visible.length;
-  // The table never narrows below its compact columns plus Session's floor;
-  // with both entities that is 43.75rem (700px) and with one 39.6875rem (635px).
+  // Preserve each column's readable floor; the container owns overflow.
   const minWidthRem = visible.reduce(
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
@@ -630,7 +625,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
 
   return (
     <>
-      <div className="@container/events">
+      <div className="@container/events overflow-x-auto">
         <Table
           className="table-fixed @min-[42rem]/events:min-w-(--events-min-w) @max-[42rem]/events:block"
           style={
