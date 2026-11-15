@@ -544,6 +544,152 @@ async fn native_truncated_sse_emits_exactly_one_error_and_non_success_terminal()
 }
 
 #[tokio::test]
+async fn native_truncated_sse_error_diagnostics_survive_error_frame_drop() -> TestResult {
+    for (kind, base_url, fixture) in [
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            "https://generativelanguage.googleapis.com/",
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n".as_slice(),
+        ),
+        (
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+            b"event: response\ndata: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}}\n\nevent: response\ndata: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n".as_slice(),
+        ),
+    ] {
+        for drop_after_error in [true, false] {
+            for with_hook in [false, true] {
+                let dir = tempfile::tempdir()?;
+                let storage = Arc::new(sqlite_storage(&dir, "gemini-truncated-sink.sqlite").await?);
+                let test_bus = TestLifecycleBus::new()
+                    .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+                let mut receiver = test_bus.bus.subscribe_lifecycle();
+                let hook = with_hook.then(|| {
+                    Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>
+                });
+                let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
+                    None,
+                    hook,
+                    Arc::new(FixedDispatch {
+                        status: StatusCode::OK,
+                        headers: sse_headers(),
+                        body: Bytes::from_static(fixture),
+                    }),
+                    LifecycleConfig::default(),
+                    upstream_record(kind, base_url),
+                ))
+                .with_event_bus(test_bus.bus_arc());
+                let response = handle_authenticated(&lifecycle, native_request("?alt=sse")).await?;
+                let status = response.status();
+                let headers = response.headers().clone();
+                let mut downstream = response.into_body();
+                let mut received = Vec::new();
+                let message = loop {
+                    let frame = tokio::time::timeout(Duration::from_secs(3), downstream.frame())
+                        .await
+                        .expect("truncated SSE produces its next frame")
+                        .expect("truncated SSE emits an error before downstream EOF")?
+                        .into_data()
+                        .expect("truncated SSE produces a data frame");
+                    received.extend_from_slice(&frame);
+                    // The first raw chunk is content, not the generated error.
+                    // Parse accumulated bytes so only a dispatched SSE error
+                    // ends the consumer, preserving the wire's LF boundaries.
+                    let parsed = parsed_sse_events(&received);
+                    if let Some(event) = parsed.iter().find(|event| event.event == "error") {
+                        let error: serde_json::Value = serde_json::from_slice(&event.data)?;
+                        let message = error["error"]["message"]
+                            .as_str()
+                            .expect("delivered framing error has a message");
+                        assert!(!message.is_empty(), "delivered framing error is diagnostic");
+                        break message.to_owned();
+                    }
+                };
+                if drop_after_error {
+                    // Do not resume the generator after its error-frame yield.
+                    drop(downstream);
+                } else {
+                    let remaining = downstream.collect().await?.to_bytes();
+                    assert!(remaining.is_empty(), "no second error frame after draining");
+                    received.extend_from_slice(&remaining);
+                }
+
+                let mut events = tokio::time::timeout(Duration::from_secs(3), async {
+                    let mut events = Vec::new();
+                    loop {
+                        let event = receiver.recv().await.expect("lifecycle event delivered");
+                        let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+                        events.push(event);
+                        if terminated {
+                            break events;
+                        }
+                    }
+                })
+                .await
+                .expect("disposing of the truncated SSE body terminates the request");
+                let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+                assert_eq!(rows.len(), 1, "one persisted request event");
+                loop {
+                    match receiver.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("lifecycle events remain observable: {error}"),
+                    }
+                }
+                let observation = Observation {
+                    status,
+                    headers,
+                    body: Bytes::from(received),
+                    row: rows.remove(0),
+                    events,
+                };
+                assert_eq!(
+                    observation.row.upstream_error_type.as_deref(),
+                    Some("upstream_response_framing_error"),
+                    "framing diagnostic survives drop_after_error={drop_after_error}, with_hook={with_hook}, upstream={kind:?}",
+                );
+                assert_eq!(
+                    observation.row.upstream_error_message.as_deref(),
+                    Some(message.as_str()),
+                    "persisted diagnostic matches the dispatched error",
+                );
+                observation.assert_framing_error();
+                let content = parsed_sse_events(&observation.body)
+                    .into_iter()
+                    .filter(|event| event.event != "error")
+                    .map(|event| serde_json::from_slice::<serde_json::Value>(&event.data))
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert!(
+                    content.iter().any(|event| {
+                        event["candidates"][0]["content"]["parts"][0]["text"] == "hello"
+                    }),
+                    "complete upstream content precedes the generated error",
+                );
+                let completions = observation
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LifecycleEvent::StreamCompleted { result, .. } => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    completions.len(),
+                    1,
+                    "one stream completion after body disposal",
+                );
+                let completion = completions[0]
+                    .as_ref()
+                    .expect_err("incomplete SSE is a stream error");
+                assert_eq!(completion.error_type, "upstream_response_framing_error");
+                assert_eq!(completion.error_message, message);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_api_key_does_not_unwrap_oauth_response_envelope() -> TestResult {
     for with_hook in [false, true] {
         for is_sse in [false, true] {
