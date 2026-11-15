@@ -390,6 +390,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .execute(storage.pool())
     .await
     .expect("install pricing completeness columns for current writer");
+    sqlx::raw_sql(include_str!(
+        "../migrations/0126_overview_error_attribution.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install attributed excluded-error schema for current writer");
     sqlx::query(
         "UPDATE usage_rollup_reconciliations_v1
          SET status = 'complete'
@@ -499,7 +505,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT error_count FROM overview_excluded_error_rollups_v1 \
+            "SELECT SUM(error_count) FROM overview_excluded_error_rollups_v1 \
              WHERE resolution = 'minute' AND bucket_start_unix_secs = ?",
         )
         .bind(1_800_000_000_i64)
@@ -749,8 +755,14 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         )
         .await
         .expect("query migrated excluded errors");
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0].error_count, 2);
+    assert_eq!(excluded.len(), 2);
+    for upstream_id in [gemini_upstream_id, Uuid::nil()] {
+        let bucket = excluded
+            .iter()
+            .find(|bucket| bucket.upstream_id == Some(upstream_id))
+            .expect("excluded errors preserve their upstream identity");
+        assert_eq!(bucket.error_count, 1);
+    }
 
     let second_run = storage
         .rollup_usage_once()
@@ -1183,7 +1195,7 @@ async fn rollup_and_keepalive_pruners_bound_total_rows_across_both_tables() {
     ] {
         sqlx::query("INSERT INTO usage_rollups_v2 (resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, updated_at) VALUES (?, ?, 'principal', 'upstream', 'upstream', 'model', 0)")
             .bind(resolution).bind(at).execute(storage.pool()).await.expect("seed rollup");
-        sqlx::query("INSERT INTO overview_excluded_error_rollups_v1 (resolution, bucket_start_unix_secs, error_count, updated_at) VALUES (?, ?, 1, 0)")
+        sqlx::query("INSERT INTO overview_excluded_error_rollups_v1 (resolution, bucket_start_unix_secs, upstream_id, error_count, updated_at) VALUES (?, ?, '00000000-0000-0000-0000-000000000000', 1, 0)")
             .bind(resolution).bind(at).execute(storage.pool()).await.expect("seed excluded rollup");
     }
     assert_eq!(

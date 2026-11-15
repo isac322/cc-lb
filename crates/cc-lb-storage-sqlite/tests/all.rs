@@ -10,6 +10,8 @@ mod cache_keepalive_session_reads;
 mod migration_versions;
 #[path = "name_active_unique_migrations.rs"]
 mod name_active_unique_migrations;
+#[path = "overview_error_attribution_migration.rs"]
+mod overview_error_attribution_migration;
 #[path = "phase3_relational_retention.rs"]
 mod phase3_relational_retention;
 #[path = "price_catalog_retention.rs"]

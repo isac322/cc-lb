@@ -229,7 +229,7 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         .expect("summary ETag")
         .to_owned();
     assert!(usage_etag.starts_with("W/\"dashboard:usage:v3:"));
-    assert!(summary_etag.starts_with("W/\"dashboard:summary:v3:"));
+    assert!(summary_etag.starts_with("W/\"dashboard:summary:v4:"));
     let checkpoint = storage.usage_rollup_checkpoint().await.unwrap().unwrap();
     let window_end = now.div_ceil(60) * 60;
     for (uri, old_etag) in [
@@ -1104,6 +1104,193 @@ async fn summary_error_rate_excludes_client_navigation_statuses() {
     assert_eq!(body["totals"]["error_rate"], 0.2);
 }
 
+async fn summary_captured_provider_scope_matches_global_error_oracle() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let openai_id = Uuid::from_u128(0x130001);
+    let gemini_id = Uuid::from_u128(0x130002);
+    let second_gemini_id = Uuid::from_u128(0x130003);
+    for (id, name, kind) in [
+        (openai_id, "captured-openai", UpstreamKind::OpenaiOauth),
+        (gemini_id, "captured-gemini", UpstreamKind::GeminiOauth),
+        (
+            second_gemini_id,
+            "captured-gemini-second",
+            UpstreamKind::GeminiOauth,
+        ),
+    ] {
+        UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id,
+                name: name.to_owned(),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let event_ts = TEST_NOW_UNIX_SECS - 120;
+    // Sanitized status/provider oracle from dashboard/findings.md F2 in the
+    // 2026-11-15 captured QA: OpenAI 200/400, Gemini 200/403/403.
+    // Summary excludes both 403s; usage deliberately retains all HTTP errors.
+    for (request_id, upstream_id, upstream_name, status) in [
+        ("openai-ok", openai_id, "captured-openai", 200),
+        ("openai-model-rejected", openai_id, "captured-openai", 400),
+        ("gemini-count-tokens", gemini_id, "captured-gemini", 200),
+        ("gemini-tos-rejected", gemini_id, "captured-gemini", 403),
+        (
+            "gemini-profile-rejected",
+            second_gemini_id,
+            "captured-gemini-second",
+            403,
+        ),
+    ] {
+        let mut event = usage_event(event_ts, request_id, upstream_id, upstream_name, 0);
+        event.status = status;
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+
+    // Check usage independently before the summary regression can fail.
+    for (range, step) in [("1h", "minute"), ("24h", "hour")] {
+        for (scope, requests, errors) in [
+            ("", 5, 3),
+            ("&providers=openai,gemini", 5, 3),
+            ("&providers=openai", 2, 1),
+            ("&providers=gemini", 3, 2),
+            ("&providers=anthropic", 0, 0),
+        ] {
+            let uri =
+                format!("/admin/v1/dashboard/usage?range={range}&step={step}&group_by=none{scope}");
+            let (full, totals) = usage_projection_pair(&admin_app, &uri).await;
+            assert_usage_totals_match_full_collapse(&full, &totals);
+            for (field, expected) in [("request_count", requests), ("error_count", errors)] {
+                let actual = totals["series"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|series| series["buckets"].as_array().unwrap())
+                    .map(|bucket| bucket[field].as_u64().unwrap())
+                    .sum::<u64>();
+                assert_eq!(actual, expected, "{uri}: {field}");
+            }
+        }
+    }
+
+    for (range, step, width, bucket_count) in [("1h", "minute", 60, 60), ("24h", "hour", 3600, 24)]
+    {
+        for (scope, requests, errors, error_rate) in [
+            ("", 5, 1, 0.2),
+            ("&providers=openai", 2, 1, 0.5),
+            ("&providers=gemini", 3, 0, 0.0),
+            ("&providers=openai,gemini", 5, 1, 0.2),
+            ("&providers=anthropic", 0, 0, 0.0),
+        ] {
+            let uri = format!("/admin/v1/dashboard/summary?range={range}{scope}");
+            let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(body["step"], step, "{uri}");
+            assert_eq!(body["totals"]["request_count"], requests, "{uri}");
+            assert_eq!(body["totals"]["error_count"], errors, "{uri}");
+            assert_eq!(body["totals"]["error_rate"], error_rate, "{uri}");
+            assert_eq!(body["observed"], requests > 0, "{uri}");
+            assert_summary_scope_buckets(&body, width, bucket_count, event_ts, requests, errors);
+        }
+    }
+}
+
+async fn summary_anthropic_without_excluded_statuses_is_unchanged() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(0x130004);
+    UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: upstream_id,
+            name: "healthy-anthropic".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+    let event_ts = TEST_NOW_UNIX_SECS - 120;
+    for status in [200, 400, 500] {
+        let mut event = usage_event(
+            event_ts,
+            &format!("anthropic-control-{status}"),
+            upstream_id,
+            "healthy-anthropic",
+            0,
+        );
+        event.status = status;
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    for (range, step, width, bucket_count) in [("1h", "minute", 60, 60), ("24h", "hour", 3600, 24)]
+    {
+        for scope in ["", "&providers=anthropic"] {
+            let uri = format!("/admin/v1/dashboard/summary?range={range}{scope}");
+            let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(body["step"], step, "{uri}");
+            assert_eq!(body["totals"]["request_count"], 3, "{uri}");
+            assert_eq!(body["totals"]["error_count"], 2, "{uri}");
+            assert_eq!(body["totals"]["error_rate"], 2.0 / 3.0, "{uri}");
+            assert_eq!(body["observed"], true, "{uri}");
+            assert_summary_scope_buckets(&body, width, bucket_count, event_ts, 3, 2);
+        }
+    }
+}
+
+fn assert_summary_scope_buckets(
+    body: &Value,
+    width: u64,
+    bucket_count: usize,
+    event_ts: u64,
+    requests: u64,
+    errors: u64,
+) {
+    let window_end = TEST_NOW_UNIX_SECS.div_ceil(width) * width;
+    let window_start = window_end - bucket_count as u64 * width;
+    assert_eq!(body["window_start_unix_secs"], window_start);
+    assert_eq!(body["window_end_unix_secs"], window_end);
+    let buckets = body["sparkline"]["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), bucket_count);
+    let event_bucket = event_ts / width * width;
+    for (index, bucket) in buckets.iter().enumerate() {
+        let start = window_start + index as u64 * width;
+        assert_eq!(bucket["bucket_start_unix_secs"], start);
+        let occupied = start == event_bucket;
+        assert_eq!(bucket["request_count"], if occupied { requests } else { 0 });
+        assert_eq!(bucket["error_count"], if occupied { errors } else { 0 });
+    }
+}
+
 async fn usage_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(
@@ -1235,13 +1422,22 @@ async fn dashboard_semantics_version_invalidates_old_etags_without_new_traffic()
         };
         assert_eq!(completeness, "unknown", "{uri}");
         let etag = headers[header::ETAG].to_str().unwrap().to_owned();
-        assert!(etag.contains(":v3:"), "{etag}");
+        let semantics_version = if uri.contains("/summary") {
+            ":v4:"
+        } else {
+            ":v3:"
+        };
+        assert!(etag.contains(semantics_version), "{etag}");
         validators.push((uri, etag));
     }
     storage.rollup_usage_once().await.unwrap();
     assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
     for (uri, current_etag) in validators {
-        let previous_etag = current_etag.replacen(":v3:", ":v2:", 1);
+        let previous_etag = if uri.contains("/summary") {
+            current_etag.replacen(":v4:", ":v3:", 1)
+        } else {
+            current_etag.replacen(":v3:", ":v2:", 1)
+        };
         let (status, headers, bytes) = authed_bytes_with_headers(
             admin_app.clone(),
             "GET",
@@ -1749,4 +1945,10 @@ async fn dashboard_usage_suite_part_2() {
     summary_error_rate_excludes_client_navigation_statuses().await;
     usage_503_when_storage_missing().await;
     usage_is_unchanged_when_diagnostics_are_taken_before_storage().await;
+}
+
+#[tokio::test]
+async fn dashboard_usage_suite_part_3() {
+    summary_anthropic_without_excluded_statuses_is_unchanged().await;
+    summary_captured_provider_scope_matches_global_error_oracle().await;
 }

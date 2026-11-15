@@ -223,6 +223,10 @@ Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on 
 
 `GET /admin/v1/dashboard/usage` reads the same rollups. Per-principal category costs come directly from `usage_rollups_v2`; principal totals use a 2 s in-process coalescing cache (`PRINCIPAL_TOTALS_CACHE_TTL`).
 
+Summary error counts exclude HTTP 401, 403 and 404 in both global and provider-filtered views. Excluded counts retain the same upstream identity as the usage rollup, so one provider's exclusions cannot reduce another provider's errors. The usage endpoint retains its existing count of all HTTP errors.
+
+Upgrades reconstruct upstream attribution from retained request events through the existing rollup checkpoint. Initialization commits bounded batches and resumes after interruption before serving requests. If raw events were already removed, their unreconstructable exclusion count remains global-only; it is never assigned to a provider. This preserves global history but cannot recover exact provider-filtered errors for orphaned historical buckets left by an interrupted prune. Normally completed pruning removes those expired buckets too.
+
 ### Rollup pricing completeness
 
 Local rollups retain three additive event counters: `priced_event_count`,

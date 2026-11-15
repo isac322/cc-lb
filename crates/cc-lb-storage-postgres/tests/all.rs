@@ -20,6 +20,8 @@ mod drop_redundant_indexes;
 mod hook_metadata_mode_backfill;
 #[path = "migration_versions.rs"]
 mod migration_versions;
+#[path = "overview_error_attribution_migration.rs"]
+mod overview_error_attribution_migration;
 #[path = "plan_tier_concurrency.rs"]
 mod plan_tier_concurrency;
 #[path = "principal_terminal_strategy.rs"]

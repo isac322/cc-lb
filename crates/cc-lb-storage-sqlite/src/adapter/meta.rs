@@ -127,7 +127,7 @@ impl MetaStore for SqliteStorage {
                     })?;
             }
             tx.commit().await.map_err(map_sqlx_error)?;
-            return Ok(());
+            return finish_overview_error_attribution(self).await;
         }
         tx.rollback().await.map_err(map_sqlx_error)?;
 
@@ -146,7 +146,7 @@ impl MetaStore for SqliteStorage {
         .await
         .map_err(map_sqlx_error)?;
 
-        Ok(())
+        finish_overview_error_attribution(self).await
     }
 
     async fn backend_kind(&self) -> StorageResult<BackendKind> {
@@ -237,5 +237,147 @@ fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {
         value => Err(StorageError::Corrupted {
             message: format!("invalid backend_kind meta value {value}"),
         }),
+    }
+}
+
+async fn finish_overview_error_attribution(storage: &SqliteStorage) -> StorageResult<()> {
+    use std::collections::BTreeMap;
+
+    loop {
+        let phase: String = sqlx::query_scalar(
+            "SELECT phase FROM overview_excluded_error_attribution_v1 WHERE id=1",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        if phase == "complete" {
+            return Ok(());
+        }
+        let mut tx = storage.begin_immediate().await?;
+        let (phase, cursor, upper): (String, i64, i64) = sqlx::query_as(
+            "SELECT phase,cursor,upper_bound FROM overview_excluded_error_attribution_v1 WHERE id=1",
+        ).fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
+        if phase == "complete" {
+            return Ok(());
+        }
+        if phase == "copy" {
+            let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+                "SELECT resolution,bucket_start_unix_secs,error_count,updated_at
+                 FROM overview_excluded_error_legacy_v1
+                 ORDER BY resolution,bucket_start_unix_secs LIMIT 1000",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            for (resolution, bucket, count, updated) in &rows {
+                sqlx::query(
+                    "INSERT INTO overview_excluded_error_rollups_v1
+                     (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
+                     VALUES (?,?,'',?,?)",
+                )
+                .bind(resolution)
+                .bind(bucket)
+                .bind(count)
+                .bind(updated)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+                sqlx::query(
+                    "DELETE FROM overview_excluded_error_legacy_v1
+                     WHERE resolution=? AND bucket_start_unix_secs=?",
+                )
+                .bind(resolution)
+                .bind(bucket)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            if rows.len() < 1000 {
+                sqlx::query("DROP TABLE overview_excluded_error_legacy_v1")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                sqlx::query(
+                    "UPDATE overview_excluded_error_attribution_v1 SET phase='events' WHERE id=1",
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        } else {
+            let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
+                "SELECT r.id,r.list_ts_ms,
+                        COALESCE(r.upstream_id,
+                            (SELECT s.id FROM upstream_spec_v1 s
+                             WHERE s.deleted_at IS NULL AND s.name=COALESCE(r.upstream_name,'unknown')),
+                            '00000000-0000-0000-0000-000000000000'),
+                        r.list_status
+                 FROM request_events_v1 r WHERE r.id>? AND r.id<=?
+                 ORDER BY r.id LIMIT 1000",
+            ).bind(cursor).bind(upper).fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+            let mut deltas = BTreeMap::new();
+            for (_, ts_ms, upstream, status) in &rows {
+                if !matches!(*status, 401 | 403 | 404) {
+                    continue;
+                }
+                for (resolution, width) in [("minute", 60_000), ("hour", 3_600_000)] {
+                    *deltas
+                        .entry((resolution, ts_ms / width * (width / 1000), upstream))
+                        .or_insert(0_i64) += 1;
+                }
+            }
+            for ((resolution, bucket, upstream), count) in deltas {
+                let moved = sqlx::query(
+                    "UPDATE overview_excluded_error_rollups_v1 SET error_count=error_count-?
+                     WHERE resolution=? AND bucket_start_unix_secs=? AND upstream_id='' AND error_count>=?",
+                ).bind(count).bind(resolution).bind(bucket).bind(count)
+                    .execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
+                if moved == 0 {
+                    let bucket_exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM overview_excluded_error_rollups_v1
+                         WHERE resolution=? AND bucket_start_unix_secs=?)",
+                    )
+                    .bind(resolution)
+                    .bind(bucket)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                    if bucket_exists {
+                        return Err(StorageError::Corrupted {
+                            message: format!(
+                                "overview excluded error attribution undercount: {resolution} bucket {bucket} cannot attribute {count} retained events"
+                            ),
+                        });
+                    }
+                    continue;
+                }
+                sqlx::query(
+                    "INSERT INTO overview_excluded_error_rollups_v1
+                     (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
+                     VALUES (?,?,?,?,unixepoch())
+                     ON CONFLICT (resolution,bucket_start_unix_secs,upstream_id)
+                     DO UPDATE SET error_count=error_count+excluded.error_count,updated_at=unixepoch()",
+                ).bind(resolution).bind(bucket).bind(upstream).bind(count)
+                    .execute(&mut *tx).await.map_err(map_sqlx_error)?;
+                sqlx::query(
+                    "DELETE FROM overview_excluded_error_rollups_v1
+                     WHERE resolution=? AND bucket_start_unix_secs=? AND upstream_id='' AND error_count=0",
+                ).bind(resolution).bind(bucket).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+            }
+            let next = rows.last().map_or(upper, |row| row.0);
+            sqlx::query(
+                "UPDATE overview_excluded_error_attribution_v1 SET cursor=?,phase=? WHERE id=1",
+            )
+            .bind(next)
+            .bind(if rows.len() < 1000 {
+                "complete"
+            } else {
+                "events"
+            })
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
     }
 }
