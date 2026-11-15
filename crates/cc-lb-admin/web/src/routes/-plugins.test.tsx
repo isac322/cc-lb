@@ -569,6 +569,15 @@ test('shows catalog and opens detail view', async () => {
   expect(screen.getByText(/cc_lb_plugin_call_duration_seconds/)).toBeDefined();
 });
 
+// These route tests supply only the query-result fields the component reads.
+// Keep the supplied fields checked against each hook's result contract.
+function partialQueryResult<T extends (...args: never[]) => unknown>(
+  _hook: T,
+  fields: { [K in keyof ReturnType<T>]?: ReturnType<T>[K] },
+): ReturnType<T> {
+  return fields as ReturnType<T>;
+}
+
 // Render both catalog arrangements and Inspect: the registry, not the current
 // fleet (or availability of its query), owns this plugin's explanation.
 test.each([
@@ -604,11 +613,15 @@ test.each([
   'preserves captured registry copy in catalog and Inspect with $name upstreams',
   async ({ query }) => {
     mockPluginPage();
-    vi.mocked(queries.usePluginRegistry).mockReturnValue({
-      data: { entries: [subscriptionPreference] },
-      isLoading: false,
-    } as never);
-    vi.mocked(queries.useUpstreams).mockReturnValue(query as never);
+    vi.mocked(queries.usePluginRegistry).mockReturnValue(
+      partialQueryResult(queries.usePluginRegistry, {
+        data: { entries: [subscriptionPreference] },
+        isLoading: false,
+      }),
+    );
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      partialQueryResult(queries.useUpstreams, query),
+    );
     renderWithProviders();
 
     // jsdom renders both responsive catalog branches.
@@ -636,6 +649,12 @@ test.each([
   },
 );
 
+// The API contract says string; null deliberately exercises a malformed wire
+// response, while the empty string remains a valid, distinct contract input.
+type NullableDescriptionEntry = Omit<queries.PluginEntry, 'description'> & {
+  description: string | null;
+};
+
 test.each([
   { description: null, expected: 'Registry fallback label' },
   { description: '', expected: 'No description provided.' },
@@ -643,18 +662,18 @@ test.each([
   'retains null versus empty registry description semantics: $description',
   async ({ description, expected }) => {
     mockPluginPage();
-    vi.mocked(queries.usePluginRegistry).mockReturnValue({
-      data: {
-        entries: [
-          {
-            ...subscriptionPreference,
-            description,
-            label: 'Registry fallback label',
-          },
-        ],
-      },
-      isLoading: false,
-    } as never);
+    const entry = {
+      ...subscriptionPreference,
+      description,
+      label: 'Registry fallback label',
+    } satisfies NullableDescriptionEntry;
+    vi.mocked(queries.usePluginRegistry).mockReturnValue(
+      partialQueryResult(queries.usePluginRegistry, {
+        // Intentionally cross the typed API boundary for the null wire case.
+        data: { entries: [entry as queries.PluginEntry] },
+        isLoading: false,
+      }),
+    );
     renderWithProviders();
     if (description === null) {
       expect(screen.getAllByText(/Registry fallback label/)).toHaveLength(2);

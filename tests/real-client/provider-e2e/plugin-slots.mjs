@@ -26,9 +26,7 @@ await access(bin, constants.X_OK);
 const wasmBytes = await readFile(wasm);
 const record = async (kind, identifier, deleteCommand) => appendFile(ledger,
   `${JSON.stringify({ kind, identifier, deleteCommand, createdAt: new Date().toISOString() })}\n`, { mode: 0o600 });
-await mkdir(out, { mode: 0o700 }); // Refuse reuse: never overwrite another run's evidence.
-await record('scratch-directory', out, `rm -r -- ${JSON.stringify(out)}`);
-await record('process', `harness pid=${process.pid}; output=${out}`, `kill -TERM ${process.pid}`);
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
 // Independent literal oracles, not computed by a shaper or response helper.
 // Gemini: challenge-proxy/AP-1-controlled.json, shape_control (2026-11-15).
@@ -75,42 +73,38 @@ const provider = http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(match.response);
 });
-await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
-const providerPort = provider.address().port;
-await record('http-listener', `harness pid=${process.pid}; 127.0.0.1:${providerPort}`, `kill -TERM ${process.pid}`);
 async function freePort() {
   const server = http.createServer();
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address().port;
-  await new Promise(resolve => server.close(resolve));
-  return port;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    return server.address().port;
+  } finally {
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+  }
 }
-const proxyPort = await freePort();
-const adminPort = await freePort();
-const metricsPort = await freePort();
-const token = randomBytes(32).toString('hex');
-const config = path.join(out, 'cc-lb.toml');
-await writeFile(config, `[runtime]\ndata_dir = ${JSON.stringify(path.join(out, 'data'))}\n[listener]\nproxy_addr = "127.0.0.1:${proxyPort}"\nadmin_addr = "127.0.0.1:${adminPort}"\nmetrics_addr = "127.0.0.1:${metricsPort}"\n[storage]\nkind = "sqlite"\npath = ${JSON.stringify(path.join(out, 'cc-lb.sqlite'))}\n[aead]\nkey_env = "CC_LB_MASTER_KEY"\n[[admin.auth.providers]]\nkind = "static_token"\nid = "local"\ntoken_env = "CC_LB_ADMIN_TOKEN"\n`, { mode: 0o600 });
-const child = spawn(bin, ['serve', '--config', config], {
-  cwd: out,
-  env: { ...process.env, CC_LB_ADMIN_TOKEN: token, CC_LB_MASTER_KEY: randomBytes(32).toString('hex'), RUST_LOG: 'warn' },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-await record('process', `cc-lb pid=${child.pid}; config=${config}`, `kill -TERM ${child.pid}`);
+let outputCreated = false;
+let providerPort;
+let proxyPort;
+let adminPort;
+let token;
+let child;
+let childClosed;
 let childError;
-child.on('error', error => { childError = error; });
 // Keep diagnostics in memory: runtime logs can contain credential-bearing request context.
 let diagnostics = '';
-for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { diagnostics = (diagnostics + data).slice(-16000); });
+const config = path.join(out, 'cc-lb.toml');
 const results = [];
 const errors = [];
 const resources = [];
-const endpoints = { admin: `http://127.0.0.1:${adminPort}`, proxy: `http://127.0.0.1:${proxyPort}`, provider: `http://127.0.0.1:${providerPort}` };
+const endpoints = {};
 async function recordAdmin(kind, data) {
   const identifier = `${kind} id=${data.id}; admin=${endpoints.admin}; config=${config}`;
   // All admin objects are confined to this run's SQLite file and scratch tree.
   // Removing that tree after stopping its recorded processes removes these rows.
-  await record(`admin-${kind}`, identifier, `# Stop recorded processes first; then remove isolated store: rm -r -- ${JSON.stringify(out)}`);
+  await record(`admin-${kind}`, identifier, `# Stop recorded processes first; then remove isolated store: rm -r -- ${shellQuote(out)}`);
   resources.push({ kind, id: data.id });
 }
 async function createPrincipal(name) {
@@ -137,6 +131,31 @@ async function admin(method, route, body, revision) {
   return { status: response.status, data: text ? JSON.parse(text) : null };
 }
 try {
+  await mkdir(out, { mode: 0o700 }); // Refuse reuse: never overwrite another run's evidence.
+  outputCreated = true;
+  await record('scratch-directory', out, `rm -r -- ${shellQuote(out)}`);
+  await record('process', `harness pid=${process.pid}; output=${out}`, `kill -TERM ${process.pid}`);
+  await new Promise((resolve, reject) => {
+    provider.once('error', reject);
+    provider.listen(0, '127.0.0.1', resolve);
+  });
+  providerPort = provider.address().port;
+  await record('http-listener', `harness pid=${process.pid}; 127.0.0.1:${providerPort}`, `kill -TERM ${process.pid}`);
+  proxyPort = await freePort();
+  adminPort = await freePort();
+  const metricsPort = await freePort();
+  token = randomBytes(32).toString('hex');
+  Object.assign(endpoints, { admin: `http://127.0.0.1:${adminPort}`, proxy: `http://127.0.0.1:${proxyPort}`, provider: `http://127.0.0.1:${providerPort}` });
+  await writeFile(config, `[runtime]\ndata_dir = ${JSON.stringify(path.join(out, 'data'))}\n[listener]\nproxy_addr = "127.0.0.1:${proxyPort}"\nadmin_addr = "127.0.0.1:${adminPort}"\nmetrics_addr = "127.0.0.1:${metricsPort}"\n[storage]\nkind = "sqlite"\npath = ${JSON.stringify(path.join(out, 'cc-lb.sqlite'))}\n[aead]\nkey_env = "CC_LB_MASTER_KEY"\n[[admin.auth.providers]]\nkind = "static_token"\nid = "local"\ntoken_env = "CC_LB_ADMIN_TOKEN"\n`, { mode: 0o600 });
+  child = spawn(bin, ['serve', '--config', config], {
+    cwd: out,
+    env: { ...process.env, CC_LB_ADMIN_TOKEN: token, CC_LB_MASTER_KEY: randomBytes(32).toString('hex'), RUST_LOG: 'warn' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.on('error', error => { childError = error; });
+  childClosed = new Promise(resolve => child.once('close', resolve));
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { diagnostics = (diagnostics + data).slice(-16000); });
+  await record('process', `cc-lb pid=${child.pid}; config=${config}`, `kill -TERM ${child.pid}`);
   let ready = false;
   for (let i = 0; i < 120; i++) {
     if (childError) throw childError;
@@ -230,13 +249,27 @@ try {
   // Deliberately do not print raw runtime diagnostics: they may include credentials.
   if (diagnostics) console.error('Runtime diagnostics captured in memory; omitted for credential safety.');
 } finally {
-  await writeFile(path.join(out, 'results.json'), JSON.stringify({ passed: !failed, legacyFixture: legacy, binary: bin, wasm, config, endpoints, process: { harnessPid: process.pid, childPid: child.pid, childExitCode: child.exitCode, childSignalCode: child.signalCode }, resources, errors, results, captures }, null, 2), { mode: 0o600 });
-  process.exitCode = failed ? 1 : 0;
-  if (retain) {
-    console.log(`RETAINED: harness PID ${process.pid}, cc-lb PID ${child.pid}, provider 127.0.0.1:${providerPort}; ledger ${ledger}`);
-  } else {
-    child.kill('SIGTERM');
-    await new Promise(resolve => provider.close(resolve));
-    // Keep all evidence and ledger entries. File deletion requires the owner's cleanup signal.
+  try {
+    if (outputCreated) {
+      await writeFile(path.join(out, 'results.json'), JSON.stringify({ passed: !failed, legacyFixture: legacy, binary: bin, wasm, config, endpoints, process: { harnessPid: process.pid, childPid: child?.pid, childExitCode: child?.exitCode, childSignalCode: child?.signalCode }, resources, errors, results, captures }, null, 2), { mode: 0o600 });
+    }
+    process.exitCode = failed ? 1 : 0;
+  } catch (error) {
+    process.exitCode = 1;
+    console.error(`Unable to write results.json: ${error.message}`);
+  } finally {
+    if (retain) {
+      console.log(`RETAINED: harness PID ${process.pid}, cc-lb PID ${child?.pid ?? 'not started'}, provider ${provider.listening ? `127.0.0.1:${providerPort}` : 'not listening'}; ledger ${ledger}`);
+    } else {
+      try {
+        if (child) {
+          child.kill('SIGTERM');
+          await childClosed;
+        }
+      } finally {
+        if (provider.listening) await new Promise(resolve => provider.close(resolve));
+      }
+      // Keep all evidence and ledger entries. File deletion requires the owner's cleanup signal.
+    }
   }
 }

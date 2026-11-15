@@ -1,3 +1,6 @@
+import type { UpstreamKind } from '../src/lib/api';
+import type { PluginEntry, Upstream } from '../src/lib/queries';
+
 // Built-in entry only from plugin-registry-final.json captured on 2026-11-14.
 // The synthetic ID replaces the captured registry ID; no account data is retained.
 export const subscriptionPreference = {
@@ -44,7 +47,7 @@ export const subscriptionPreference = {
     gemini: { filter: ['gemini_api_key', 'gemini_oauth'] },
     openai: { filter: ['openai_api_key', 'openai_oauth'] },
   },
-};
+} satisfies PluginEntry & Record<string, unknown>;
 
 export const upstreamPools = {
   'Anthropic-only': ['anthropic_oauth'],
@@ -52,9 +55,9 @@ export const upstreamPools = {
   'Gemini-only': ['gemini_oauth'],
   mixed: ['anthropic_oauth', 'openai_oauth', 'gemini_oauth', 'openai_api_key'],
   'API-key-only': ['anthropic_api_key', 'openai_api_key', 'gemini_api_key'],
-} as const;
+} as const satisfies Record<string, readonly UpstreamKind[]>;
 
-export function poolUpstreams(kinds: readonly string[]) {
+export function poolUpstreams(kinds: readonly UpstreamKind[]): Upstream[] {
   return kinds.map((kind, index) => ({
     id: `fixture-upstream-${index}`, name: `Fixture ${kind}`, kind,
     enabled: true, base_url: null, spec_revision: 1,

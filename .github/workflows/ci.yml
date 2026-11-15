@@ -785,6 +785,11 @@ jobs:
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots" \
           CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
             node tests/real-client/provider-e2e/plugin-slots.mjs
+          CC_LB_BIN="$PWD/target/debug/cc-lb" \
+          CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
+          CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots-lifecycle" \
+          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
+            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs
       - name: Show sccache stats
         if: always()
         run: |
