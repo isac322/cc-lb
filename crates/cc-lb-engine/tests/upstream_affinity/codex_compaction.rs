@@ -229,3 +229,117 @@ async fn codex_compaction_encrypted_content_binds_owner_across_http_continuation
     );
     Ok(())
 }
+
+async fn assert_additional_tools_schema_annotations_are_not_affinity_state(
+    annotation_type: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for annotation in ["default", "examples"] {
+        let ciphertext = format!("synthetic-schema-{annotation_type}-{annotation}");
+        let example = json!({
+            "type": annotation_type,
+            "encrypted_content": ciphertext,
+        });
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "encrypted_content": {"type": "string"},
+            },
+            "required": ["type", "encrypted_content"],
+            "additionalProperties": false,
+        });
+        parameters[annotation] = if annotation == "examples" {
+            json!([example])
+        } else {
+            example
+        };
+
+        let upstream = Uuid::from_u128(0x130703);
+        let store = Arc::new(MemoryAffinityStore::default());
+        let provider_response = json!({
+            "id": "resp_schema_annotation_control",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+        });
+        let dispatch =
+            RecordingDispatch::with_response(ResponseSpec::Json(provider_response.clone()));
+        let proxy = lifecycle(
+            vec![openai_upstream_record(upstream, "healthy", true)],
+            dispatch.clone(),
+            Some(store.clone()),
+        );
+        // Codex a41fe5b, protocol/src/models.rs:1097-1105:
+        // AdditionalTools carries a role and arbitrary JSON tool declarations.
+        // The default/example is valid function input data, not a Responses item.
+        let response = handle_authenticated(
+            &proxy,
+            responses_request(json!({
+                "model": "gpt-5-codex",
+                "store": false,
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "system",
+                        "tools": [{
+                            "type": "function",
+                            "name": "inspect_example",
+                            "description": "Inspect a structured example.",
+                            "parameters": parameters,
+                        }],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Say hello without calling a tool.",
+                        }],
+                    },
+                ],
+            })),
+        )
+        .await
+        .expect("stateless tool-schema request handled");
+        let status = response.status();
+        let body = response.into_body().collect().await?.to_bytes();
+        let value: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{annotation_type} schema {annotation} must not require an owner: {value}",
+        );
+        assert_eq!(value, provider_response);
+        assert_eq!(dispatch.call_count(), 1);
+        assert_eq!(
+            dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+            &["http://healthy.local/v1/responses".to_owned()],
+        );
+        assert_eq!(
+            store.upstream_for(&ws1296_openai_key(&ciphertext)),
+            None,
+            "{annotation_type} schema {annotation} must not acquire an affinity binding",
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_additional_tools_schema_annotations_compaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_additional_tools_schema_annotations_are_not_affinity_state("compaction").await
+}
+
+#[tokio::test]
+async fn codex_additional_tools_schema_annotations_compaction_summary()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_additional_tools_schema_annotations_are_not_affinity_state("compaction_summary").await
+}
+
+// The same recursive traversal already inspected reasoning before 7d3d29b;
+// this adjacent control must not be attributed to the compaction change.
+#[tokio::test]
+async fn codex_additional_tools_schema_annotations_reasoning()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_additional_tools_schema_annotations_are_not_affinity_state("reasoning").await
+}

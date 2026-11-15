@@ -351,11 +351,6 @@ impl<'a> KeyCollector<'a> {
                         object.get("encrypted_content"),
                     )?;
                 }
-                for child in object.values() {
-                    if matches!(child, Value::Array(_) | Value::Object(_)) {
-                        self.openai_reasoning_tree(Some(child))?;
-                    }
-                }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
