@@ -48,6 +48,8 @@ mod lifecycle_cache_keepalive_noop;
 mod lifecycle_candidate_builder;
 #[path = "lifecycle_client_disconnect.rs"]
 mod lifecycle_client_disconnect;
+#[path = "lifecycle_cost_metrics.rs"]
+mod lifecycle_cost_metrics;
 #[path = "lifecycle_event_policy.rs"]
 mod lifecycle_event_policy;
 #[path = "lifecycle_filter_pipeline.rs"]
