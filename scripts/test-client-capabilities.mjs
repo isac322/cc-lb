@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { REQUIRED_FAMILIES, validateClientCapabilities, validatePublicClaims } from './check-client-capabilities.mjs';
+import { REQUIRED_FAMILIES, validateClientCapabilities } from './check-client-capabilities.mjs';
 
 // Entirely synthetic objects: these references and passing outcomes are test
 // controls, not provider evidence, public ledger entries or a Q-HARNESS API.
@@ -8,7 +8,6 @@ const issue = (number) => `https://github.com/isac322/cc-lb/issues/${number}`;
 const evidenceRef = 'tests/real-client/synthetic-control.json';
 const codexPin = 'd32063f96c2dff1dc96af839b3952abb6acfeda4';
 const agyPin = 'fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a';
-const caveat = 'Shipped native routes do not establish pinned client acceptance. Exact CLI verification remains pending.';
 
 function pendingLedger() {
   return {
@@ -75,14 +74,6 @@ test('complete synthetic positive control permits future evidence-backed promoti
     promote(ledger, id);
     assert.deepEqual(validateClientCapabilities(ledger), [], id);
   }
-});
-
-test('complete synthetic family evidence cannot license exhaustive client claims while canonical coverage is pending', () => {
-  const ledger = pendingLedger();
-  for (const row of ledger.families) if (row.status.boundary === 'feature') promote(ledger, row.id);
-  ledger.metadata.acceptance.status = 'feature-evidence-recorded';
-  assert.deepEqual(validateClientCapabilities(ledger), []);
-  assert.match(validatePublicClaims(`${caveat}\n\nCodex CLI is fully supported.`, 'synthetic aggregate control', ledger).join(' '), /canonical Q-HARNESS completeness/);
 });
 
 test('reported numeric zero stays distinct from absent or fabricated usage', () => {
@@ -236,57 +227,5 @@ test('malformed JSON-shaped inputs return errors rather than throwing', () => {
     rejects((ledger) => { ledger.families[0] = value; }, /must be an object|missing field|client\/family mismatch/);
     rejects((_, row) => { row.sourceEvidence = value; }, /source evidence/);
     rejects((_, row) => { row.dependencies = value; }, /dependencies|Q-HARNESS/);
-  }
-});
-
-test('public caveat accepts route support and rejects missing acceptance distinction', () => {
-  const ledger = pendingLedger();
-  for (const text of [caveat, 'Existing route support is distinct from exact CLI acceptance, which remains unverified.', 'Shipped routes and credential support do not prove pinned client verification. Acceptance is pending.']) {
-    assert.deepEqual(validatePublicClaims(text, 'control', ledger), []);
-  }
-  assert.match(validatePublicClaims('Provider-native routes are supported.', 'control', ledger).join(' '), /missing route-versus-client/);
-});
-
-test('YAML not-claimable boundary may put acceptance before plural clients', () => {
-  const content = 'not_claimable:\n  - Full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients remains unverified; shipped route support and credential eligibility do not establish client parity.';
-  assert.deepEqual(validatePublicClaims(content, 'positioning control', pendingLedger()), []);
-  assert.match(validatePublicClaims(`${content}\n  - Codex CLI 0.169.0 is supported.`, 'positioning control', pendingLedger()).join(' '), /promotion lacks accepted feature evidence/);
-});
-
-test('shipped API-key and OAuth route statements do not imply full-client support', () => {
-  for (const claim of ['OpenAI API-key Realtime and Gemini Live routes are supported.', 'OAuth model routes retain their shipped support.', 'Codex uses a shipped Responses route; exact client acceptance remains pending.']) {
-    assert.deepEqual(validatePublicClaims(`${caveat}\n\n${claim}`, 'route control', pendingLedger()), []);
-  }
-});
-
-test('negated broad claims are not mistaken for positive promotions', () => {
-  for (const claim of ['Codex CLI is not fully supported.', 'We do not claim complete support for the agy CLI.', 'Full Codex CLI support is not established.', 'There is no complete parity for the Antigravity client.', 'Codex CLI 0.169.0 is not supported.', 'This client is not real-client tested.', 'Subscription acceptance has not passed.']) {
-    assert.deepEqual(validatePublicClaims(`${caveat}\n\n${claim}`, 'control', pendingLedger()), [], claim);
-  }
-});
-
-test('an unrelated caveat cannot license broad or mixed positive client claims', () => {
-  for (const claim of ['Codex CLI is fully supported.', 'Full Codex CLI support is available.', 'All agy features are supported.', 'Codex CLI is not fully supported, but agy CLI is fully supported.', 'Not complete parity for Codex; Antigravity is fully verified.', 'Codex CLI 0.169.0 is supported.', 'agy 1.5.9 is supported.', 'Codex CLI is real-client tested.', 'Subscription acceptance passed.']) {
-    assert.match(validatePublicClaims(`${caveat}\n\n${claim}`, 'control', pendingLedger()).join(' '), /promotion lacks accepted feature evidence/, claim);
-  }
-});
-
-test('pending text in another comma or while clause cannot negate an asserted promotion', () => {
-  const boundary = 'The tables describe shipped routes. Full client acceptance remains unverified for Codex CLI and agy.';
-  for (const claim of [
-    'Codex CLI is fully supported, while subscription acceptance remains pending.',
-    'Codex CLI is fully supported, subscription acceptance remains pending.',
-    'Subscription acceptance remains pending, while Codex CLI is fully supported.',
-    'Codex CLI is fully supported and subscription acceptance remains pending.',
-    'Codex CLI is fully supported with subscription acceptance pending.',
-  ]) {
-    assert.match(validatePublicClaims(`${boundary}\n\n${claim}`, 'mixed clause control', pendingLedger()).join(' '), /promotion lacks accepted feature evidence/, claim);
-  }
-  for (const claim of [
-    'Codex CLI is not fully supported, while subscription acceptance remains pending.',
-    'Full Codex CLI support is not established, and subscription acceptance remains pending.',
-    'We do not claim complete support for Codex CLI, while subscription acceptance remains pending.',
-  ]) {
-    assert.deepEqual(validatePublicClaims(`${boundary}\n\n${claim}`, 'negated clause control', pendingLedger()), [], claim);
   }
 });

@@ -95,6 +95,27 @@ describe('source documentation consumers', () => {
     expect(rendered).toContain('`:streamGenerateContent`');
   });
 
+  test('keeps the committed runtime mirror equal to the rendered source', async () => {
+    const [source, mirror] = await Promise.all([
+      readFile(new URL('../../docs/runtime-management.md', import.meta.url), 'utf8'),
+      readFile(
+        new URL('../src/content/docs/reference/source/runtime-management.md', import.meta.url),
+        'utf8',
+      ),
+    ]);
+
+    expect(mirror).toBe(renderSourceNotes(source, runtimeSource));
+  });
+
+  test.each([
+    'Codex CLI is supported for Responses SSE only; account and cloud features remain unverified.',
+    'Full support for Codex CLI remains unverified.',
+  ])('preserves bounded and negative client statements unchanged: %s', (statement) => {
+    const source = `## Admin v1 REST API\n\n${statement}\n`;
+
+    expect(renderSourceNotes(source, runtimeSource)).toContain(`\n\n${statement}\n`);
+  });
+
   test('selects technical sections, sanitizes local paths, and rewrites relative links', () => {
     const source = [
       '## Admin v1 REST API',

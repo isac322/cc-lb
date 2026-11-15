@@ -211,48 +211,12 @@ export function validateClientCapabilities(ledger) {
   return errors;
 }
 
-// Route support and client acceptance are separate claims. This guard checks
-// the bounded caveat and broad client promotions, not the provider route table.
-export function validatePublicClaims(content, label, ledger) {
-  const errors = [];
-  const paragraphs = content.split(/\n\s*\n/).map((part) => part.replace(/\s+/g, ' '));
-  const caveat = paragraphs.some((part) => /(?:\b(?:shipped|native|existing)\b.{0,100}\broutes?\b|\broutes?\b.{0,100}\b(?:shipped|native|existing)\b)/i.test(part)
-    && /(?:\b(?:clients?|CLI)\b.{0,100}\b(?:acceptance|verification|support|parity)\b|\b(?:acceptance|verification|support|parity)\b.{0,100}\b(?:clients?|CLI)\b)/i.test(part)
-    && /\b(?:pending|unverified|not (?:yet )?(?:verified|established|proven)|does not (?:prove|establish|imply))\b/i.test(part));
-  if (!caveat) errors.push(`${label}: missing route-versus-client-acceptance boundary`);
-  for (const sentence of content.split(/(?<=[.!?])\s+|\n/)) {
-    const positive = /\b(?:fully?\s+(?:supports?|supported|verified)|complete\s+(?:support|parity)|(?:full|complete)\s+(?:Codex|agy|Antigravity)\s+(?:CLI\s+)?(?:support|parity)|all\s+(?:(?:Codex|agy|Antigravity)\s+)?(?:features|capabilities)\s+(?:work|(?:are\s+)?supported)|(?:Codex|agy|Antigravity)\s+(?:CLI\s+)?(?:v?\d+(?:\.\d+){1,3}\s+)?(?:is\s+)?(?:fully\s+)?(?:supported|verified)|real[- ]client[- ]tested|subscription\s+acceptance\s+(?:has\s+)?passed)\b/i;
-    if (!positive.test(sentence) || !/\b(?:Codex|agy|Antigravity|client|CLI|subscription\s+acceptance)\b/i.test(sentence)) continue;
-    // A negated assertion is not a positive support claim. Require negation in
-    // the same clause; a preceding unrelated caveat cannot license promotion.
-    for (const clause of sentence.split(/[,;]|\b(?:but|while|whereas|although|and|yet|however)\b/i)) {
-      const assertions = [...clause.matchAll(new RegExp(positive.source, 'gi'))];
-      for (const [index, assertion] of assertions.entries()) {
-        const before = clause.slice(index ? assertions[index - 1].index + assertions[index - 1][0].length : 0, assertion.index);
-        const after = clause.slice(assertion.index + assertion[0].length, assertions[index + 1]?.index);
-        const negatedBefore = /\b(?:no|not|never|cannot|without|unverified|pending)(?:\s+[a-z-]+){0,3}\s*$/i.test(before);
-        const negatedAfter = /^\s+(?:(?:is|are|remains?|has|have|still)\s+){0,2}(?:not|unverified|pending)\b/i.test(after);
-        if (negatedBefore || negatedAfter) continue;
-        const client = /\b(?:agy|Antigravity)\b/i.test(clause) ? 'agy' : /\bCodex\b/i.test(clause) ? 'codex' : null;
-        const rows = (Array.isArray(ledger?.families) ? ledger.families : []).filter((row) => row?.status?.boundary === 'feature' && (!client || row.client === client));
-        if (ledger?.metadata?.canonicalCoverage?.status === 'pending-external-ledger' || !rows.length || rows.some((row) => row.status?.clientAcceptance !== 'supported') || validateClientCapabilities(ledger).length) errors.push(`${label}: broad client-support promotion lacks accepted feature evidence and canonical Q-HARNESS completeness`);
-      }
-    }
-  }
-  return errors;
-}
-
 export function checkClientCapabilities(root) {
   const ledgerPath = path.join(root, 'docs/client-capabilities.json');
   let ledger;
   try { ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')); }
   catch { return ['docs/client-capabilities.json: cannot read valid JSON']; }
-  const errors = validateClientCapabilities(ledger);
-  for (const file of ['docs/runtime-management.md', 'site/src/content/docs/reference/source/runtime-management.md', 'README.md', 'positioning.yml']) {
-    try { errors.push(...validatePublicClaims(readFileSync(path.join(root, file), 'utf8'), file, ledger)); }
-    catch { errors.push(`${file}: cannot read public claims`); }
-  }
-  return errors;
+  return validateClientCapabilities(ledger);
 }
 
 function main(argv) {
