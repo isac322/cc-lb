@@ -7916,6 +7916,8 @@ impl Lifecycle {
             // independent of the downstream framing, which permits rewritten
             // SSE bytes and no longer advertises the upstream length.
             let mut deferred_terminal_chunks: Vec<Bytes> = Vec::new();
+            // Commit the native framing failure before exposing its sole error frame.
+            let mut deferred_native_framing_error: Option<Bytes> = None;
             // Dynamic unsolicited hold: `unsolicited_hold_pending` is set while
             // the unforwarded buffered bytes may carry provider state, and
             // `unsolicited_forwarded_bytes` counts the leading bytes of the
@@ -9882,7 +9884,9 @@ impl Lifecycle {
                     {
                         o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                     }
-                    if deferred_terminal_chunks.is_empty() {
+                    if native_sse_framing_error {
+                        deferred_native_framing_error = Some(frame);
+                    } else if deferred_terminal_chunks.is_empty() {
                         yield Ok::<Bytes, Infallible>(frame);
                     } else {
                         // Preserve byte order while retaining final-frame
@@ -10265,6 +10269,9 @@ impl Lifecycle {
             }
             for chunk in deferred_terminal_chunks {
                 yield Ok::<Bytes, Infallible>(chunk);
+            }
+            if let Some(frame) = deferred_native_framing_error {
+                yield Ok::<Bytes, Infallible>(frame);
             }
         };
         Response::from_parts(

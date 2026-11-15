@@ -281,6 +281,130 @@ async fn native_alt_sse_json_success_is_framing_error_without_stream_field() -> 
 }
 
 #[tokio::test]
+async fn native_alt_sse_json_error_diagnostics_survive_first_frame_drop() -> TestResult {
+    for drop_after_error in [true, false] {
+        for with_hook in [false, true] {
+            for fixture in [JSON_OBJECT, JSON_ARRAY] {
+                let dir = tempfile::tempdir()?;
+                let storage = Arc::new(sqlite_storage(&dir, "gemini-native-sink.sqlite").await?);
+                let test_bus = TestLifecycleBus::new()
+                    .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+                let mut receiver = test_bus.bus.subscribe_lifecycle();
+                let hook = with_hook.then(|| {
+                    Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>
+                });
+                let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
+                    None,
+                    hook,
+                    Arc::new(FixedDispatch {
+                        status: StatusCode::OK,
+                        headers: json_headers(fixture.len(), false),
+                        body: Bytes::from_static(fixture),
+                    }),
+                    LifecycleConfig::default(),
+                    upstream_record(
+                        StorageUpstreamKind::GeminiApiKey,
+                        "https://generativelanguage.googleapis.com/",
+                    ),
+                ))
+                .with_event_bus(test_bus.bus_arc());
+                let response = handle_authenticated(&lifecycle, native_request("?alt=sse")).await?;
+                let status = response.status();
+                let headers = response.headers().clone();
+                let mut downstream = response.into_body();
+                let first = tokio::time::timeout(Duration::from_secs(3), downstream.frame())
+                    .await
+                    .expect("native framing error frame arrives")
+                    .expect("native framing error frame exists")?
+                    .into_data()
+                    .expect("native framing error is a data frame");
+                let delivered = parsed_sse_events(&first);
+                assert_eq!(
+                    delivered.len(),
+                    1,
+                    "first frame is one complete error event"
+                );
+                assert_eq!(delivered[0].event, "error");
+                let error: serde_json::Value = serde_json::from_slice(&delivered[0].data)?;
+                let message = error["error"]["message"]
+                    .as_str()
+                    .expect("delivered error has a message");
+                assert!(!message.is_empty(), "delivered framing error is diagnostic");
+                if drop_after_error {
+                    // A consumer exits on the dispatched error; it never polls EOF.
+                    drop(downstream);
+                } else {
+                    let remaining = downstream.collect().await?.to_bytes();
+                    assert!(remaining.is_empty(), "no second error frame after draining");
+                }
+
+                let mut events = tokio::time::timeout(Duration::from_secs(3), async {
+                    let mut events = Vec::new();
+                    loop {
+                        let event = receiver.recv().await.expect("lifecycle event delivered");
+                        let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+                        events.push(event);
+                        if terminated {
+                            break events;
+                        }
+                    }
+                })
+                .await
+                .expect("dropping or draining the error body terminates the request");
+                let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+                assert_eq!(rows.len(), 1, "one persisted request event");
+                loop {
+                    match receiver.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("lifecycle events remain observable: {error}"),
+                    }
+                }
+                let observation = Observation {
+                    status,
+                    headers,
+                    body: first,
+                    row: rows.remove(0),
+                    events,
+                };
+                // Check the stored diagnostic before completion counts so the
+                // dropped-body regression fails on the actual lost evidence.
+                assert_eq!(
+                    observation.row.upstream_error_type.as_deref(),
+                    Some("upstream_response_framing_error"),
+                    "framing diagnostic survives drop_after_error={drop_after_error}, with_hook={with_hook}",
+                );
+                assert_eq!(
+                    observation.row.upstream_error_message.as_deref(),
+                    Some(message),
+                    "persisted diagnostic matches the error the client received",
+                );
+                observation.assert_framing_error();
+                let completions = observation
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LifecycleEvent::StreamCompleted { result, .. } => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    completions.len(),
+                    1,
+                    "one stream completion after body disposal"
+                );
+                let completion = completions[0]
+                    .as_ref()
+                    .expect_err("framing mismatch is a stream error");
+                assert_eq!(completion.error_type, "upstream_response_framing_error");
+                assert_eq!(completion.error_message, message);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_json_array_alt_json_and_absent_alt_remain_success() -> TestResult {
     for query in ["?alt=json", ""] {
         for with_hook in [false, true] {
