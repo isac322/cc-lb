@@ -1,3 +1,6 @@
+#[path = "upstream_affinity/codex_compaction.rs"]
+mod codex_compaction;
+
 use crate::common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
 use crate::lifecycle_client_disconnect::client_disconnect_support::{
     assert_error_terminal, assert_one_final, assert_responses_failed, assert_stream_failure_once,

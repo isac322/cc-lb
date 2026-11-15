@@ -342,7 +342,10 @@ impl<'a> KeyCollector<'a> {
                 }
             }
             Value::Object(object) => {
-                if object.get("type").and_then(Value::as_str) == Some("reasoning") {
+                if matches!(
+                    object.get("type").and_then(Value::as_str),
+                    Some("reasoning" | "compaction" | "compaction_summary")
+                ) {
                     self.reference(
                         UpstreamAffinityKind::OpenaiResponseId,
                         object.get("encrypted_content"),
