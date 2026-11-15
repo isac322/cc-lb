@@ -538,7 +538,7 @@ impl RequestKind {
                     | Self::OpenaiModels
                     | Self::OpenaiCodexAuxiliary
             ),
-            K::GeminiOauth => matches!(self, Self::GeminiGenerateContent | Self::GeminiCountTokens),
+            K::GeminiOauth => matches!(self, Self::GeminiGenerateContent | Self::GeminiCountTokens | Self::GeminiModels),
         }
     }
 
@@ -6687,8 +6687,9 @@ impl Lifecycle {
                 }
             }
         };
-        let gemini_unwrapped_body = transform_ctx
-            .gemini_oauth
+        let gemini_catalog = transform_ctx.gemini_oauth
+            && response_affinity_context.capability == ProviderCapability::GeminiModels;
+        let gemini_unwrapped_body = (!gemini_catalog && transform_ctx.gemini_oauth)
             .then_some(semantic_body.as_ref())
             .flatten()
             .and_then(|body| unwrap_gemini_code_assist_body(body).ok().flatten());
@@ -6784,6 +6785,11 @@ impl Lifecycle {
                 None,
             );
         }
+        if gemini_catalog && status.is_success() && !body_collect_failed
+            && let Some(decoded) = semantic_body.as_ref()
+        {
+            downstream_body = decoded.clone();
+        }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
         let mut keepalive_transformed_json = None;
         let mut keepalive_body_replaced = false;
@@ -6834,6 +6840,32 @@ impl Lifecycle {
                         "response transform failed open to original upstream response"
                     );
                     buffered_transform_error = Some(error);
+                }
+            }
+        }
+        if gemini_catalog && parts.status.is_success() && !body_collect_failed {
+            match sonic_rs::from_slice::<Value>(&downstream_body)
+                .ok()
+                .as_ref()
+                .ok_or(crate::gemini_oauth_catalog::CatalogError::InvalidModels)
+                .and_then(crate::gemini_oauth_catalog::project_fetch_available_models)
+            {
+                Ok(native) => {
+                    downstream_body = Bytes::from(serde_json::to_vec(&native)
+                        .expect("catalog projection contains only JSON values"));
+                    parts.headers = sanitize_downstream_response_headers(
+                        std::mem::take(&mut parts.headers), downstream_body.len(), None,
+                    );
+                }
+                Err(_) => {
+                    parts.status = StatusCode::BAD_GATEWAY;
+                    downstream_body = provider_error_body(
+                        response_affinity_context.capability, parts.status, "api_error",
+                        "invalid Gemini OAuth catalog response", None,
+                    );
+                    parts.headers = sanitize_downstream_response_headers(
+                        std::mem::take(&mut parts.headers), downstream_body.len(), None,
+                    );
                 }
             }
         }
@@ -14392,7 +14424,7 @@ mod tests {
             (RequestKind::OpenaiCodexAuxiliary, &[K::OpenaiOauth]),
             (RequestKind::GeminiEmbedContent, &[K::GeminiApiKey]),
             (RequestKind::GeminiPredict, &[K::GeminiApiKey]),
-            (RequestKind::GeminiModels, &[K::GeminiApiKey]),
+            (RequestKind::GeminiModels, &[K::GeminiApiKey, K::GeminiOauth]),
             (RequestKind::GeminiOpenaiChatCompletions, &[K::GeminiApiKey]),
             (RequestKind::GeminiOpenaiEmbeddings, &[K::GeminiApiKey]),
             (RequestKind::GeminiOpenaiImages, &[K::GeminiApiKey]),

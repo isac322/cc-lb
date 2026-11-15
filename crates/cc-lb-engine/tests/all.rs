@@ -1,6 +1,8 @@
 mod common;
 mod prompt_cache_routing_support;
 mod router_lifecycle_support;
+#[path = "gemini_oauth_catalog.rs"]
+mod gemini_oauth_catalog;
 
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;

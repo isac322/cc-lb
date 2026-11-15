@@ -424,6 +424,7 @@ pub struct GeminiSubscriptionSigner {
     never_refresh: bool,
     clock: ClockHandle,
     antigravity: Option<AntigravityRequestProfile>,
+    catalog_endpoint: Option<Url>,
 }
 
 #[derive(Clone)]
@@ -434,6 +435,13 @@ struct AntigravityRequestProfile {
 }
 
 impl GeminiSubscriptionSigner {
+    /// Supplies the discovery endpoint resolved by the owning credential factory.
+    /// No host selection or discovery fallback is performed by the signer.
+    pub fn with_catalog_endpoint(mut self, endpoint: Url) -> Self {
+        self.catalog_endpoint = Some(endpoint);
+        self
+    }
+
     /// Access-only imports supply their expiry; rotating credentials use
     /// [`Self::new_refreshing`] so expiry is checked with refresh skew.
     pub fn new(
@@ -480,6 +488,7 @@ impl GeminiSubscriptionSigner {
             never_refresh,
             clock,
             antigravity: None,
+            catalog_endpoint: None,
         })
     }
 
@@ -788,6 +797,27 @@ impl Signer for GeminiSubscriptionSigner {
             self.never_refresh,
             self.clock.as_ref(),
         )?;
+        if shaped.method() == http::Method::GET
+            && matches!(shaped.url().path(), "/v1beta/models" | "/v1/models")
+        {
+            let project = self.project_id.as_deref()
+                .filter(|project| !project.trim().is_empty())
+                .ok_or_else(|| SignerError::SigningFailed {
+                    reason: "Gemini OAuth catalog requires a stored project".to_owned(),
+                })?;
+            let endpoint = self.catalog_endpoint.clone()
+                .ok_or_else(|| SignerError::SigningFailed {
+                    reason: "Gemini OAuth catalog endpoint was not resolved".to_owned(),
+                })?;
+            shaped.set_url(endpoint);
+            shaped.set_method(http::Method::POST);
+            shaped.set_body(Bytes::from(serde_json::to_vec(&json!({"project": project}))
+                .map_err(|_| SignerError::SigningFailed {
+                    reason: "Gemini OAuth catalog body could not be serialized".to_owned(),
+                })?));
+            shaped.headers_mut().remove(CONTENT_LENGTH);
+            shaped.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
         let wrapped = wrap_gemini_code_assist_request(
             &mut shaped,
             self.project_id.as_deref(),
