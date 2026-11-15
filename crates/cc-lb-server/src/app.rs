@@ -3605,8 +3605,10 @@ async fn relay_responses_websocket(
                                                 break 'relay;
                                             }
                                         } else {
+                                            let mut suppress_affinity_duplicate = affinity_error;
                                             for closed_error in result.errors {
-                                                if affinity_error && closed_error.stream_id == error.stream_id {
+                                                if suppress_affinity_duplicate && closed_error.stream_id == error.stream_id {
+                                                    suppress_affinity_duplicate = false;
                                                     continue;
                                                 }
                                                 if downstream_sink.send(websocket_error_message(&closed_error)).await.is_err() {
@@ -7540,13 +7542,19 @@ mod tests {
     async fn ws1296_reasoning_bind_failure_preserves_503_on_item_done_and_completed() {
         const ITEM_DONE: &str = r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"rs-bind-failure","type":"reasoning","summary":[],"encrypted_content":"synthetic-ws1296-bind-failure"}}"#;
         const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"resp-bind-failure","status":"completed","store":false,"output":[{"id":"rs-bind-failure","type":"reasoning","summary":[],"encrypted_content":"synthetic-ws1296-bind-failure"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
-        for unbound_event in [ITEM_DONE, COMPLETED] {
+        for (unbound_event, queued) in [
+            (ITEM_DONE, false),
+            (COMPLETED, false),
+            (ITEM_DONE, true),
+            (COMPLETED, true),
+        ] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("provider listener binds");
             let address = listener
                 .local_addr()
                 .expect("provider address is available");
+            let (release_failure, failure_ready) = tokio::sync::oneshot::channel();
             let provider_task = tokio::spawn(async move {
                 let (socket, _) = listener
                     .accept()
@@ -7566,6 +7574,9 @@ mod tests {
                     ))
                     .await
                     .expect("created sends");
+                failure_ready
+                    .await
+                    .expect("client finishes admission checks");
                 websocket
                     .send(UpstreamMessage::Text(unbound_event.into()))
                     .await
@@ -7602,6 +7613,27 @@ mod tests {
             let created: Value = serde_json::from_str(created.to_text().expect("created is text"))
                 .expect("created is JSON");
             assert_eq!(created["type"], "response.created");
+            if queued {
+                client.send(UpstreamMessage::Text(
+                    r#"{"type":"response.create","model":"gpt-4.1","store":false,"previous_response_id":"resp-bind-failure","input":[]}"#.into(),
+                )).await.expect("same-lane continuation queues");
+                // A rejected control is an owner-loop barrier after the queued
+                // create; an automatic Pong would only prove reader progress.
+                client
+                    .send(UpstreamMessage::Binary(Bytes::new()))
+                    .await
+                    .unwrap();
+                let barrier = tokio::time::timeout(Duration::from_secs(5), client.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let barrier: Value = serde_json::from_str(barrier.to_text().unwrap()).unwrap();
+                assert_eq!(barrier["error"]["code"], "invalid_request_error");
+            }
+            release_failure
+                .send(())
+                .expect("provider waits for admission");
             let error = tokio::time::timeout(Duration::from_secs(5), client.next())
                 .await
                 .expect("binding error arrives")
@@ -7618,6 +7650,16 @@ mod tests {
                 "binding failure is not a provider disconnect"
             );
             assert_eq!(error["error"]["code"], "upstream_affinity_unavailable");
+            if queued {
+                let cancelled = tokio::time::timeout(Duration::from_secs(5), client.next())
+                    .await
+                    .expect("queued continuation receives its own failure")
+                    .expect("downstream remains open")
+                    .expect("queued failure decodes");
+                let cancelled: Value = serde_json::from_str(cancelled.to_text().unwrap()).unwrap();
+                assert_eq!(cancelled["status"], 502);
+                assert_eq!(cancelled["error"]["code"], "upstream_connection_closed");
+            }
             assert!(
                 tokio::time::timeout(Duration::from_millis(100), client.next())
                     .await
