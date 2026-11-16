@@ -1,0 +1,66 @@
+{
+  "record_kind": "A14-clean-master-agy-api-key-rerun",
+  "source_sha": "9767566cf9f0be0e971a91657e99504f3c2556bc",
+  "binary_sha256": "b7b35c678d15e6f0dca93c0fa90ecb48685999c3a96ab8b08d42877115b137c9",
+  "build_command": "cargo build --locked -p cc-lb-server --bin cc-lb (SDKROOT=MacOSX27.0.sdk; CARGO_BUILD_JOBS=2; RUSTC_WRAPPER=)",
+  "client": {
+    "name": "agy",
+    "version": "1.5.9",
+    "sha256": "fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a"
+  },
+  "scenarios": {
+    "Actual Antigravity coding tools": {
+      "verdict": "PASS_AFTER_CRITERION_CORRECTION",
+      "reasons": [
+        "file inspection occurred via run_command(cat ...) and fixture tests/edit completed; tool kind is not part of the corrected criterion"
+      ]
+    },
+    "thoughtSignature continuity": {
+      "verdict": "PASS",
+      "reasons": [
+        "pairs=10 emittedFunctionCallSignatures=10 requestsReplayingSignedFunctionCall=11",
+        "cc-lb->provider hop: not observable (cc-lb records no signature evidence); provider accepted replay is shown by HTTP 200 + responseId on follow-up requests"
+      ]
+    },
+    "Session continue": {
+      "verdict": "PASS",
+      "reasons": [
+        "resumed conversation by exact session selector; identifier redacted"
+      ]
+    }
+  },
+  "wire_summary": [
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":0,"signed_function_calls":0,"replayed_signatures":0},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":1,"signed_function_calls":1,"replayed_signatures":1},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":2,"signed_function_calls":2,"replayed_signatures":2},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":3,"signed_function_calls":3,"replayed_signatures":3},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":4,"signed_function_calls":4,"replayed_signatures":4},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":5,"signed_function_calls":5,"replayed_signatures":5},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":6,"signed_function_calls":6,"replayed_signatures":6},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":6,"signed_function_calls":6,"replayed_signatures":7},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":7,"signed_function_calls":7,"replayed_signatures":8},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":8,"signed_function_calls":8,"replayed_signatures":9},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":9,"signed_function_calls":9,"replayed_signatures":10},
+    {"transport":"HTTP/1.1 text/event-stream","endpoint":"POST /v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse","http_status":200,"function_calls":10,"signed_function_calls":10,"replayed_signatures":11}
+  ],
+  "native_parts_observation": [
+    {"turn":1,"function_call_parts":21,"signed_function_call_parts":21,"replayed_signatures":21},
+    {"turn":2,"function_call_parts":40,"signed_function_call_parts":40,"replayed_signatures":45}
+  ],
+  "thought_signature_observation": [
+    "pairs=10 emittedFunctionCallSignatures=10 requestsReplayingSignedFunctionCall=11",
+    "cc-lb->provider hop: not observable (cc-lb records no signature evidence); provider accepted replay is shown by HTTP 200 + responseId on follow-up requests"
+  ],
+  "owner_affinity": {
+    "owner_binding_verified": true,
+    "shared_store_unmodified": true,
+    "storage_under_slice_root": true
+  },
+  "criterion_correction": {
+    "a01_file_inspection": "PASS_AFTER_CRITERION_CORRECTION",
+    "cc_lb_defect": false,
+    "no_new_provider_calls": true,
+    "evidence": "Captured client tool action run_command(cat pricing.py test_pricing.py); cc-lb request body sizes match observer request sizes for all 12 requests and source preserves context.body_bytes.clone().",
+    "raw_upstream_body": "not captured"
+  }
+}

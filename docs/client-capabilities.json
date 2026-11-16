@@ -11,7 +11,7 @@
     "acceptance": {
       "ownerIssue": "https://github.com/isac322/cc-lb/issues/1325",
       "status": "pending-feature-evidence",
-      "reason": "All exact-client acceptance remains pending merged implementation and feature-specific passing client/provider evidence."
+      "reason": "Feature-specific agy 1.5.9 Gemini API-key execution evidence is recorded below. Rows marked pending still require their own client/provider evidence; Code Assist/OAuth subscription acceptance remains unverified."
     },
     "limitations": "Family taxonomy is documentation scope, not a reproduced-defect list or wildcard relay policy. Source presence, binary descriptors, synthetic fixtures and recorder traffic do not prove support. Preserve existing shipped API-key and OAuth routes. Subscription Antigravity is not Vertex; TOS and entitlement restrictions remain in force. Background quota polling is not inbound-client acceptance."
   },
@@ -605,10 +605,10 @@
     {
       "id": "agy-native-api-key",
       "client": "agy",
-      "caller": "native coding, tools and content generation control",
-      "reachability": "dummy-key recorder ended with invalid stream chunk; not a passing provider turn",
-      "authBase": "authenticated provider-prefixed Gemini base",
-      "clientMode": "agy native API-key mode",
+      "caller": "native coding turns, coding tools, thought signatures and content generation",
+      "reachability": "PASS in agy 1.5.9 Gemini API-key mode through cc-lb; observed generateContent and streamGenerateContent only",
+      "authBase": "authenticated provider-prefixed Gemini base with a cc-lb principal key",
+      "clientMode": "agy native Gemini API-key mode",
       "upstreamCredential": "gemini_api_key",
       "ownerIssue": "https://github.com/isac322/cc-lb/issues/1308",
       "dependencies": [
@@ -618,15 +618,66 @@
       "sourceEvidence": [
         "runtime",
         "harness",
+        "accept",
         "agyChangelog"
       ],
       "status": {
         "route": "shipped",
         "boundary": "feature",
-        "clientAcceptance": "pending"
+        "clientAcceptance": "supported"
       },
-      "deferReason": "dummy-key recorder ended with invalid stream chunk; not a passing provider turn. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
-      "acceptanceEvidence": null
+      "deferReason": null,
+      "acceptanceEvidence": {
+        "implementation": {
+          "reference": "https://github.com/isac322/cc-lb/pull/1328",
+          "mergedCommit": "f088658d7dea86e62d100cfd64c0cde4dbc21b21"
+        },
+        "execution": {
+          "kind": "actual-client",
+          "client": "agy",
+          "version": "1.5.9",
+          "pin": "fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a",
+          "command": "tests/real-client/provider-e2e/run.mjs --run --case agy",
+          "outcome": "passed",
+          "reference": "https://github.com/isac322/cc-lb/issues/1325"
+        },
+        "wire": {
+          "method": "POST",
+          "path": "/gemini/v1beta/models/{model}:streamGenerateContent",
+          "transport": "sse",
+          "reference": "docs/runtime-management.md#gemini-endpoint-reference"
+        },
+        "upstream": {
+          "credentialKind": "gemini_api_key",
+          "selection": "Authorized Gemini API-key upstream; cached-content owner remains selected",
+          "reference": "https://github.com/isac322/cc-lb/issues/1318"
+        },
+        "ownerAffinity": {
+          "decision": "cachedContent remains on its creating upstream; owner unavailability returns 503 without failover",
+          "reference": "https://github.com/isac322/cc-lb/issues/1318"
+        },
+        "provider": {
+          "outcome": "passed",
+          "entitlement": "confirmed",
+          "clientOutcome": "passed",
+          "reference": "https://github.com/isac322/cc-lb/issues/1325"
+        },
+        "usage": {
+          "state": "absent",
+          "reason": "The evidence records runner accounting, not a separate client usage screen.",
+          "reference": "https://github.com/isac322/cc-lb/issues/1325"
+        },
+        "quota": {
+          "state": "absent",
+          "reason": "The API-key run does not establish Code Assist subscription quota visibility.",
+          "reference": "https://github.com/isac322/cc-lb/issues/1325"
+        },
+        "cost": {
+          "state": "absent",
+          "reason": "The evidence does not establish a provider cost screen for this client mode.",
+          "reference": "https://github.com/isac322/cc-lb/issues/1325"
+        }
+      }
     },
     {
       "id": "agy-native-oauth",
