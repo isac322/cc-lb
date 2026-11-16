@@ -27,7 +27,9 @@ The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the exam
 
 ### Current-mode client acceptance
 
-The proxy route tables below describe shipped operations and upstream credential eligibility. Full client acceptance remains unverified for the pinned Codex 0.169.0 and agy 1.5.9 clients; route support does not establish it. A principal's proxy key authenticates the client to cc-lb; routing independently selects an eligible OAuth or API-key upstream. Native agy client mode can be tested with either upstream class. An API-key control does not establish OAuth success.
+The proxy route tables below describe shipped operations and upstream credential eligibility. The agy 1.5.9 Gemini API-key mode has feature-specific client evidence through cc-lb for multi-turn coding tools, thought-signature continuity, conversation resume and native-part preservation. The agy Code Assist/OAuth mode remains unverified because no healthy entitled subscription account was available. A feature-specific API-key result does not establish full agy subscription compatibility.
+
+In the agy API-key mode, the client calls Gemini `generateContent` and `streamGenerateContent`. `countTokens`, model discovery, and related `v1internal` Code Assist methods are outside that client's reachable API-key path. Gemini API-key `cachedContent` remains bound to its creating upstream; if that owner is unavailable, cc-lb returns `503 upstream_affinity_unavailable` and does not fail over.
 
 The [client capability ledger](https://github.com/isac322/cc-lb/blob/master/docs/client-capabilities.json) records acceptance boundaries and evidence. Its reference inputs are Codex source commit `d32063f96c2dff1dc96af839b3952abb6acfeda4` and the agy 1.5.9 installed binary SHA-256 `fad3628ad91fe8613a72f074a1c5fde7cd816517788a5b9be96703f7d256741a`. Source and descriptor coverage does not establish execution. Acceptance requires the exact client, upstream class, required entitlement, and real feature execution; a recorder or substitute API request cannot establish that result.
 
