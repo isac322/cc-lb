@@ -310,6 +310,8 @@ struct Turn {
 /// dispatches, not already admitted provider output.
 pub struct ResponsesWebSocketGateway {
     lifecycle: Arc<Lifecycle>,
+    session_service: Option<Arc<crate::codex_sessions::CodexSessionService>>,
+    session_upstream: Option<Uuid>,
     provider: Option<cc_lb_domain::Provider>,
     headers: HeaderMap,
     query: Option<String>,
@@ -336,6 +338,8 @@ impl ResponsesWebSocketGateway {
     ) -> Self {
         Self {
             lifecycle,
+            session_service: None,
+            session_upstream: None,
             provider: None,
             headers: original_headers,
             query: None,
@@ -352,6 +356,20 @@ impl ResponsesWebSocketGateway {
             connection_signers: HashMap::new(),
             successors: HashMap::new(),
         }
+    }
+
+    pub fn with_session_service(mut self, service: Arc<crate::codex_sessions::CodexSessionService>) -> Self {
+        self.session_service = Some(service);
+        self
+    }
+
+    fn session_upstream(&self, resource_owner: Option<Uuid>) -> Result<Option<Uuid>, WebSocketError> {
+        if let (Some(session), Some(resource)) = (self.session_upstream, resource_owner)
+            && session != resource
+        {
+            return Err(WebSocketError::new(400, "owner_conflict", "resource belongs to another session owner"));
+        }
+        Ok(resource_owner.or(self.session_upstream))
     }
 
     /// Preserve the downstream upgrade query after removing API-key parameters.
@@ -412,6 +430,11 @@ impl ResponsesWebSocketGateway {
         auth: Authenticated,
         frame: Bytes,
     ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
+        if let Err(error) = crate::codex_sessions::authorize_registered_purpose(
+            &auth, &http::Method::GET, "/v1/responses",
+        ) {
+            return Err(self.reject_authentication(&error));
+        }
         let body = parse_client_frame(&auth, &frame, self.byte_cap);
         let repeated_steer = body.as_ref().ok().is_some_and(|body| {
             body.get("type").and_then(Value::as_str) == Some("response.steer")
@@ -431,6 +454,29 @@ impl ResponsesWebSocketGateway {
             self.lifecycle
                 .record_authentication_completed(&auth, observer);
         }
+        self.session_upstream = None;
+        let body = if auth.session().is_some() {
+            let result = match self.session_service.as_ref() {
+                Some(service) => service.fence_session_dispatch(&auth).await,
+                None => Err(crate::codex_sessions::SessionError::Unavailable),
+            };
+            match result {
+                Ok(binding) => {
+                    self.session_upstream = Some(binding.upstream_id);
+                    body
+                }
+                Err(error) => Err(match error {
+                    crate::codex_sessions::SessionError::Unauthenticated(error) =>
+                        WebSocketError::new(error.http_status(), "authentication_error", error.to_string()),
+                    crate::codex_sessions::SessionError::OwnerConflict =>
+                        WebSocketError::new(400, "owner_conflict", "session owner authority changed"),
+                    crate::codex_sessions::SessionError::InvalidRequest =>
+                        WebSocketError::new(400, "invalid_request_error", "invalid session request"),
+                    crate::codex_sessions::SessionError::Unavailable =>
+                        WebSocketError::new(503, "owner_unavailable", "session owner unavailable"),
+                }),
+            }
+        } else { body };
         let result = match body {
             Ok(body) => {
                 self.admit_client(
@@ -544,7 +590,7 @@ impl ResponsesWebSocketGateway {
                     query: self.query.as_deref(),
                 },
                 body.clone(),
-                owner.as_ref().map(|owner| owner.upstream_id),
+                self.session_upstream(owner.as_ref().map(|owner| owner.upstream_id))?,
                 observer,
                 request_id,
             )
@@ -720,7 +766,7 @@ impl ResponsesWebSocketGateway {
                     query: self.query.as_deref(),
                 },
                 body.clone(),
-                Some(owner.upstream_id),
+                self.session_upstream(Some(owner.upstream_id))?,
                 observer,
                 request_id,
             )

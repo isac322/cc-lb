@@ -92,7 +92,7 @@ fn reject_unauthenticated_with_capability(
 ) -> Response<Body> {
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
     let retry_after_secs = matches!(error, BuiltinAuthError::Unavailable).then_some(1);
-    let response = match (capability, retry_after_secs) {
+    let mut response = match (capability, retry_after_secs) {
         (Some(capability), Some(retry_after_secs)) => provider_error_response_with_retry_after(
             capability,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -119,6 +119,10 @@ fn reject_unauthenticated_with_capability(
             retry_after_secs,
         ),
     };
+    response.headers_mut().insert("cc-lb-error-origin", HeaderValue::from_static("principal"));
+    if matches!(error, BuiltinAuthError::SessionAccessExpired) {
+        response.headers_mut().insert("cc-lb-auth-reason", HeaderValue::from_static("expired"));
+    }
     if let Some(o) = observer {
         o.emit_request_started(false);
         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
@@ -162,11 +166,23 @@ pub fn reject_unauthenticated_for_route(
     provider: Option<Provider>,
     observer: Option<&LifecycleContext>,
 ) -> Response<Body> {
-    reject_unauthenticated_with_capability(
+    let mut response = reject_unauthenticated_with_capability(
         error,
         auth_capability_for_route(method, path, provider),
         observer,
-    )
+    );
+    let scoped_origin = match (method.as_str(), path) {
+        ("POST", "/oauth/token" | "/oauth/revoke") => Some("renewal"),
+        ("POST", "/backend-api/wham/remote/control/server/pair"
+            | "/backend-api/wham/remote/control/server/pair/status")
+        | ("GET", "/backend-api/wham/remote/control/server") => Some("relay"),
+        _ => None,
+    };
+    if let Some(origin) = scoped_origin {
+        response.headers_mut().insert("cc-lb-error-origin", HeaderValue::from_static(origin));
+        response.headers_mut().remove("cc-lb-auth-reason");
+    }
+    response
 }
 
 /// Build an Anthropic-shaped rejection for unscoped legacy callers.
@@ -208,6 +224,18 @@ impl Authenticated {
     pub fn success(&self) -> &AuthnSuccess {
         &self.success
     }
+
+    /// Stored local session authority, never decoded caller claims.
+    pub fn session(&self) -> Option<&cc_lb_storage_api::codex_sessions::SessionSnapshot> {
+        self.success.session.as_ref()
+    }
+
+    pub fn purpose(&self) -> cc_lb_storage_api::codex_sessions::CredentialPurpose {
+        self.session().map_or(
+            cc_lb_storage_api::codex_sessions::CredentialPurpose::PrincipalKey,
+            |session| session.purpose,
+        )
+    }
 }
 
 /// Authenticate a request from its headers, before anything else happens to it.
@@ -232,7 +260,7 @@ pub async fn authenticate_first(
 /// was wrong by watching the metrics endpoint.
 fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
     match source {
-        BuiltinAuthError::Expired => "Expired",
+        BuiltinAuthError::Expired | BuiltinAuthError::SessionAccessExpired => "Expired",
         BuiltinAuthError::KeyRevoked => "Revoked",
         BuiltinAuthError::PrincipalDisabled => "PrincipalDisabled",
         BuiltinAuthError::Unavailable => "Unavailable",

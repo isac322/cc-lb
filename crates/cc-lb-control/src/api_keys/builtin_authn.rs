@@ -1,18 +1,35 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{KeyStatus, StorageError, StoredApiKeyRecord};
+use cc_lb_storage_api::codex_sessions::{
+    CodexSessionStore, CredentialPurpose, SessionSnapshot, SessionStoreError,
+};
 
 use crate::api_keys::{
     key_store::{KeyStore, KeyStoreError},
     principal_view::{PrincipalStatus, PrincipalView},
     secret,
 };
+use super::session_token::{self, Purpose};
 use cc_lb_clock::{ClockHandle, unix_secs};
+
+/// Verifies a local relay credential and its stored lineage from headers only.
+/// Provider-owner resolution belongs to the post-authentication dispatch fence.
+#[async_trait::async_trait]
+pub trait RelayCredentialVerifier: Send + Sync {
+    async fn authenticate_relay(
+        &self,
+        credential: &str,
+        view: &PrincipalView,
+    ) -> Result<AuthnSuccess, BuiltinAuthError>;
+}
 
 #[derive(Clone)]
 pub struct BuiltinAuthn {
     key_store: Arc<KeyStore>,
     clock: ClockHandle,
+    session_store: Option<Arc<dyn CodexSessionStore>>,
+    relay_verifier: Option<Arc<dyn RelayCredentialVerifier>>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +39,7 @@ pub struct AuthnSuccess {
     pub record: StoredApiKeyRecord,
     pub last_4: String,
     pub api_key: Option<String>,
+    pub session: Option<SessionSnapshot>,
 }
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -38,6 +56,8 @@ pub enum BuiltinAuthError {
     KeyRevoked,
     #[error("api key expired")]
     Expired,
+    #[error("local session access expired")]
+    SessionAccessExpired,
     #[error("principal not found")]
     PrincipalMissing,
     #[error("principal disabled")]
@@ -57,6 +77,7 @@ impl BuiltinAuthError {
             | Self::SignatureMismatch
             | Self::KeyRevoked
             | Self::Expired
+            | Self::SessionAccessExpired
             | Self::PrincipalMissing => 401,
         }
     }
@@ -64,7 +85,17 @@ impl BuiltinAuthError {
 
 impl BuiltinAuthn {
     pub fn new(key_store: Arc<KeyStore>, clock: ClockHandle) -> Self {
-        Self { key_store, clock }
+        Self { key_store, clock, session_store: None, relay_verifier: None }
+    }
+
+    pub fn with_session_store(mut self, store: Arc<dyn CodexSessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    pub fn with_relay_verifier(mut self, verifier: Arc<dyn RelayCredentialVerifier>) -> Self {
+        self.relay_verifier = Some(verifier);
+        self
     }
 
     pub async fn authenticate(
@@ -73,6 +104,22 @@ impl BuiltinAuthn {
         view: &PrincipalView,
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
         let input = extract_credential(headers)?;
+        if session_token::validate(input, Purpose::Relay) {
+            let verifier = self.relay_verifier.as_ref().ok_or(BuiltinAuthError::NotFound)?;
+            let success = verifier.authenticate_relay(input, view).await?;
+            if success.api_key.is_some()
+                || !success.session.as_ref().is_some_and(|session| {
+                    session.purpose == CredentialPurpose::RemoteRelay
+                        && session.parent_key_id == success.key_id
+                })
+            {
+                return Err(BuiltinAuthError::InvalidFormat);
+            }
+            return Ok(success);
+        }
+        if !input.starts_with("sk-cclb-") {
+            return self.authenticate_session(input, view).await;
+        }
         let (parsed_key_id, secret_bytes) =
             secret::parse(input).map_err(|_| BuiltinAuthError::InvalidFormat)?;
         let index_hash = secret::compute_index_hash(&secret_bytes);
@@ -113,6 +160,84 @@ impl BuiltinAuthn {
             record,
             last_4,
             api_key: Some(input.to_owned()),
+            session: None,
+        })
+    }
+
+    async fn authenticate_session(
+        &self,
+        input: &str,
+        view: &PrincipalView,
+    ) -> Result<AuthnSuccess, BuiltinAuthError> {
+        let purpose = if session_token::validate(input, Purpose::Access) {
+            CredentialPurpose::SessionAccess
+        } else if session_token::validate(input, Purpose::Renewal) {
+            CredentialPurpose::SessionRenewal
+        } else {
+            return Err(BuiltinAuthError::InvalidFormat);
+        };
+        let store = self.session_store.as_ref().ok_or(BuiltinAuthError::NotFound)?;
+        let record = store
+            .lookup_session_credential(&secret::compute_index_hash(input.as_bytes()))
+            .await
+            .map_err(map_session_error)?
+            .ok_or(BuiltinAuthError::NotFound)?;
+        let credential = record.credential;
+        let family = record.family;
+        if credential.purpose != purpose
+            || credential.family_id != family.family_id
+            || !secret::verify_secret(input.as_bytes(), &credential.verify_hash, &credential.salt)
+        {
+            return Err(BuiltinAuthError::SignatureMismatch);
+        }
+        let now = unix_secs(self.clock.now());
+        if credential.revoked_at.is_some()
+            || family.revoked_at.is_some()
+            || now >= family.expires_at
+            || record.parent_key.status != KeyStatus::Active
+            || record.parent_key.expires_at_unix_secs.is_some_and(|expiry| now > expiry)
+        {
+            return Err(BuiltinAuthError::KeyRevoked);
+        }
+        view.get(&family.principal_id).ok_or(BuiltinAuthError::PrincipalMissing)?;
+        if !record.principal_enabled
+            || view.principal_status(&family.principal_id) != PrincipalStatus::Active
+        {
+            return Err(BuiltinAuthError::PrincipalDisabled);
+        }
+        if purpose == CredentialPurpose::SessionAccess
+            && credential.workspace_generation != family.workspace_generation
+        {
+            return Err(BuiltinAuthError::KeyRevoked);
+        }
+        if now >= credential.expires_at {
+            return Err(if purpose == CredentialPurpose::SessionAccess {
+                BuiltinAuthError::SessionAccessExpired
+            } else {
+                BuiltinAuthError::KeyRevoked
+            });
+        }
+        let session = SessionSnapshot {
+            family_id: family.family_id,
+            parent_key_id: family.parent_key_id.clone(),
+            credential_id: credential.credential_id,
+            purpose,
+            owner_binding_id: family.owner_binding_id,
+            provider: family.provider,
+            owner_generation: family.owner_generation,
+            binding_revision: family.binding_revision,
+            workspace_id: family.workspace_id,
+            workspace_generation: family.workspace_generation,
+            access_generation: credential.access_generation,
+            origin: family.origin,
+        };
+        Ok(AuthnSuccess {
+            principal_id: family.principal_id,
+            key_id: family.parent_key_id,
+            last_4: record.parent_key.last_4.clone(),
+            record: record.parent_key,
+            api_key: None,
+            session: Some(session),
         })
     }
 }
@@ -149,6 +274,16 @@ fn map_lookup_error(error: KeyStoreError) -> BuiltinAuthError {
     }
 }
 
+fn map_session_error(error: SessionStoreError) -> BuiltinAuthError {
+    match error {
+        SessionStoreError::PrincipalDisabled => BuiltinAuthError::PrincipalDisabled,
+        SessionStoreError::Storage(_) => BuiltinAuthError::Unavailable,
+        SessionStoreError::CredentialRejected
+        | SessionStoreError::OwnerConflict
+        | SessionStoreError::InvalidOperation => BuiltinAuthError::NotFound,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -160,6 +295,9 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
 
     use super::*;
+    mod session_auth_tests {
+        include!("session_auth_tests.rs");
+    }
 
     #[tokio::test]
     async fn authenticates_valid_key() {

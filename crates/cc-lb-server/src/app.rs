@@ -1080,7 +1080,9 @@ async fn build_app_with_storage_inner(
             Option<cc_lb_control::api_keys::limit_engine::ReservationTtlSweeperHandle>,
         >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
-    let builtin_authn = Arc::new(BuiltinAuthn::new(key_store.clone(), clock.clone()));
+    let builtin_authn = Arc::new(
+        BuiltinAuthn::new(key_store.clone(), clock.clone()).with_session_store(storage.clone()),
+    );
     let (
         dispatcher,
         breaker_registry,
@@ -1774,6 +1776,9 @@ async fn build_app_with_storage_inner(
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
+        codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
+            storage.clone(), storage.clone(), clock.clone(),
+        )),
         lifecycle: lifecycle.clone(),
         body_caps,
         server_state: server_state.clone(),
@@ -2284,6 +2289,7 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
 
 #[derive(Clone)]
 struct ProxyState {
+    codex_sessions: Arc<cc_lb_engine::codex_sessions::CodexSessionService>,
     lifecycle: Arc<Lifecycle>,
     body_caps: RequestBodyCaps,
     server_state: Arc<ServerStateHandle>,
@@ -2536,6 +2542,9 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
         "/v1/messages" => Some("/v1/messages"),
         "/v1/messages/count_tokens" => Some("/v1/messages/count_tokens"),
         "/v1/responses" => Some("/v1/responses"),
+        "/backend-api/codex/responses" => Some("/backend-api/codex/responses"),
+        "/oauth/token" => Some("/oauth/token"),
+        "/oauth/revoke" => Some("/oauth/revoke"),
         "/v1/models" => Some("/v1/models"),
         "/v1/files" => Some("/v1/files"),
         _ if path.starts_with("/v1/models/") => Some("/v1/models/{id}"),
@@ -2564,6 +2573,10 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_id_state = RequestIdState::uuid_v7("req_server_");
     let websocket_routes = Router::new()
         .route("/v1/responses", get(responses_websocket_handler))
+        .route(
+            "/backend-api/codex/responses",
+            get(responses_websocket_handler).layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+        )
         .nest(
             "/openai",
             Router::new()
@@ -2659,6 +2672,15 @@ fn scoped_proxy_routes(
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .route("/v1beta/{*path}", any(lifecycle_handler));
+    if provider.is_none() {
+        routes = routes
+            .route("/oauth/token", post(lifecycle_handler))
+            .route("/oauth/revoke", post(lifecycle_handler))
+            .route(
+                "/backend-api/codex/responses",
+                post(lifecycle_handler).layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+            );
+    }
     if include_oauth_usage {
         routes = routes.route("/api/oauth/usage", get(oauth_usage_handler));
     }
@@ -2926,6 +2948,7 @@ async fn proxy_timeout_middleware(
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
+mod codex_sessions;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -2961,6 +2984,18 @@ async fn responses_websocket_handler(
                 );
         }
     };
+    if let Err(error) = cc_lb_engine::codex_sessions::authorize_registered_purpose(
+        &auth, &http::Method::GET, uri.path(),
+    ) {
+        return state.lifecycle.reject_responses_websocket_authentication_for_provider(
+            &error, uri.path(), provider_scope.as_ref().map(|scope| scope.0.0),
+        );
+    }
+    if auth.session().is_some()
+        && let Err(error) = state.codex_sessions.fence_session_dispatch(&auth).await
+    {
+        return state.lifecycle.reject_responses_websocket_session(&auth, error, uri.path());
+    }
     let slots: usize = state
         .websocket_bulkhead_config
         .semaphore_permits
@@ -2973,6 +3008,7 @@ async fn responses_websocket_handler(
         state.body_caps.messages,
         slots,
     )
+    .with_session_service(state.codex_sessions.clone())
     .with_provider(provider_scope.as_ref().map(|scope| scope.0.0))
     .with_downstream_query(uri.query().and_then(|query| {
         let scrubbed = scrub_query_api_key(query);
@@ -3736,7 +3772,7 @@ async fn lifecycle_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let observer = parts
         .extensions
         .get::<cc_lb_engine::LifecycleContext>()
@@ -3759,6 +3795,17 @@ async fn lifecycle_handler(
             );
         }
     };
+    let matched_path = parts.extensions.get::<axum::extract::MatchedPath>()
+        .map_or(parts.uri.path(), axum::extract::MatchedPath::as_str);
+    if let Err(error) = cc_lb_engine::codex_sessions::authorize_registered_purpose(
+        &auth, &parts.method, matched_path,
+    ) {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &error, &parts.method, parts.uri.path(),
+            parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
+            observer.as_ref(),
+        );
+    }
     // Record the authenticated principal before the body is read: requests
     // that terminate on a body-read error or the size cap still carry their
     // real principal in metrics. The event is metrics-only; `Lifecycle::handle`
@@ -3767,6 +3814,17 @@ async fn lifecycle_handler(
         state
             .lifecycle
             .record_authentication_completed(&auth, observer);
+    }
+    if auth.purpose() == cc_lb_storage_api::codex_sessions::CredentialPurpose::SessionAccess {
+        match state.codex_sessions.session_owner_constraint(&auth).await {
+            Ok(owner) => { parts.extensions.insert(owner); }
+            Err(error) => {
+                if let Some(observer) = observer.as_ref() {
+                    state.lifecycle.record_local_authenticated_request(&auth, observer);
+                }
+                return cc_lb_engine::codex_sessions::session_error_response(error, observer.as_ref());
+            }
+        }
     }
     let cap = state.body_caps.for_path(parts.uri.path());
     let body_read_started = Instant::now();
@@ -3833,6 +3891,23 @@ async fn lifecycle_handler(
             return response;
         }
     };
+    if parts.uri.path() == "/oauth/token" || parts.uri.path() == "/oauth/revoke" {
+        if let Some(observer) = observer.as_ref() {
+            state.lifecycle.record_local_authenticated_request(&auth, observer);
+        }
+        return codex_sessions::handle(
+            &state.codex_sessions, &auth, parts.uri.path(), &body, observer.as_ref(),
+        ).await;
+    }
+    if parts.uri.path() == "/backend-api/codex/responses" {
+        let path = parts.uri.query().map_or_else(
+            || http::uri::PathAndQuery::from_static("/v1/responses"),
+            |query| format!("/v1/responses?{query}").parse().expect("existing URI query is valid"),
+        );
+        let mut uri = parts.uri.into_parts();
+        uri.path_and_query = Some(path);
+        parts.uri = http::Uri::from_parts(uri).expect("canonical Responses URI is valid");
+    }
     let request = Request::from_parts(parts, body);
     let request = match responses_request_body::normalize(request, cap, &auth, observer.as_ref()) {
         Ok(request) => request,
@@ -5583,6 +5658,9 @@ mod tests {
             .with_event_bus(bus as Arc<dyn RequestEventBus>),
         );
         let state = ProxyState {
+            codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
+                Arc::new(storage.clone()), Arc::new(storage.clone()), clock.clone(),
+            )),
             lifecycle,
             body_caps: RequestBodyCaps {
                 messages: 1024,
@@ -6046,6 +6124,9 @@ mod tests {
             clock.clone(),
         ));
         ProxyState {
+            codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
+                storage.clone(), storage.clone(), clock.clone(),
+            )),
             lifecycle,
             body_caps: RequestBodyCaps {
                 messages: 1024 * 1024,

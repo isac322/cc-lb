@@ -4,6 +4,7 @@ pub mod api_key_usage;
 pub mod audit;
 pub mod cache_keepalive;
 pub mod cache_keepalive_sessions;
+pub mod codex_sessions;
 pub mod error;
 pub mod limits;
 pub mod oauth_pkce;

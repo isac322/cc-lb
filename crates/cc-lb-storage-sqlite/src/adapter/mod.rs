@@ -9,6 +9,7 @@ pub mod cache_keepalive_session_reads;
 pub mod cache_keepalive_sessions;
 #[cfg(test)]
 mod cache_keepalive_sessions_tests;
+pub mod codex_sessions;
 pub mod config_store;
 pub mod managed_keys;
 pub mod meta;

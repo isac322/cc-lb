@@ -9,4 +9,6 @@ pub mod limit_engine;
 pub mod principal_view;
 #[cfg(not(loom))]
 pub mod secret;
+#[cfg(not(loom))]
+pub mod session_token;
 pub mod types;

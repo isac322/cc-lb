@@ -1,0 +1,62 @@
+{
+  "upstream": "https://github.com/openai/codex.git",
+  "commit": "d32063f96c2dff1dc96af839b3952abb6acfeda4",
+  "tree": "89a3702732fed79957e519b5464ba7e9ac0e42d4",
+  "tag": "rust-v0.169.0",
+  "annotated_tag_object": "a41fe5b443652cbdbee57717fbb9fd78d8d8b32a",
+  "verification": "Official upstream HTTPS clone; commit, tree and annotated tag target were checked with git object commands. The tag is not treated as a signed vendor identity assertion.",
+  "patch": "cc-lb-local-session.patch",
+  "patch_sha256": "09a3d67e08de37c626ee09b6d1593a77443e36cec4d73732775e4088237d6553",
+  "patch_files": 121,
+  "source_preparation": "bash clients/codex/prepare-source.sh /absolute/new/isolated/source-directory",
+  "build": "bash clients/codex/build.sh /absolute/isolated/source-directory",
+  "install": "bash clients/codex/build.sh /absolute/isolated/source-directory /absolute/new/install-path/codex",
+  "patch_regeneration": "bash clients/codex/export-patch.sh /absolute/patched/source-directory",
+  "toolchain": "Rust 1.95.0, as pinned by upstream codex-rs/rust-toolchain.toml",
+  "package": "codex-cli",
+  "binary": "codex",
+  "build_output": "<isolated-source>/codex-rs/target/release/codex (unless CARGO_TARGET_DIR is explicitly configured)",
+  "credential_profile": {
+    "configuration": "[cc_lb]\norigin = \"https://proxy.example.com\"\nprofile = \"default\"",
+    "profile_default": "default (1 to 64 ASCII letters, digits, underscores or hyphens)",
+    "private_file": "$CODEX_HOME/cc-lb/<lowercase SHA256(normalized-origin UTF8 + NUL + profile UTF8)>/session.json",
+    "permissions": "directories 0700 and files 0600 on Unix; protected user-only DACL on Windows; never stored in auth.json or a keyring",
+    "import": "codex login --cc-lb-session (bounded 64 KiB JSON on stdin after configuration and destination validation; no token arguments or environment variables; refuses to replace an existing session)",
+    "bootstrap_provenance": "The authorized executor passes the admin issuance response (Cache-Control: no-store) through memory or private storage. The client holds no admin credential and contacts no bootstrap endpoint.",
+    "fields": ["session_id", "access_token", "renewal_token", "token_type", "expires_at", "session_expires_at", "origin", "account_id", "user_id", "workspace_generation"],
+    "metadata": "The runtime id_token is the actual local access token, never a generated vendor identity. Issuer, user and workspace metadata must match the stored record.",
+    "renewal": "POST {origin}/oauth/token, Authorization: Bearer <renewal_token>, body {\"grant_type\":\"refresh_token\",\"expected_workspace_generation\":<stored u64>}; the response is committed only if the stored session is unchanged.",
+    "workspace_switch": "POST {origin}/backend-api/accounts/switch-workspace-token with the access bearer; response {access_token, workspace_generation} must carry a higher generation and matching local metadata. Rollback is a reverse exchange.",
+    "revocation": "POST {origin}/oauth/revoke, Authorization: Bearer <renewal_token>, body {}; only 204 counts as server-confirmed. codex logout exits non-zero when the session was erased locally without confirmation."
+  },
+  "destinations": {
+    "responses_base": "{origin}/backend-api/codex",
+    "account_cloud_remote_control_base": "{origin}/backend-api",
+    "apps_mcp": "{origin}/backend-api/ps/mcp",
+    "renewal": "{origin}/oauth/token",
+    "revocation": "{origin}/oauth/revoke"
+  },
+  "account_metadata": "The app-server Account response carries authSource \"cc-lb-local\" only when the server-side credential is a local session; vendor responses omit the field.",
+  "not_supported_in_cc_lb_profile": [
+    "Vendor ChatGPT, API-key, access-token and device-code login (rejected; the profile accepts only an imported local session)",
+    "Agent Identity and runtime agent registration (a local session is not vendor identity proof)",
+    "Enterprise IdP token exchange from the account grant (the renewal credential is never exported as an OAuth grant)",
+    "Internal Cloud conversation preview over native gRPC ThreadService and its /v2/models catalog (inventory CX03, out of scope): rejected before any credential is read; no proxy route exists"
+  ],
+  "qa_commands": [
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-config cc_lb",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-login cc_lb",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-http-client",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-api",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-model-provider",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-backend-client",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-cloud-config",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-cloud-tasks -p codex-cloud-tasks-client",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-app-server-transport remote_control",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-rmcp-client",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-app-server-protocol -p codex-app-server -p codex-app-server-client",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-core config",
+    "cd <isolated-source>/codex-rs && cargo test --locked -p codex-cli -p codex-tui"
+  ],
+  "support_status": "Maintained source patch, not stock CLI support and not an upstream release. The patch has never been compiled, formatted, linted or tested; Cargo.lock and the app-server protocol schema files were edited by hand and need generator parity checks. TLS recorder runs, real client runs and the full inventory acceptance are pending."
+}

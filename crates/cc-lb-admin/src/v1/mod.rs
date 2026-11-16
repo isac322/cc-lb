@@ -4,6 +4,7 @@ use axum::{
 };
 
 pub(crate) mod api_key;
+pub mod codex_sessions;
 pub mod keys;
 pub(crate) mod limit_resets;
 pub mod oauth;

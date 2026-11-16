@@ -18,6 +18,8 @@ mod circuit_breaker;
 #[cfg(not(loom))]
 mod codex_quota_observation;
 #[cfg(not(loom))]
+pub mod codex_sessions;
+#[cfg(not(loom))]
 mod completion_observer;
 #[cfg(not(loom))]
 mod dns_cache;

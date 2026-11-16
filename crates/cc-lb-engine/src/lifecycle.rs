@@ -4399,6 +4399,38 @@ impl Lifecycle {
         )
     }
 
+    pub fn reject_responses_websocket_session(
+        &self,
+        auth: &crate::Authenticated,
+        error: crate::codex_sessions::SessionError,
+        path: &str,
+    ) -> Response<Body> {
+        let (observer, _) = self.websocket_observer(path);
+        if let Some(observer) = observer.as_ref() {
+            observer.mark_authn_reached();
+            observer.emit_request_started(false);
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                event_id: observer.event_id().to_owned(),
+                result: Ok(self.websocket_auth_info(auth)),
+            });
+            self.record_authentication_completed(auth, observer);
+        }
+        crate::codex_sessions::session_error_response(error, observer.as_ref())
+    }
+
+    pub fn record_local_authenticated_request(
+        &self,
+        auth: &crate::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        observer.emit_request_started(false);
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(self.websocket_auth_info(auth)),
+        });
+        self.record_authentication_completed(auth, observer);
+    }
+
     pub(crate) fn publish_websocket_provider_cache_observation(
         &self,
         context: &PromptCacheObservationContext,
@@ -4870,6 +4902,7 @@ impl Lifecycle {
         }
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
+        crate::codex_sessions::strip_untrusted_provenance(&mut downstream_headers);
         let canonical_model = canonical_model_id(Provider::Openai, model).to_owned();
         let service_tier = body.get("service_tier").and_then(Value::as_str);
         let identity = request_identity_metadata(ingress.headers, Some(body));
@@ -4991,6 +5024,7 @@ impl Lifecycle {
         })?;
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
+        crate::codex_sessions::strip_untrusted_provenance(&mut downstream_headers);
         let context = DialectShapeContext {
             request_id: request_id.to_owned(),
             downstream_headers,
@@ -5073,6 +5107,7 @@ impl Lifecycle {
         })?;
         let mut downstream_headers = headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
+        crate::codex_sessions::strip_untrusted_provenance(&mut downstream_headers);
         let ctx = RequestContext::builder()
             .request_id(next_request_id())
             .downstream_headers(downstream_headers)
@@ -5126,6 +5161,7 @@ impl Lifecycle {
         })?;
         let mut headers = signed.headers().clone();
         strip_hop_by_hop(&mut headers);
+        crate::codex_sessions::strip_untrusted_provenance(&mut headers);
         Ok((url, headers, signer))
     }
 
@@ -5250,6 +5286,7 @@ impl Lifecycle {
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
+        let session_owner = req.extensions().get::<crate::codex_sessions::SessionOwnerConstraint>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
         let multipart = is_multipart_operation(&ctx.path)
             && ctx
@@ -5387,6 +5424,16 @@ impl Lifecycle {
             }
             return Ok(response);
         };
+        if auth.session().is_some() {
+            let Some(owner) = session_owner.as_ref() else {
+                return Ok(crate::codex_sessions::session_error_response(
+                    crate::codex_sessions::SessionError::OwnerConflict, observer.as_ref(),
+                ));
+            };
+            if let Err(error) = owner.validate(auth).await {
+                return Ok(crate::codex_sessions::session_error_response(error, observer.as_ref()));
+            }
+        }
         if body_view
             .value()
             .is_some_and(|body| !body_is_consistency_safe(request_capability, body))
@@ -5605,6 +5652,13 @@ impl Lifecycle {
                 return Ok(failure.response(request_capability));
             }
         };
+        if let (Some(owner), Some(affinity)) = (session_owner.as_ref(), request_affinity.as_ref())
+            && owner.upstream_id() != affinity.target_upstream_id
+        {
+            return Ok(crate::codex_sessions::session_error_response(
+                crate::codex_sessions::SessionError::OwnerConflict, observer.as_ref(),
+            ));
+        }
         let keepalive_response_enabled =
             self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
@@ -5684,6 +5738,10 @@ impl Lifecycle {
                 &native_cache_scores,
                 &*self.clock,
             );
+        if let Some(owner) = session_owner.as_ref() {
+            candidates.retain(|candidate| candidate.upstream_id == owner.upstream_id());
+            selected_cache_matches.retain(|upstream_id, _| *upstream_id == owner.upstream_id());
+        }
         if let Some(affinity) = request_affinity.as_ref() {
             candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
             selected_cache_matches
@@ -5705,6 +5763,9 @@ impl Lifecycle {
                 .candidates
                 .retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
         }
+        if let Some(owner) = session_owner.as_ref() {
+            pipeline_result.candidates.retain(|candidate| candidate.upstream_id == owner.upstream_id());
+        }
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -5718,7 +5779,7 @@ impl Lifecycle {
             "cc_lb.route.candidate_count",
             numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
         );
-        if request_affinity.is_some() && pipeline_result.candidates.is_empty() {
+        if (request_affinity.is_some() || session_owner.is_some()) && pipeline_result.candidates.is_empty() {
             route_span.record("cc_lb.route.outcome", "error");
             route_span.record("otel.status_code", "ERROR");
             route_span.record("error.type", error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
@@ -5883,7 +5944,7 @@ impl Lifecycle {
             request_kind,
             observer: observer.as_ref(),
             handle_span: &handle_span,
-            enabled: request_affinity.is_none(),
+            enabled: request_affinity.is_none() && session_owner.is_none(),
             excluded: Vec::new(),
             upstream_attempts: 1,
         };
@@ -5898,6 +5959,11 @@ impl Lifecycle {
                 && request_affinity.is_some());
         let mut routed_owner_epoch;
         let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
+            if let Some(owner) = session_owner.as_ref()
+                && let Err(error) = owner.validate(auth).await
+            {
+                return Ok(crate::codex_sessions::session_error_response(error, observer.as_ref()));
+            }
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
             // response status or timings under the new route.
@@ -6601,6 +6667,7 @@ impl Lifecycle {
             body = Body::empty();
         }
         strip_hop_by_hop(&mut parts.headers);
+        crate::codex_sessions::mark_upstream_response(&mut parts.headers);
         let body_collect_started = Instant::now();
         let response_body_timing = BodyIoTiming::default();
         let mut response_body_timing_guard =
@@ -7430,6 +7497,7 @@ impl Lifecycle {
 
         let downstream_headers = {
             strip_hop_by_hop(&mut parts.headers);
+            crate::codex_sessions::strip_untrusted_provenance(&mut parts.headers);
             parts.headers
         };
         let ctx = RequestContext::builder()
@@ -7669,6 +7737,7 @@ impl Lifecycle {
         let upstream_has_content_length = parts.headers.contains_key(CONTENT_LENGTH);
         let upstream_diagnostics = UpstreamBodyDiagnostics::from_parts(&parts);
         strip_hop_by_hop(&mut parts.headers);
+        crate::codex_sessions::mark_upstream_response(&mut parts.headers);
         let decompression_output_budget_bytes =
             decompression_output_budget_bytes(self.config.messages_body_cap_bytes);
         let incomplete_sse_event_budget_bytes =
@@ -10585,6 +10654,7 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
         headers: {
             let mut headers = parts.headers;
             strip_hop_by_hop(&mut headers);
+            crate::codex_sessions::mark_upstream_response(&mut headers);
             headers
         },
         body: collect_terminal_error_body(body).await,

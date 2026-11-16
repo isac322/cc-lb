@@ -64,6 +64,8 @@ mod oauth_post_commit_completion;
 mod plugin_admin_audit_completion;
 #[path = "principal_keys.rs"]
 mod principal_keys;
+#[path = "codex_sessions.rs"]
+mod codex_sessions;
 #[path = "principal_post_commit.rs"]
 mod principal_post_commit;
 #[path = "principals_cache_keepalive_roundtrip.rs"]
