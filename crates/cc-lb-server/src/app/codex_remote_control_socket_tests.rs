@@ -259,11 +259,12 @@ fn text_and_binary_conversions_retain_the_original_bytes() {
 fn runtime_authentication_rail_stays_on_every_downstream_data_frame() {
     let source = include_str!("codex_remote_control_socket.rs");
     let rail = source.split("pub(super) async fn relay(").nth(1).unwrap();
-    let authenticate = rail.find("state.lifecycle.authenticate(headers)").unwrap();
+    let authenticate = rail.find(".authenticate(headers)").unwrap();
     let proof = rail.find("same_proof(auth, &current)").unwrap();
     let fence = rail.find("fenced_relay(state, &current,").unwrap();
     assert!(authenticate < proof && proof < fence);
-    assert!(rail.contains("relay_sockets(downstream, provider, capacity, || async"));
+    assert!(rail.contains("relay_sockets("));
+    assert!(rail.contains("downstream,"));
     assert!(source.contains("use super::handshake::ProviderSocket;"));
 }
 

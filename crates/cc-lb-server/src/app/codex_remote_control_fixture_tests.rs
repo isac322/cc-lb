@@ -1,6 +1,8 @@
 use super::*;
-use cc_lb_storage_api::{CodexSessionStore, RelayEnrollmentStore};
-use cc_lb_storage_api::codex_sessions::{CredentialPurpose, IssueSession, SessionCredential, SessionFamily};
+use cc_lb_storage_api::codex_sessions::{
+    CodexSessionStore, CredentialPurpose, IssueSession, SessionCredential, SessionFamily,
+};
+use cc_lb_storage_api::RelayEnrollmentStore;
 use cc_lb_control::api_keys::{relay_authn::StoredRelayVerifier, session_token};
 
 // Contract-faithful HTTP transport fixture only. This is not provider evidence
