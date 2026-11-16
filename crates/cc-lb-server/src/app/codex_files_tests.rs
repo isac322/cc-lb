@@ -692,6 +692,7 @@ async fn invalid_principal_and_wrong_purpose_never_poll_body_or_sign() {
 async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_without_usage() {
     const CREATE_BODY: &[u8] = b" { \"file_id\":\"pdf-file\", \"upload_url\":\"https://signed.invalid/put\", \"opaque\": [1,2,3] }\n";
     const PDF_PENDING: &[u8] = br#"{"status":"pending","retry":true,"file_id":"pdf-file"}"#;
+    const PDF_RETRY: &[u8] = br#"{"status":"retry","file_id":"pdf-file"}"#;
     const FINALIZE_BODY: &[u8] = br#" { "status":"success", "download_url":"https://signed.invalid/pdf" } "#;
     let fixture = Fixture::new(
         vec![
@@ -699,6 +700,7 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
                 .with_header("content-type", "application/json"),
             Reply::new(StatusCode::ACCEPTED, PDF_PENDING)
                 .with_header("retry-after", "3"),
+            Reply::new(StatusCode::OK, PDF_RETRY),
             Reply::new(StatusCode::OK, FINALIZE_BODY),
             Reply::new(StatusCode::OK, FINALIZE_BODY),
         ],
@@ -722,6 +724,7 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
     const UPLOADED_REQUEST: &[u8] = br#"{"bytes":4,"sha256":"abc"}"#;
     for (expected_status, expected_body) in [
         (StatusCode::ACCEPTED, PDF_PENDING),
+        (StatusCode::OK, PDF_RETRY),
         (StatusCode::OK, FINALIZE_BODY),
         (StatusCode::OK, FINALIZE_BODY),
     ] {
@@ -740,7 +743,7 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
         ).fetch_one(fixture.storage.pool()).await.expect("HTTP-created file state");
         assert_eq!(
             ledger_state,
-            if status == StatusCode::ACCEPTED { "created" } else { "finalized" },
+            if expected_body == FINALIZE_BODY { "finalized" } else { "created" },
             "PDF reservation responses must not finalize the HTTP-created resource",
         );
         if status == StatusCode::ACCEPTED {
@@ -755,7 +758,7 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
         );
     }
     let calls = fixture.recorder_a.requests();
-    assert_eq!(calls.len(), 4, "each client retry is exactly one provider call");
+    assert_eq!(calls.len(), 5, "each client retry is exactly one provider call");
     assert_eq!(calls[0].method, Method::POST);
     assert_eq!(calls[0].path, "/backend-api/files");
     assert_eq!(&calls[0].body[..], CREATE_REQUEST);
@@ -764,7 +767,7 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
         assert_eq!(&call.body[..], UPLOADED_REQUEST);
     }
     assert!(fixture.recorder_b.requests().is_empty());
-    assert_eq!(fixture.signer_factory.choices(), vec!["files-owner-a"; 4]);
+    assert_eq!(fixture.signer_factory.choices(), vec!["files-owner-a"; 5]);
 }
 
 #[tokio::test]
