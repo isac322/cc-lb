@@ -1,4 +1,4 @@
-SELECT pg_advisory_xact_lock(410172);
+SELECT pg_advisory_xact_lock(410173);
 
 CREATE TABLE IF NOT EXISTS relay_enrollments_v1 (
     family_id TEXT NOT NULL CHECK (btrim(family_id) <> ''),
