@@ -15,6 +15,7 @@ use crate::{
     oauth_pkce::OAuthPkceStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
+    relay::RelayEnrollmentStore,
     upstream_affinity::UpstreamAffinityStore,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
@@ -489,6 +490,7 @@ pub trait Storage:
     + UpstreamSubscriptionQuotaStore
     + UpstreamSubscriptionQuotaAggregateStore
     + UpstreamSubscriptionMetadataStore
+    + RelayEnrollmentStore
     + UpstreamWarmupAttemptStore
     + PromptCacheObservationStore
     + OrganizationMetadataStore
@@ -535,6 +537,7 @@ impl<T> Storage for T where
         + CacheKeepaliveSessionReadStore
         + UsageRollupStore
         + UsageTokenIntervalStore
+        + RelayEnrollmentStore
         + ApiKeyUsageBucketStore
         + ApiKeyConcurrencyHoldStore
         + PriceCatalogCache

@@ -23,6 +23,7 @@ mod pool_quota_history_summary;
 pub mod price_catalog;
 pub mod principals;
 pub mod prompt_cache_observation;
+pub mod relay;
 mod request_event_list_row;
 mod request_event_list_sql;
 mod request_event_row;
