@@ -132,6 +132,38 @@ async fn seed_binding(
     binding
 }
 
+#[tokio::test]
+async fn create_rejects_inconsistent_resource_snapshot_without_persisting() {
+    use cc_lb_storage_api::{CodexFileResource, CodexFileStore};
+
+    let fixture = Fixture::new().await;
+    let expected = Fixture::expectation(&fixture.owner);
+    for field in ["revision", "workspace"] {
+        let mut resource = CodexFileResource::bind(
+            format!("file-invalid-{field}"),
+            "input_file".to_owned(),
+            &fixture.owner,
+            expected.workspace_id.clone(),
+            CREATED_AT,
+            None,
+        );
+        if field == "revision" {
+            resource.binding_revision += 1;
+        } else {
+            resource.workspace_id = "unrelated-workspace".to_owned();
+        }
+        let file_id = resource.file_id.clone();
+        let result = fixture.storage.create_codex_file(&expected, resource).await;
+        assert!(matches!(result, Err(StorageError::Conflict { .. })), "{field}");
+        let stored = fixture
+            .storage
+            .resolve_codex_file(&expected, "input_file", &file_id)
+            .await
+            .expect("lookup valid selected owner");
+        assert!(stored.is_none(), "{field} mismatch must not persist");
+    }
+}
+
 async fn usage_and_provider_row_counts(storage: &SqliteStorage) -> (i64, i64) {
     let usage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_rollups_v2")
         .fetch_one(storage.pool())

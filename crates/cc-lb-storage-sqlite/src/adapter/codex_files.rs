@@ -107,6 +107,11 @@ impl CodexFileStore for SqliteStorage {
         let mut tx = self.begin_immediate().await?;
         let binding = validate_owner_binding_in_tx(&mut tx, expected).await?;
         ensure_bound(&resource, &binding)?;
+        if resource.binding_revision != binding.revision
+            || resource.workspace_id != expected.workspace_id
+        {
+            return Err(conflict("codex file creation snapshot does not match"));
+        }
         sqlx::query("INSERT INTO codex_files_v1 (file_id, principal_id, provider, kind, owner_binding_id, owner_id, upstream_id, owner_generation, binding_revision, workspace_id, state, created_at_unix_secs, expires_at_unix_secs, reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, NULL)")
             .bind(&resource.file_id).bind(&resource.principal_id).bind(&resource.provider).bind(&resource.kind)
             .bind(&resource.owner_binding_id).bind(&resource.owner_id).bind(resource.upstream_id.to_string())
