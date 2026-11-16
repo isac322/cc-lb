@@ -5,6 +5,7 @@ use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
+pub(crate) mod codex_files;
 pub(crate) mod account_owner;
 pub mod anthropic_compatibility_kv;
 pub mod api_key_usage;

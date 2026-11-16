@@ -1,4 +1,5 @@
 pub mod account_owner;
+pub mod codex_files;
 pub mod anthropic_compatibility_kv;
 pub mod api_key_usage;
 pub mod audit;
@@ -34,6 +35,7 @@ pub mod upstream_subscription_quota_checkpoint;
 pub mod usage_pruner;
 pub mod validation;
 pub mod warmup_attempts;
+pub use codex_files::*;
 
 pub use account_owner::*;
 pub use anthropic_compatibility_kv::*;
