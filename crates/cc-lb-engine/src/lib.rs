@@ -22,6 +22,7 @@ pub mod codex_account;
 mod codex_quota_observation;
 #[cfg(not(loom))]
 pub mod codex_sessions;
+pub mod codex_remote_control;
 #[cfg(not(loom))]
 mod completion_observer;
 #[cfg(not(loom))]
