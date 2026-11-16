@@ -385,6 +385,25 @@ async fn websocket(state: &ProxyState, auth: &Authenticated, parts: &mut Parts,
     let bulkhead = state.websocket_bulkheads.bulkhead(format!("remote-control:{}", upstream.id), config);
     let permit = bulkhead.acquire_owned().await.map_err(|_| Error::Affinity)?;
     let Some(drain_guard) = state.drain_controller.try_track() else { return Err(Error::Affinity); };
+    // Admission may wait while another connection holds the permit. Revalidate
+    // authority after that wait and before opening the provider socket.
+    let admitted_auth = state
+        .lifecycle
+        .authenticate(&parts.headers)
+        .await
+        .map_err(|error| {
+            Error::Session(cc_lb_engine::codex_sessions::SessionError::Unauthenticated(error))
+        })?;
+    let admitted_generation = fenced_relay(
+        state,
+        &admitted_auth,
+        unix_secs(state.clock.now()),
+    )
+    .await?
+    .generation;
+    if !same_proof(auth, &admitted_auth) || admitted_generation != generation {
+        return Err(Error::Affinity);
+    }
     *observation = Some(RemoteControlObservation::begin(auth, observer, upstream, &state.clock));
     let connected = tokio::select! {
         _ = state.drain_controller.wait_for_draining() => return Err(Error::Affinity),

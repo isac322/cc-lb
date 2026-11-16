@@ -31,7 +31,10 @@ use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
 use cc_lb_control::{
     DynamicView, DynamicViewHolder,
     api_keys::{
-        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
+        builtin_authn::BuiltinAuthn,
+        concurrent_guard::KeyConcurrencyManager,
+        key_store::KeyStore,
+        relay_authn::StoredRelayVerifier,
         limit_engine::LimitEngine,
     },
     spawn_audit_writer,
@@ -1081,7 +1084,12 @@ async fn build_app_with_storage_inner(
         >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
     let builtin_authn = Arc::new(
-        BuiltinAuthn::new(key_store.clone(), clock.clone()).with_session_store(storage.clone()),
+        BuiltinAuthn::new(key_store.clone(), clock.clone())
+            .with_session_store(storage.clone())
+            .with_relay_verifier(Arc::new(StoredRelayVerifier::new(
+                storage.clone(),
+                clock.clone(),
+            ))),
     );
     let (
         dispatcher,
