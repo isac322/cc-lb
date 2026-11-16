@@ -118,7 +118,7 @@ async fn recorder_handler(
         .expect("provider request lock")
         .push(CapturedRequest {
             method: parts.method,
-            path: parts.uri.path().to_owned(),
+            path: parts.uri.path_and_query().expect("provider target").as_str().to_owned(),
             headers: parts.headers,
             body,
         });
@@ -735,6 +735,14 @@ async fn create_duplicate_finalize_and_pdf_reservation_preserve_raw_bodies_witho
             .await;
         assert_eq!(status, expected_status);
         assert_eq!(&body[..], expected_body);
+        let ledger_state: String = sqlx::query_scalar(
+            "SELECT state FROM codex_files_v1 WHERE file_id = 'pdf-file'",
+        ).fetch_one(fixture.storage.pool()).await.expect("HTTP-created file state");
+        assert_eq!(
+            ledger_state,
+            if status == StatusCode::ACCEPTED { "created" } else { "finalized" },
+            "PDF reservation responses must not finalize the HTTP-created resource",
+        );
         if status == StatusCode::ACCEPTED {
             assert_eq!(headers[header::RETRY_AFTER], "3");
         }
@@ -796,7 +804,7 @@ async fn unobserved_native_and_encoded_ids_reach_selected_owner_preserving_404()
     .await;
     for (path, expected_status, expected_body) in [
         ("/backend-api/files/native-file/uploaded", StatusCode::NOT_FOUND, MISSING),
-        ("/backend-api/files/native%20id/uploaded", StatusCode::OK, SUCCESS),
+        ("/backend-api/files/native%20id/uploaded?purpose=pdf&opaque=a%2Fb", StatusCode::OK, SUCCESS),
     ] {
         let (status, _, body) = fixture
             .request(Method::POST, path, Some(&fixture.session_a.access), Body::from("{}"))
@@ -807,7 +815,7 @@ async fn unobserved_native_and_encoded_ids_reach_selected_owner_preserving_404()
     let calls = fixture.recorder_a.requests();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].path, "/backend-api/files/native-file/uploaded");
-    assert_eq!(calls[1].path, "/backend-api/files/native%20id/uploaded");
+    assert_eq!(calls[1].path, "/backend-api/files/native%20id/uploaded?purpose=pdf&opaque=a%2Fb");
     assert!(fixture.recorder_b.requests().is_empty());
 }
 
@@ -1028,4 +1036,80 @@ async fn awaited_vendor_signing_rechecks_revocation_and_workspace_access_before_
         assert!(fixture.recorder_a.requests().is_empty(), "stale signed request was dispatched");
         assert!(fixture.recorder_b.requests().is_empty(), "owner changed after invalidation");
     }
+}
+
+#[tokio::test]
+async fn request_cap_and_body_read_failure_emit_one_typed_terminal_without_dispatch() {
+    let fixture = Fixture::new(vec![], vec![]).await;
+    for exceeds_cap in [true, false] {
+        let mut events = fixture.bus.subscribe_lifecycle();
+        let mut headers = HeaderMap::new();
+        let body = if exceeds_cap {
+            headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&(PROVIDER_BODY_CAP + 1).to_string()).expect("body cap header"),
+            );
+            panic_body()
+        } else {
+            Body::from_stream(stream::once(async {
+                Err::<Bytes, _>(std::io::Error::other("fixture ingress read failure"))
+            }))
+        };
+        let (status, headers, _) = fixture.request_with_headers(
+            Method::POST, "/backend-api/files", Some(&fixture.session_a.access), headers, body,
+        ).await;
+        assert_eq!(
+            status,
+            if exceeds_cap { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST },
+        );
+        assert_eq!(headers["cc-lb-error-origin"], "proxy");
+        let mut terminated = 0;
+        while let Ok(event) = events.try_recv() {
+            if let LifecycleEvent::RequestTerminated {
+                client_status, reason, internal_errors, ..
+            } = event {
+                terminated += 1;
+                assert_eq!(client_status, status.as_u16());
+                let expected_code = if exceeds_cap { "body_too_large" } else { "body_read_failed" };
+                assert!(
+                    matches!(reason, cc_lb_lifecycle::TerminationReason::ErrorCode(code) if code == expected_code),
+                    "ingress rejection must keep its typed terminal reason",
+                );
+                assert_eq!(internal_errors.len(), 1);
+                assert_eq!(internal_errors[0].stage, cc_lb_domain::InternalErrorStage::Ingress);
+            }
+        }
+        assert_eq!(terminated, 1);
+        assert!(fixture.recorder_a.requests().is_empty());
+        assert!(fixture.recorder_b.requests().is_empty());
+        assert!(fixture.signer_factory.choices().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn oversized_provider_response_emits_one_relay_failure_without_exposing_success() {
+    let fixture = Fixture::new(
+        vec![Reply::with_body(StatusCode::OK, vec![b'x'; PROVIDER_BODY_CAP + 1])],
+        vec![],
+    ).await;
+    let mut events = fixture.bus.subscribe_lifecycle();
+    let (status, headers, body) = fixture.request(
+        Method::POST, "/backend-api/files", Some(&fixture.session_a.access), Body::from("{}"),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(headers["cc-lb-error-origin"], "proxy");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("bounded relay error");
+    assert_eq!(error["error"], "upstream_dispatch_failed");
+    let mut terminated = 0;
+    while let Ok(event) = events.try_recv() {
+        if let LifecycleEvent::RequestTerminated { client_status, internal_errors, .. } = event {
+            terminated += 1;
+            assert_eq!(client_status, 502);
+            assert_eq!(internal_errors.len(), 1);
+            assert_eq!(internal_errors[0].stage, cc_lb_domain::InternalErrorStage::Relay);
+        }
+    }
+    assert_eq!(terminated, 1);
+    assert_eq!(fixture.recorder_a.requests().len(), 1);
+    assert!(fixture.recorder_b.requests().is_empty());
 }
