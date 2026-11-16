@@ -84,20 +84,6 @@ impl AccountOwnerStore for SqliteStorage {
         Ok(binding)
     }
 
-    async fn list_owner_workspace_targets(
-        &self,
-        principal_id: &str,
-        provider: &str,
-        local_user_id: &str,
-    ) -> StorageResult<Vec<String>> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
-        let aliases =
-            list_owner_workspace_aliases_in_read_tx(&mut tx, principal_id, provider, local_user_id)
-                .await?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(aliases)
-    }
-
     async fn compare_and_replace_owner_binding(
         &self,
         binding: AccountOwnerBinding,
@@ -120,7 +106,6 @@ impl AccountOwnerStore for SqliteStorage {
             || existing.upstream_id != binding.upstream_id
             || existing.provider_workspace_id != binding.provider_workspace_id;
         let permission_withdrawal = !identity_changed
-            && binding.outbound_region == existing.outbound_region
             && binding
                 .allowed_workspaces
                 .iter()
@@ -184,57 +169,6 @@ impl AccountOwnerStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(binding)
     }
-}
-
-/// Lists local aliases in the caller's read snapshot without granting authority.
-/// This helper neither obtains a writer lock nor changes any account state.
-pub(crate) async fn list_owner_workspace_aliases_in_read_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    principal_id: &str,
-    provider: &str,
-    local_user_id: &str,
-) -> StorageResult<Vec<String>> {
-    let principal = Uuid::parse_str(principal_id)
-        .map_err(|_| conflict("principal id must be a canonical UUID"))?;
-    let mut canonical = [0_u8; 36];
-    if principal.hyphenated().encode_lower(&mut canonical) != principal_id {
-        return Err(conflict("principal id must be a canonical UUID"));
-    }
-    sqlx::query_scalar(
-        "SELECT alias.workspace_id COLLATE BINARY
-         FROM account_owner_workspaces_v1 alias
-         JOIN account_owner_bindings_v1 binding ON binding.binding_id = alias.binding_id
-         JOIN principals_v1 principal ON principal.id = alias.principal_id
-         JOIN upstream_spec_v1 upstream ON upstream.id = binding.upstream_id
-         LEFT JOIN upstream_status_v1 status ON status.upstream_id = upstream.id
-         WHERE alias.principal_id = ? AND alias.provider = ?
-           AND binding.principal_id = alias.principal_id
-           AND binding.provider = alias.provider AND binding.local_user_id = ?
-           AND binding.revoked_at_unix_secs IS NULL
-           AND principal.enabled = 1 AND principal.deleted_at IS NULL
-           AND upstream.enabled = 1 AND upstream.deleted_at IS NULL
-           AND status.last_apply_error IS NULL
-           AND binding.provider IN ('anthropic', 'openai', 'gemini')
-           AND upstream.kind IN (binding.provider || '_api_key', binding.provider || '_oauth')
-           AND EXISTS (
-               SELECT 1 FROM json_each(binding.allowed_workspaces_json) allowed
-               WHERE allowed.type = 'text' AND allowed.value = alias.workspace_id
-           )
-           AND (
-               json_array_length(principal.allowed_upstreams) = 0
-               OR EXISTS (
-                   SELECT 1 FROM json_each(principal.allowed_upstreams) allowed
-                   WHERE allowed.type = 'text' AND allowed.value = upstream.id
-               )
-           )
-         ORDER BY alias.workspace_id COLLATE BINARY",
-    )
-    .bind(principal_id)
-    .bind(provider)
-    .bind(local_user_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)
 }
 
 /// Validates a fresh tuple inside the transaction used for the protected write.
@@ -494,7 +428,7 @@ fn conflict(message: impl Into<String>) -> StorageError {
 }
 
 fn upstream_unavailable(message: impl Into<String>) -> StorageError {
-    StorageError::UpstreamUnavailable {
+    StorageError::Unavailable {
         message: message.into(),
     }
 }
@@ -587,63 +521,6 @@ mod tests {
         let target = bindings.pop().expect("target binding");
         let source = bindings.pop().expect("source binding");
         (temp_dir, storage, source, target)
-    }
-
-    #[tokio::test]
-    async fn workspace_list_keeps_the_callers_read_snapshot_without_blocking_writers() {
-        let (_temp_dir, storage, source, target) = fixture().await;
-        let mut reader = storage.pool().begin().await.expect("deferred reader");
-        let before = list_owner_workspace_aliases_in_read_tx(
-            &mut reader,
-            &source.principal_id,
-            &source.provider,
-            &source.local_user_id,
-        )
-        .await
-        .expect("establish snapshot");
-        assert_eq!(before, ["workspace-a", "workspace-b"]);
-
-        let mut writer = storage.begin_immediate().await.expect("independent writer");
-        sqlx::query("UPDATE account_owner_bindings_v1 SET revoked_at_unix_secs = 1, revision = revision + 1 WHERE binding_id = ?")
-            .bind(&target.binding_id).execute(&mut *writer).await.expect("revoke target");
-        assert_eq!(
-            list_owner_workspace_aliases_in_read_tx(
-                &mut reader,
-                &source.principal_id,
-                &source.provider,
-                &source.local_user_id,
-            )
-            .await
-            .expect("snapshot during writer"),
-            before
-        );
-        writer
-            .commit()
-            .await
-            .expect("writer commits while reader remains open");
-        assert_eq!(
-            list_owner_workspace_aliases_in_read_tx(
-                &mut reader,
-                &source.principal_id,
-                &source.provider,
-                &source.local_user_id,
-            )
-            .await
-            .expect("snapshot after commit"),
-            before
-        );
-        reader.commit().await.expect("close snapshot");
-        assert_eq!(
-            storage
-                .list_owner_workspace_targets(
-                    &source.principal_id,
-                    &source.provider,
-                    &source.local_user_id,
-                )
-                .await
-                .expect("fresh snapshot"),
-            ["workspace-a"]
-        );
     }
 
     fn expected(binding: &AccountOwnerBinding) -> OwnerBindingExpectation {
@@ -755,10 +632,7 @@ mod tests {
             .expect("restore fixture FK");
         drop(connection);
         let result = storage.resolve_owner_binding(&expected(&source)).await;
-        assert!(matches!(
-            result,
-            Err(StorageError::UpstreamUnavailable { .. })
-        ));
+        assert!(matches!(result, Err(StorageError::Unavailable { .. })));
         let mut foreign = expected(&source);
         foreign.principal_id = Uuid::new_v4().to_string();
         let result = storage.resolve_owner_binding(&foreign).await;
@@ -785,10 +659,7 @@ mod tests {
                 Some(&expected(&target)),
             )
             .await;
-            assert!(matches!(
-                unavailable,
-                Err(StorageError::UpstreamUnavailable { .. })
-            ));
+            assert!(matches!(unavailable, Err(StorageError::Unavailable { .. })));
             tx.rollback().await.expect("rollback unavailable control");
 
             let mut target_expected = expected(&target);
