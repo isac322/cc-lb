@@ -1,7 +1,8 @@
 use crate::common::{TestAuthn, TestState, managed_api_key};
 use cc_lb_engine::authn_rail::authenticate_first;
 use cc_lb_engine::codex_account::{
-    AccountProjectionError, AccountProjectionMetadata, project_codex_accounts,
+    AccountProjectionError, AccountProjectionMetadata, WorkspaceSwitchRequestError,
+    project_codex_accounts, workspace_switch_target,
 };
 use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
@@ -42,6 +43,54 @@ fn list_account(id: &str) -> Value {
         "structure": "workspace",
         "secret_extension": "must-not-forward"
     })
+}
+
+#[tokio::test]
+async fn workspace_switch_parser_returns_decoded_opaque_target() {
+    let auth = authenticated().await;
+    assert_eq!(
+        workspace_switch_target(
+            &auth,
+            br#"{ "workspace_id": "local \u2603 workspace", "unknown": "secret" }"#,
+        )
+        .unwrap(),
+        "local \u{2603} workspace"
+    );
+    assert_eq!(
+        workspace_switch_target(&auth, br#"{ "workspace_id": "  local workspace  " }"#).unwrap(),
+        "  local workspace  "
+    );
+}
+
+#[tokio::test]
+async fn workspace_switch_parser_rejects_invalid_requests_without_details() {
+    let auth = authenticated().await;
+    let secret = "workspace-secret-value";
+    let invalid_bodies: &[&[u8]] = &[
+        br#"{}"#,
+        br#"{"workspace_id":null}"#,
+        br#"{"workspace_id":7}"#,
+        br#"{"workspace_id":{}}"#,
+        br#"{"workspace_id":[]}"#,
+        br#"{"workspace_id":""}"#,
+        br#"{"workspace_id":" \t\n "}"#,
+        br#"[]"#,
+        br#"null"#,
+        br#"{"workspace_id":"ok"} trailing"#,
+        br#"{"workspace_id":"first","workspace_id":"second"}"#,
+        br#"{"workspace_id":"first","\u0077orkspace_id":"second"}"#,
+    ];
+    for body in invalid_bodies {
+        let error = workspace_switch_target(&auth, body).unwrap_err();
+        assert_eq!(error, WorkspaceSwitchRequestError::InvalidRequest);
+        assert!(!error.to_string().contains(secret));
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    let malformed = format!(r#"{{"workspace_id":"{secret}"}} trailing"#);
+    let error = workspace_switch_target(&auth, malformed.as_bytes()).unwrap_err();
+    assert_eq!(error, WorkspaceSwitchRequestError::InvalidRequest);
+    assert!(!error.to_string().contains(secret));
+    assert!(!format!("{error:?}").contains(secret));
 }
 
 #[tokio::test]

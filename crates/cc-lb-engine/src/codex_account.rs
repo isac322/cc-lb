@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use url::Url;
 
@@ -46,6 +47,42 @@ impl fmt::Display for AccountProjectionError {
 }
 
 impl std::error::Error for AccountProjectionError {}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSwitchRequest {
+    workspace_id: String,
+}
+
+/// Safe, non-secret failures while parsing a workspace switch request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSwitchRequestError {
+    InvalidRequest,
+}
+
+impl fmt::Display for WorkspaceSwitchRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid workspace switch request")
+    }
+}
+
+impl std::error::Error for WorkspaceSwitchRequestError {}
+
+/// Parse the authenticated client's local workspace target.
+///
+/// Credential and route-purpose admission precede body parsing; target owner authorization is
+/// performed by the issuer after parsing and is not repeated here.
+/// The returned string is the decoded target without trimming or normalization.
+pub fn workspace_switch_target(
+    _auth: &Authenticated,
+    body: &[u8],
+) -> Result<String, WorkspaceSwitchRequestError> {
+    let request = sonic_rs::from_slice::<WorkspaceSwitchRequest>(body)
+        .map_err(|_| WorkspaceSwitchRequestError::InvalidRequest)?;
+    if request.workspace_id.trim().is_empty() {
+        return Err(WorkspaceSwitchRequestError::InvalidRequest);
+    }
+    Ok(request.workspace_id)
+}
 
 /// Project one authenticated provider workspace into the canonical Codex list response.
 ///
