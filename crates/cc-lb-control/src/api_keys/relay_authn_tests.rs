@@ -45,11 +45,19 @@ impl RelayEnrollmentStore for Store {
     ) -> SessionStoreResult<RelayEnrollment> {
         panic!("header verifier must not refresh")
     }
+    async fn lookup_access_relay_enrollment(
+        &self,
+        _: &str,
+        _: &SessionSnapshot,
+        _: &cc_lb_storage_api::AccessRelaySelector,
+        _: u64,
+    ) -> SessionStoreResult<cc_lb_storage_api::RelayEnrollmentMetadata> {
+        panic!("header verifier must not resolve account enrollment")
+    }
     async fn fence_relay_dispatch(
         &self,
         _: &str,
         _: &SessionSnapshot,
-        _: &RelayEnrollmentIdentity,
         _: u64,
     ) -> SessionStoreResult<RelayDispatch> {
         panic!("header verifier must not resolve owner")

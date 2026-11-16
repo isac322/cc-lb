@@ -3,9 +3,10 @@ use cc_lb_storage_api::{
     StorageError,
     codex_sessions::{CredentialPurpose, SessionSnapshot, SessionStoreError, SessionStoreResult},
     relay::{
-        IssueRelayEnrollment, RefreshRelayEnrollment, RelayAuthRecord, RelayCredential,
-        RelayDispatch, RelayEnrollment, RelayEnrollmentIdentity, RelayEnrollmentStore,
-        RelayLineage, validate_relay_dispatch, validate_relay_grant,
+        AccessRelaySelector, IssueRelayEnrollment, RefreshRelayEnrollment, RelayAuthRecord,
+        RelayCredential, RelayDispatch, RelayEnrollment, RelayEnrollmentIdentity,
+        RelayEnrollmentMetadata, RelayEnrollmentStore, RelayLineage, validate_relay_dispatch,
+        validate_relay_grant,
     },
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
@@ -152,33 +153,100 @@ impl RelayEnrollmentStore for PostgresStorage {
         }))
     }
 
-    async fn fence_relay_dispatch(
+    async fn lookup_access_relay_enrollment(
         &self,
         principal_id: &str,
         snapshot: &SessionSnapshot,
-        identity: &RelayEnrollmentIdentity,
+        selector: &AccessRelaySelector,
         now: u64,
-    ) -> SessionStoreResult<RelayDispatch> {
-        if snapshot.purpose != CredentialPurpose::RemoteRelay
-            || snapshot.family_id != identity.family_id
-        {
+    ) -> SessionStoreResult<RelayEnrollmentMetadata> {
+        if snapshot.purpose != CredentialPurpose::SessionAccess {
             return Err(SessionStoreError::CredentialRejected);
         }
         let mut tx = self.pool.begin().await.map_err(map_error)?;
         let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
-        let enrollment = read_enrollment(&mut tx, identity).await?;
+        validate_session_access_credential_in_tx(&mut tx, &family, snapshot, now).await?;
+        let (sql, binds): (&str, Vec<&str>) = match selector {
+            AccessRelaySelector::Server { server_id, installation_id } => {
+                if server_id.is_empty() || installation_id.is_empty() {
+                    return Err(SessionStoreError::InvalidOperation);
+                }
+                (
+                    "SELECT enrollment_id, family_id, server_id, environment_id, installation_id, \
+                     principal_id, parent_key_id, owner_binding_id, provider, owner_generation, \
+                     binding_revision, workspace_id, workspace_generation, access_generation, origin, \
+                     provider_expires_at_unix_secs, generation, updated_at_unix_secs \
+                     FROM codex_relay_enrollments_v1 WHERE family_id = $1 AND server_id = $2 \
+                     AND installation_id = $3 LIMIT 2",
+                    vec![&family.family_id, server_id, installation_id],
+                )
+            }
+            AccessRelaySelector::Environment { environment_id } => {
+                if environment_id.is_empty() {
+                    return Err(SessionStoreError::InvalidOperation);
+                }
+                (
+                    "SELECT enrollment_id, family_id, server_id, environment_id, installation_id, \
+                     principal_id, parent_key_id, owner_binding_id, provider, owner_generation, \
+                     binding_revision, workspace_id, workspace_generation, access_generation, origin, \
+                     provider_expires_at_unix_secs, generation, updated_at_unix_secs \
+                     FROM codex_relay_enrollments_v1 WHERE family_id = $1 AND environment_id = $2 LIMIT 2",
+                    vec![&family.family_id, environment_id],
+                )
+            }
+        };
+        let mut query = sqlx::query(sql);
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        let rows = query.fetch_all(&mut *tx).await.map_err(map_error)?;
+        if rows.len() != 1 {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        let row = &rows[0];
+        let identity = identity_row(row)?;
+        let lineage = lineage_row(row, false)?;
+        if !lineage.matches_family(&identity, &family) {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        let result = RelayEnrollmentMetadata {
+            enrollment_id: row.try_get("enrollment_id").map_err(map_error)?,
+            identity,
+            lineage,
+            provider_expires_at_unix_secs: number(row, "provider_expires_at_unix_secs")?,
+            generation: number(row, "generation")?,
+            updated_at_unix_secs: number(row, "updated_at_unix_secs")?,
+        };
+        tx.commit().await.map_err(map_error)?;
+        Ok(result)
+    }
+
+    async fn fence_relay_dispatch(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        now: u64,
+    ) -> SessionStoreResult<RelayDispatch> {
+        if snapshot.purpose != CredentialPurpose::RemoteRelay {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+        let mut tx = self.pool.begin().await.map_err(map_error)?;
+        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
         let row = sqlx::query(
             "SELECT * FROM codex_relay_credentials_v1 \
-             WHERE credential_id = $1 AND enrollment_id = $2 AND family_id = $3 FOR UPDATE",
+             WHERE credential_id = $1 AND family_id = $2 FOR UPDATE",
         )
         .bind(&snapshot.credential_id)
-        .bind(&enrollment.enrollment_id)
         .bind(&family.family_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_error)?
         .ok_or(SessionStoreError::CredentialRejected)?;
         let credential = credential_row(&row)?;
+        let enrollment = read_enrollment(&mut tx, &credential.identity).await?;
+        if enrollment.enrollment_id != credential.enrollment_id {
+            return Err(SessionStoreError::CredentialRejected);
+        }
         validate_relay_dispatch(&enrollment, &credential, snapshot, &family, now)?;
         let result = if now >= enrollment.provider_expires_at_unix_secs {
             RelayDispatch::ProviderExpired

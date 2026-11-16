@@ -78,6 +78,7 @@ http.workspace = true
 http-body-util.workspace = true
 http-body.workspace = true
 hex.workspace = true
+hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true

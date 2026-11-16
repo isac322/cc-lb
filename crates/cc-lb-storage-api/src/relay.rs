@@ -183,6 +183,24 @@ impl fmt::Debug for RelayCredential {
     }
 }
 
+/// Account-authenticated selectors are equality filters within the stored
+/// session family; they never establish ownership or release relay ciphertext.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccessRelaySelector {
+    Server { server_id: String, installation_id: String },
+    Environment { environment_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayEnrollmentMetadata {
+    pub enrollment_id: String,
+    pub identity: RelayEnrollmentIdentity,
+    pub lineage: RelayLineage,
+    pub provider_expires_at_unix_secs: u64,
+    pub generation: u64,
+    pub updated_at_unix_secs: u64,
+}
+
 pub struct IssueRelayEnrollment {
     pub principal_id: String,
     pub access: SessionSnapshot,
@@ -240,13 +258,24 @@ pub trait RelayEnrollmentStore: Send + Sync {
         index_hash: &[u8; 32],
     ) -> SessionStoreResult<Option<RelayAuthRecord>>;
 
-    /// Checks RemoteRelay purpose, all frozen stamps, local credential validity,
-    /// and current owner/family authority before returning server-only ciphertext.
+    /// Resolves one stored enrollment under a live SessionAccess family/owner
+    /// fence. Metadata only: account client list/revoke and refresh do not need
+    /// provider relay ciphertext. Provider expiry must not prevent refresh.
+    async fn lookup_access_relay_enrollment(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        selector: &AccessRelaySelector,
+        now: u64,
+    ) -> SessionStoreResult<RelayEnrollmentMetadata>;
+
+    /// Derives enrollment identity from the authenticated credential/family,
+    /// checks all frozen stamps and live owner authority, and only then releases
+    /// server-only ciphertext. Client identity selectors are not authority.
     async fn fence_relay_dispatch(
         &self,
         principal_id: &str,
         snapshot: &SessionSnapshot,
-        identity: &RelayEnrollmentIdentity,
         now: u64,
     ) -> SessionStoreResult<RelayDispatch>;
 }

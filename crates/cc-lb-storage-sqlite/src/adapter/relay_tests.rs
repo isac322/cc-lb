@@ -136,7 +136,7 @@ async fn dispatch(
     now: u64,
 ) -> SessionStoreResult<RelayDispatch> {
     store
-        .fence_relay_dispatch("principal", snapshot, &identity(), now)
+        .fence_relay_dispatch("principal", snapshot, now)
         .await
 }
 
@@ -662,5 +662,144 @@ async fn owner_revision_and_generation_changes_fence_without_affecting_header_lo
         assert_eq!(stored, (1, initial.vendor_ciphertext.clone()));
         assert!(s.lookup_relay_credential(&[11; 32]).await?.is_none());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_lookup_returns_metadata_and_expired_provider_can_be_refreshed() -> TestResult {
+    let s = store().await;
+    let initial = s.issue_relay_enrollment(grant(10, 1, 101), 101).await?;
+    let access = access(&family(), 1);
+    let expected = RelayEnrollmentMetadata {
+        enrollment_id: initial.enrollment_id.clone(),
+        identity: initial.identity.clone(),
+        lineage: initial.lineage.clone(),
+        provider_expires_at_unix_secs: 180,
+        generation: 1,
+        updated_at_unix_secs: 101,
+    };
+    // An unreadable ciphertext column proves account lookup does not decode it.
+    sqlx::query("UPDATE codex_relay_enrollments_v1 SET vendor_ciphertext='not-a-blob'")
+        .execute(s.pool())
+        .await?;
+    for selector in [
+        AccessRelaySelector::Server {
+            server_id: "server".into(),
+            installation_id: "installation".into(),
+        },
+        AccessRelaySelector::Environment { environment_id: "environment".into() },
+    ] {
+        assert_eq!(
+            s.lookup_access_relay_enrollment("principal", &access, &selector, 180).await?,
+            expected
+        );
+    }
+    // Restore ciphertext for the separate refresh operation, whose contract reads it.
+    sqlx::query("UPDATE codex_relay_enrollments_v1 SET vendor_ciphertext=?")
+        .bind(initial.vendor_ciphertext)
+        .execute(s.pool())
+        .await?;
+    let mut refreshed = grant(11, 2, 181);
+    refreshed.provider_expires_at_unix_secs = 195;
+    refreshed.credential.expires_at_unix_secs = 190;
+    let current = s.refresh_relay_enrollment(
+        RefreshRelayEnrollment { grant: refreshed, expected_generation: 1 },
+        181,
+    ).await?;
+    assert_eq!(current.generation, 2);
+    assert_eq!(current.provider_expires_at_unix_secs, 195);
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_lookup_rejects_wrong_authority_selectors_and_ambiguous_environment() -> TestResult {
+    let s = store().await;
+    s.issue_relay_enrollment(grant(10, 1, 101), 101).await?;
+    let valid = access(&family(), 1);
+    let selector = AccessRelaySelector::Environment { environment_id: "environment".into() };
+    let mut renewal = valid.clone();
+    renewal.purpose = CredentialPurpose::SessionRenewal;
+    let mut relay = valid.clone();
+    relay.purpose = CredentialPurpose::RemoteRelay;
+    let mut wrong_family = valid.clone();
+    wrong_family.family_id = "other-family".into();
+    let mut missing_credential = valid.clone();
+    missing_credential.credential_id = "missing".into();
+    for snapshot in [&renewal, &relay, &wrong_family, &missing_credential] {
+        assert!(s.lookup_access_relay_enrollment("principal", snapshot, &selector, 102).await.is_err());
+    }
+    assert!(s.lookup_access_relay_enrollment("other-principal", &valid, &selector, 102).await.is_err());
+    for selector in [
+        AccessRelaySelector::Server { server_id: "other".into(), installation_id: "installation".into() },
+        AccessRelaySelector::Server { server_id: "server".into(), installation_id: "other".into() },
+        AccessRelaySelector::Environment { environment_id: "other".into() },
+    ] {
+        assert!(matches!(
+            s.lookup_access_relay_enrollment("principal", &valid, &selector, 102).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+    }
+    for selector in [
+        AccessRelaySelector::Server { server_id: String::new(), installation_id: "installation".into() },
+        AccessRelaySelector::Server { server_id: "server".into(), installation_id: String::new() },
+        AccessRelaySelector::Environment { environment_id: String::new() },
+    ] {
+        assert!(matches!(
+            s.lookup_access_relay_enrollment("principal", &valid, &selector, 102).await,
+            Err(SessionStoreError::InvalidOperation)
+        ));
+    }
+    let mut second = grant(11, 1, 102);
+    second.enrollment_id = "second-enrollment".into();
+    second.identity.server_id = "second-server".into();
+    second.credential.enrollment_id = second.enrollment_id.clone();
+    second.credential.identity = second.identity.clone();
+    s.issue_relay_enrollment(second, 102).await?;
+    assert!(matches!(
+        s.lookup_access_relay_enrollment("principal", &valid, &selector, 103).await,
+        Err(SessionStoreError::OwnerConflict)
+    ));
+    sqlx::query("UPDATE codex_relay_enrollments_v1 SET workspace_generation=2")
+        .execute(s.pool())
+        .await?;
+    let server = AccessRelaySelector::Server {
+        server_id: "server".into(),
+        installation_id: "installation".into(),
+    };
+    assert!(matches!(
+        s.lookup_access_relay_enrollment("principal", &valid, &server, 103).await,
+        Err(SessionStoreError::OwnerConflict)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_derives_nondefault_identity_and_never_returns_expired_or_revoked_ciphertext() -> TestResult {
+    let s = store().await;
+    let mut command = grant(10, 1, 101);
+    command.identity.server_id = "stored-server".into();
+    command.identity.environment_id = "stored-environment".into();
+    command.identity.installation_id = "stored-installation".into();
+    command.credential.identity = command.identity.clone();
+    let initial = s.issue_relay_enrollment(command, 101).await?;
+    let record = s.lookup_relay_credential(&[10; 32]).await?.unwrap();
+    assert_eq!(
+        dispatch(&s, &record.snapshot, 102).await?,
+        RelayDispatch::Authorized(initial)
+    );
+    assert!(dispatch(&s, &access(&family(), 1), 102).await.is_err());
+    assert!(s.fence_relay_dispatch("other-principal", &record.snapshot, 102).await.is_err());
+    let mut wrong_family = record.snapshot.clone();
+    wrong_family.family_id = "other-family".into();
+    assert!(dispatch(&s, &wrong_family, 102).await.is_err());
+    sqlx::query("UPDATE codex_relay_enrollments_v1 SET provider_expires_at_unix_secs=103")
+        .execute(s.pool())
+        .await?;
+    assert_eq!(dispatch(&s, &record.snapshot, 103).await?, RelayDispatch::ProviderExpired);
+    s.revoke_session_family("family", "session-2", 104).await?;
+    assert!(matches!(
+        dispatch(&s, &record.snapshot, 105).await,
+        Err(SessionStoreError::CredentialRejected)
+    ));
     Ok(())
 }

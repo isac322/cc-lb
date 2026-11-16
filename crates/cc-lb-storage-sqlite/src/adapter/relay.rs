@@ -3,9 +3,10 @@ use cc_lb_storage_api::{
     StorageError,
     codex_sessions::{CredentialPurpose, SessionSnapshot, SessionStoreError, SessionStoreResult},
     relay::{
-        IssueRelayEnrollment, RefreshRelayEnrollment, RelayAuthRecord, RelayCredential,
-        RelayDispatch, RelayEnrollment, RelayEnrollmentIdentity, RelayEnrollmentStore,
-        RelayLineage, validate_relay_dispatch, validate_relay_grant,
+        AccessRelaySelector, IssueRelayEnrollment, RefreshRelayEnrollment, RelayAuthRecord,
+        RelayCredential, RelayDispatch, RelayEnrollment, RelayEnrollmentIdentity,
+        RelayEnrollmentMetadata, RelayEnrollmentStore, RelayLineage, validate_relay_dispatch,
+        validate_relay_grant,
     },
 };
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -174,33 +175,94 @@ impl RelayEnrollmentStore for SqliteStorage {
         }))
     }
 
-    async fn fence_relay_dispatch(
+    async fn lookup_access_relay_enrollment(
         &self,
         principal_id: &str,
         snapshot: &SessionSnapshot,
-        identity: &RelayEnrollmentIdentity,
+        selector: &AccessRelaySelector,
         now: u64,
-    ) -> SessionStoreResult<RelayDispatch> {
-        if snapshot.purpose != CredentialPurpose::RemoteRelay
-            || snapshot.family_id != identity.family_id
-        {
+    ) -> SessionStoreResult<RelayEnrollmentMetadata> {
+        if snapshot.purpose != CredentialPurpose::SessionAccess {
             return Err(SessionStoreError::CredentialRejected);
         }
         let mut tx = self.begin_immediate().await?;
         let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
-        let enrollment = read_enrollment(&mut tx, identity).await?;
+        validate_session_access_credential_in_tx(&mut tx, &family, snapshot, now).await?;
+        let (server_id, installation_id, environment_id) = match selector {
+            AccessRelaySelector::Server { server_id, installation_id } => {
+                if server_id.is_empty() || installation_id.is_empty() {
+                    return Err(SessionStoreError::InvalidOperation);
+                }
+                (Some(server_id.as_str()), Some(installation_id.as_str()), None)
+            }
+            AccessRelaySelector::Environment { environment_id } => {
+                if environment_id.is_empty() {
+                    return Err(SessionStoreError::InvalidOperation);
+                }
+                (None, None, Some(environment_id.as_str()))
+            }
+        };
+        let rows = sqlx::query(
+            "SELECT enrollment_id, family_id, server_id, environment_id, \
+             installation_id, principal_id, parent_key_id, owner_binding_id, provider, \
+             owner_generation, binding_revision, workspace_id, workspace_generation, \
+             access_generation, origin, provider_expires_at_unix_secs, generation, \
+             updated_at_unix_secs FROM codex_relay_enrollments_v1 \
+             WHERE family_id = ? AND ((server_id = ? AND installation_id = ?) \
+             OR environment_id = ?) LIMIT 2",
+        )
+        .bind(&family.family_id)
+        .bind(server_id)
+        .bind(installation_id)
+        .bind(environment_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_error)?;
+        if rows.len() != 1 {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        let row = &rows[0];
+        let metadata = RelayEnrollmentMetadata {
+            enrollment_id: row.try_get("enrollment_id").map_err(map_error)?,
+            identity: identity_row(row)?,
+            lineage: lineage_row(row)?,
+            provider_expires_at_unix_secs: number(row, "provider_expires_at_unix_secs")?,
+            generation: number(row, "generation")?,
+            updated_at_unix_secs: number(row, "updated_at_unix_secs")?,
+        };
+        if !metadata.lineage.matches_family(&metadata.identity, &family) {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        tx.commit().await.map_err(map_error)?;
+        Ok(metadata)
+    }
+
+    async fn fence_relay_dispatch(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        now: u64,
+    ) -> SessionStoreResult<RelayDispatch> {
+        if snapshot.purpose != CredentialPurpose::RemoteRelay {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+        let mut tx = self.begin_immediate().await?;
+        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
         let row = sqlx::query(
             "SELECT * FROM codex_relay_credentials_v1 \
-             WHERE credential_id = ? AND enrollment_id = ? AND family_id = ?",
+             WHERE credential_id = ? AND family_id = ?",
         )
         .bind(&snapshot.credential_id)
-        .bind(&enrollment.enrollment_id)
         .bind(&family.family_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_error)?
         .ok_or(SessionStoreError::CredentialRejected)?;
         let credential = credential_row(&row)?;
+        let enrollment = read_enrollment(&mut tx, &credential.identity).await?;
+        if enrollment.enrollment_id != credential.enrollment_id {
+            return Err(SessionStoreError::CredentialRejected);
+        }
         validate_relay_dispatch(&enrollment, &credential, snapshot, &family, now)?;
         let result = if now >= enrollment.provider_expires_at_unix_secs {
             RelayDispatch::ProviderExpired

@@ -1513,7 +1513,7 @@ async fn build_app_with_storage_inner(
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
-        dispatcher,
+        dispatcher.clone(),
         lifecycle_config,
         clock.clone(),
     );
@@ -1776,6 +1776,8 @@ async fn build_app_with_storage_inner(
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
+        remote_control_dispatch: dispatcher,
+        remote_control_websocket: codex_remote_control::WebSocketClient::new(),
         codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
             storage.clone(),
             storage.clone(),
@@ -2294,6 +2296,8 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
 
 #[derive(Clone)]
 struct ProxyState {
+    remote_control_dispatch: Arc<dyn UpstreamDispatch>,
+    remote_control_websocket: codex_remote_control::WebSocketClient,
     codex_sessions: Arc<cc_lb_engine::codex_sessions::CodexSessionService>,
     lifecycle: Arc<Lifecycle>,
     account_dispatcher: Arc<dyn UpstreamDispatch>,
@@ -2544,6 +2548,9 @@ fn health_router(state: ProxyState) -> Router {
 }
 
 fn proxy_route_template(path: &str) -> Option<&'static str> {
+    if let Some(template) = codex_remote_control::route_template(path) {
+        return Some(template);
+    }
     match path {
         "/v1/messages" => Some("/v1/messages"),
         "/v1/messages/count_tokens" => Some("/v1/messages/count_tokens"),
@@ -2578,6 +2585,11 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_id_state = RequestIdState::uuid_v7("req_server_");
     let websocket_routes = Router::new()
+        // Keep upgrade headers intact; the handler authenticates before
+        // extracting WebSocketUpgrade or connecting to the provider.
+        .route(codex_remote_control::SERVER, get(lifecycle_handler)
+            .layer(middleware::from_fn_with_state(state.clone(), lifecycle_middleware))
+            .layer(middleware::from_fn_with_state(request_id_state.clone(), request_id_middleware)))
         .route("/v1/responses", get(responses_websocket_handler))
         .route(
             "/backend-api/codex/responses",
@@ -2856,6 +2868,9 @@ fn scoped_proxy_routes(
                     .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
             );
     }
+    if provider.is_none() {
+        routes = codex_remote_control::register(routes);
+    }
     if include_oauth_usage {
         routes = routes.route("/api/oauth/usage", get(oauth_usage_handler));
     }
@@ -3125,6 +3140,7 @@ mod codex_sessions;
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
+mod codex_remote_control;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -4044,6 +4060,8 @@ async fn lifecycle_handler(
             observer.as_ref(),
         );
     }
+    let remote_control_operation =
+        codex_remote_control::Operation::from_registered_path(matched_path);
     // Record the authenticated principal before the body is read: requests
     // that terminate on a body-read error or the size cap still carry their
     // real principal in metrics. The event is metrics-only; `Lifecycle::handle`
@@ -4053,7 +4071,9 @@ async fn lifecycle_handler(
             .lifecycle
             .record_authentication_completed(&auth, observer);
     }
-    if auth.purpose() == cc_lb_storage_api::codex_sessions::CredentialPurpose::SessionAccess {
+    if auth.purpose() == cc_lb_storage_api::codex_sessions::CredentialPurpose::SessionAccess
+        && remote_control_operation.is_none()
+    {
         match state.codex_sessions.session_owner_constraint(&auth).await {
             Ok(owner) => {
                 parts.extensions.insert(owner);
@@ -4136,6 +4156,14 @@ async fn lifecycle_handler(
             return response;
         }
     };
+    if let Some(operation) = remote_control_operation {
+        if let Some(observer) = observer.as_ref() {
+            state.lifecycle.record_local_authenticated_request(&auth, observer);
+        }
+        return codex_remote_control::handle(
+            &state, &auth, operation, &mut parts, body, observer.as_ref(),
+        ).await;
+    }
     if parts.uri.path() == "/oauth/token" || parts.uri.path() == "/oauth/revoke" {
         if let Some(observer) = observer.as_ref() {
             state
@@ -4616,6 +4644,11 @@ mod tests {
     }
     mod account_relay_tests {
         include!("app_account_relay_tests.rs");
+    mod remote_control_tests {
+        include!("app/codex_remote_control_tests.rs");
+    }
+    mod remote_control_fixture_tests {
+        include!("app/codex_remote_control_fixture_tests.rs");
     }
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
@@ -5926,6 +5959,8 @@ mod tests {
             .with_event_bus(bus as Arc<dyn RequestEventBus>),
         );
         let state = ProxyState {
+            remote_control_dispatch: make_default_dispatcher(50),
+            remote_control_websocket: codex_remote_control::WebSocketClient::new(),
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
                 Arc::new(storage.clone()),
                 Arc::new(storage.clone()),
@@ -6395,6 +6430,8 @@ mod tests {
             clock.clone(),
         ));
         ProxyState {
+            remote_control_dispatch: make_default_dispatcher(50),
+            remote_control_websocket: codex_remote_control::WebSocketClient::new(),
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
                 storage.clone(),
                 storage.clone(),

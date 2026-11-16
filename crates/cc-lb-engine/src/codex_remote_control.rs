@@ -9,6 +9,10 @@ use serde_json::Value;
 
 use crate::authn_rail::Authenticated;
 
+#[path = "codex_remote_control_observation.rs"]
+mod observation;
+pub use observation::{RemoteControlObservation, RemoteControlWebSocketTermination};
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct EnrollmentIdentity {
     pub server_id: String,

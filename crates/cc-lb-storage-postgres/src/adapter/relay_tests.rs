@@ -120,7 +120,6 @@ async fn dispatch(
         .fence_relay_dispatch(
             "00000000-0000-0000-0000-000000000002",
             snapshot,
-            &identity(),
             now,
         )
         .await
@@ -586,6 +585,105 @@ async fn generation_overflow_and_credential_expiry_beyond_family_are_atomic_fail
         Ok(())
     }
     .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn access_lookup_and_fence_enforce_authenticated_selectors_and_expiry() -> TestResult {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let s = &fixture.storage;
+    let result: TestResult = async {
+        let initial = s.issue_relay_enrollment(grant(10, 1, 101), 101).await?;
+        let access_snapshot = access(&family(), 1);
+        let server = s.lookup_access_relay_enrollment(
+            &family().principal_id,
+            &access_snapshot,
+            &AccessRelaySelector::Server {
+                server_id: "server".into(),
+                installation_id: "installation".into(),
+            },
+            102,
+        ).await?;
+        assert_eq!(server.enrollment_id, initial.enrollment_id);
+        assert_eq!(server.identity, identity());
+        assert_eq!(server.lineage, RelayLineage::from_family(&family()));
+        assert_eq!(
+            s.lookup_access_relay_enrollment(
+                &family().principal_id,
+                &access_snapshot,
+                &AccessRelaySelector::Environment { environment_id: "environment".into() },
+                102,
+            ).await?.identity,
+            identity()
+        );
+        let mut second = grant(11, 1, 101);
+        second.enrollment_id = "enrollment-2".into();
+        second.identity.server_id = "server-2".into();
+        second.credential.enrollment_id = second.enrollment_id.clone();
+        second.credential.identity = second.identity.clone();
+        s.issue_relay_enrollment(second, 101).await?;
+        assert!(matches!(
+            s.lookup_access_relay_enrollment(
+                &family().principal_id,
+                &access_snapshot,
+                &AccessRelaySelector::Environment { environment_id: "environment".into() },
+                102,
+            ).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        assert!(matches!(
+            s.lookup_access_relay_enrollment(
+                "00000000-0000-0000-0000-000000000003",
+                &access_snapshot,
+                &AccessRelaySelector::Server {
+                    server_id: "server".into(),
+                    installation_id: "installation".into(),
+                },
+                102,
+            ).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        let mut other_family = access_snapshot.clone();
+        other_family.family_id = "other-family".into();
+        assert!(s.lookup_access_relay_enrollment(
+            &family().principal_id,
+            &other_family,
+            &AccessRelaySelector::Server {
+                server_id: "server".into(),
+                installation_id: "installation".into(),
+            },
+            102,
+        ).await.is_err());
+        for selector in [
+            AccessRelaySelector::Server { server_id: "wrong".into(), installation_id: "installation".into() },
+            AccessRelaySelector::Server { server_id: "server".into(), installation_id: "wrong".into() },
+            AccessRelaySelector::Environment { environment_id: "wrong".into() },
+        ] {
+            assert!(matches!(
+                s.lookup_access_relay_enrollment(&family().principal_id, &access_snapshot, &selector, 102).await,
+                Err(SessionStoreError::OwnerConflict)
+            ));
+        }
+        assert!(matches!(
+            s.lookup_access_relay_enrollment(
+                &family().principal_id,
+                &s.lookup_relay_credential(&[10; 32]).await?.unwrap().snapshot,
+                &AccessRelaySelector::Environment { environment_id: "environment".into() },
+                102,
+            ).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        let relay = s.lookup_relay_credential(&[10; 32]).await?.unwrap();
+        assert_eq!(dispatch(s, &relay.snapshot, 102).await?, RelayDispatch::Authorized(initial));
+        sqlx::query("UPDATE codex_relay_enrollments_v1 SET provider_expires_at_unix_secs=102")
+            .execute(&s.pool).await?;
+        assert!(matches!(dispatch(s, &relay.snapshot, 102).await?, RelayDispatch::ProviderExpired));
+        Ok(())
+    }.await;
     let teardown = fixture.drop_schema().await;
     result?;
     teardown
