@@ -182,3 +182,69 @@ pub fn validate_relay_credential(credential: &RelayCredential) -> StorageResult<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity() -> RelayEnrollmentIdentity {
+        RelayEnrollmentIdentity {
+            family_id: "family".into(),
+            server_id: "server".into(),
+            environment_id: "environment".into(),
+            installation_id: "installation".into(),
+        }
+    }
+
+    fn enrollment() -> RelayEnrollment {
+        RelayEnrollment {
+            identity: identity(),
+            principal_id: "principal".into(),
+            owner_epoch: 1,
+            vendor_ciphertext: vec![0x42],
+            provider_expires_at_unix_secs: 200,
+            revision: 1,
+            updated_at_unix_secs: 100,
+        }
+    }
+
+    #[test]
+    fn enrollment_debug_redacts_vendor_ciphertext() {
+        let debug = format!("{:?}", enrollment());
+
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("42"));
+    }
+
+    #[test]
+    fn enrollment_requires_provider_expiry() {
+        let mut value = enrollment();
+        value.provider_expires_at_unix_secs = 0;
+
+        assert!(validate_relay_enrollment(&value).is_err());
+    }
+
+    #[test]
+    fn credential_requires_strictly_positive_lifetime() {
+        let credential = RelayCredential {
+            credential_id: "credential".into(),
+            identity: identity(),
+            principal_id: "principal".into(),
+            owner_epoch: 1,
+            enrollment_revision: 1,
+            verifier: vec![0x24],
+            issued_at_unix_secs: 100,
+            expires_at_unix_secs: 100,
+        };
+
+        assert!(validate_relay_credential(&credential).is_err());
+    }
+
+    #[test]
+    fn identity_rejects_blank_components() {
+        let mut value = identity();
+        value.environment_id = " ".into();
+
+        assert!(value.validate().is_err());
+    }
+}
