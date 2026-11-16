@@ -29,7 +29,7 @@ use crate::terminal_observer::{
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WebSocketError {
     pub status: u16,
     pub code: &'static str,
@@ -37,6 +37,7 @@ pub struct WebSocketError {
     pub message: String,
     pub stream_id: Option<String>,
     provider_headers: Vec<(String, String)>,
+    provider_body: Option<Bytes>,
 }
 
 impl WebSocketError {
@@ -48,6 +49,7 @@ impl WebSocketError {
             message: message.into(),
             stream_id: None,
             provider_headers: Vec::new(),
+            provider_body: None,
         }
     }
 
@@ -56,6 +58,13 @@ impl WebSocketError {
         self
     }
 
+
+    /// Original rejected upstream handshake bytes, for downstream error fidelity.
+    /// This is provider-controlled data, never authentication provenance.
+    pub fn with_provider_body(mut self, body: Option<Bytes>) -> Self {
+        self.provider_body = body;
+        self
+    }
     pub fn with_stream(mut self, stream_id: Option<String>) -> Self {
         self.stream_id = stream_id;
         self
@@ -104,6 +113,11 @@ impl WebSocketError {
         if let Some(stream_id) = self.stream_id.as_ref() {
             error["stream_id"] = Value::String(stream_id.clone());
         }
+        if let Some(body) = self.provider_body.as_ref() {
+            error["cc_lb_provider_body_base64"] = Value::String(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD, body,
+            ));
+        }
         if !self.provider_headers.is_empty() {
             let headers = self
                 .provider_headers
@@ -124,6 +138,19 @@ impl WebSocketError {
                 headers.append(name, value);
             }
         }
+    }
+}
+
+impl fmt::Debug for WebSocketError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("WebSocketError")
+            .field("status", &self.status)
+            .field("code", &self.code)
+            .field("native_code", &self.native_code)
+            .field("message", &self.message)
+            .field("stream_id", &self.stream_id)
+            .field("provider_body_len", &self.provider_body.as_ref().map(Bytes::len))
+            .finish_non_exhaustive()
     }
 }
 
@@ -370,6 +397,38 @@ impl ResponsesWebSocketGateway {
             return Err(WebSocketError::new(400, "owner_conflict", "resource belongs to another session owner"));
         }
         Ok(resource_owner.or(self.session_upstream))
+    }
+
+    async fn validate_session_dispatch_owner(
+        &self,
+        auth: &Authenticated,
+        upstream_id: Uuid,
+    ) -> Result<(), WebSocketError> {
+        if auth.session().is_none() {
+            return Ok(());
+        }
+        let service = self.session_service.as_ref().ok_or_else(|| {
+            WebSocketError::new(503, "owner_unavailable", "Session owner service is unavailable")
+        })?;
+        let binding = service.fence_session_dispatch(auth).await.map_err(|error| {
+            use crate::codex_sessions::SessionError;
+            match error {
+                SessionError::Unauthenticated(error) =>
+                    WebSocketError::new(error.http_status(), "authentication_error", error.to_string()),
+                SessionError::OwnerConflict =>
+                    WebSocketError::new(400, "owner_conflict", "Session owner authority changed"),
+                SessionError::InvalidRequest =>
+                    WebSocketError::new(400, "invalid_request_error", "Invalid session authority"),
+                SessionError::Unavailable =>
+                    WebSocketError::new(503, "owner_unavailable", "Session owner is unavailable"),
+            }
+        })?;
+        if binding.upstream_id != upstream_id {
+            return Err(WebSocketError::new(
+                400, "owner_conflict", "Queued response belongs to another session owner",
+            ));
+        }
+        Ok(())
     }
 
     /// Preserve the downstream upgrade query after removing API-key parameters.
@@ -883,6 +942,7 @@ impl ResponsesWebSocketGateway {
             }
             (turn.frame.clone(), turn.body.clone())
         };
+        self.validate_session_dispatch_owner(&auth, candidate.upstream_id).await?;
         self.lifecycle
             .validate_websocket_turn(
                 &auth,
@@ -1109,6 +1169,9 @@ impl ResponsesWebSocketGateway {
                 "No upstream owns this dispatch",
             )
         })?;
+        self.validate_session_dispatch_owner(&auth, upstream_id)
+            .await
+            .map_err(|error| error.with_stream(turn.lane.clone()))?;
         if turn
             .connection_id
             .and_then(|connection| self.connections.get(&connection))

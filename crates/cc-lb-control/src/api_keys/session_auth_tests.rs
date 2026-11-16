@@ -227,6 +227,10 @@ async fn relay_requires_remote_relay_snapshot_and_parent_identity() {
             owner_generation: 1, binding_revision: 1, workspace_id: "workspace-1".into(), workspace_generation: 1,
             access_generation: 1, origin: "https://chatgpt.com".into(),
         }),
+        relay: Some(RelayTargetSnapshot {
+            enrollment_id: "enrollment-1".into(), server_id: "server-1".into(),
+            environment_id: "environment-1".into(), installation_id: "installation-1".into(),
+        }),
     };
     struct Verifier(Mutex<Option<AuthnSuccess>>);
     #[async_trait]
@@ -237,7 +241,12 @@ async fn relay_requires_remote_relay_snapshot_and_parent_identity() {
     }
     let (base, _) = api_key_authn(LookupAction::Return(Box::new(None)));
     let authn = base.clone().with_relay_verifier(Arc::new(Verifier(Mutex::new(Some(success.clone())))));
-    assert!(authn.authenticate(&header("x-api-key", relay.plaintext.expose()), &principal_view(true)).await.is_ok());
+    let authenticated = authn.authenticate(&header("x-api-key", relay.plaintext.expose()), &principal_view(true)).await.unwrap();
+    assert_eq!(authenticated.relay.as_ref().unwrap().enrollment_id, "enrollment-1");
+    let missing_target = base.clone().with_relay_verifier(Arc::new(Verifier(Mutex::new(Some(AuthnSuccess {
+        relay: None, ..success.clone()
+    })))));
+    assert_eq!(missing_target.authenticate(&header("x-api-key", relay.plaintext.expose()), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::InvalidFormat);
     success.session.as_mut().unwrap().purpose = CredentialPurpose::SessionAccess;
     let authn = base.with_relay_verifier(Arc::new(Verifier(Mutex::new(Some(success)))));
     assert_eq!(authn.authenticate(&header("x-api-key", relay.plaintext.expose()), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::InvalidFormat);

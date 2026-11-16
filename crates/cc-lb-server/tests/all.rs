@@ -29,6 +29,8 @@ mod cache_keepalive_wall_clock;
 mod claude_fable_5_proxy_path;
 #[path = "codex_zstd_request.rs"]
 mod codex_zstd_request;
+#[path = "native_codex_sessions.rs"]
+mod native_codex_sessions;
 #[path = "common.rs"]
 mod common;
 #[path = "composite_signer_dispatch.rs"]

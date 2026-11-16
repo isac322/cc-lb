@@ -230,6 +230,11 @@ impl Authenticated {
         self.success.session.as_ref()
     }
 
+    /// Target identifiers from the verified relay credential, never request fields.
+    pub fn relay(&self) -> Option<&cc_lb_storage_api::codex_sessions::RelayTargetSnapshot> {
+        self.success.relay.as_ref()
+    }
+
     pub fn purpose(&self) -> cc_lb_storage_api::codex_sessions::CredentialPurpose {
         self.session().map_or(
             cc_lb_storage_api::codex_sessions::CredentialPurpose::PrincipalKey,

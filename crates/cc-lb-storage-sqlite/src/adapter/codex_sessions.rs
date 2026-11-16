@@ -668,7 +668,7 @@ mod tests {
             s.list_session_workspace_aliases("principal", &stale, 101).await,
             Err(SessionStoreError::OwnerConflict)
         ));
-        let mut generation = snapshot(&f, "credential", 99);
+        let generation = snapshot(&f, "credential", 99);
         assert!(matches!(
             s.list_session_workspace_aliases("principal", &generation, 101).await,
             Err(SessionStoreError::CredentialRejected)

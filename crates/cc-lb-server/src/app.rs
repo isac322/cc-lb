@@ -3057,14 +3057,52 @@ enum WsProviderEvent {
 }
 
 fn provider_websocket_error_from_http(response: http::Response<Option<Vec<u8>>>) -> WebSocketError {
-    let status = response.status().as_u16();
-    let headers = response.headers().clone();
+    let (parts, body) = response.into_parts();
+    let status = parts.status.as_u16();
     WebSocketError::new(
         status,
         "upstream_unavailable",
         "provider WebSocket handshake rejected",
     )
-    .with_provider_headers(&headers)
+    .with_provider_headers(&parts.headers)
+    .with_provider_body(body.map(Bytes::from))
+}
+
+#[cfg(test)]
+mod provider_handshake_fidelity_tests {
+    use super::provider_websocket_error_from_http;
+    use base64::Engine as _;
+
+    #[test]
+    fn rejected_handshake_keeps_binary_body_without_auth_provenance() {
+        let body = [b"\xff\x00".as_slice(), b"private-handshake-body"].concat();
+        let response = http::Response::builder()
+            .status(401)
+            .header("retry-after", "7")
+            .header("cc-lb-error-origin", "principal")
+            .header("cc-lb-auth-reason", "expired")
+            .body(Some(body.clone())).unwrap();
+        let error = provider_websocket_error_from_http(response);
+        let payload: serde_json::Value = serde_json::from_slice(&error.to_bytes()).unwrap();
+        assert_eq!(payload["status"], 401);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(
+            payload["cc_lb_provider_body_base64"].as_str().unwrap(),
+        ).unwrap(), body);
+        assert_eq!(payload["headers"]["retry-after"], "7");
+        assert!(payload["headers"].get("cc-lb-error-origin").is_none());
+        assert!(payload["headers"].get("cc-lb-auth-reason").is_none());
+        assert!(!format!("{error:?}").contains("private-handshake-body"));
+    }
+
+    #[test]
+    fn absent_handshake_body_is_not_manufactured() {
+        let response = http::Response::builder().status(429).body(None).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(
+            &provider_websocket_error_from_http(response).to_bytes(),
+        ).unwrap();
+        assert_eq!(payload["status"], 429);
+        assert!(payload.get("cc_lb_provider_body_base64").is_none());
+    }
 }
 
 fn websocket_breaker_key(upstream_id: uuid::Uuid) -> String {
@@ -4026,19 +4064,19 @@ async fn oauth_usage_handler(
     if let Some(ctx) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
         ctx.mark_authn_reached();
     }
-    if let Err(error) =
-        cc_lb_engine::authenticate_first(authn, request.headers(), &dynamic_view.principal_view)
-            .await
-    {
-        let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-        let mut response = json_response(
-            status,
-            serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
+    let authorization = cc_lb_engine::authenticate_first(
+        authn, request.headers(), &dynamic_view.principal_view,
+    ).await.and_then(|auth| {
+        cc_lb_engine::codex_sessions::authorize_registered_purpose(
+            &auth, request.method(), "/api/oauth/usage",
+        )?;
+        Ok(auth)
+    });
+    if let Err(error) = authorization {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &error, request.method(), "/api/oauth/usage", None,
+            request.extensions().get::<cc_lb_engine::LifecycleContext>(),
         );
-        response
-            .extensions_mut()
-            .insert(TerminalClassification::local(status));
-        return response;
     }
 
     let mut response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(

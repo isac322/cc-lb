@@ -12,6 +12,17 @@ pub enum CredentialPurpose {
     RemoteRelay,
 }
 
+/// Non-secret relay target metadata captured from the verified credential row.
+/// Session lineage remains in `SessionSnapshot`; these identifiers are not
+/// client selectors and never authorize a different enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayTargetSnapshot {
+    pub enrollment_id: String,
+    pub server_id: String,
+    pub environment_id: String,
+    pub installation_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub family_id: String,

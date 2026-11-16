@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cc_lb_storage_api::{KeyStatus, StorageError, StoredApiKeyRecord};
 use cc_lb_storage_api::codex_sessions::{
-    CodexSessionStore, CredentialPurpose, SessionSnapshot, SessionStoreError,
+    CodexSessionStore, CredentialPurpose, RelayTargetSnapshot, SessionSnapshot, SessionStoreError,
 };
 
 use crate::api_keys::{
@@ -40,6 +40,7 @@ pub struct AuthnSuccess {
     pub last_4: String,
     pub api_key: Option<String>,
     pub session: Option<SessionSnapshot>,
+    pub relay: Option<RelayTargetSnapshot>,
 }
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -108,6 +109,10 @@ impl BuiltinAuthn {
             let verifier = self.relay_verifier.as_ref().ok_or(BuiltinAuthError::NotFound)?;
             let success = verifier.authenticate_relay(input, view).await?;
             if success.api_key.is_some()
+                || success.relay.as_ref().is_none_or(|relay| {
+                    relay.enrollment_id.is_empty() || relay.server_id.is_empty()
+                        || relay.environment_id.is_empty() || relay.installation_id.is_empty()
+                })
                 || !success.session.as_ref().is_some_and(|session| {
                     session.purpose == CredentialPurpose::RemoteRelay
                         && session.parent_key_id == success.key_id
@@ -161,6 +166,7 @@ impl BuiltinAuthn {
             last_4,
             api_key: Some(input.to_owned()),
             session: None,
+            relay: None,
         })
     }
 
@@ -238,6 +244,7 @@ impl BuiltinAuthn {
             record: record.parent_key,
             api_key: None,
             session: Some(session),
+            relay: None,
         })
     }
 }

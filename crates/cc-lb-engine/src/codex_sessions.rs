@@ -55,7 +55,15 @@ pub fn authorize_registered_purpose(
     matched_path: &str,
 ) -> Result<(), BuiltinAuthError> {
     let required = match (method.as_str(), matched_path) {
+        ("GET", "/api/oauth/usage") => Some(CredentialPurpose::PrincipalKey),
         ("GET" | "POST", "/backend-api/codex/responses") => Some(CredentialPurpose::SessionAccess),
+        ("GET", "/backend-api/cc-lb/workspaces") => Some(CredentialPurpose::SessionAccess),
+        ("GET", "/backend-api/wham/tasks/list"
+            | "/backend-api/wham/tasks/{task_id}"
+            | "/backend-api/wham/tasks/{task_id}/turns/{turn_id}/sibling_turns"
+            | "/backend-api/wham/environments"
+            | "/backend-api/wham/environments/by-repo/github/{owner}/{repo}")
+        | ("POST", "/backend-api/wham/tasks") => Some(CredentialPurpose::SessionAccess),
         ("POST", "/oauth/token" | "/oauth/revoke") => Some(CredentialPurpose::SessionRenewal),
         ("POST", "/backend-api/wham/remote/control/server/pair"
             | "/backend-api/wham/remote/control/server/pair/status")
