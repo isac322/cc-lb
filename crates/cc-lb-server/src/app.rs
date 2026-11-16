@@ -2677,6 +2677,11 @@ fn scoped_proxy_routes(
         .route("/v1beta/{*path}", any(lifecycle_handler));
     if provider.is_none() {
         routes = routes
+            .merge(codex_auxiliary::routes())
+            .route(
+                "/backend-api/cc-lb/workspaces",
+                get(codex_account::workspace_discovery_handler),
+            )
             .route("/oauth/token", post(lifecycle_handler))
             .route("/oauth/revoke", post(lifecycle_handler))
             .route(
@@ -2953,6 +2958,8 @@ mod codex_sessions;
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
+mod codex_account;
+mod codex_auxiliary;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -3866,6 +3873,15 @@ async fn lifecycle_handler(
             observer.as_ref(),
         );
     }
+    if let Err(error) = codex_auxiliary::authorize(&auth, parts.uri.path()) {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &error,
+            &parts.method,
+            parts.uri.path(),
+            parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
+            observer.as_ref(),
+        );
+    }
     // Record the authenticated principal before the body is read: requests
     // that terminate on a body-read error or the size cap still carry their
     // real principal in metrics. The event is metrics-only; `Lifecycle::handle`
@@ -3973,6 +3989,7 @@ async fn lifecycle_handler(
         )
         .await;
     }
+    codex_auxiliary::normalize_uri(&mut parts.uri, &auth);
     if parts.uri.path() == "/backend-api/codex/responses" {
         let path = parts.uri.query().map_or_else(
             || http::uri::PathAndQuery::from_static("/v1/responses"),

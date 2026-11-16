@@ -572,6 +572,21 @@ async fn native_image_routes_authenticate_before_reading_a_body() {
     for provider in [Provider::OpenAi, Provider::Gemini] {
         let harness = Harness::start(provider).await;
         let mut routes = vec![("POST", provider.path())];
+        if matches!(provider, Provider::OpenAi) {
+            routes.extend([
+                ("GET", "/backend-api/codex/models"),
+                ("POST", "/backend-api/codex/alpha/search"),
+                ("POST", "/backend-api/codex/images/generations"),
+                ("POST", "/backend-api/codex/images/edits"),
+                ("POST", "/backend-api/codex/memories/trace_summarize"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/list_files_by_prefix"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/read_file"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/search_contents"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/append_to_file"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/write_file"),
+                ("POST", "/backend-api/codex/alpha/notes/v2/thread_hint"),
+            ]);
+        }
         if matches!(provider, Provider::Gemini) {
             routes.extend([
                 ("GET", "/gemini/v1beta/models"),
