@@ -11,7 +11,7 @@
     "acceptance": {
       "ownerIssue": "https://github.com/isac322/cc-lb/issues/1325",
       "status": "pending-feature-evidence",
-      "reason": "All exact-client acceptance remains pending merged implementation and feature-specific passing client/provider evidence."
+      "reason": "Feature-specific agy 1.5.9 Gemini API-key execution evidence is recorded below. Rows marked pending still require their own client/provider evidence; Code Assist/OAuth subscription acceptance remains unverified."
     },
     "limitations": "Family taxonomy is documentation scope, not a reproduced-defect list or wildcard relay policy. Source presence, binary descriptors, synthetic fixtures and recorder traffic do not prove support. Preserve existing shipped API-key and OAuth routes. Subscription Antigravity is not Vertex; TOS and entitlement restrictions remain in force. Background quota polling is not inbound-client acceptance."
   },
@@ -649,7 +649,7 @@
         },
         "upstream": {
           "credentialKind": "gemini_api_key",
-          "selection": "runbear-local API-key project; cached-content owner remains selected",
+          "selection": "Authorized Gemini API-key upstream; cached-content owner remains selected",
           "reference": "https://github.com/isac322/cc-lb/issues/1318"
         },
         "ownerAffinity": {
