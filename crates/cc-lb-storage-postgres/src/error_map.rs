@@ -7,7 +7,11 @@ pub fn map_sqlx_error(error: sqlx::Error) -> StorageError {
                 message: db_error.message().to_owned(),
             }
         }
-        sqlx::Error::Database(db_error) if db_error.is_foreign_key_violation() => {
+        sqlx::Error::Database(db_error)
+            if db_error.is_foreign_key_violation()
+                // PostgreSQL 18 reports explicit RESTRICT failures as 23001.
+                || db_error.code().as_deref() == Some("23001") =>
+        {
             StorageError::Conflict {
                 message: db_error.message().to_owned(),
             }

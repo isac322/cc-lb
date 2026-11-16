@@ -1,3 +1,4 @@
+pub mod account_owner;
 pub mod anthropic_compatibility_kv;
 pub mod api_key_usage;
 pub mod audit;
@@ -33,6 +34,7 @@ pub mod usage_pruner;
 pub mod validation;
 pub mod warmup_attempts;
 
+pub use account_owner::*;
 pub use anthropic_compatibility_kv::*;
 pub use api_key_usage::*;
 pub use audit::*;

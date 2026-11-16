@@ -1,3 +1,5 @@
+#[path = "account_owner.rs"]
+mod account_owner;
 #[path = "adapter_commit_last.rs"]
 mod adapter_commit_last;
 #[path = "api_key_usage.rs"]
