@@ -41,7 +41,10 @@ pub(super) fn authorize(
     auth: &Authenticated,
     path: &str,
 ) -> Result<(), cc_lb_control::api_keys::builtin_authn::BuiltinAuthError> {
-    if canonical_path(path).is_some() && auth.purpose() != CredentialPurpose::SessionAccess {
+    let session_only = canonical_path(path).is_some()
+        || (path.starts_with("/v1/alpha/notes/v2/")
+            && ROUTES.iter().any(|&(_, canonical)| path == canonical));
+    if session_only && auth.purpose() != CredentialPurpose::SessionAccess {
         return Err(cc_lb_control::api_keys::builtin_authn::BuiltinAuthError::InvalidFormat);
     }
     Ok(())

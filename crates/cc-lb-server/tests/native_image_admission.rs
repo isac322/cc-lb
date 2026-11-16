@@ -585,6 +585,18 @@ async fn native_image_routes_authenticate_before_reading_a_body() {
                 ("POST", "/backend-api/codex/alpha/notes/v2/append_to_file"),
                 ("POST", "/backend-api/codex/alpha/notes/v2/write_file"),
                 ("POST", "/backend-api/codex/alpha/notes/v2/thread_hint"),
+                ("POST", "/v1/alpha/notes/v2/list_files_by_prefix"),
+                ("POST", "/v1/alpha/notes/v2/read_file"),
+                ("POST", "/v1/alpha/notes/v2/search_contents"),
+                ("POST", "/v1/alpha/notes/v2/append_to_file"),
+                ("POST", "/v1/alpha/notes/v2/write_file"),
+                ("POST", "/v1/alpha/notes/v2/thread_hint"),
+                ("POST", "/openai/v1/alpha/notes/v2/list_files_by_prefix"),
+                ("POST", "/openai/v1/alpha/notes/v2/read_file"),
+                ("POST", "/openai/v1/alpha/notes/v2/search_contents"),
+                ("POST", "/openai/v1/alpha/notes/v2/append_to_file"),
+                ("POST", "/openai/v1/alpha/notes/v2/write_file"),
+                ("POST", "/openai/v1/alpha/notes/v2/thread_hint"),
             ]);
         }
         if matches!(provider, Provider::Gemini) {
@@ -602,7 +614,7 @@ async fn native_image_routes_authenticate_before_reading_a_body() {
         let principal_header = format!("Authorization: Bearer {}\r\n", principal.plaintext);
         for (method, path) in routes {
             let mut auth_headers = vec!["", "Authorization: Bearer invalid-principal\r\n"];
-            if path.starts_with("/backend-api/codex/") {
+            if path.starts_with("/backend-api/codex/") || path.contains("/alpha/notes/v2/") {
                 auth_headers.push(principal_header.as_str());
             }
             for auth_header in auth_headers {
