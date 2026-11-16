@@ -83,3 +83,32 @@ async fn notes_preserve_wire_and_use_only_the_session_owner() {
     }
     assert_eq!(selected.records.lock().unwrap().len(), 6);
 }
+
+#[tokio::test]
+async fn notes_do_not_fail_over_when_the_session_owner_is_disabled() {
+    let selected = Provider::start().await;
+    let alternate = Provider::start().await;
+    let support = build_oauth_session_app(selected.url.clone(), alternate.url.clone(), vec![]).await;
+    sqlx::query("UPDATE upstream_spec_v1 SET enabled = 0 WHERE id = ?")
+        .bind(support.selected_upstream_id.to_string())
+        .execute(support.storage.pool())
+        .await
+        .expect("disable selected owner");
+    for operation in ["list_files_by_prefix", "read_file", "search_contents", "append_to_file", "write_file", "thread_hint"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/backend-api/codex/alpha/notes/v2/{operation}"))
+            .header(header::AUTHORIZATION, format!("Bearer {}", support.access))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"path":"qa.txt"}"#)).unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            support.app.router.clone().oneshot(request),
+        ).await.expect("owner rejection completes").unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{operation}: {body:?}");
+        assert!(selected.records.lock().unwrap().is_empty());
+        assert!(alternate.records.lock().unwrap().is_empty(), "must not fail over to another owner");
+    }
+}
