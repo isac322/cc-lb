@@ -111,7 +111,7 @@ fn credential_row(row: SqliteRow) -> Result<SessionCredential> {
     })
 }
 
-fn parent_row(row: SqliteRow) -> Result<StoredApiKeyRecord> {
+pub(crate) fn parent_row(row: SqliteRow) -> Result<StoredApiKeyRecord> {
     let status: String = row.try_get("status").map_err(map_sqlx_error)?;
     Ok(StoredApiKeyRecord {
         label: row.try_get("label").map_err(map_sqlx_error)?,
@@ -650,6 +650,27 @@ impl CodexSessionStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
+}
+
+/// Checks the access credential after the caller has locked and validated its family.
+pub(crate) async fn validate_session_access_credential_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    family: &SessionFamily,
+    snapshot: &SessionSnapshot,
+    now: u64,
+) -> SessionStoreResult<()> {
+    if snapshot.purpose != CredentialPurpose::SessionAccess {
+        return Err(SessionStoreError::CredentialRejected);
+    }
+    let c = credential(tx, &snapshot.credential_id).await?;
+    validate_credential(&c, family, CredentialPurpose::SessionAccess, now)?;
+    if c.access_generation != snapshot.access_generation
+        || c.access_generation > family.access_generation
+        || c.expires_at > family.expires_at
+    {
+        return Err(SessionStoreError::CredentialRejected);
+    }
+    Ok(())
 }
 
 /// Shared family fence for independently verified access or relay credentials.

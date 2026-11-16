@@ -320,6 +320,26 @@ impl CodexSessionStore for PostgresStorage {
     }
 }
 
+/// Checks the access credential after the caller has locked and validated its family.
+pub(crate) async fn validate_session_access_credential_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    family: &SessionFamily,
+    snapshot: &SessionSnapshot,
+    now: u64,
+) -> SessionStoreResult<()> {
+    if snapshot.purpose != CredentialPurpose::SessionAccess {
+        return Err(SessionStoreError::CredentialRejected);
+    }
+    let credential = read_credential(tx, &snapshot.credential_id, &family.family_id)
+        .await?
+        .ok_or(SessionStoreError::CredentialRejected)?;
+    validate_live_credential(&credential, family, CredentialPurpose::SessionAccess, now)?;
+    if credential.access_generation != snapshot.access_generation {
+        return Err(SessionStoreError::CredentialRejected);
+    }
+    Ok(())
+}
+
 /// Internal family fence for the relay adapter after its own credential validation.
 /// Lock order: upstream -> binding -> principal -> parent -> family -> credential.
 /// Call before acquiring any relay-credential row lock; this is not a public proof constructor.
@@ -998,7 +1018,7 @@ fn decode_credential(row: &PgRow, joined: bool) -> StorageResult<SessionCredenti
     })
 }
 
-fn decode_parent(row: &PgRow) -> StorageResult<StoredApiKeyRecord> {
+pub(crate) fn decode_parent(row: &PgRow) -> StorageResult<StoredApiKeyRecord> {
     let status: String = row.try_get("parent_status").map_err(map_sqlx_error)?;
     let limits: serde_json::Value = row
         .try_get("parent_limit_overrides")

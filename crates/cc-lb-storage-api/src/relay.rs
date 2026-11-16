@@ -1,14 +1,16 @@
-//! Durable storage vocabulary for Codex remote-control relay enrollment.
-//!
-//! Enrollment rows own the current provider ciphertext. Credential rows are local
-//! verifier records: they deliberately carry no provider ciphertext or revocation
-//! marker and remain usable until their own expiry.
+//! Atomic persistence for remote-control enrollment and local relay verifiers.
+//! Header lookup never returns provider ciphertext or performs owner discovery.
 
 use std::fmt;
 
 use async_trait::async_trait;
 
-use crate::{StorageError, StorageResult};
+use crate::{
+    StorageError, StorageResult, StoredApiKeyRecord,
+    codex_sessions::{
+        CredentialPurpose, SessionFamily, SessionSnapshot, SessionStoreError, SessionStoreResult,
+    },
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayEnrollmentIdentity {
@@ -37,14 +39,100 @@ impl RelayEnrollmentIdentity {
     }
 }
 
+/// Issue-time authority. Refresh never rewrites these fields, even after renewal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayLineage {
+    pub principal_id: String,
+    pub parent_key_id: String,
+    pub owner_binding_id: String,
+    pub provider: String,
+    pub owner_generation: u64,
+    pub binding_revision: u64,
+    pub workspace_id: String,
+    pub workspace_generation: u64,
+    pub access_generation: u64,
+    pub origin: String,
+}
+
+impl RelayLineage {
+    pub fn from_family(family: &SessionFamily) -> Self {
+        Self {
+            principal_id: family.principal_id.clone(),
+            parent_key_id: family.parent_key_id.clone(),
+            owner_binding_id: family.owner_binding_id.clone(),
+            provider: family.provider.clone(),
+            owner_generation: family.owner_generation,
+            binding_revision: family.binding_revision,
+            workspace_id: family.workspace_id.clone(),
+            workspace_generation: family.workspace_generation,
+            access_generation: family.access_generation,
+            origin: family.origin.clone(),
+        }
+    }
+
+    pub fn matches_family(
+        &self,
+        identity: &RelayEnrollmentIdentity,
+        family: &SessionFamily,
+    ) -> bool {
+        identity.family_id == family.family_id
+            && self.principal_id == family.principal_id
+            && self.parent_key_id == family.parent_key_id
+            && self.owner_binding_id == family.owner_binding_id
+            && self.provider == family.provider
+            && self.owner_generation == family.owner_generation
+            && self.binding_revision == family.binding_revision
+            && self.workspace_id == family.workspace_id
+            && self.workspace_generation == family.workspace_generation
+            && self.access_generation <= family.access_generation
+            && self.origin == family.origin
+    }
+
+    pub fn matches_snapshot(
+        &self,
+        credential: &RelayCredential,
+        snapshot: &SessionSnapshot,
+    ) -> bool {
+        snapshot.family_id == credential.identity.family_id
+            && snapshot.credential_id == credential.credential_id
+            && snapshot.purpose == CredentialPurpose::RemoteRelay
+            && snapshot.parent_key_id == self.parent_key_id
+            && snapshot.owner_binding_id == self.owner_binding_id
+            && snapshot.provider == self.provider
+            && snapshot.owner_generation == self.owner_generation
+            && snapshot.binding_revision == self.binding_revision
+            && snapshot.workspace_id == self.workspace_id
+            && snapshot.workspace_generation == self.workspace_generation
+            && snapshot.access_generation == self.access_generation
+            && snapshot.origin == self.origin
+    }
+
+    pub fn snapshot(&self, credential: &RelayCredential) -> SessionSnapshot {
+        SessionSnapshot {
+            family_id: credential.identity.family_id.clone(),
+            parent_key_id: self.parent_key_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            purpose: CredentialPurpose::RemoteRelay,
+            owner_binding_id: self.owner_binding_id.clone(),
+            provider: self.provider.clone(),
+            owner_generation: self.owner_generation,
+            binding_revision: self.binding_revision,
+            workspace_id: self.workspace_id.clone(),
+            workspace_generation: self.workspace_generation,
+            access_generation: self.access_generation,
+            origin: self.origin.clone(),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayEnrollment {
+    pub enrollment_id: String,
     pub identity: RelayEnrollmentIdentity,
-    pub principal_id: String,
-    pub owner_epoch: u64,
+    pub lineage: RelayLineage,
     pub vendor_ciphertext: Vec<u8>,
     pub provider_expires_at_unix_secs: u64,
-    pub revision: u64,
+    pub generation: u64,
     pub updated_at_unix_secs: u64,
 }
 
@@ -52,28 +140,30 @@ impl fmt::Debug for RelayEnrollment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RelayEnrollment")
+            .field("enrollment_id", &self.enrollment_id)
             .field("identity", &self.identity)
-            .field("principal_id", &self.principal_id)
-            .field("owner_epoch", &self.owner_epoch)
+            .field("lineage", &self.lineage)
             .field("vendor_ciphertext", &"[redacted]")
             .field(
                 "provider_expires_at_unix_secs",
                 &self.provider_expires_at_unix_secs,
             )
-            .field("revision", &self.revision)
+            .field("generation", &self.generation)
             .field("updated_at_unix_secs", &self.updated_at_unix_secs)
             .finish()
     }
 }
 
+/// No bearer plaintext or provider ciphertext is persisted in a credential row.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayCredential {
     pub credential_id: String,
+    pub enrollment_id: String,
     pub identity: RelayEnrollmentIdentity,
-    pub principal_id: String,
-    pub owner_epoch: u64,
-    pub enrollment_revision: u64,
-    pub verifier: Vec<u8>,
+    pub enrollment_generation: u64,
+    pub index_hash: [u8; 32],
+    pub verify_hash: [u8; 32],
+    pub salt: [u8; 16],
     pub issued_at_unix_secs: u64,
     pub expires_at_unix_secs: u64,
 }
@@ -83,10 +173,9 @@ impl fmt::Debug for RelayCredential {
         formatter
             .debug_struct("RelayCredential")
             .field("credential_id", &self.credential_id)
+            .field("enrollment_id", &self.enrollment_id)
             .field("identity", &self.identity)
-            .field("principal_id", &self.principal_id)
-            .field("owner_epoch", &self.owner_epoch)
-            .field("enrollment_revision", &self.enrollment_revision)
+            .field("enrollment_generation", &self.enrollment_generation)
             .field("verifier", &"[redacted]")
             .field("issued_at_unix_secs", &self.issued_at_unix_secs)
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
@@ -94,157 +183,126 @@ impl fmt::Debug for RelayCredential {
     }
 }
 
+pub struct IssueRelayEnrollment {
+    pub principal_id: String,
+    pub access: SessionSnapshot,
+    pub enrollment_id: String,
+    pub identity: RelayEnrollmentIdentity,
+    pub vendor_ciphertext: Vec<u8>,
+    pub provider_expires_at_unix_secs: u64,
+    pub credential: RelayCredential,
+}
+
+pub struct RefreshRelayEnrollment {
+    pub grant: IssueRelayEnrollment,
+    pub expected_generation: u64,
+}
+
+/// Durable header-authentication snapshot; deliberately has no ciphertext/expiry
+/// from the provider. The verifier must check the full bearer and local lifetimes.
+pub struct RelayAuthRecord {
+    pub credential: RelayCredential,
+    pub snapshot: SessionSnapshot,
+    pub family: SessionFamily,
+    pub parent_key: StoredApiKeyRecord,
+    pub principal_enabled: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelayDispatch {
+    Authorized(RelayEnrollment),
+    /// Local expiry knowledge is not a received provider HTTP response. No
+    /// ciphertext is released, and callers must not retry or renew local auth.
+    ProviderExpired,
+}
+
 #[async_trait]
 pub trait RelayEnrollmentStore: Send + Sync {
-    async fn get_relay_enrollment(
+    /// Validates live access authority and inserts enrollment + verifier atomically.
+    async fn issue_relay_enrollment(
         &self,
+        command: IssueRelayEnrollment,
+        now: u64,
+    ) -> SessionStoreResult<RelayEnrollment>;
+
+    /// Rotates current ciphertext and inserts a verifier in the same transaction.
+    /// Prior verifier rows remain immutable and use the current enrollment.
+    async fn refresh_relay_enrollment(
+        &self,
+        command: RefreshRelayEnrollment,
+        now: u64,
+    ) -> SessionStoreResult<RelayEnrollment>;
+
+    /// No owner discovery and no provider ciphertext projection. Frozen lineage
+    /// must match the live family before a record is returned.
+    async fn lookup_relay_credential(
+        &self,
+        index_hash: &[u8; 32],
+    ) -> SessionStoreResult<Option<RelayAuthRecord>>;
+
+    /// Checks RemoteRelay purpose, all frozen stamps, local credential validity,
+    /// and current owner/family authority before returning server-only ciphertext.
+    async fn fence_relay_dispatch(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
         identity: &RelayEnrollmentIdentity,
-    ) -> StorageResult<Option<RelayEnrollment>>;
-
-    /// Creates or replaces the current enrollment using a revision CAS.
-    /// `expected_revision = None` creates a new row; `Some` replaces only that revision.
-    async fn compare_and_swap_relay_enrollment(
-        &self,
-        enrollment: &RelayEnrollment,
-        expected_revision: Option<u64>,
-    ) -> StorageResult<()>;
-
-    /// Inserts a local verifier row. Existing credentials are never revoked or updated.
-    async fn insert_relay_credential(&self, credential: &RelayCredential) -> StorageResult<()>;
-
-    /// Looks up an unexpired verifier and removes no rows. Expiry is checked in SQL.
-    async fn find_relay_credential(
-        &self,
-        verifier: &[u8],
-        now_unix_secs: u64,
-    ) -> StorageResult<Option<RelayCredential>>;
+        now: u64,
+    ) -> SessionStoreResult<RelayDispatch>;
 }
 
-pub fn validate_relay_enrollment(enrollment: &RelayEnrollment) -> StorageResult<()> {
-    enrollment.identity.validate()?;
-    if enrollment.principal_id.trim().is_empty() {
-        return Err(StorageError::InvalidInput {
-            field: "principal_id".to_owned(),
-            reason: "must not be empty".to_owned(),
-        });
-    }
-    if enrollment.owner_epoch == 0 || enrollment.revision == 0 {
-        return Err(StorageError::InvalidInput {
-            field: "owner_epoch/revision".to_owned(),
-            reason: "must be greater than zero".to_owned(),
-        });
-    }
-    if enrollment.vendor_ciphertext.is_empty() {
-        return Err(StorageError::InvalidInput {
-            field: "vendor_ciphertext".to_owned(),
-            reason: "must not be empty".to_owned(),
-        });
-    }
-    if enrollment.provider_expires_at_unix_secs == 0 {
-        return Err(StorageError::InvalidInput {
-            field: "provider_expires_at_unix_secs".to_owned(),
-            reason: "must be greater than zero".to_owned(),
-        });
+/// Validate caller-supplied material before any enrollment mutation.
+pub fn validate_relay_grant(
+    command: &IssueRelayEnrollment,
+    family: &SessionFamily,
+    generation: u64,
+    now: u64,
+) -> SessionStoreResult<()> {
+    let c = &command.credential;
+    command
+        .identity
+        .validate()
+        .map_err(|_| SessionStoreError::InvalidOperation)?;
+    if command.enrollment_id.trim().is_empty()
+        || c.credential_id.trim().is_empty()
+        || command.identity.family_id != family.family_id
+        || c.identity != command.identity
+        || c.enrollment_id != command.enrollment_id
+        || c.enrollment_generation != generation
+        || generation == 0
+        || command.vendor_ciphertext.is_empty()
+        || command.provider_expires_at_unix_secs <= now
+        || c.issued_at_unix_secs != now
+        || c.expires_at_unix_secs <= now
+        || c.expires_at_unix_secs > family.expires_at
+        || c.expires_at_unix_secs > command.provider_expires_at_unix_secs
+    {
+        return Err(SessionStoreError::InvalidOperation);
     }
     Ok(())
 }
 
-pub fn validate_relay_credential(credential: &RelayCredential) -> StorageResult<()> {
-    credential.identity.validate()?;
-    for (field, value) in [
-        ("credential_id", &credential.credential_id),
-        ("principal_id", &credential.principal_id),
-    ] {
-        if value.trim().is_empty() {
-            return Err(StorageError::InvalidInput {
-                field: field.to_owned(),
-                reason: "must not be empty".to_owned(),
-            });
-        }
-    }
-    if credential.owner_epoch == 0 || credential.enrollment_revision == 0 {
-        return Err(StorageError::InvalidInput {
-            field: "owner_epoch/enrollment_revision".to_owned(),
-            reason: "must be greater than zero".to_owned(),
-        });
-    }
-    if credential.verifier.is_empty() {
-        return Err(StorageError::InvalidInput {
-            field: "verifier".to_owned(),
-            reason: "must not be empty".to_owned(),
-        });
-    }
-    if credential.expires_at_unix_secs <= credential.issued_at_unix_secs {
-        return Err(StorageError::InvalidInput {
-            field: "expires_at_unix_secs".to_owned(),
-            reason: "must be after issued_at_unix_secs".to_owned(),
-        });
+pub fn validate_relay_dispatch(
+    enrollment: &RelayEnrollment,
+    credential: &RelayCredential,
+    snapshot: &SessionSnapshot,
+    family: &SessionFamily,
+    now: u64,
+) -> SessionStoreResult<()> {
+    if snapshot.purpose != CredentialPurpose::RemoteRelay
+        || credential.identity != enrollment.identity
+        || credential.enrollment_id != enrollment.enrollment_id
+        || credential.enrollment_generation == 0
+        || credential.enrollment_generation > enrollment.generation
+        || !enrollment.lineage.matches_snapshot(credential, snapshot)
+        || !enrollment
+            .lineage
+            .matches_family(&enrollment.identity, family)
+        || now < credential.issued_at_unix_secs
+        || now >= credential.expires_at_unix_secs
+        || credential.expires_at_unix_secs > family.expires_at
+    {
+        return Err(SessionStoreError::CredentialRejected);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn identity() -> RelayEnrollmentIdentity {
-        RelayEnrollmentIdentity {
-            family_id: "family".into(),
-            server_id: "server".into(),
-            environment_id: "environment".into(),
-            installation_id: "installation".into(),
-        }
-    }
-
-    fn enrollment() -> RelayEnrollment {
-        RelayEnrollment {
-            identity: identity(),
-            principal_id: "principal".into(),
-            owner_epoch: 1,
-            vendor_ciphertext: vec![0x42],
-            provider_expires_at_unix_secs: 200,
-            revision: 1,
-            updated_at_unix_secs: 100,
-        }
-    }
-
-    #[test]
-    fn enrollment_debug_redacts_vendor_ciphertext() {
-        let debug = format!("{:?}", enrollment());
-
-        assert!(debug.contains("[redacted]"));
-        assert!(!debug.contains("42"));
-    }
-
-    #[test]
-    fn enrollment_requires_provider_expiry() {
-        let mut value = enrollment();
-        value.provider_expires_at_unix_secs = 0;
-
-        assert!(validate_relay_enrollment(&value).is_err());
-    }
-
-    #[test]
-    fn credential_requires_strictly_positive_lifetime() {
-        let credential = RelayCredential {
-            credential_id: "credential".into(),
-            identity: identity(),
-            principal_id: "principal".into(),
-            owner_epoch: 1,
-            enrollment_revision: 1,
-            verifier: vec![0x24],
-            issued_at_unix_secs: 100,
-            expires_at_unix_secs: 100,
-        };
-
-        assert!(validate_relay_credential(&credential).is_err());
-    }
-
-    #[test]
-    fn identity_rejects_blank_components() {
-        let mut value = identity();
-        value.environment_id = " ".into();
-
-        assert!(value.validate().is_err());
-    }
 }

@@ -1,231 +1,368 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RelayCredential, RelayEnrollment, RelayEnrollmentIdentity, RelayEnrollmentStore, StorageError,
-    StorageResult, validate_relay_credential, validate_relay_enrollment,
+    StorageError,
+    codex_sessions::{CredentialPurpose, SessionSnapshot, SessionStoreError, SessionStoreResult},
+    relay::{
+        IssueRelayEnrollment, RefreshRelayEnrollment, RelayAuthRecord, RelayCredential,
+        RelayDispatch, RelayEnrollment, RelayEnrollmentIdentity, RelayEnrollmentStore,
+        RelayLineage, validate_relay_dispatch, validate_relay_grant,
+    },
 };
-use sqlx::{Row, sqlite::SqliteRow};
+use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{SqliteStorage, map_sqlx_error};
+use super::codex_sessions::{
+    family_row, parent_row, validate_session_access_credential_in_tx, validate_session_family_in_tx,
+};
+use crate::SqliteStorage;
+
+// Explicit metadata projection: neither provider expiry nor ciphertext is read.
+const HEADER_SQL: &str = "SELECT c.*, e.principal_id, e.parent_key_id, e.owner_binding_id, \
+    e.provider, e.owner_generation, e.binding_revision, e.workspace_id, \
+    e.workspace_generation, e.access_generation, e.origin, e.generation \
+    FROM codex_relay_credentials_v1 c JOIN codex_relay_enrollments_v1 e \
+    ON e.enrollment_id = c.enrollment_id AND e.family_id = c.family_id \
+    AND e.server_id = c.server_id AND e.environment_id = c.environment_id \
+    AND e.installation_id = c.installation_id WHERE c.index_hash = ?";
 
 #[async_trait]
 impl RelayEnrollmentStore for SqliteStorage {
-    async fn get_relay_enrollment(
+    async fn issue_relay_enrollment(
         &self,
-        identity: &RelayEnrollmentIdentity,
-    ) -> StorageResult<Option<RelayEnrollment>> {
-        identity.validate()?;
-        let row = sqlx::query(
-            "SELECT family_id, server_id, environment_id, installation_id, principal_id,
-                    owner_epoch, vendor_ciphertext, provider_expires_at_unix_secs,
-                    revision, updated_at_unix_secs
-             FROM relay_enrollments_v1
-             WHERE family_id = ? AND server_id = ? AND environment_id = ? AND installation_id = ?",
-        )
-        .bind(&identity.family_id)
-        .bind(&identity.server_id)
-        .bind(&identity.environment_id)
-        .bind(&identity.installation_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        row.map(enrollment_from_row).transpose()
-    }
-
-    async fn compare_and_swap_relay_enrollment(
-        &self,
-        enrollment: &RelayEnrollment,
-        expected_revision: Option<u64>,
-    ) -> StorageResult<()> {
-        validate_relay_enrollment(enrollment)?;
-        let mut tx = self.begin_immediate().await?;
-        let result = if let Some(expected) = expected_revision {
-            sqlx::query(
-                "UPDATE relay_enrollments_v1
-                 SET vendor_ciphertext = ?, provider_expires_at_unix_secs = ?,
-                     revision = ?, updated_at_unix_secs = ?
-                 WHERE family_id = ? AND server_id = ? AND environment_id = ?
-                   AND installation_id = ? AND revision = ?
-                   AND principal_id = ? AND owner_epoch = ?",
-            )
-            .bind(&enrollment.vendor_ciphertext)
-            .bind(to_i64(
-                enrollment.provider_expires_at_unix_secs,
-                "provider_expires_at_unix_secs",
-            )?)
-            .bind(to_i64(enrollment.revision, "revision")?)
-            .bind(to_i64(
-                enrollment.updated_at_unix_secs,
-                "updated_at_unix_secs",
-            )?)
-            .bind(&enrollment.identity.family_id)
-            .bind(&enrollment.identity.server_id)
-            .bind(&enrollment.identity.environment_id)
-            .bind(&enrollment.identity.installation_id)
-            .bind(to_i64(expected, "expected_revision")?)
-            .bind(&enrollment.principal_id)
-            .bind(to_i64(enrollment.owner_epoch, "owner_epoch")?)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
-        } else {
-            sqlx::query(
-                "INSERT INTO relay_enrollments_v1
-                 (family_id, server_id, environment_id, installation_id, principal_id,
-                  owner_epoch, vendor_ciphertext, provider_expires_at_unix_secs,
-                  revision, updated_at_unix_secs)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&enrollment.identity.family_id)
-            .bind(&enrollment.identity.server_id)
-            .bind(&enrollment.identity.environment_id)
-            .bind(&enrollment.identity.installation_id)
-            .bind(&enrollment.principal_id)
-            .bind(to_i64(enrollment.owner_epoch, "owner_epoch")?)
-            .bind(&enrollment.vendor_ciphertext)
-            .bind(to_i64(
-                enrollment.provider_expires_at_unix_secs,
-                "provider_expires_at_unix_secs",
-            )?)
-            .bind(to_i64(enrollment.revision, "revision")?)
-            .bind(to_i64(
-                enrollment.updated_at_unix_secs,
-                "updated_at_unix_secs",
-            )?)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
-        };
-        if result.rows_affected() != 1 {
-            return Err(StorageError::Conflict {
-                message: "relay enrollment revision conflict".to_owned(),
-            });
+        command: IssueRelayEnrollment,
+        now: u64,
+    ) -> SessionStoreResult<RelayEnrollment> {
+        if command.access.purpose != CredentialPurpose::SessionAccess {
+            return Err(SessionStoreError::CredentialRejected);
         }
-        tx.commit().await.map_err(map_sqlx_error)
+        let mut tx = self.begin_immediate().await?;
+        let family =
+            validate_session_family_in_tx(&mut tx, &command.principal_id, &command.access, now)
+                .await?;
+        validate_relay_grant(&command, &family, 1, now)?;
+        validate_session_access_credential_in_tx(&mut tx, &family, &command.access, now).await?;
+        let enrollment = RelayEnrollment {
+            enrollment_id: command.enrollment_id,
+            identity: command.identity,
+            lineage: RelayLineage::from_family(&family),
+            vendor_ciphertext: command.vendor_ciphertext,
+            provider_expires_at_unix_secs: command.provider_expires_at_unix_secs,
+            generation: 1,
+            updated_at_unix_secs: now,
+        };
+        insert_enrollment(&mut tx, &enrollment).await?;
+        insert_credential(&mut tx, &command.credential).await?;
+        tx.commit().await.map_err(map_error)?;
+        Ok(enrollment)
     }
 
-    async fn insert_relay_credential(&self, credential: &RelayCredential) -> StorageResult<()> {
-        validate_relay_credential(credential)?;
-        sqlx::query(
-            "INSERT INTO relay_credentials_v1
-             (credential_id, family_id, server_id, environment_id, installation_id,
-              principal_id, owner_epoch, enrollment_revision, verifier,
-              issued_at_unix_secs, expires_at_unix_secs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&credential.credential_id)
-        .bind(&credential.identity.family_id)
-        .bind(&credential.identity.server_id)
-        .bind(&credential.identity.environment_id)
-        .bind(&credential.identity.installation_id)
-        .bind(&credential.principal_id)
-        .bind(to_i64(credential.owner_epoch, "owner_epoch")?)
-        .bind(to_i64(
-            credential.enrollment_revision,
-            "enrollment_revision",
-        )?)
-        .bind(&credential.verifier)
-        .bind(to_i64(
-            credential.issued_at_unix_secs,
-            "issued_at_unix_secs",
-        )?)
-        .bind(to_i64(
-            credential.expires_at_unix_secs,
-            "expires_at_unix_secs",
-        )?)
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
-    async fn find_relay_credential(
+    async fn refresh_relay_enrollment(
         &self,
-        verifier: &[u8],
-        now_unix_secs: u64,
-    ) -> StorageResult<Option<RelayCredential>> {
-        let row = sqlx::query(
-            "SELECT credential_id, family_id, server_id, environment_id, installation_id,
-                    principal_id, owner_epoch, enrollment_revision, verifier,
-                    issued_at_unix_secs, expires_at_unix_secs
-             FROM relay_credentials_v1 WHERE verifier = ? AND expires_at_unix_secs > ?",
+        command: RefreshRelayEnrollment,
+        now: u64,
+    ) -> SessionStoreResult<RelayEnrollment> {
+        let grant = command.grant;
+        if grant.access.purpose != CredentialPurpose::SessionAccess {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+        let mut tx = self.begin_immediate().await?;
+        let family =
+            validate_session_family_in_tx(&mut tx, &grant.principal_id, &grant.access, now).await?;
+        let mut current = read_enrollment(&mut tx, &grant.identity).await?;
+        if current.enrollment_id != grant.enrollment_id
+            || !current.lineage.matches_family(&current.identity, &family)
+            || current.generation != command.expected_generation
+        {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        let generation = current
+            .generation
+            .checked_add(1)
+            .ok_or(SessionStoreError::InvalidOperation)?;
+        validate_relay_grant(&grant, &family, generation, now)?;
+        validate_session_access_credential_in_tx(&mut tx, &family, &grant.access, now).await?;
+        let changed = sqlx::query(
+            "UPDATE codex_relay_enrollments_v1 SET vendor_ciphertext = ?, \
+             provider_expires_at_unix_secs = ?, generation = ?, updated_at_unix_secs = ? \
+             WHERE enrollment_id = ? AND generation = ?",
         )
-        .bind(verifier)
-        .bind(to_i64(now_unix_secs, "now_unix_secs")?)
-        .fetch_optional(self.pool())
+        .bind(&grant.vendor_ciphertext)
+        .bind(integer(grant.provider_expires_at_unix_secs)?)
+        .bind(integer(generation)?)
+        .bind(integer(now)?)
+        .bind(&current.enrollment_id)
+        .bind(integer(command.expected_generation)?)
+        .execute(&mut *tx)
         .await
-        .map_err(map_sqlx_error)?;
-        row.map(credential_from_row).transpose()
+        .map_err(map_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        insert_credential(&mut tx, &grant.credential).await?;
+        current.vendor_ciphertext = grant.vendor_ciphertext;
+        current.provider_expires_at_unix_secs = grant.provider_expires_at_unix_secs;
+        current.generation = generation;
+        current.updated_at_unix_secs = now;
+        tx.commit().await.map_err(map_error)?;
+        Ok(current)
+    }
+
+    async fn lookup_relay_credential(
+        &self,
+        index_hash: &[u8; 32],
+    ) -> SessionStoreResult<Option<RelayAuthRecord>> {
+        let mut tx = self.pool().begin().await.map_err(map_error)?;
+        let Some(row) = sqlx::query(HEADER_SQL)
+            .bind(index_hash.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_error)?
+        else {
+            return Ok(None);
+        };
+        let credential = credential_row(&row)?;
+        let lineage = lineage_row(&row)?;
+        if credential.enrollment_generation > number(&row, "generation")? {
+            return Ok(None);
+        }
+        let Some(row) = sqlx::query("SELECT * FROM codex_session_families_v1 WHERE family_id = ?")
+            .bind(&credential.identity.family_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_error)?
+        else {
+            return Ok(None);
+        };
+        let family = family_row(row)?;
+        if !lineage.matches_family(&credential.identity, &family) {
+            return Ok(None);
+        }
+        let Some(row) =
+            sqlx::query("SELECT * FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?")
+                .bind(&family.principal_id)
+                .bind(&family.parent_key_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_error)?
+        else {
+            return Ok(None);
+        };
+        let parent_key = parent_row(row)?;
+        let Some(row) = sqlx::query("SELECT enabled, deleted_at FROM principals_v1 WHERE id = ?")
+            .bind(&family.principal_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_error)?
+        else {
+            return Ok(None);
+        };
+        if row
+            .try_get::<Option<i64>, _>("deleted_at")
+            .map_err(map_error)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let principal_enabled = row.try_get("enabled").map_err(map_error)?;
+        let snapshot = lineage.snapshot(&credential);
+        tx.commit().await.map_err(map_error)?;
+        Ok(Some(RelayAuthRecord {
+            credential,
+            snapshot,
+            family,
+            parent_key,
+            principal_enabled,
+        }))
+    }
+
+    async fn fence_relay_dispatch(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        identity: &RelayEnrollmentIdentity,
+        now: u64,
+    ) -> SessionStoreResult<RelayDispatch> {
+        if snapshot.purpose != CredentialPurpose::RemoteRelay
+            || snapshot.family_id != identity.family_id
+        {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+        let mut tx = self.begin_immediate().await?;
+        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
+        let enrollment = read_enrollment(&mut tx, identity).await?;
+        let row = sqlx::query(
+            "SELECT * FROM codex_relay_credentials_v1 \
+             WHERE credential_id = ? AND enrollment_id = ? AND family_id = ?",
+        )
+        .bind(&snapshot.credential_id)
+        .bind(&enrollment.enrollment_id)
+        .bind(&family.family_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_error)?
+        .ok_or(SessionStoreError::CredentialRejected)?;
+        let credential = credential_row(&row)?;
+        validate_relay_dispatch(&enrollment, &credential, snapshot, &family, now)?;
+        let result = if now >= enrollment.provider_expires_at_unix_secs {
+            RelayDispatch::ProviderExpired
+        } else {
+            RelayDispatch::Authorized(enrollment)
+        };
+        tx.commit().await.map_err(map_error)?;
+        Ok(result)
     }
 }
 
-fn enrollment_from_row(row: SqliteRow) -> StorageResult<RelayEnrollment> {
+async fn read_enrollment(
+    tx: &mut Transaction<'_, Sqlite>,
+    identity: &RelayEnrollmentIdentity,
+) -> SessionStoreResult<RelayEnrollment> {
+    let row = sqlx::query(
+        "SELECT * FROM codex_relay_enrollments_v1 \
+         WHERE family_id = ? AND server_id = ? AND environment_id = ? AND installation_id = ?",
+    )
+    .bind(&identity.family_id)
+    .bind(&identity.server_id)
+    .bind(&identity.environment_id)
+    .bind(&identity.installation_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_error)?
+    .ok_or(SessionStoreError::CredentialRejected)?;
     Ok(RelayEnrollment {
-        identity: RelayEnrollmentIdentity {
-            family_id: row.try_get("family_id").map_err(map_sqlx_error)?,
-            server_id: row.try_get("server_id").map_err(map_sqlx_error)?,
-            environment_id: row.try_get("environment_id").map_err(map_sqlx_error)?,
-            installation_id: row.try_get("installation_id").map_err(map_sqlx_error)?,
-        },
-        principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
-        owner_epoch: from_i64(
-            row.try_get("owner_epoch").map_err(map_sqlx_error)?,
-            "owner_epoch",
-        )?,
-        vendor_ciphertext: row.try_get("vendor_ciphertext").map_err(map_sqlx_error)?,
-        provider_expires_at_unix_secs: from_i64(
-            row.try_get("provider_expires_at_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "provider_expires_at_unix_secs",
-        )?,
-        revision: from_i64(row.try_get("revision").map_err(map_sqlx_error)?, "revision")?,
-        updated_at_unix_secs: from_i64(
-            row.try_get("updated_at_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "updated_at_unix_secs",
-        )?,
+        enrollment_id: row.try_get("enrollment_id").map_err(map_error)?,
+        identity: identity_row(&row)?,
+        lineage: lineage_row(&row)?,
+        vendor_ciphertext: row.try_get("vendor_ciphertext").map_err(map_error)?,
+        provider_expires_at_unix_secs: number(&row, "provider_expires_at_unix_secs")?,
+        generation: number(&row, "generation")?,
+        updated_at_unix_secs: number(&row, "updated_at_unix_secs")?,
     })
 }
 
-fn credential_from_row(row: SqliteRow) -> StorageResult<RelayCredential> {
+async fn insert_enrollment(
+    tx: &mut Transaction<'_, Sqlite>,
+    e: &RelayEnrollment,
+) -> SessionStoreResult<()> {
+    let l = &e.lineage;
+    sqlx::query(
+        "INSERT INTO codex_relay_enrollments_v1 (enrollment_id, family_id, server_id, \
+         environment_id, installation_id, principal_id, parent_key_id, owner_binding_id, \
+         provider, owner_generation, binding_revision, workspace_id, workspace_generation, \
+         access_generation, origin, vendor_ciphertext, provider_expires_at_unix_secs, \
+         generation, updated_at_unix_secs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(&e.enrollment_id).bind(&e.identity.family_id).bind(&e.identity.server_id)
+        .bind(&e.identity.environment_id).bind(&e.identity.installation_id)
+        .bind(&l.principal_id).bind(&l.parent_key_id).bind(&l.owner_binding_id).bind(&l.provider)
+        .bind(integer(l.owner_generation)?).bind(integer(l.binding_revision)?).bind(&l.workspace_id)
+        .bind(integer(l.workspace_generation)?).bind(integer(l.access_generation)?).bind(&l.origin)
+        .bind(&e.vendor_ciphertext).bind(integer(e.provider_expires_at_unix_secs)?)
+        .bind(integer(e.generation)?).bind(integer(e.updated_at_unix_secs)?)
+        .execute(&mut **tx).await.map_err(map_error)?;
+    Ok(())
+}
+
+async fn insert_credential(
+    tx: &mut Transaction<'_, Sqlite>,
+    c: &RelayCredential,
+) -> SessionStoreResult<()> {
+    sqlx::query(
+        "INSERT INTO codex_relay_credentials_v1 (credential_id, enrollment_id, family_id, \
+         server_id, environment_id, installation_id, enrollment_generation, index_hash, \
+         verify_hash, salt, issued_at_unix_secs, expires_at_unix_secs) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&c.credential_id)
+    .bind(&c.enrollment_id)
+    .bind(&c.identity.family_id)
+    .bind(&c.identity.server_id)
+    .bind(&c.identity.environment_id)
+    .bind(&c.identity.installation_id)
+    .bind(integer(c.enrollment_generation)?)
+    .bind(c.index_hash.as_slice())
+    .bind(c.verify_hash.as_slice())
+    .bind(c.salt.as_slice())
+    .bind(integer(c.issued_at_unix_secs)?)
+    .bind(integer(c.expires_at_unix_secs)?)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_error)?;
+    Ok(())
+}
+
+fn identity_row(row: &SqliteRow) -> SessionStoreResult<RelayEnrollmentIdentity> {
+    Ok(RelayEnrollmentIdentity {
+        family_id: row.try_get("family_id").map_err(map_error)?,
+        server_id: row.try_get("server_id").map_err(map_error)?,
+        environment_id: row.try_get("environment_id").map_err(map_error)?,
+        installation_id: row.try_get("installation_id").map_err(map_error)?,
+    })
+}
+
+fn lineage_row(row: &SqliteRow) -> SessionStoreResult<RelayLineage> {
+    Ok(RelayLineage {
+        principal_id: row.try_get("principal_id").map_err(map_error)?,
+        parent_key_id: row.try_get("parent_key_id").map_err(map_error)?,
+        owner_binding_id: row.try_get("owner_binding_id").map_err(map_error)?,
+        provider: row.try_get("provider").map_err(map_error)?,
+        owner_generation: number(row, "owner_generation")?,
+        binding_revision: number(row, "binding_revision")?,
+        workspace_id: row.try_get("workspace_id").map_err(map_error)?,
+        workspace_generation: number(row, "workspace_generation")?,
+        access_generation: number(row, "access_generation")?,
+        origin: row.try_get("origin").map_err(map_error)?,
+    })
+}
+
+fn credential_row(row: &SqliteRow) -> SessionStoreResult<RelayCredential> {
     Ok(RelayCredential {
-        credential_id: row.try_get("credential_id").map_err(map_sqlx_error)?,
-        identity: RelayEnrollmentIdentity {
-            family_id: row.try_get("family_id").map_err(map_sqlx_error)?,
-            server_id: row.try_get("server_id").map_err(map_sqlx_error)?,
-            environment_id: row.try_get("environment_id").map_err(map_sqlx_error)?,
-            installation_id: row.try_get("installation_id").map_err(map_sqlx_error)?,
-        },
-        principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
-        owner_epoch: from_i64(
-            row.try_get("owner_epoch").map_err(map_sqlx_error)?,
-            "owner_epoch",
-        )?,
-        enrollment_revision: from_i64(
-            row.try_get("enrollment_revision").map_err(map_sqlx_error)?,
-            "enrollment_revision",
-        )?,
-        verifier: row.try_get("verifier").map_err(map_sqlx_error)?,
-        issued_at_unix_secs: from_i64(
-            row.try_get("issued_at_unix_secs").map_err(map_sqlx_error)?,
-            "issued_at_unix_secs",
-        )?,
-        expires_at_unix_secs: from_i64(
-            row.try_get("expires_at_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "expires_at_unix_secs",
-        )?,
+        credential_id: row.try_get("credential_id").map_err(map_error)?,
+        enrollment_id: row.try_get("enrollment_id").map_err(map_error)?,
+        identity: identity_row(row)?,
+        enrollment_generation: number(row, "enrollment_generation")?,
+        index_hash: bytes(row, "index_hash")?,
+        verify_hash: bytes(row, "verify_hash")?,
+        salt: bytes(row, "salt")?,
+        issued_at_unix_secs: number(row, "issued_at_unix_secs")?,
+        expires_at_unix_secs: number(row, "expires_at_unix_secs")?,
     })
 }
 
-fn to_i64(value: u64, field: &str) -> StorageResult<i64> {
-    i64::try_from(value).map_err(|_| StorageError::InvalidInput {
-        field: field.to_owned(),
-        reason: "exceeds SQLite integer range".to_owned(),
+fn integer(value: u64) -> SessionStoreResult<i64> {
+    i64::try_from(value).map_err(|_| SessionStoreError::InvalidOperation)
+}
+
+fn number(row: &SqliteRow, name: &str) -> SessionStoreResult<u64> {
+    u64::try_from(row.try_get::<i64, _>(name).map_err(map_error)?).map_err(|_| {
+        StorageError::Corrupted {
+            message: format!("negative relay {name}"),
+        }
+        .into()
     })
 }
 
-fn from_i64(value: i64, field: &str) -> StorageResult<u64> {
-    u64::try_from(value).map_err(|_| StorageError::Corrupted {
-        message: format!("{field} is negative"),
-    })
+fn bytes<const N: usize>(row: &SqliteRow, name: &str) -> SessionStoreResult<[u8; N]> {
+    row.try_get::<Vec<u8>, _>(name)
+        .map_err(map_error)?
+        .try_into()
+        .map_err(|_| {
+            StorageError::Corrupted {
+                message: format!("invalid relay {name} length"),
+            }
+            .into()
+        })
 }
+
+fn map_error(error: sqlx::Error) -> StorageError {
+    if let sqlx::Error::Database(database) = &error
+        && database.is_unique_violation()
+    {
+        return StorageError::Conflict {
+            message: "relay identity or verifier already exists".into(),
+        };
+    }
+    crate::map_sqlx_error(error)
+}
+
+#[cfg(test)]
+#[path = "relay_tests.rs"]
+mod tests;
