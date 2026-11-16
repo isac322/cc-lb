@@ -110,7 +110,12 @@ async fn deleted_or_missing_principal_is_not_a_live_disabled_principal() -> Test
         assert!(fixture.storage.lookup_session_credential(&[2; 32]).await?.is_none());
         assert!(matches!(fixture.storage.fence_session_dispatch(&fixture.principal_id, &snapshot(&family, 1), 105).await,
             Err(SessionStoreError::CredentialRejected)));
-        assert!(PrincipalStore::hard_delete(&fixture.storage, fixture.principal_uuid).await?);
+        // Durable owner bindings intentionally reserve their principal by FK.
+        // Hard deletion must not bypass that contract to manufacture an orphan.
+        assert!(matches!(
+            PrincipalStore::hard_delete(&fixture.storage, fixture.principal_uuid).await,
+            Err(StorageError::Conflict { .. }),
+        ));
         let remaining_parent: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = 'parent'",
         ).bind(&fixture.principal_id).fetch_one(&fixture.storage.pool).await?;

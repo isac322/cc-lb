@@ -457,6 +457,7 @@ pub(crate) async fn validate_session_family_in_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_storage_api::{AccountOwnerBinding, AccountOwnerStore};
 
     async fn store() -> SqliteStorage {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
