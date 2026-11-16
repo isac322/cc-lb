@@ -948,15 +948,20 @@ async fn disabled_deleted_or_missing_selected_upstream_is_503_without_failover()
 }
 
 #[tokio::test]
-async fn empty_file_id_route_never_dispatches() {
+async fn empty_and_invalid_utf8_file_id_routes_never_dispatch() {
     let fixture = Fixture::new(vec![], vec![]).await;
-    let (status, _, _) = fixture
-        .request(
-            Method::POST, "/backend-api/files//uploaded",
-            Some(&fixture.session_a.access), Body::from("{}"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    for (path, expected_status) in [
+        ("/backend-api/files//uploaded", StatusCode::NOT_FOUND),
+        ("/backend-api/files/%FF/uploaded", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _, _) = fixture
+            .request(
+                Method::POST, path,
+                Some(&fixture.session_a.access), Body::from("{}"),
+            )
+            .await;
+        assert_eq!(status, expected_status);
+    }
     assert!(fixture.recorder_a.requests().is_empty());
     assert!(fixture.recorder_b.requests().is_empty());
     assert!(fixture.signer_factory.choices().is_empty());
