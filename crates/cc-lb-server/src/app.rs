@@ -3125,6 +3125,10 @@ mod codex_sessions;
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
+mod codex_account;
+#[cfg(test)]
+#[path = "app/codex_files_tests.rs"]
+mod codex_files_tests;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
