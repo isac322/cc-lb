@@ -10859,7 +10859,10 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 ///
 /// (we only copy the fields explicitly whitelisted). Provider-specific quota
 /// fields are carried in separate maps and parsed by the off-path subscriber.
-pub(crate) fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind) -> HeaderSnapshot {
+pub(crate) fn header_snapshot_from(
+    headers: &HeaderMap,
+    upstream_kind: StorageUpstreamKind,
+) -> HeaderSnapshot {
     let mut anthropic_headers = std::collections::BTreeMap::new();
     let mut provider_headers = std::collections::BTreeMap::new();
     let is_openai = matches!(

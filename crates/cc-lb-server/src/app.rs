@@ -2587,9 +2587,18 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let websocket_routes = Router::new()
         // Keep upgrade headers intact; the handler authenticates before
         // extracting WebSocketUpgrade or connecting to the provider.
-        .route(codex_remote_control::SERVER, get(lifecycle_handler)
-            .layer(middleware::from_fn_with_state(state.clone(), lifecycle_middleware))
-            .layer(middleware::from_fn_with_state(request_id_state.clone(), request_id_middleware)))
+        .route(
+            codex_remote_control::SERVER,
+            get(lifecycle_handler)
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    lifecycle_middleware,
+                ))
+                .layer(middleware::from_fn_with_state(
+                    request_id_state.clone(),
+                    request_id_middleware,
+                )),
+        )
         .route("/v1/responses", get(responses_websocket_handler))
         .route(
             "/backend-api/codex/responses",

@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use cc_lb_clock::{ClockHandle, unix_secs};
-use cc_lb_storage_api::codex_sessions::{CredentialPurpose, SessionStoreError};
+use cc_lb_storage_api::codex_sessions::{
+    CredentialPurpose, RelayTargetSnapshot, SessionStoreError,
+};
 use cc_lb_storage_api::{KeyStatus, RelayEnrollmentStore};
 
 use super::{
@@ -99,6 +101,12 @@ impl RelayCredentialVerifier for StoredRelayVerifier {
             record: record.parent_key,
             api_key: None,
             session: Some(snapshot),
+            relay: Some(RelayTargetSnapshot {
+                enrollment_id: credential.enrollment_id,
+                server_id: credential.identity.server_id,
+                environment_id: credential.identity.environment_id,
+                installation_id: credential.identity.installation_id,
+            }),
         })
     }
 }
