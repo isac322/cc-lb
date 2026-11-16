@@ -902,7 +902,7 @@ fn bytes<const N: usize>(row: &PgRow, column: &str) -> StorageResult<[u8; N]> {
     })
 }
 
-fn decode_family(row: &PgRow) -> StorageResult<SessionFamily> {
+pub(crate) fn decode_family(row: &PgRow) -> StorageResult<SessionFamily> {
     Ok(SessionFamily {
         family_id: row.try_get("family_id").map_err(map_sqlx_error)?,
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,

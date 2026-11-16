@@ -58,7 +58,7 @@ fn bytes<const N: usize>(row: &SqliteRow, name: &str) -> Result<[u8; N]> {
     })
 }
 
-fn family_row(row: SqliteRow) -> Result<SessionFamily> {
+pub(crate) fn family_row(row: SqliteRow) -> Result<SessionFamily> {
     macro_rules! text {
         ($name:literal) => {
             row.try_get($name).map_err(map_sqlx_error)?
