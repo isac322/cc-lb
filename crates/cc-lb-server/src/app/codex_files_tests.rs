@@ -340,7 +340,7 @@ impl Fixture {
         let key_store = KeyStore::new(storage.clone());
         let (_, parent_secret) = key_store
             .create(
-                "files-http-principal",
+                &principal.id.to_string(),
                 CreateParams {
                     label: "files-http-parent".to_owned(),
                     description: None,
