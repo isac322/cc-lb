@@ -14648,6 +14648,12 @@ mod tests {
                 (Method::POST, "images/edits"),
                 (Method::POST, "alpha/search"),
                 (Method::POST, "memories/trace_summarize"),
+                (Method::POST, "alpha/notes/v2/list_files_by_prefix"),
+                (Method::POST, "alpha/notes/v2/read_file"),
+                (Method::POST, "alpha/notes/v2/search_contents"),
+                (Method::POST, "alpha/notes/v2/append_to_file"),
+                (Method::POST, "alpha/notes/v2/write_file"),
+                (Method::POST, "alpha/notes/v2/thread_hint"),
             ] {
                 for query in [
                     None,

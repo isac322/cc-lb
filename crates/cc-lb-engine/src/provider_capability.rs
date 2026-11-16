@@ -165,9 +165,17 @@ pub(crate) fn classify(
             (&Method::GET, path) if model_catalog(path, "/v1/models", false) => {
                 Some(C::OpenaiModels)
             }
-            (&Method::POST, "/v1/alpha/search" | "/v1/memories/trace_summarize") => {
-                Some(C::OpenaiCodexAuxiliary)
-            }
+            (
+                &Method::POST,
+                "/v1/alpha/search"
+                    | "/v1/memories/trace_summarize"
+                    | "/v1/alpha/notes/v2/list_files_by_prefix"
+                    | "/v1/alpha/notes/v2/read_file"
+                    | "/v1/alpha/notes/v2/search_contents"
+                    | "/v1/alpha/notes/v2/append_to_file"
+                    | "/v1/alpha/notes/v2/write_file"
+                    | "/v1/alpha/notes/v2/thread_hint",
+            ) => Some(C::OpenaiCodexAuxiliary),
             _ => None,
         },
         Provider::Gemini => match (method, path) {
@@ -434,6 +442,36 @@ mod tests {
             (
                 Method::POST,
                 "/v1/memories/trace_summarize",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/list_files_by_prefix",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/read_file",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/search_contents",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/append_to_file",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/write_file",
+                C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1/alpha/notes/v2/thread_hint",
                 C::OpenaiCodexAuxiliary,
             ),
             (
