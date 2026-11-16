@@ -225,8 +225,38 @@ impl CodexSessionStore for PostgresStorage {
         snapshot: &SessionSnapshot,
         now: u64,
     ) -> SessionStoreResult<Vec<String>> {
+        if snapshot.purpose != CredentialPurpose::SessionAccess {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+
+        // Discovery is deliberately read-only.  Establish the repeatable-read
+        // snapshot before any authority row is read, and never call the
+        // write-locking owner/family validation helpers from this path.
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        let family = read_family(&mut tx, &snapshot.family_id, false)
+            .await?
+            .ok_or(SessionStoreError::CredentialRejected)?;
+        validate_live_family(&family, now)?;
+        validate_discovery_snapshot(&family, principal_id, snapshot)?;
+
+        let credential = read_credential_read_only(&mut tx, &snapshot.credential_id, &family.family_id)
+            .await?
+            .ok_or(SessionStoreError::CredentialRejected)?;
+        validate_live_credential(&credential, &family, CredentialPurpose::SessionAccess, now)?;
+        if credential.access_generation != family.access_generation
+            || credential.access_generation != snapshot.access_generation
+        {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+
+        validate_live_principal_and_parent(&mut tx, &family, now).await?;
+        validate_discovery_source(&mut tx, principal_id, &family).await?;
+
         let aliases = super::account_owner::list_owner_workspace_aliases_in_read_tx(
             &mut tx, principal_id, &family.provider, &family.local_user_id,
         ).await.map_err(|error| match error {
@@ -338,6 +368,168 @@ fn validate_snapshot(
     }
     // Deliberately no equality against family.access_generation: renew preserves
     // every prior access until its own expiry, whereas workspace changes fence all.
+    Ok(())
+}
+fn validate_discovery_snapshot(
+    family: &SessionFamily,
+    principal_id: &str,
+    snapshot: &SessionSnapshot,
+) -> SessionStoreResult<()> {
+    if family.principal_id != principal_id
+        || family.family_id != snapshot.family_id
+        || family.parent_key_id != snapshot.parent_key_id
+        || family.owner_binding_id != snapshot.owner_binding_id
+        || family.provider != snapshot.provider
+        || family.owner_generation != snapshot.owner_generation
+        || family.binding_revision != snapshot.binding_revision
+        || family.workspace_id != snapshot.workspace_id
+        || family.workspace_generation != snapshot.workspace_generation
+        || family.origin != snapshot.origin
+    {
+        return Err(SessionStoreError::OwnerConflict);
+    }
+    Ok(())
+}
+
+async fn validate_live_principal_and_parent(
+    tx: &mut Transaction<'_, Postgres>,
+    family: &SessionFamily,
+    now: u64,
+) -> SessionStoreResult<()> {
+    let principal_id = Uuid::parse_str(&family.principal_id)
+        .map_err(|_| SessionStoreError::CredentialRejected)?;
+    let principal: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT enabled, deleted_at IS NOT NULL
+         FROM principals_v1
+         WHERE id = $1",
+    )
+    .bind(principal_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    match principal {
+        None | Some((_, true)) => return Err(SessionStoreError::CredentialRejected),
+        Some((false, false)) => return Err(SessionStoreError::PrincipalDisabled),
+        Some((true, false)) => {}
+    }
+
+    let parent: Option<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT k.status, k.revoked_at_unix_secs, k.expires_at_unix_secs
+         FROM managed_api_keys_v1 k
+         WHERE k.principal_id = $1
+           AND k.key_id = $2
+           AND EXISTS (
+               SELECT 1
+               FROM managed_api_key_index_v1 i
+               WHERE i.principal_id = k.principal_id
+                 AND i.key_id = k.key_id
+                 AND i.index_hash = k.index_hash
+           )",
+    )
+    .bind(&family.principal_id)
+    .bind(&family.parent_key_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some((status, revoked_at, expires_at)) = parent else {
+        return Err(SessionStoreError::CredentialRejected);
+    };
+    let expires_at = expires_at
+        .map(|value| i64_to_u64(value, "parent.expires_at"))
+        .transpose()?;
+    if status != "active" || revoked_at.is_some() || expires_at.is_some_and(|expiry| now > expiry) {
+        return Err(SessionStoreError::CredentialRejected);
+    }
+    Ok(())
+}
+
+async fn validate_discovery_source(
+    tx: &mut Transaction<'_, Postgres>,
+    principal_id: &str,
+    family: &SessionFamily,
+) -> SessionStoreResult<()> {
+    let source = sqlx::query(
+        "SELECT b.principal_id, b.provider, b.owner_generation, b.revision,
+                b.local_user_id, b.allowed_workspaces_json, b.revoked_at_unix_secs,
+                b.upstream_id
+         FROM account_owner_bindings_v1 b
+         WHERE b.binding_id = $1",
+    )
+    .bind(&family.owner_binding_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| StorageError::Conflict {
+        message: "source owner binding does not exist".into(),
+    })?;
+
+    let binding_principal: Uuid = source.try_get("principal_id").map_err(map_sqlx_error)?;
+    let binding_principal = binding_principal.to_string();
+    let provider: String = source.try_get("provider").map_err(map_sqlx_error)?;
+    let owner_generation: i64 = source.try_get("owner_generation").map_err(map_sqlx_error)?;
+    let revision: i64 = source.try_get("revision").map_err(map_sqlx_error)?;
+    let local_user_id: String = source.try_get("local_user_id").map_err(map_sqlx_error)?;
+    let allowed_workspaces: String = source
+        .try_get("allowed_workspaces_json")
+        .map_err(map_sqlx_error)?;
+    let revoked_at: Option<i64> = source
+        .try_get("revoked_at_unix_secs")
+        .map_err(map_sqlx_error)?;
+    let upstream_id: Uuid = source.try_get("upstream_id").map_err(map_sqlx_error)?;
+    let allowed_workspaces: Vec<String> = serde_json::from_str(&allowed_workspaces).map_err(|error| {
+        StorageError::Conflict {
+            message: format!("allowed_workspaces_json is malformed: {error}"),
+        }
+    })?;
+    if binding_principal != principal_id
+        || provider != family.provider
+        || local_user_id != family.local_user_id
+        || owner_generation != u64_to_i64(family.owner_generation, "owner_generation")?
+        || revision != u64_to_i64(family.binding_revision, "binding_revision")?
+        || revoked_at.is_some()
+        || !allowed_workspaces.iter().any(|workspace| workspace == &family.workspace_id)
+    {
+        return Err(SessionStoreError::OwnerConflict);
+    }
+
+    let upstream = sqlx::query(
+        "SELECT spec.kind, spec.enabled, spec.deleted_at, status.last_apply_error
+         FROM upstream_spec_v1 spec
+         LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id
+         WHERE spec.id = $1",
+    )
+    .bind(upstream_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some(upstream) = upstream else {
+        return Err(StorageError::Unavailable {
+            message: "source owner upstream is unavailable".into(),
+        }
+        .into());
+    };
+    let kind: String = upstream.try_get("kind").map_err(map_sqlx_error)?;
+    let enabled: bool = upstream.try_get("enabled").map_err(map_sqlx_error)?;
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
+        upstream.try_get("deleted_at").map_err(map_sqlx_error)?;
+    let last_apply_error: Option<String> = upstream
+        .try_get("last_apply_error")
+        .map_err(map_sqlx_error)?;
+    let provider_matches_kind = matches!(
+        (family.provider.as_str(), kind.as_str()),
+        ("anthropic", "anthropic_api_key" | "anthropic_oauth")
+            | ("openai", "openai_api_key" | "openai_oauth")
+            | ("gemini", "gemini_api_key" | "gemini_oauth")
+    );
+    if !provider_matches_kind {
+        return Err(SessionStoreError::OwnerConflict);
+    }
+    if !enabled || deleted_at.is_some() || last_apply_error.is_some() {
+        return Err(StorageError::Unavailable {
+            message: "source owner upstream is unavailable".into(),
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -543,6 +735,26 @@ async fn read_credential(
     let row = sqlx::query("SELECT * FROM codex_session_credentials_v1 WHERE credential_id = $1 AND family_id = $2 FOR UPDATE")
         .bind(credential_id).bind(family_id).fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
     row.as_ref().map(|row| decode_credential(row, false)).transpose().map_err(Into::into)
+}
+
+async fn read_credential_read_only(
+    tx: &mut Transaction<'_, Postgres>,
+    credential_id: &str,
+    family_id: &str,
+) -> SessionStoreResult<Option<SessionCredential>> {
+    let row = sqlx::query(
+        "SELECT * FROM codex_session_credentials_v1
+         WHERE credential_id = $1 AND family_id = $2",
+    )
+    .bind(credential_id)
+    .bind(family_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    row.as_ref()
+        .map(|row| decode_credential(row, false))
+        .transpose()
+        .map_err(Into::into)
 }
 
 async fn insert_family(tx: &mut Transaction<'_, Postgres>, family: &SessionFamily) -> SessionStoreResult<()> {

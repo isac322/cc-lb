@@ -13,7 +13,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 async fn renewal_preserves_access_until_expiry_switch_fences_old_workspace_and_revoke_is_terminal() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let mut initial = fixture.family("family-a");
         initial.plan_type = "plus".into();
@@ -92,7 +92,7 @@ async fn renewal_preserves_access_until_expiry_switch_fences_old_workspace_and_r
 
 #[tokio::test]
 async fn deleted_or_missing_principal_is_not_a_live_disabled_principal() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("principal-lineage");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -129,7 +129,7 @@ async fn deleted_or_missing_principal_is_not_a_live_disabled_principal() -> Test
 
 #[tokio::test]
 async fn point_auth_lookup_does_not_discover_owner_and_live_fences_preserve_typed_failures() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("authority");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -175,8 +175,230 @@ async fn point_auth_lookup_does_not_discover_owner_and_live_fences_preserve_type
 }
 
 #[tokio::test]
+async fn workspace_discovery_is_read_only_and_does_not_wait_on_writer_lock() -> TestResult {
+    let fixture = Fixture::create().await?;
+    let result: TestResult = async {
+        let family = fixture.family("discovery-read-only");
+        fixture.storage.issue_session(issue(&family, 1, 2)).await?;
+        let access = snapshot(&family, 1);
+        let before: (String, i64) = sqlx::query_as(
+            "SELECT allowed_workspaces_json, revision
+             FROM account_owner_bindings_v1
+             WHERE binding_id = 'binding'",
+        )
+        .fetch_one(&fixture.storage.pool)
+        .await?;
+        sqlx::query(
+            "CREATE FUNCTION reject_discovery_writes() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION 'workspace discovery must not write';
+             END;
+             $$",
+        )
+        .execute(&fixture.storage.pool)
+        .await?;
+        for table in [
+            "codex_session_families_v1",
+            "codex_session_credentials_v1",
+            "account_owner_bindings_v1",
+            "account_owner_workspaces_v1",
+        ] {
+            sqlx::query(AssertSqlSafe(format!(
+                "CREATE TRIGGER reject_discovery_writes BEFORE INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH ROW EXECUTE FUNCTION reject_discovery_writes()"
+            )))
+            .execute(&fixture.storage.pool)
+            .await?;
+        }
+
+        let mut writer = fixture.storage.pool.begin().await?;
+        sqlx::query(
+            "SELECT binding_id
+             FROM account_owner_bindings_v1
+             WHERE binding_id = 'binding'
+             FOR UPDATE",
+        )
+        .fetch_one(&mut *writer)
+        .await?;
+
+
+        let aliases = tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105),
+        )
+        .await??;
+        assert_eq!(aliases, ["workspace-a", "workspace-b"]);
+        writer.rollback().await?;
+
+        let after: (String, i64) = sqlx::query_as(
+            "SELECT allowed_workspaces_json, revision
+             FROM account_owner_bindings_v1
+             WHERE binding_id = 'binding'",
+        )
+        .fetch_one(&fixture.storage.pool)
+        .await?;
+        assert_eq!(after, before);
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn workspace_discovery_rejects_invalid_credentials_and_classifies_source_failures() -> TestResult {
+    let fixture = Fixture::create().await?;
+    let result: TestResult = async {
+        let family = fixture.family("discovery-errors");
+        fixture.storage.issue_session(issue(&family, 1, 2)).await?;
+        let access = snapshot(&family, 1);
+
+        let mut wrong_purpose = access.clone();
+        wrong_purpose.purpose = CredentialPurpose::SessionRenewal;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &wrong_purpose, 105).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+
+        let mut missing_credential = access.clone();
+        missing_credential.credential_id = "missing-credential".into();
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &missing_credential, 105).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        sqlx::query("UPDATE principals_v1 SET enabled = FALSE WHERE id = $1")
+            .bind(fixture.principal_uuid)
+            .execute(&fixture.storage.pool)
+            .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::PrincipalDisabled)
+        ));
+        sqlx::query("UPDATE principals_v1 SET enabled = TRUE WHERE id = $1")
+            .bind(fixture.principal_uuid)
+            .execute(&fixture.storage.pool)
+            .await?;
+        sqlx::query("UPDATE managed_api_keys_v1 SET status = 'revoked' WHERE principal_id = $1 AND key_id = 'parent'")
+            .bind(&fixture.principal_id)
+            .execute(&fixture.storage.pool)
+            .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        sqlx::query("UPDATE managed_api_keys_v1 SET status = 'active' WHERE principal_id = $1 AND key_id = 'parent'")
+            .bind(&fixture.principal_id)
+            .execute(&fixture.storage.pool)
+            .await?;
+
+
+        sqlx::query("UPDATE account_owner_bindings_v1 SET revision = 2 WHERE binding_id = 'binding'")
+            .execute(&fixture.storage.pool)
+            .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        sqlx::query("UPDATE account_owner_bindings_v1 SET revision = 1 WHERE binding_id = 'binding'")
+            .execute(&fixture.storage.pool)
+            .await?;
+        sqlx::query("UPDATE account_owner_bindings_v1 SET allowed_workspaces_json = '[\"workspace-b\"]' WHERE binding_id = 'binding'")
+            .execute(&fixture.storage.pool)
+            .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        sqlx::query("UPDATE account_owner_bindings_v1 SET allowed_workspaces_json = '[\"workspace-a\", \"workspace-b\"]' WHERE binding_id = 'binding'")
+            .execute(&fixture.storage.pool)
+            .await?;
+
+
+        sqlx::query("UPDATE upstream_spec_v1 SET enabled = FALSE WHERE id = $1")
+            .bind(fixture.upstream_id)
+            .execute(&fixture.storage.pool)
+            .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::Storage(StorageError::Unavailable { .. }))
+        ));
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn workspace_discovery_uses_one_snapshot_across_binding_races() -> TestResult {
+    let fixture = Fixture::create().await?;
+    let result: TestResult = async {
+        let family = fixture.family("discovery-snapshot-race");
+        fixture.storage.issue_session(issue(&family, 1, 2)).await?;
+        let access = snapshot(&family, 1);
+
+        let mut writer = fixture.storage.pool.begin().await?;
+        sqlx::query(
+            "UPDATE account_owner_bindings_v1
+             SET allowed_workspaces_json = '[\"workspace-a\"]', revision = revision + 1
+             WHERE binding_id = 'binding'",
+        )
+        .execute(&mut *writer)
+        .await?;
+
+        let before_commit = fixture.storage.list_session_workspace_aliases(
+            &fixture.principal_id,
+            &access,
+            105,
+        ).await?;
+        assert_eq!(before_commit, ["workspace-a", "workspace-b"]);
+        writer.commit().await?;
+
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn workspace_discovery_rejects_stale_access_generation() -> TestResult {
+    let fixture = Fixture::create().await?;
+    let result: TestResult = async {
+        let family = fixture.family("discovery-generation");
+        fixture.storage.issue_session(issue(&family, 1, 2)).await?;
+        let access = snapshot(&family, 1);
+        sqlx::query(
+            "UPDATE codex_session_families_v1
+             SET access_generation = 2
+             WHERE family_id = $1",
+        )
+        .bind(&family.family_id)
+        .execute(&fixture.storage.pool)
+        .await?;
+        assert!(matches!(
+            fixture.storage.list_session_workspace_aliases(&fixture.principal_id, &access, 105).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
 async fn issue_and_replace_failures_roll_back_all_rows_and_generation_changes() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("original");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -221,7 +443,7 @@ async fn issue_and_replace_failures_roll_back_all_rows_and_generation_changes() 
 
 #[tokio::test]
 async fn expiry_blocks_new_authority_but_does_not_block_internal_revoke_compensation() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("expiry");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -252,7 +474,7 @@ async fn expiry_blocks_new_authority_but_does_not_block_internal_revoke_compensa
 
 #[tokio::test]
 async fn internal_revoke_compensates_after_owner_parent_and_principal_authority_withdrawal() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("compensation");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -284,7 +506,7 @@ async fn internal_revoke_compensates_after_owner_parent_and_principal_authority_
 
 #[tokio::test]
 async fn compensation_does_not_wait_for_upstream_binding_principal_or_parent_locks() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("contraction-locks");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -309,7 +531,7 @@ async fn compensation_does_not_wait_for_upstream_binding_principal_or_parent_loc
 
 #[tokio::test]
 async fn revoke_races_with_renewal_and_duplicate_revoke_without_publishing_live_descendants() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("renew-revoke-race");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -353,7 +575,7 @@ async fn revoke_races_with_renewal_and_duplicate_revoke_without_publishing_live_
 
 #[tokio::test]
 async fn wrong_family_revoke_never_locks_another_familys_credential() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("credential-scope");
         let other = fixture.family("other-credential-scope");
@@ -377,7 +599,7 @@ async fn wrong_family_revoke_never_locks_another_familys_credential() -> TestRes
 
 #[tokio::test]
 async fn owner_revocation_wins_a_blocked_issue_and_upstream_is_locked_before_principal() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("blocked-issue");
         let mut blocker = fixture.storage.pool.begin().await?;
@@ -406,7 +628,7 @@ async fn owner_revocation_wins_a_blocked_issue_and_upstream_is_locked_before_pri
 
 #[tokio::test]
 async fn principal_disable_wins_a_blocked_renewal() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("principal-race");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -428,7 +650,7 @@ async fn principal_disable_wins_a_blocked_renewal() -> TestResult {
 
 #[tokio::test]
 async fn parent_revocation_wins_a_blocked_dispatch_fence() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("parent-race");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -452,7 +674,7 @@ async fn parent_revocation_wins_a_blocked_dispatch_fence() -> TestResult {
 
 #[tokio::test]
 async fn family_revocation_wins_a_blocked_workspace_switch_without_publishing_access() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("family-race");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -474,7 +696,7 @@ async fn family_revocation_wins_a_blocked_workspace_switch_without_publishing_ac
 
 #[tokio::test]
 async fn cross_binding_switches_use_ordered_locks_and_renewal_follows_the_new_owner() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let mut target = fixture.add_binding("binding-c", "workspace-c", "local-user").await?;
         target.owner_id = "replacement-provider-owner".into();
@@ -525,7 +747,7 @@ async fn cross_binding_switches_use_ordered_locks_and_renewal_follows_the_new_ow
 
 #[tokio::test]
 async fn cross_binding_switch_rejects_different_local_identity_and_stale_target_revision() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let other_user = fixture.add_binding("other-user", "workspace-other", "different-local-user").await?;
         let target = fixture.add_binding("binding-c", "workspace-c", "local-user").await?;
@@ -550,7 +772,7 @@ async fn cross_binding_switch_rejects_different_local_identity_and_stale_target_
 
 #[tokio::test]
 async fn target_owner_revocation_wins_a_blocked_cross_binding_switch() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let target = fixture.add_binding("binding-c", "workspace-c", "local-user").await?;
         let family = fixture.family("target-race");
@@ -578,7 +800,7 @@ async fn target_owner_revocation_wins_a_blocked_cross_binding_switch() -> TestRe
 
 #[tokio::test]
 async fn concurrent_renew_generation_does_not_invalidate_older_live_access_fence() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let family = fixture.family("renew-fence");
         fixture.storage.issue_session(issue(&family, 1, 2)).await?;
@@ -614,7 +836,7 @@ fn binding_expectation(binding: &AccountOwnerBinding, workspace: &str) -> OwnerB
 
 #[tokio::test]
 async fn issue_accepts_the_next_clock_second_but_rejects_future_or_expired_candidates() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else { return Ok(()) };
+    let fixture = Fixture::create().await?;
     let result: TestResult = async {
         let minted = fixture.family("clock-boundary");
         let command = issue(&minted, 1, 2);
@@ -731,11 +953,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
-            eprintln!("skipped: CI_POSTGRES_URL unset; PostgreSQL session assertions did not run");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let url = std::env::var("CI_POSTGRES_URL").map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "CI_POSTGRES_URL must be set for PostgreSQL session tests")
+        })?;
         let schema = format!("test_codex_sessions_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new().max_connections(1).connect_with(PgConnectOptions::from_str(&url)?).await?;
         sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await?;
@@ -775,7 +996,7 @@ impl Fixture {
             fixture.drop_schema().await?;
             return Err(error);
         }
-        Ok(Some(fixture))
+        Ok(fixture)
     }
 
     fn family(&self, id: &str) -> SessionFamily { family(&self.principal_id, id) }

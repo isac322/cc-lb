@@ -221,20 +221,19 @@ impl CodexSessionService {
         &self,
         auth: &Authenticated,
     ) -> Result<SessionWorkspaceDiscovery, SessionError> {
-        let family = self.family(auth, CredentialPurpose::SessionAccess).await?;
         let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
-        let mut workspaces = self.store.list_session_workspace_aliases(
-            auth.principal_id(), snapshot, unix_secs(self.clock.now()),
-        ).await.map_err(Into::into)?;
-        workspaces.sort();
-        workspaces.dedup();
-        if !workspaces.iter().any(|workspace| workspace == &family.workspace_id) {
-            return Err(SessionError::OwnerConflict);
+        if snapshot.purpose != CredentialPurpose::SessionAccess {
+            return Err(SessionError::Unauthenticated(BuiltinAuthError::InvalidFormat));
         }
+        // Storage validates these captured stamps and reads the aliases in one
+        // read-only snapshot. Do not obtain family metadata in a separate read.
+        let workspaces = self.store.list_session_workspace_aliases(
+            auth.principal_id(), snapshot, unix_secs(self.clock.now()),
+        ).await?;
         Ok(SessionWorkspaceDiscovery {
-            session_id: family.family_id,
-            workspace_generation: family.workspace_generation,
-            selected_workspace_id: family.workspace_id,
+            session_id: snapshot.family_id.clone(),
+            workspace_generation: snapshot.workspace_generation,
+            selected_workspace_id: snapshot.workspace_id.clone(),
             workspaces,
         })
     }

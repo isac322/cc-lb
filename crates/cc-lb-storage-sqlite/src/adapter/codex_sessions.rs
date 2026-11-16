@@ -339,10 +339,70 @@ impl CodexSessionStore for SqliteStorage {
         snapshot: &SessionSnapshot,
         now: u64,
     ) -> Result<Vec<String>> {
+        // This endpoint is discovery only: one deferred read transaction keeps
+        // credential, lineage, owner binding and upstream health consistent.
+        if snapshot.purpose != CredentialPurpose::SessionAccess {
+            return Err(SessionStoreError::CredentialRejected);
+        }
         let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
-        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
+        let f = family(&mut tx, &snapshot.family_id).await?;
+        if f.principal_id != principal_id
+            || snapshot.parent_key_id != f.parent_key_id
+            || snapshot.owner_binding_id != f.owner_binding_id
+            || snapshot.provider != f.provider
+            || snapshot.owner_generation != f.owner_generation
+            || snapshot.binding_revision != f.binding_revision
+            || snapshot.workspace_id != f.workspace_id
+            || snapshot.workspace_generation != f.workspace_generation
+            || snapshot.origin != f.origin
+        {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        let c = credential(&mut tx, &snapshot.credential_id).await?;
+        validate_credential(&c, &f, CredentialPurpose::SessionAccess, now)?;
+        if snapshot.access_generation != c.access_generation
+            || snapshot.access_generation != f.access_generation
+        {
+            return Err(SessionStoreError::CredentialRejected);
+        }
+        principal_and_parent(&mut tx, &f, now).await?;
+
+        let source = sqlx::query(
+            "SELECT b.principal_id, b.provider, b.owner_generation, b.revision,
+                    b.local_user_id, b.revoked_at_unix_secs,
+                    s.kind, s.enabled, s.deleted_at, st.last_apply_error
+             FROM account_owner_bindings_v1 b
+             JOIN upstream_spec_v1 s ON s.id = b.upstream_id
+             LEFT JOIN upstream_status_v1 st ON st.upstream_id = s.id
+             WHERE b.binding_id = ?",
+        )
+        .bind(&f.owner_binding_id)
+        .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?
+        .ok_or_else(|| StorageError::Conflict { message: "source owner binding does not exist".into() })?;
+        let binding_principal: String = source.try_get("principal_id").map_err(map_sqlx_error)?;
+        let provider: String = source.try_get("provider").map_err(map_sqlx_error)?;
+        let owner_generation: i64 = source.try_get("owner_generation").map_err(map_sqlx_error)?;
+        let revision: i64 = source.try_get("revision").map_err(map_sqlx_error)?;
+        let revoked: Option<i64> = source.try_get("revoked_at_unix_secs").map_err(map_sqlx_error)?;
+        let kind: String = source.try_get("kind").map_err(map_sqlx_error)?;
+        let enabled: i64 = source.try_get("enabled").map_err(map_sqlx_error)?;
+        let deleted: Option<i64> = source.try_get("deleted_at").map_err(map_sqlx_error)?;
+        let unhealthy: Option<String> = source.try_get("last_apply_error").map_err(map_sqlx_error)?;
+        let expected_api_key = format!("{}_api_key", f.provider);
+        let expected_oauth = format!("{}_oauth", f.provider);
+        if binding_principal != principal_id || provider != f.provider
+            || owner_generation != integer(f.owner_generation)?
+            || revision != integer(f.binding_revision)? || revoked.is_some()
+            || (kind != expected_api_key && kind != expected_oauth)
+        {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        if enabled == 0 || deleted.is_some() || unhealthy.is_some() {
+            return Err(StorageError::Unavailable { message: "source owner upstream is unavailable".into() }.into());
+        }
+        let local_user_id: String = source.try_get("local_user_id").map_err(map_sqlx_error)?;
         let aliases = super::account_owner::list_owner_workspace_aliases_in_read_tx(
-            &mut tx, principal_id, &family.provider, &family.local_user_id,
+            &mut tx, principal_id, &f.provider, &local_user_id,
         ).await.map_err(|error| match error {
             StorageError::Conflict { .. } => SessionStoreError::OwnerConflict,
             StorageError::Unavailable { .. } => SessionStoreError::Storage(error),
@@ -580,6 +640,99 @@ mod tests {
         clock.set_unix_secs(200);
         assert!(matches!(s.issue_session(issue()).await, Err(SessionStoreError::InvalidOperation)));
         assert!(s.get_session_family("family").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_wrong_purpose_revoked_and_stale_credentials() {
+        let s = store().await;
+        s.issue_session(issue()).await.unwrap();
+        let f = family();
+        let mut renewal_snapshot = snapshot(&f, "renewal", 1);
+        renewal_snapshot.purpose = CredentialPurpose::SessionRenewal;
+        assert!(matches!(
+            s.list_session_workspace_aliases("principal", &renewal_snapshot, 101).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        sqlx::query("UPDATE codex_session_credentials_v1 SET revoked_at=101 WHERE credential_id='credential'")
+            .execute(s.pool()).await.unwrap();
+        assert!(matches!(
+            s.list_session_workspace_aliases("principal", &snapshot(&f, "credential", 1), 101).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+        sqlx::query("UPDATE codex_session_credentials_v1 SET revoked_at=NULL WHERE credential_id='credential'")
+            .execute(s.pool()).await.unwrap();
+        let mut stale = snapshot(&f, "credential", 1);
+        stale.workspace_generation = 99;
+        assert!(matches!(
+            s.list_session_workspace_aliases("principal", &stale, 101).await,
+            Err(SessionStoreError::OwnerConflict)
+        ));
+        let mut generation = snapshot(&f, "credential", 99);
+        assert!(matches!(
+            s.list_session_workspace_aliases("principal", &generation, 101).await,
+            Err(SessionStoreError::CredentialRejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_source_upstream_unavailable_in_read_snapshot() {
+        let s = store().await;
+        s.issue_session(issue()).await.unwrap();
+        sqlx::query("UPDATE upstream_spec_v1 SET enabled=0").execute(s.pool()).await.unwrap();
+        assert!(matches!(
+            s.list_session_workspace_aliases("principal", &snapshot(&family(), "credential", 1), 101).await,
+            Err(SessionStoreError::Storage(StorageError::Unavailable { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_lists_only_live_reserved_aliases_once() {
+        let s = store().await;
+        let principal = "00000000-0000-0000-0000-000000000011";
+        for statement in [
+            "DELETE FROM account_owner_workspaces_v1",
+            "DELETE FROM account_owner_bindings_v1",
+            "DELETE FROM managed_keys_v1",
+            "DELETE FROM principals_v1",
+            "INSERT INTO principals_v1 (id,name,created_at,updated_at) VALUES ('00000000-0000-0000-0000-000000000011','canonical',100,100)",
+            "INSERT INTO managed_keys_v1 (secret_hash,created_at,status,principal_id,key_id,label,verify_hash,secret_salt,limit_overrides,last_4,index_hash,updated_at) VALUES ('parent-hash',100,'active','00000000-0000-0000-0000-000000000011','parent','parent-label',zeroblob(32),zeroblob(16),'[]','1234',zeroblob(32),100)",
+        ] {
+            sqlx::query(statement).execute(s.pool()).await.unwrap();
+        }
+        s.create_owner_binding(AccountOwnerBinding {
+            binding_id: "binding".into(), principal_id: principal.into(), provider: "openai".into(),
+            owner_id: "owner".into(), upstream_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            owner_generation: 1, local_user_id: "user".into(),
+            allowed_workspaces: vec!["workspace".into(), "other".into()],
+            provider_workspace_id: "provider-workspace".into(), outbound_region: None,
+            revision: 1, revoked_at_unix_secs: None,
+        }).await.unwrap();
+        s.create_owner_binding(AccountOwnerBinding {
+            binding_id: "binding-2".into(), principal_id: principal.into(), provider: "openai".into(),
+            owner_id: "owner-2".into(), upstream_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            owner_generation: 1, local_user_id: "user".into(),
+            allowed_workspaces: vec!["workspace-2".into()],
+            provider_workspace_id: "provider-workspace-2".into(), outbound_region: None,
+            revision: 1, revoked_at_unix_secs: None,
+        }).await.unwrap();
+        s.create_owner_binding(AccountOwnerBinding {
+            binding_id: "foreign".into(), principal_id: principal.into(), provider: "openai".into(),
+            owner_id: "foreign-owner".into(), upstream_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            owner_generation: 1, local_user_id: "other-user".into(),
+            allowed_workspaces: vec!["foreign".into()],
+            provider_workspace_id: "provider-workspace-3".into(), outbound_region: None,
+            revision: 1, revoked_at_unix_secs: None,
+        }).await.unwrap();
+        let mut command = issue();
+        command.family.principal_id = principal.into();
+        let family = command.family.clone();
+        s.issue_session(command).await.unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM account_owner_workspaces_v1").fetch_one(s.pool()).await.unwrap();
+        let mut aliases = s.list_session_workspace_aliases(principal, &snapshot(&family, "credential", 1), 101).await.unwrap();
+        aliases.sort();
+        assert_eq!(aliases, vec!["other".to_string(), "workspace".to_string(), "workspace-2".to_string()]);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM account_owner_workspaces_v1").fetch_one(s.pool()).await.unwrap();
+        assert_eq!(before, after);
     }
 
     fn issue() -> IssueSession {
