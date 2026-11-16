@@ -38,7 +38,14 @@ fn to_u64(value: i64, field: &str) -> StorageResult<u64> {
 }
 
 fn parse_principal_id(value: &str) -> StorageResult<Uuid> {
-    Uuid::parse_str(value).map_err(|_| conflict("principal_id must be a UUID"))
+    let parsed = Uuid::parse_str(value).map_err(|_| conflict("principal_id must be a UUID"))?;
+    let mut buffer = [0_u8; 36];
+    if parsed.hyphenated().encode_lower(&mut buffer) != value {
+        return Err(conflict(
+            "principal_id must use canonical lowercase UUID spelling",
+        ));
+    }
+    Ok(parsed)
 }
 
 fn provider_matches_kind(provider: &str, kind: &str) -> bool {
@@ -106,18 +113,29 @@ async fn lock_upstream(
     tx: &mut Transaction<'_, Postgres>,
     upstream_id: UpstreamRecordId,
 ) -> StorageResult<Option<UpstreamState>> {
+    let exists = sqlx::query("SELECT id FROM upstream_spec_v1 WHERE id = $1 FOR UPDATE")
+        .bind(upstream_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    // The lock and health read must be separate statements: after waiting on
+    // the spec lock, READ COMMITTED needs a fresh snapshot for status changes.
     let row = sqlx::query(
-        "SELECT spec.kind, spec.enabled, spec.deleted_at, status.last_apply_error FROM upstream_spec_v1 spec LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id WHERE spec.id = $1 FOR UPDATE OF spec",
-    ).bind(upstream_id).fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
-    row.map(|row| {
-        Ok(UpstreamState {
-            kind: row.try_get("kind").map_err(map_sqlx_error)?,
-            enabled: row.try_get("enabled").map_err(map_sqlx_error)?,
-            deleted_at: row.try_get("deleted_at").map_err(map_sqlx_error)?,
-            last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
-        })
-    })
-    .transpose()
+        "SELECT spec.kind, spec.enabled, spec.deleted_at, status.last_apply_error FROM upstream_spec_v1 spec LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id WHERE spec.id = $1",
+    )
+    .bind(upstream_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(Some(UpstreamState {
+        kind: row.try_get("kind").map_err(map_sqlx_error)?,
+        enabled: row.try_get("enabled").map_err(map_sqlx_error)?,
+        deleted_at: row.try_get("deleted_at").map_err(map_sqlx_error)?,
+        last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
+    }))
 }
 
 fn validate_live_upstream(state: Option<&UpstreamState>, provider: &str) -> StorageResult<()> {
@@ -405,6 +423,7 @@ mod tests {
         postgres::{PgConnectOptions, PgPoolOptions},
     };
     use std::{str::FromStr, sync::Arc, time::Duration};
+    use tokio::sync::oneshot;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -539,6 +558,147 @@ mod tests {
             validate(expected[0].clone(), expected[1].clone()).await,
             Err(StorageError::Conflict { .. })
         ));
+        pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
+            .execute(&admin)
+            .await?;
+        admin.close().await;
+        Ok(())
+    }
+    #[tokio::test]
+    #[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+    async fn late_status_error_after_upstream_lock_is_not_stale() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let schema = format!("account_owner_status_race_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await?;
+        let options = PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]);
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await?;
+        let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+        storage.initialize().await?;
+        let principal_id = PrincipalStore::create(
+            &storage,
+            PrincipalCreate {
+                name: format!("status-race-principal-{}", Uuid::new_v4().simple()),
+                kind: PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await?
+        .id
+        .to_string();
+        let upstream_id = UpstreamStore::create(
+            &storage,
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "status-race-upstream".to_owned(),
+                kind: UpstreamKind::OpenaiApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await?
+        .id;
+        let binding = AccountOwnerBinding {
+            binding_id: "status-race-binding".to_owned(),
+            principal_id,
+            provider: "openai".to_owned(),
+            owner_id: "status-race-owner".to_owned(),
+            upstream_id,
+            owner_generation: 1,
+            local_user_id: "status-race-user".to_owned(),
+            allowed_workspaces: vec!["status-race-workspace".to_owned()],
+            provider_workspace_id: "status-race-vendor-workspace".to_owned(),
+            outbound_region: None,
+            revision: 1,
+            revoked_at_unix_secs: None,
+        };
+        storage.create_owner_binding(binding.clone()).await?;
+        let expected = OwnerBindingExpectation {
+            binding_id: binding.binding_id.clone(),
+            principal_id: binding.principal_id.clone(),
+            provider: binding.provider.clone(),
+            owner_generation: 1,
+            binding_revision: 1,
+            workspace_id: binding.allowed_workspaces[0].clone(),
+        };
+        let mut healthy_tx = pool.begin().await?;
+        assert_eq!(
+            validate_owner_binding_in_tx(&mut healthy_tx, &expected).await?,
+            binding,
+        );
+        healthy_tx.rollback().await?;
+
+        let mut writer = pool.begin().await?;
+        sqlx::query("SELECT id FROM upstream_spec_v1 WHERE id = $1 FOR UPDATE")
+            .bind(upstream_id)
+            .fetch_one(&mut *writer)
+            .await?;
+        sqlx::query(
+            "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, updated_at) VALUES ($1, 'late apply error', NOW()) ON CONFLICT (upstream_id) DO UPDATE SET last_apply_error = EXCLUDED.last_apply_error, updated_at = EXCLUDED.updated_at",
+        )
+        .bind(upstream_id)
+        .execute(&mut *writer)
+        .await?;
+
+        let (pid_tx, pid_rx) = oneshot::channel();
+        let reader_pool = pool.clone();
+        let reader_expected = expected.clone();
+        let reader = tokio::spawn(async move {
+            let mut tx = reader_pool.begin().await.map_err(map_sqlx_error)?;
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            let _ = pid_tx.send(pid);
+            let result = validate_owner_binding_in_tx(&mut tx, &reader_expected).await;
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            Ok::<_, StorageError>((pid, result))
+        });
+        let reader_pid = pid_rx.await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: i64 =
+                    sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1))::bigint")
+                        .bind(reader_pid)
+                        .fetch_one(&pool)
+                        .await?;
+                if blocked > 0 {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reader never blocked on the writer's upstream lock")?;
+        writer.commit().await?;
+        let (_, result) = tokio::time::timeout(Duration::from_secs(5), reader).await???;
+        assert!(matches!(result, Err(StorageError::Unavailable { .. })));
+        let mut post_update_tx = pool.begin().await?;
+        assert!(matches!(
+            validate_owner_binding_in_tx(&mut post_update_tx, &expected).await,
+            Err(StorageError::Unavailable { .. })
+        ));
+        post_update_tx.rollback().await?;
         pool.close().await;
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
             .execute(&admin)

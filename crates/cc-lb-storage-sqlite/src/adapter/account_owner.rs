@@ -106,6 +106,7 @@ impl AccountOwnerStore for SqliteStorage {
             || existing.upstream_id != binding.upstream_id
             || existing.provider_workspace_id != binding.provider_workspace_id;
         let permission_withdrawal = !identity_changed
+            && binding.outbound_region == existing.outbound_region
             && binding
                 .allowed_workspaces
                 .iter()
