@@ -522,7 +522,7 @@ impl<T> Storage for T where
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
         + crate::upstream_api_key::UpstreamApiKeyStore
-        + UpstreamAffinityStore
+        + crate::upstream_affinity::UpstreamAffinityStore
         + RequestEventStore
         + CacheKeepaliveProjectionStore
         + UpstreamRateLimitStateStore
