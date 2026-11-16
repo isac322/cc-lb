@@ -98,6 +98,10 @@ pub(super) async fn handler(
         None
     } else {
         match Path::<String>::from_request_parts(&mut parts, &state).await {
+            Ok(Path(file_id)) if file_id.is_empty() => {
+                return failure(StatusCode::NOT_FOUND, "invalid_file_id", InternalErrorStage::Ingress,
+                    InternalErrorKind::InvalidInput, observer.as_ref());
+            }
             Ok(Path(file_id)) => Some(file_id),
             Err(_) => {
                 return failure(StatusCode::BAD_REQUEST, "invalid_file_id", InternalErrorStage::Ingress,
