@@ -336,6 +336,45 @@ async fn unhealthy_upstream_blocks_grants_but_not_permission_withdrawal_or_revoc
     fixture.drop_schema().await
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn noncanonical_principal_spelling_is_rejected_without_orphan_mutation() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+    let generated = create_principal(&storage).await?;
+    let canonical = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_owned();
+    sqlx::query("UPDATE principals_v1 SET id = $1 WHERE id = $2")
+        .bind(Uuid::parse_str(&canonical)?)
+        .bind(Uuid::parse_str(&generated)?)
+        .execute(&fixture.pool)
+        .await?;
+    let upstream_id = create_upstream(&storage, "canonical-principal").await?;
+    for (binding_id, spelling) in [
+        ("uppercase-principal-binding", canonical.to_uppercase()),
+        ("unhyphenated-principal-binding", canonical.replace('-', "")),
+    ] {
+        let mut candidate = binding(upstream_id, 1, 1, None);
+        candidate.binding_id = binding_id.to_owned();
+        candidate.principal_id = spelling;
+        assert!(matches!(
+            storage.create_owner_binding(candidate).await,
+            Err(StorageError::Conflict { .. })
+        ));
+        assert!(storage.get_owner_binding(binding_id).await?.is_none());
+        let alias_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM account_owner_workspaces_v1 WHERE binding_id = $1",
+        )
+        .bind(binding_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(alias_count, 0);
+    }
+    fixture.drop_schema().await
+}
+
 async fn create_principal(storage: &PostgresStorage) -> TestResult<String> {
     Ok(PrincipalStore::create(
         storage,

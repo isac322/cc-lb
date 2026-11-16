@@ -263,6 +263,7 @@ async fn replacement_preserves_generation_then_advances_and_withdraws_permission
     let mut same_owner = stored.clone();
     same_owner.allowed_workspaces = vec!["workspace-b".to_owned()];
     same_owner.revision = 2;
+    same_owner.outbound_region = Some("different-region".to_owned());
     AccountOwnerStore::compare_and_replace_owner_binding(&storage, same_owner.clone(), 1)
         .await
         .expect("same-owner replacement");
@@ -274,9 +275,15 @@ async fn replacement_preserves_generation_then_advances_and_withdraws_permission
         )
         .await,
     );
-    AccountOwnerStore::resolve_owner_binding(&storage, &expectation(&same_owner, "workspace-b"))
+    assert_eq!(
+        AccountOwnerStore::resolve_owner_binding(
+            &storage,
+            &expectation(&same_owner, "workspace-b")
+        )
         .await
-        .expect("resolve replacement");
+        .expect("resolve replacement"),
+        same_owner,
+    );
 
     let mut new_owner = same_owner.clone();
     new_owner.owner_id = "owner-2".to_owned();
@@ -562,6 +569,14 @@ async fn dead_owners_allow_withdrawal_and_revocation_but_not_new_grants_or_moves
         moved.owner_generation = 2;
         moved.provider_workspace_id = "vendor-workspace-2".to_owned();
         assert_unavailable(storage.compare_and_replace_owner_binding(moved, 1).await);
+        let mut region_change = first.clone();
+        region_change.revision = 2;
+        region_change.outbound_region = Some("different-region".to_owned());
+        assert_unavailable(
+            storage
+                .compare_and_replace_owner_binding(region_change, 1)
+                .await,
+        );
 
         let mut withdrawn = first.clone();
         withdrawn.revision = 2;
