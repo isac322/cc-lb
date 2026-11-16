@@ -13,6 +13,55 @@ use cc_lb_storage_api::{
 };
 use url::Url;
 
+/// A failure before a provider response could be relayed.
+///
+/// Signer and transport error text is deliberately not exposed: it may contain
+/// credentials or URLs. Session errors retain the existing authentication path.
+#[derive(Debug)]
+pub enum FilesDispatchError {
+    Session(crate::codex_sessions::SessionError),
+    OwnerUnavailable,
+    SigningFailed,
+    DispatchFailed,
+}
+
+/// Relay Files bytes to the current session owner without routing or retries.
+pub async fn dispatch(
+    lifecycle: &crate::Lifecycle,
+    auth: &Authenticated,
+    owner: &crate::codex_sessions::SessionOwnerConstraint,
+    request: http::Request<bytes::Bytes>,
+    observer: Option<&crate::LifecycleContext>,
+) -> Result<http::Response<axum::body::Body>, FilesDispatchError> {
+    lifecycle.dispatch_codex_file(auth, owner, request, observer).await
+}
+
+/// Finish the already-buffered provider response without inventing usage.
+pub fn complete_response(
+    _auth: &Authenticated,
+    status: http::StatusCode,
+    body_bytes: usize,
+    observer: Option<&crate::LifecycleContext>,
+) {
+    if let Some(observer) = observer {
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(cc_lb_lifecycle::StreamSuccess {
+                body_bytes: Some(body_bytes as u64),
+                ..Default::default()
+            }),
+        });
+        if status.is_client_error() {
+            observer.set_upstream_error(status, crate::terminal_observer::UpstreamErrorCode::Upstream4xx);
+        } else if status.is_server_error() {
+            observer.set_upstream_error(status, crate::terminal_observer::UpstreamErrorCode::Upstream5xx);
+        } else {
+            observer.set_success_status(status);
+        }
+        observer.finish();
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SignedUrlMetadata {
     url: String,
@@ -58,11 +107,11 @@ impl SignedUrlMetadata {
     }
 }
 
-pub struct CodexFiles<'a, S> {
+pub struct CodexFiles<'a, S: ?Sized> {
     storage: &'a S,
 }
 
-impl<'a, S> CodexFiles<'a, S>
+impl<'a, S: ?Sized> CodexFiles<'a, S>
 where
     S: AccountOwnerStore + CodexFileStore,
 {

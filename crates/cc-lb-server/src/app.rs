@@ -2553,6 +2553,10 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
         "/oauth/revoke" => Some("/oauth/revoke"),
         "/v1/models" => Some("/v1/models"),
         "/v1/files" => Some("/v1/files"),
+        "/backend-api/files" => Some("/backend-api/files"),
+        _ if path.starts_with("/backend-api/files/") && path.ends_with("/uploaded") => {
+            Some("/backend-api/files/{file_id}/uploaded")
+        }
         _ if path.starts_with("/v1/models/") => Some("/v1/models/{id}"),
         _ if path.starts_with("/v1/files/") && path.ends_with("/content") => {
             Some("/v1/files/{id}/content")
@@ -2848,6 +2852,8 @@ fn scoped_proxy_routes(
                 "/api/codex/accounts/switch-workspace-token",
                 post(account_lifecycle_handler),
             )
+            .route("/backend-api/files", post(codex_files::handler))
+            .route("/backend-api/files/{file_id}/uploaded", post(codex_files::handler))
             .route("/oauth/token", post(lifecycle_handler))
             .route("/oauth/revoke", post(lifecycle_handler))
             .route(
@@ -3126,6 +3132,7 @@ mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
 mod codex_account;
+mod codex_files;
 #[cfg(test)]
 #[path = "app/codex_files_tests.rs"]
 mod codex_files_tests;

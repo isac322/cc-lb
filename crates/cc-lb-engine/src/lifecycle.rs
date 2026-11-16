@@ -5239,6 +5239,129 @@ impl Lifecycle {
         observer.emit_authentication_completed(principal_id.to_owned(), kind);
     }
 
+    /// Relay a Codex Files request through the selected owner's current
+    /// signer and dispatcher without routing, retries, or credential refresh.
+    pub(crate) async fn dispatch_codex_file(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        owner: &crate::codex_sessions::SessionOwnerConstraint,
+        request: Request<Bytes>,
+        observer: Option<&LifecycleContext>,
+    ) -> Result<Response<Body>, crate::codex_files::FilesDispatchError> {
+        use crate::codex_files::FilesDispatchError;
+
+        owner.validate(auth).await.map_err(FilesDispatchError::Session)?;
+        let view = self.dynamic_view.load();
+        let record = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| {
+                record.id == owner.upstream_id()
+                    && record.enabled
+                    && record.deleted_at_unix_secs.is_none()
+                    && record.kind == StorageUpstreamKind::OpenaiOauth
+            })
+            .ok_or(FilesDispatchError::OwnerUnavailable)?;
+        let upstream = upstream_for_record(record).map_err(|_| FilesDispatchError::OwnerUnavailable)?;
+        let (parts, body) = request.into_parts();
+        let mut headers = parts.headers;
+        strip_hop_by_hop(&mut headers);
+        crate::codex_sessions::strip_untrusted_provenance(&mut headers);
+        for name in [
+            "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+            "openai-api-key", "x-goog-api-key", "chatgpt-account-id",
+            "openai-organization", "openai-project",
+        ] {
+            headers.remove(name);
+        }
+        let context = RequestContext::builder()
+            .request_id(observer.map_or_else(next_request_id, |observer| observer.event_id().to_owned()))
+            .downstream_headers(headers)
+            .method(parts.method)
+            .path(parts.uri.path().to_owned())
+            .query(parts.uri.query().map(str::to_owned))
+            .body_bytes(body)
+            .build();
+        let principal = Principal {
+            id: auth.principal_id().to_owned(),
+            kind: PrincipalKind::InternalKey,
+        };
+        let shape_started = Instant::now();
+        let shaped = raw_passthrough_request(
+            record.base_url.as_ref(), &context, &principal, &upstream, true,
+        ).map_err(|_| FilesDispatchError::SigningFailed)?;
+        let shape_ms = duration_to_ms(shape_started.elapsed());
+        let destination = shaped.url().clone();
+        let factory = view.signer_factory.with_router_choice(record.name.clone());
+        let signer = factory.build(&upstream).await.map_err(|_| FilesDispatchError::SigningFailed)?;
+        owner.validate(auth).await.map_err(FilesDispatchError::Session)?;
+        let sign_started = Instant::now();
+        let signed = sign_request(signer.as_ref(), shaped).await.map_err(|_| FilesDispatchError::SigningFailed)?;
+        let sign_ms = duration_to_ms(sign_started.elapsed());
+        if signed.url() != &destination {
+            return Err(FilesDispatchError::SigningFailed);
+        }
+        // Signing may yield to credential storage. A switch or revocation in
+        // that interval must not send the already-signed request.
+        owner.validate(auth).await.map_err(FilesDispatchError::Session)?;
+        if let Some(observer) = observer {
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                event_id: observer.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::RouteInfo {
+                    upstream_id: record.id,
+                    upstream_name: record.name.clone(),
+                    upstream_kind: Some(storage_upstream_kind_label(record.kind).to_owned()),
+                    model: None,
+                    route_ms: None,
+                    routing_trace: None,
+                    predicted_cache_read_tokens: None,
+                    matched_v3_cache_key: None,
+                    breakpoint_content_block_index: None,
+                    matched_content_block_index: None,
+                    lookback_distance: None,
+                    predicted_cache_creation_tokens_5m: None,
+                    predicted_cache_creation_tokens_1h: None,
+                    token_estimate_source: None,
+                    cache_breakpoints: None,
+                    cache_prefix_hash: None,
+                    cache_value_micros: None,
+                    formula_winner_upstream_id: None,
+                    kept_upstream_id: None,
+                    quota_urgency_5h: None,
+                    quota_urgency_7d: None,
+                    quota_urgency_combined: None,
+                    quota_warning_multiplier: None,
+                }),
+                routing_trace: None,
+            });
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
+                event_id: observer.event_id().to_owned(),
+                attempt_num: 1,
+                upstream_id: record.id,
+            });
+        }
+        let started = Instant::now();
+        let response = self.dispatcher.dispatch(signed).await.map_err(|_| FilesDispatchError::DispatchFailed)?;
+        let upstream_ttfb_ms = duration_to_ms(started.elapsed());
+        if let Some(observer) = observer {
+            observer.set_attempt_timings(Some(shape_ms), Some(sign_ms), Some(upstream_ttfb_ms));
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
+                event_id: observer.event_id().to_owned(),
+                status: response.status().as_u16(),
+                headers: header_snapshot_from(response.headers(), record.kind),
+                observed_at_unix_millis: Some(unix_now_ms(&*self.clock)),
+                bulkhead_wait_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                shape_ms: Some(shape_ms),
+                sign_ms: Some(sign_ms),
+                upstream_ttfb_ms: Some(upstream_ttfb_ms),
+            });
+        }
+        Ok(response)
+    }
+
     /// Handle a request that has already been authenticated. `auth` is the
     /// proof: callers must obtain it from [`Lifecycle::authenticate`] before
     /// the request body is read.
