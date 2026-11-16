@@ -85,6 +85,7 @@ pub fn authorize_registered_purpose(
 #[derive(Clone)]
 pub struct SessionOwnerConstraint {
     upstream_id: uuid::Uuid,
+    provider_workspace_id: String,
     principal_id: String,
     snapshot: cc_lb_storage_api::codex_sessions::SessionSnapshot,
     store: Arc<dyn CodexSessionStore>,
@@ -93,6 +94,9 @@ pub struct SessionOwnerConstraint {
 
 impl SessionOwnerConstraint {
     pub fn upstream_id(&self) -> uuid::Uuid { self.upstream_id }
+
+    /// Provider workspace from the same fenced binding as the selected upstream.
+    pub fn provider_workspace_id(&self) -> &str { &self.provider_workspace_id }
 
     pub async fn validate(&self, auth: &Authenticated) -> Result<(), SessionError> {
         if auth.principal_id() != self.principal_id
@@ -171,6 +175,7 @@ impl CodexSessionService {
         let binding = self.fence_session_dispatch(auth).await?;
         Ok(SessionOwnerConstraint {
             upstream_id: binding.upstream_id,
+            provider_workspace_id: binding.provider_workspace_id,
             principal_id: auth.principal_id().to_owned(),
             snapshot: auth.session().ok_or(SessionError::InvalidRequest)?.clone(),
             store: self.store.clone(),
