@@ -27,6 +27,10 @@ mod cache_keepalive_strict_scenarios;
 mod cache_keepalive_wall_clock;
 #[path = "claude_fable_5_proxy_path.rs"]
 mod claude_fable_5_proxy_path;
+#[path = "codex_auxiliary.rs"]
+mod codex_auxiliary;
+#[path = "codex_control_support.rs"]
+mod codex_control_support;
 #[path = "codex_zstd_request.rs"]
 mod codex_zstd_request;
 #[path = "common.rs"]
