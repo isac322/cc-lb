@@ -30,11 +30,19 @@ struct Provider {
 
 impl Provider {
     async fn start() -> Self {
+        Self::start_with_status(StatusCode::OK).await
+    }
+
+    async fn start_with_status(status: StatusCode) -> Self {
         let records = Records::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind provider");
         let url = format!("http://{}/backend-api/codex/", listener.local_addr().unwrap())
             .parse().unwrap();
-        let router = Router::new().fallback(any(record)).with_state(records.clone());
+        let router = Router::new().fallback(any(record)).with_state(records.clone())
+            .layer(axum::middleware::map_response(move |mut response: axum::response::Response| async move {
+                *response.status_mut() = status;
+                response
+            }));
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve provider");
         });
@@ -180,4 +188,27 @@ async fn model_auxiliary_routes_preserve_requests_on_the_session_owner() {
         assert!(alternate.records.lock().unwrap().is_empty());
     }
     assert_eq!(selected.records.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn notes_provider_error_is_not_replayed_on_another_owner() {
+    let selected = Provider::start_with_status(StatusCode::INTERNAL_SERVER_ERROR).await;
+    let alternate = Provider::start().await;
+    let support = build_oauth_session_app(selected.url.clone(), alternate.url.clone(), vec![]).await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/backend-api/codex/alpha/notes/v2/append_to_file")
+        .header(header::AUTHORIZATION, format!("Bearer {}", support.access))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"path":"qa.txt","content":"append exactly once"}"#)).unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        support.app.router.clone().oneshot(request),
+    ).await.expect("provider error completes").unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body.as_ref(), br#"{"result":"selected-owner-result"}"#);
+    assert_eq!(selected.records.lock().unwrap().len(), 1, "append must not be retried");
+    assert!(alternate.records.lock().unwrap().is_empty(), "provider error must not switch owners");
 }
