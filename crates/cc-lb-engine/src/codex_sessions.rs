@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::authn_rail::Authenticated;
 use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_control::api_keys::{
     builtin_authn::BuiltinAuthError,
@@ -9,10 +10,15 @@ use cc_lb_control::api_keys::{
 };
 use cc_lb_storage_api::{
     StorageError,
-    account_owner::{AccountOwnerBinding, AccountOwnerStore, AccountOwnerWorkspaceTarget, OwnerBindingExpectation},
-    codex_sessions::{CodexSessionStore, CredentialPurpose, ReplaceSessionAccess, SessionCredential, SessionFamily, SessionStoreError},
+    account_owner::{
+        AccountOwnerBinding, AccountOwnerStore, AccountOwnerWorkspaceTarget,
+        OwnerBindingExpectation,
+    },
+    codex_sessions::{
+        CodexSessionStore, CredentialPurpose, ReplaceSessionAccess, SessionCredential,
+        SessionFamily, SessionStoreError,
+    },
 };
-use crate::authn_rail::Authenticated;
 
 /// Reserved provenance is never accepted from clients, providers, or plugins.
 pub fn strip_untrusted_provenance(headers: &mut http::HeaderMap) {
@@ -23,7 +29,10 @@ pub fn strip_untrusted_provenance(headers: &mut http::HeaderMap) {
 /// Call only on a response actually received from an authenticated dispatch.
 pub fn mark_upstream_response(headers: &mut http::HeaderMap) {
     strip_untrusted_provenance(headers);
-    headers.insert("cc-lb-error-origin", http::HeaderValue::from_static("upstream"));
+    headers.insert(
+        "cc-lb-error-origin",
+        http::HeaderValue::from_static("upstream"),
+    );
 }
 
 pub fn session_error_response(
@@ -31,7 +40,9 @@ pub fn session_error_response(
     observer: Option<&crate::LifecycleContext>,
 ) -> http::Response<axum::body::Body> {
     let (status, origin, code) = match error {
-        SessionError::Unauthenticated(error) => (error.http_status(), "principal", "session_rejected"),
+        SessionError::Unauthenticated(error) => {
+            (error.http_status(), "principal", "session_rejected")
+        }
         SessionError::OwnerConflict => (400, "proxy", "owner_conflict"),
         SessionError::InvalidRequest => (400, "proxy", "invalid_session_request"),
         SessionError::Unavailable => (503, "proxy", "session_unavailable"),
@@ -40,11 +51,18 @@ pub fn session_error_response(
         serde_json::json!({"error": code}).to_string(),
     ));
     *response.status_mut() = http::StatusCode::from_u16(status).expect("fixed HTTP status");
-    response.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
-    response.headers_mut().insert("cc-lb-error-origin", http::HeaderValue::from_static(origin));
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    response
+        .headers_mut()
+        .insert("cc-lb-error-origin", http::HeaderValue::from_static(origin));
     let classification = crate::TerminalClassification::local(response.status());
     response.extensions_mut().insert(classification);
-    if let Some(observer) = observer { observer.terminate_local(classification); }
+    if let Some(observer) = observer {
+        observer.terminate_local(classification);
+    }
     response
 }
 
@@ -58,27 +76,48 @@ pub fn authorize_registered_purpose(
         ("GET", "/api/oauth/usage") => Some(CredentialPurpose::PrincipalKey),
         ("GET" | "POST", "/backend-api/codex/responses") => Some(CredentialPurpose::SessionAccess),
         ("GET", "/backend-api/cc-lb/workspaces") => Some(CredentialPurpose::SessionAccess),
-        ("GET", "/backend-api/wham/tasks/list"
+        (
+            "GET",
+            "/backend-api/wham/tasks/list"
             | "/backend-api/wham/tasks/{task_id}"
             | "/backend-api/wham/tasks/{task_id}/turns/{turn_id}/sibling_turns"
             | "/backend-api/wham/environments"
-            | "/backend-api/wham/environments/by-repo/github/{owner}/{repo}")
+            | "/backend-api/wham/environments/by-repo/github/{owner}/{repo}",
+        )
         | ("POST", "/backend-api/wham/tasks") => Some(CredentialPurpose::SessionAccess),
         ("POST", "/oauth/token" | "/oauth/revoke") => Some(CredentialPurpose::SessionRenewal),
-        ("POST", "/backend-api/wham/remote/control/server/pair"
-            | "/backend-api/wham/remote/control/server/pair/status")
-        | ("GET", "/backend-api/wham/remote/control/server") => Some(CredentialPurpose::RemoteRelay),
-        ("POST", "/backend-api/wham/remote/control/server/enroll"
-            | "/backend-api/wham/remote/control/server/refresh")
+        (
+            "POST",
+            "/backend-api/wham/remote/control/server/pair"
+            | "/backend-api/wham/remote/control/server/pair/status",
+        )
+        | ("GET", "/backend-api/wham/remote/control/server") => {
+            Some(CredentialPurpose::RemoteRelay)
+        }
+        (
+            "POST",
+            "/backend-api/wham/remote/control/server/enroll"
+            | "/backend-api/wham/remote/control/server/refresh",
+        )
         | ("GET", "/backend-api/wham/remote/control/environments/{environment_id}/clients")
-        | ("DELETE", "/backend-api/wham/remote/control/environments/{environment_id}/clients/{client_id}") => Some(CredentialPurpose::SessionAccess),
+        | (
+            "DELETE",
+            "/backend-api/wham/remote/control/environments/{environment_id}/clients/{client_id}",
+        ) => Some(CredentialPurpose::SessionAccess),
         _ => None,
     };
     let allowed = match required {
         Some(required) => auth.purpose() == required,
-        None => matches!(auth.purpose(), CredentialPurpose::PrincipalKey | CredentialPurpose::SessionAccess),
+        None => matches!(
+            auth.purpose(),
+            CredentialPurpose::PrincipalKey | CredentialPurpose::SessionAccess
+        ),
     };
-    if allowed { Ok(()) } else { Err(BuiltinAuthError::InvalidFormat) }
+    if allowed {
+        Ok(())
+    } else {
+        Err(BuiltinAuthError::InvalidFormat)
+    }
 }
 
 /// A server-created owner fence, never constructed from caller claims.
@@ -93,20 +132,27 @@ pub struct SessionOwnerConstraint {
 }
 
 impl SessionOwnerConstraint {
-    pub fn upstream_id(&self) -> uuid::Uuid { self.upstream_id }
+    pub fn upstream_id(&self) -> uuid::Uuid {
+        self.upstream_id
+    }
 
     /// Provider workspace from the same fenced binding as the selected upstream.
-    pub fn provider_workspace_id(&self) -> &str { &self.provider_workspace_id }
+    pub fn provider_workspace_id(&self) -> &str {
+        &self.provider_workspace_id
+    }
 
     pub async fn validate(&self, auth: &Authenticated) -> Result<(), SessionError> {
-        if auth.principal_id() != self.principal_id
-            || auth.session() != Some(&self.snapshot)
-        {
+        if auth.principal_id() != self.principal_id || auth.session() != Some(&self.snapshot) {
             return Err(SessionError::OwnerConflict);
         }
-        self.store.fence_session_dispatch(
-            &self.principal_id, &self.snapshot, unix_secs(self.clock.now()),
-        ).await.map_err(Into::into)
+        self.store
+            .fence_session_dispatch(
+                &self.principal_id,
+                &self.snapshot,
+                unix_secs(self.clock.now()),
+            )
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -150,8 +196,12 @@ pub enum SessionError {
 impl From<SessionStoreError> for SessionError {
     fn from(error: SessionStoreError) -> Self {
         match error {
-            SessionStoreError::CredentialRejected => Self::Unauthenticated(BuiltinAuthError::KeyRevoked),
-            SessionStoreError::PrincipalDisabled => Self::Unauthenticated(BuiltinAuthError::PrincipalDisabled),
+            SessionStoreError::CredentialRejected => {
+                Self::Unauthenticated(BuiltinAuthError::KeyRevoked)
+            }
+            SessionStoreError::PrincipalDisabled => {
+                Self::Unauthenticated(BuiltinAuthError::PrincipalDisabled)
+            }
             SessionStoreError::OwnerConflict => Self::OwnerConflict,
             SessionStoreError::InvalidOperation => Self::InvalidRequest,
             SessionStoreError::Storage(error) => map_owner_error(error),
@@ -188,7 +238,11 @@ impl CodexSessionService {
         owners: Arc<dyn AccountOwnerStore>,
         clock: ClockHandle,
     ) -> Self {
-        Self { store, owners, clock }
+        Self {
+            store,
+            owners,
+            clock,
+        }
     }
 
     pub async fn renew_session(
@@ -212,12 +266,16 @@ impl CodexSessionService {
             return Err(SessionError::InvalidRequest);
         }
         let family = self.family(auth, CredentialPurpose::SessionAccess).await?;
-        let binding = self.owners.find_owner_binding_for_workspace(&AccountOwnerWorkspaceTarget {
-            principal_id: family.principal_id.clone(),
-            provider: family.provider.clone(),
-            local_user_id: family.local_user_id.clone(),
-            workspace_id: target_workspace_id.to_owned(),
-        }).await.map_err(map_owner_error)?;
+        let binding = self
+            .owners
+            .find_owner_binding_for_workspace(&AccountOwnerWorkspaceTarget {
+                principal_id: family.principal_id.clone(),
+                provider: family.provider.clone(),
+                local_user_id: family.local_user_id.clone(),
+                workspace_id: target_workspace_id.to_owned(),
+            })
+            .await
+            .map_err(map_owner_error)?;
         let target = OwnerBindingExpectation {
             binding_id: binding.binding_id,
             principal_id: family.principal_id.clone(),
@@ -236,13 +294,20 @@ impl CodexSessionService {
     ) -> Result<SessionWorkspaceDiscovery, SessionError> {
         let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
         if snapshot.purpose != CredentialPurpose::SessionAccess {
-            return Err(SessionError::Unauthenticated(BuiltinAuthError::InvalidFormat));
+            return Err(SessionError::Unauthenticated(
+                BuiltinAuthError::InvalidFormat,
+            ));
         }
         // Storage validates these captured stamps and reads the aliases in one
         // read-only snapshot. Do not obtain family metadata in a separate read.
-        let workspaces = self.store.list_session_workspace_aliases(
-            auth.principal_id(), snapshot, unix_secs(self.clock.now()),
-        ).await?;
+        let workspaces = self
+            .store
+            .list_session_workspace_aliases(
+                auth.principal_id(),
+                snapshot,
+                unix_secs(self.clock.now()),
+            )
+            .await?;
         Ok(SessionWorkspaceDiscovery {
             session_id: snapshot.family_id.clone(),
             workspace_generation: snapshot.workspace_generation,
@@ -254,11 +319,14 @@ impl CodexSessionService {
     pub async fn revoke_session(&self, auth: &Authenticated) -> Result<(), SessionError> {
         let family = self.family(auth, CredentialPurpose::SessionRenewal).await?;
         let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
-        self.store.revoke_session_family(
-            &family.family_id,
-            &snapshot.credential_id,
-            unix_secs(self.clock.now()),
-        ).await.map_err(Into::into)
+        self.store
+            .revoke_session_family(
+                &family.family_id,
+                &snapshot.credential_id,
+                unix_secs(self.clock.now()),
+            )
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn fence_session_dispatch(
@@ -267,17 +335,24 @@ impl CodexSessionService {
     ) -> Result<AccountOwnerBinding, SessionError> {
         let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
         if snapshot.purpose != CredentialPurpose::SessionAccess {
-            return Err(SessionError::Unauthenticated(BuiltinAuthError::InvalidFormat));
+            return Err(SessionError::Unauthenticated(
+                BuiltinAuthError::InvalidFormat,
+            ));
         }
-        self.store.fence_session_dispatch(auth.principal_id(), snapshot, unix_secs(self.clock.now())).await?;
-        self.owners.resolve_owner_binding(&OwnerBindingExpectation {
-            binding_id: snapshot.owner_binding_id.clone(),
-            principal_id: auth.principal_id().to_owned(),
-            provider: snapshot.provider.clone(),
-            owner_generation: snapshot.owner_generation,
-            binding_revision: snapshot.binding_revision,
-            workspace_id: snapshot.workspace_id.clone(),
-        }).await.map_err(map_owner_error)
+        self.store
+            .fence_session_dispatch(auth.principal_id(), snapshot, unix_secs(self.clock.now()))
+            .await?;
+        self.owners
+            .resolve_owner_binding(&OwnerBindingExpectation {
+                binding_id: snapshot.owner_binding_id.clone(),
+                principal_id: auth.principal_id().to_owned(),
+                provider: snapshot.provider.clone(),
+                owner_generation: snapshot.owner_generation,
+                binding_revision: snapshot.binding_revision,
+                workspace_id: snapshot.workspace_id.clone(),
+            })
+            .await
+            .map_err(map_owner_error)
     }
 
     async fn family(
@@ -285,11 +360,18 @@ impl CodexSessionService {
         auth: &Authenticated,
         purpose: CredentialPurpose,
     ) -> Result<SessionFamily, SessionError> {
-        let snapshot = auth.session().ok_or(SessionError::Unauthenticated(BuiltinAuthError::InvalidFormat))?;
+        let snapshot = auth.session().ok_or(SessionError::Unauthenticated(
+            BuiltinAuthError::InvalidFormat,
+        ))?;
         if snapshot.purpose != purpose {
-            return Err(SessionError::Unauthenticated(BuiltinAuthError::InvalidFormat));
+            return Err(SessionError::Unauthenticated(
+                BuiltinAuthError::InvalidFormat,
+            ));
         }
-        let family = self.store.get_session_family(&snapshot.family_id).await?
+        let family = self
+            .store
+            .get_session_family(&snapshot.family_id)
+            .await?
             .ok_or(SessionError::Unauthenticated(BuiltinAuthError::NotFound))?;
         if family.principal_id != auth.principal_id()
             || family.parent_key_id != auth.key_id()
@@ -308,16 +390,30 @@ impl CodexSessionService {
     ) -> Result<SessionGrant, SessionError> {
         let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
         let now = unix_secs(self.clock.now());
-        let expires_at = now.checked_add(family.access_ttl_secs)
-            .ok_or(SessionError::InvalidRequest)?.min(family.expires_at);
+        let expires_at = now
+            .checked_add(family.access_ttl_secs)
+            .ok_or(SessionError::InvalidRequest)?
+            .min(family.expires_at);
         if expires_at <= now {
             return Err(SessionError::Unauthenticated(BuiltinAuthError::KeyRevoked));
         }
         let workspace_generation = if target_owner.is_some() {
-            family.workspace_generation.checked_add(1).ok_or(SessionError::InvalidRequest)?
-        } else { family.workspace_generation };
-        let access_generation = family.access_generation.checked_add(1).ok_or(SessionError::InvalidRequest)?;
-        let workspace_id = target_owner.as_ref().map_or(family.workspace_id.as_str(), |target| target.workspace_id.as_str());
+            family
+                .workspace_generation
+                .checked_add(1)
+                .ok_or(SessionError::InvalidRequest)?
+        } else {
+            family.workspace_generation
+        };
+        let access_generation = family
+            .access_generation
+            .checked_add(1)
+            .ok_or(SessionError::InvalidRequest)?;
+        let workspace_id = target_owner
+            .as_ref()
+            .map_or(family.workspace_id.as_str(), |target| {
+                target.workspace_id.as_str()
+            });
         let access_id = uuid::Uuid::new_v4().to_string();
         let minted = session_token::mint_access(&Claims {
             issuer: family.origin.clone(),
@@ -327,15 +423,34 @@ impl CodexSessionService {
             access_id: access_id.clone(),
             issued_at: now,
             expires_at,
-            plan: if target_owner.is_some() { "unknown".to_owned() } else { family.plan_type.clone() },
-        }).map_err(|_| SessionError::InvalidRequest)?;
-        let access = credential(&minted, access_id, &family.family_id, workspace_generation, access_generation, now, expires_at);
-        let updated = self.store.replace_session_access(ReplaceSessionAccess {
-            expected: family,
-            authorizing_credential_id: snapshot.credential_id.clone(),
-            access,
-            target_owner,
-        }, now).await?;
+            plan: if target_owner.is_some() {
+                "unknown".to_owned()
+            } else {
+                family.plan_type.clone()
+            },
+        })
+        .map_err(|_| SessionError::InvalidRequest)?;
+        let access = credential(
+            &minted,
+            access_id,
+            &family.family_id,
+            workspace_generation,
+            access_generation,
+            now,
+            expires_at,
+        );
+        let updated = self
+            .store
+            .replace_session_access(
+                ReplaceSessionAccess {
+                    expected: family,
+                    authorizing_credential_id: snapshot.credential_id.clone(),
+                    access,
+                    target_owner,
+                },
+                now,
+            )
+            .await?;
         Ok(SessionGrant {
             session_id: updated.family_id,
             access_token: minted.plaintext,
@@ -381,11 +496,23 @@ mod tests {
     #[test]
     fn provider_cannot_assert_local_expiry() {
         let mut headers = http::HeaderMap::new();
-        headers.append("cc-lb-error-origin", http::HeaderValue::from_static("principal"));
-        headers.append("cc-lb-error-origin", http::HeaderValue::from_static("renewal"));
-        headers.insert("cc-lb-auth-reason", http::HeaderValue::from_static("expired"));
+        headers.append(
+            "cc-lb-error-origin",
+            http::HeaderValue::from_static("principal"),
+        );
+        headers.append(
+            "cc-lb-error-origin",
+            http::HeaderValue::from_static("renewal"),
+        );
+        headers.insert(
+            "cc-lb-auth-reason",
+            http::HeaderValue::from_static("expired"),
+        );
         headers.insert("retry-after", http::HeaderValue::from_static("7"));
-        headers.insert("x-request-id", http::HeaderValue::from_static("provider-request"));
+        headers.insert(
+            "x-request-id",
+            http::HeaderValue::from_static("provider-request"),
+        );
         mark_upstream_response(&mut headers);
         assert_eq!(headers.get_all("cc-lb-error-origin").iter().count(), 1);
         assert_eq!(headers["cc-lb-error-origin"], "upstream");
@@ -397,9 +524,18 @@ mod tests {
     #[test]
     fn client_provenance_is_not_forwarded() {
         let mut headers = http::HeaderMap::new();
-        headers.insert("cc-lb-error-origin", http::HeaderValue::from_static("principal"));
-        headers.insert("cc-lb-auth-reason", http::HeaderValue::from_static("expired"));
-        headers.insert("content-type", http::HeaderValue::from_static("application/json"));
+        headers.insert(
+            "cc-lb-error-origin",
+            http::HeaderValue::from_static("principal"),
+        );
+        headers.insert(
+            "cc-lb-auth-reason",
+            http::HeaderValue::from_static("expired"),
+        );
+        headers.insert(
+            "content-type",
+            http::HeaderValue::from_static("application/json"),
+        );
         strip_untrusted_provenance(&mut headers);
         assert!(!headers.contains_key("cc-lb-error-origin"));
         assert!(!headers.contains_key("cc-lb-auth-reason"));

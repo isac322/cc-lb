@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{KeyStatus, StorageError, StoredApiKeyRecord};
 use cc_lb_storage_api::codex_sessions::{
     CodexSessionStore, CredentialPurpose, RelayTargetSnapshot, SessionSnapshot, SessionStoreError,
 };
+use cc_lb_storage_api::{KeyStatus, StorageError, StoredApiKeyRecord};
 
+use super::session_token::{self, Purpose};
 use crate::api_keys::{
     key_store::{KeyStore, KeyStoreError},
     principal_view::{PrincipalStatus, PrincipalView},
     secret,
 };
-use super::session_token::{self, Purpose};
 use cc_lb_clock::{ClockHandle, unix_secs};
 
 /// Verifies a local relay credential and its stored lineage from headers only.
@@ -86,7 +86,12 @@ impl BuiltinAuthError {
 
 impl BuiltinAuthn {
     pub fn new(key_store: Arc<KeyStore>, clock: ClockHandle) -> Self {
-        Self { key_store, clock, session_store: None, relay_verifier: None }
+        Self {
+            key_store,
+            clock,
+            session_store: None,
+            relay_verifier: None,
+        }
     }
 
     pub fn with_session_store(mut self, store: Arc<dyn CodexSessionStore>) -> Self {
@@ -106,12 +111,17 @@ impl BuiltinAuthn {
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
         let input = extract_credential(headers)?;
         if session_token::validate(input, Purpose::Relay) {
-            let verifier = self.relay_verifier.as_ref().ok_or(BuiltinAuthError::NotFound)?;
+            let verifier = self
+                .relay_verifier
+                .as_ref()
+                .ok_or(BuiltinAuthError::NotFound)?;
             let success = verifier.authenticate_relay(input, view).await?;
             if success.api_key.is_some()
                 || success.relay.as_ref().is_none_or(|relay| {
-                    relay.enrollment_id.is_empty() || relay.server_id.is_empty()
-                        || relay.environment_id.is_empty() || relay.installation_id.is_empty()
+                    relay.enrollment_id.is_empty()
+                        || relay.server_id.is_empty()
+                        || relay.environment_id.is_empty()
+                        || relay.installation_id.is_empty()
                 })
                 || !success.session.as_ref().is_some_and(|session| {
                     session.purpose == CredentialPurpose::RemoteRelay
@@ -182,7 +192,10 @@ impl BuiltinAuthn {
         } else {
             return Err(BuiltinAuthError::InvalidFormat);
         };
-        let store = self.session_store.as_ref().ok_or(BuiltinAuthError::NotFound)?;
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or(BuiltinAuthError::NotFound)?;
         let record = store
             .lookup_session_credential(&secret::compute_index_hash(input.as_bytes()))
             .await
@@ -201,11 +214,15 @@ impl BuiltinAuthn {
             || family.revoked_at.is_some()
             || now >= family.expires_at
             || record.parent_key.status != KeyStatus::Active
-            || record.parent_key.expires_at_unix_secs.is_some_and(|expiry| now > expiry)
+            || record
+                .parent_key
+                .expires_at_unix_secs
+                .is_some_and(|expiry| now > expiry)
         {
             return Err(BuiltinAuthError::KeyRevoked);
         }
-        view.get(&family.principal_id).ok_or(BuiltinAuthError::PrincipalMissing)?;
+        view.get(&family.principal_id)
+            .ok_or(BuiltinAuthError::PrincipalMissing)?;
         if !record.principal_enabled
             || view.principal_status(&family.principal_id) != PrincipalStatus::Active
         {

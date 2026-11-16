@@ -1777,7 +1777,9 @@ async fn build_app_with_storage_inner(
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
         codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
-            storage.clone(), storage.clone(), clock.clone(),
+            storage.clone(),
+            storage.clone(),
+            clock.clone(),
         )),
         lifecycle: lifecycle.clone(),
         body_caps,
@@ -2575,7 +2577,8 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .route("/v1/responses", get(responses_websocket_handler))
         .route(
             "/backend-api/codex/responses",
-            get(responses_websocket_handler).layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+            get(responses_websocket_handler)
+                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
             "/openai",
@@ -2678,7 +2681,8 @@ fn scoped_proxy_routes(
             .route("/oauth/revoke", post(lifecycle_handler))
             .route(
                 "/backend-api/codex/responses",
-                post(lifecycle_handler).layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+                post(lifecycle_handler)
+                    .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
             );
     }
     if include_oauth_usage {
@@ -2944,11 +2948,11 @@ async fn proxy_timeout_middleware(
     }
 }
 
+mod codex_sessions;
 #[path = "app_realtime_websocket.rs"]
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
-mod codex_sessions;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -2985,16 +2989,24 @@ async fn responses_websocket_handler(
         }
     };
     if let Err(error) = cc_lb_engine::codex_sessions::authorize_registered_purpose(
-        &auth, &http::Method::GET, uri.path(),
+        &auth,
+        &http::Method::GET,
+        uri.path(),
     ) {
-        return state.lifecycle.reject_responses_websocket_authentication_for_provider(
-            &error, uri.path(), provider_scope.as_ref().map(|scope| scope.0.0),
-        );
+        return state
+            .lifecycle
+            .reject_responses_websocket_authentication_for_provider(
+                &error,
+                uri.path(),
+                provider_scope.as_ref().map(|scope| scope.0.0),
+            );
     }
     if auth.session().is_some()
         && let Err(error) = state.codex_sessions.fence_session_dispatch(&auth).await
     {
-        return state.lifecycle.reject_responses_websocket_session(&auth, error, uri.path());
+        return state
+            .lifecycle
+            .reject_responses_websocket_session(&auth, error, uri.path());
     }
     let slots: usize = state
         .websocket_bulkhead_config
@@ -3081,13 +3093,17 @@ mod provider_handshake_fidelity_tests {
             .header("retry-after", "7")
             .header("cc-lb-error-origin", "principal")
             .header("cc-lb-auth-reason", "expired")
-            .body(Some(body.clone())).unwrap();
+            .body(Some(body.clone()))
+            .unwrap();
         let error = provider_websocket_error_from_http(response);
         let payload: serde_json::Value = serde_json::from_slice(&error.to_bytes()).unwrap();
         assert_eq!(payload["status"], 401);
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(
-            payload["cc_lb_provider_body_base64"].as_str().unwrap(),
-        ).unwrap(), body);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(payload["cc_lb_provider_body_base64"].as_str().unwrap(),)
+                .unwrap(),
+            body
+        );
         assert_eq!(payload["headers"]["retry-after"], "7");
         assert!(payload["headers"].get("cc-lb-error-origin").is_none());
         assert!(payload["headers"].get("cc-lb-auth-reason").is_none());
@@ -3097,9 +3113,9 @@ mod provider_handshake_fidelity_tests {
     #[test]
     fn absent_handshake_body_is_not_manufactured() {
         let response = http::Response::builder().status(429).body(None).unwrap();
-        let payload: serde_json::Value = serde_json::from_slice(
-            &provider_websocket_error_from_http(response).to_bytes(),
-        ).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&provider_websocket_error_from_http(response).to_bytes())
+                .unwrap();
         assert_eq!(payload["status"], 429);
         assert!(payload.get("cc_lb_provider_body_base64").is_none());
     }
@@ -3833,13 +3849,19 @@ async fn lifecycle_handler(
             );
         }
     };
-    let matched_path = parts.extensions.get::<axum::extract::MatchedPath>()
+    let matched_path = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
         .map_or(parts.uri.path(), axum::extract::MatchedPath::as_str);
     if let Err(error) = cc_lb_engine::codex_sessions::authorize_registered_purpose(
-        &auth, &parts.method, matched_path,
+        &auth,
+        &parts.method,
+        matched_path,
     ) {
         return cc_lb_engine::reject_unauthenticated_for_route(
-            &error, &parts.method, parts.uri.path(),
+            &error,
+            &parts.method,
+            parts.uri.path(),
             parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
             observer.as_ref(),
         );
@@ -3855,12 +3877,19 @@ async fn lifecycle_handler(
     }
     if auth.purpose() == cc_lb_storage_api::codex_sessions::CredentialPurpose::SessionAccess {
         match state.codex_sessions.session_owner_constraint(&auth).await {
-            Ok(owner) => { parts.extensions.insert(owner); }
+            Ok(owner) => {
+                parts.extensions.insert(owner);
+            }
             Err(error) => {
                 if let Some(observer) = observer.as_ref() {
-                    state.lifecycle.record_local_authenticated_request(&auth, observer);
+                    state
+                        .lifecycle
+                        .record_local_authenticated_request(&auth, observer);
                 }
-                return cc_lb_engine::codex_sessions::session_error_response(error, observer.as_ref());
+                return cc_lb_engine::codex_sessions::session_error_response(
+                    error,
+                    observer.as_ref(),
+                );
             }
         }
     }
@@ -3931,16 +3960,27 @@ async fn lifecycle_handler(
     };
     if parts.uri.path() == "/oauth/token" || parts.uri.path() == "/oauth/revoke" {
         if let Some(observer) = observer.as_ref() {
-            state.lifecycle.record_local_authenticated_request(&auth, observer);
+            state
+                .lifecycle
+                .record_local_authenticated_request(&auth, observer);
         }
         return codex_sessions::handle(
-            &state.codex_sessions, &auth, parts.uri.path(), &body, observer.as_ref(),
-        ).await;
+            &state.codex_sessions,
+            &auth,
+            parts.uri.path(),
+            &body,
+            observer.as_ref(),
+        )
+        .await;
     }
     if parts.uri.path() == "/backend-api/codex/responses" {
         let path = parts.uri.query().map_or_else(
             || http::uri::PathAndQuery::from_static("/v1/responses"),
-            |query| format!("/v1/responses?{query}").parse().expect("existing URI query is valid"),
+            |query| {
+                format!("/v1/responses?{query}")
+                    .parse()
+                    .expect("existing URI query is valid")
+            },
         );
         let mut uri = parts.uri.into_parts();
         uri.path_and_query = Some(path);
@@ -4064,17 +4104,23 @@ async fn oauth_usage_handler(
     if let Some(ctx) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
         ctx.mark_authn_reached();
     }
-    let authorization = cc_lb_engine::authenticate_first(
-        authn, request.headers(), &dynamic_view.principal_view,
-    ).await.and_then(|auth| {
-        cc_lb_engine::codex_sessions::authorize_registered_purpose(
-            &auth, request.method(), "/api/oauth/usage",
-        )?;
-        Ok(auth)
-    });
+    let authorization =
+        cc_lb_engine::authenticate_first(authn, request.headers(), &dynamic_view.principal_view)
+            .await
+            .and_then(|auth| {
+                cc_lb_engine::codex_sessions::authorize_registered_purpose(
+                    &auth,
+                    request.method(),
+                    "/api/oauth/usage",
+                )?;
+                Ok(auth)
+            });
     if let Err(error) = authorization {
         return cc_lb_engine::reject_unauthenticated_for_route(
-            &error, request.method(), "/api/oauth/usage", None,
+            &error,
+            request.method(),
+            "/api/oauth/usage",
+            None,
             request.extensions().get::<cc_lb_engine::LifecycleContext>(),
         );
     }
@@ -5697,7 +5743,9 @@ mod tests {
         );
         let state = ProxyState {
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
-                Arc::new(storage.clone()), Arc::new(storage.clone()), clock.clone(),
+                Arc::new(storage.clone()),
+                Arc::new(storage.clone()),
+                clock.clone(),
             )),
             lifecycle,
             body_caps: RequestBodyCaps {
@@ -6163,7 +6211,9 @@ mod tests {
         ));
         ProxyState {
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
-                storage.clone(), storage.clone(), clock.clone(),
+                storage.clone(),
+                storage.clone(),
+                clock.clone(),
             )),
             lifecycle,
             body_caps: RequestBodyCaps {

@@ -119,9 +119,13 @@ fn reject_unauthenticated_with_capability(
             retry_after_secs,
         ),
     };
-    response.headers_mut().insert("cc-lb-error-origin", HeaderValue::from_static("principal"));
+    response
+        .headers_mut()
+        .insert("cc-lb-error-origin", HeaderValue::from_static("principal"));
     if matches!(error, BuiltinAuthError::SessionAccessExpired) {
-        response.headers_mut().insert("cc-lb-auth-reason", HeaderValue::from_static("expired"));
+        response
+            .headers_mut()
+            .insert("cc-lb-auth-reason", HeaderValue::from_static("expired"));
     }
     if let Some(o) = observer {
         o.emit_request_started(false);
@@ -173,13 +177,18 @@ pub fn reject_unauthenticated_for_route(
     );
     let scoped_origin = match (method.as_str(), path) {
         ("POST", "/oauth/token" | "/oauth/revoke") => Some("renewal"),
-        ("POST", "/backend-api/wham/remote/control/server/pair"
-            | "/backend-api/wham/remote/control/server/pair/status")
+        (
+            "POST",
+            "/backend-api/wham/remote/control/server/pair"
+            | "/backend-api/wham/remote/control/server/pair/status",
+        )
         | ("GET", "/backend-api/wham/remote/control/server") => Some("relay"),
         _ => None,
     };
     if let Some(origin) = scoped_origin {
-        response.headers_mut().insert("cc-lb-error-origin", HeaderValue::from_static(origin));
+        response
+            .headers_mut()
+            .insert("cc-lb-error-origin", HeaderValue::from_static(origin));
         response.headers_mut().remove("cc-lb-auth-reason");
     }
     response

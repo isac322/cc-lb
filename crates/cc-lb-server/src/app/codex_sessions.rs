@@ -30,8 +30,10 @@ pub(super) async fn handle(
 ) -> Response<Body> {
     let result = match path {
         "/oauth/token" => match sonic_rs::from_slice::<RenewalRequest>(body) {
-            Ok(request) if request.grant_type == "refresh_token" => {
-                sessions.renew_session(auth, request.expected_workspace_generation).await.map(|grant| {
+            Ok(request) if request.grant_type == "refresh_token" => sessions
+                .renew_session(auth, request.expected_workspace_generation)
+                .await
+                .map(|grant| {
                     let payload = json!({
                         "session_id": grant.session_id,
                         "access_token": grant.access_token.expose(),
@@ -44,8 +46,7 @@ pub(super) async fn handle(
                         "workspace_generation": grant.workspace_generation,
                     });
                     json_response(StatusCode::OK, &payload)
-                })
-            }
+                }),
             _ => Err(SessionError::InvalidRequest),
         },
         "/oauth/revoke" => match sonic_rs::from_slice::<RevokeRequest>(body) {
@@ -63,19 +64,31 @@ pub(super) async fn handle(
         Err(error) => {
             let (status, origin, code) = match error {
                 SessionError::Unauthenticated(error) => (
-                    StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                    "renewal", "local_session_rejected",
+                    StatusCode::from_u16(error.http_status())
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    "renewal",
+                    "local_session_rejected",
                 ),
                 SessionError::OwnerConflict => (StatusCode::BAD_REQUEST, "proxy", "owner_conflict"),
-                SessionError::InvalidRequest => (StatusCode::BAD_REQUEST, "proxy", "invalid_session_request"),
-                SessionError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "proxy", "session_unavailable"),
+                SessionError::InvalidRequest => {
+                    (StatusCode::BAD_REQUEST, "proxy", "invalid_session_request")
+                }
+                SessionError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "proxy",
+                    "session_unavailable",
+                ),
             };
             let mut response = json_response(status, &json!({"error": code}));
-            response.headers_mut().insert("cc-lb-error-origin", http::HeaderValue::from_static(origin));
+            response
+                .headers_mut()
+                .insert("cc-lb-error-origin", http::HeaderValue::from_static(origin));
             response
         }
     };
-    response.headers_mut().insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
     let classification = TerminalClassification::local(response.status());
     response.extensions_mut().insert(classification);
     if let Some(observer) = observer {
@@ -85,8 +98,13 @@ pub(super) async fn handle(
 }
 
 fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<Body> {
-    let mut response = Response::new(Body::from(serde_json::to_vec(value).expect("JSON value serializes")));
+    let mut response = Response::new(Body::from(
+        serde_json::to_vec(value).expect("JSON value serializes"),
+    ));
     *response.status_mut() = status;
-    response.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
     response
 }

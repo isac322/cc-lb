@@ -18,6 +18,8 @@ mod owner_bindings;
 
 #[path = "cache_keepalive_contracts.rs"]
 mod cache_keepalive_contracts;
+#[path = "codex_sessions.rs"]
+mod codex_sessions;
 #[path = "config_admin_common/mod.rs"]
 mod config_admin_common;
 #[path = "config_download.rs"]
@@ -64,8 +66,6 @@ mod oauth_post_commit_completion;
 mod plugin_admin_audit_completion;
 #[path = "principal_keys.rs"]
 mod principal_keys;
-#[path = "codex_sessions.rs"]
-mod codex_sessions;
 #[path = "principal_post_commit.rs"]
 mod principal_post_commit;
 #[path = "principals_cache_keepalive_roundtrip.rs"]

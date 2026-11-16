@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    AccountOwnerBinding, KeyStatus, OwnerBindingExpectation, StorageError, StorageResult, StoredApiKeyRecord,
+    AccountOwnerBinding, KeyStatus, OwnerBindingExpectation, StorageError, StorageResult,
+    StoredApiKeyRecord,
     codex_sessions::{
-        CodexSessionStore, CredentialPurpose, IssueSession, ReplaceSessionAccess, SessionAuthRecord,
-        SessionCredential, SessionFamily, SessionSnapshot, SessionStoreError, SessionStoreResult,
+        CodexSessionStore, CredentialPurpose, IssueSession, ReplaceSessionAccess,
+        SessionAuthRecord, SessionCredential, SessionFamily, SessionSnapshot, SessionStoreError,
+        SessionStoreResult,
     },
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
@@ -63,13 +65,19 @@ impl CodexSessionStore for PostgresStorage {
         .transpose()
     }
 
-    async fn get_session_family(&self, family_id: &str) -> SessionStoreResult<Option<SessionFamily>> {
+    async fn get_session_family(
+        &self,
+        family_id: &str,
+    ) -> SessionStoreResult<Option<SessionFamily>> {
         let row = sqlx::query("SELECT * FROM codex_session_families_v1 WHERE family_id = $1")
             .bind(family_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        row.as_ref().map(decode_family).transpose().map_err(Into::into)
+        row.as_ref()
+            .map(decode_family)
+            .transpose()
+            .map_err(Into::into)
     }
 
     async fn issue_session(&self, command: IssueSession) -> SessionStoreResult<()> {
@@ -114,9 +122,13 @@ impl CodexSessionStore for PostgresStorage {
         if current != command.expected {
             return Err(SessionStoreError::OwnerConflict);
         }
-        let authorizing = read_credential(&mut tx, &command.authorizing_credential_id, &current.family_id)
-            .await?
-            .ok_or(SessionStoreError::CredentialRejected)?;
+        let authorizing = read_credential(
+            &mut tx,
+            &command.authorizing_credential_id,
+            &current.family_id,
+        )
+        .await?
+        .ok_or(SessionStoreError::CredentialRejected)?;
         validate_live_credential(&authorizing, &current, snapshot.purpose, now)?;
 
         let mut replacement = current;
@@ -146,12 +158,24 @@ impl CodexSessionStore for PostgresStorage {
         )
         .bind(&replacement.family_id)
         .bind(&replacement.workspace_id)
-        .bind(u64_to_i64(replacement.workspace_generation, "workspace_generation")?)
-        .bind(u64_to_i64(replacement.access_generation, "access_generation")?)
+        .bind(u64_to_i64(
+            replacement.workspace_generation,
+            "workspace_generation",
+        )?)
+        .bind(u64_to_i64(
+            replacement.access_generation,
+            "access_generation",
+        )?)
         .bind(&replacement.owner_binding_id)
         .bind(&replacement.provider)
-        .bind(u64_to_i64(replacement.owner_generation, "owner_generation")?)
-        .bind(u64_to_i64(replacement.binding_revision, "binding_revision")?)
+        .bind(u64_to_i64(
+            replacement.owner_generation,
+            "owner_generation",
+        )?)
+        .bind(u64_to_i64(
+            replacement.binding_revision,
+            "binding_revision",
+        )?)
         .bind(&replacement.plan_type)
         .execute(&mut *tx)
         .await
@@ -244,9 +268,10 @@ impl CodexSessionStore for PostgresStorage {
         validate_live_family(&family, now)?;
         validate_discovery_snapshot(&family, principal_id, snapshot)?;
 
-        let credential = read_credential_read_only(&mut tx, &snapshot.credential_id, &family.family_id)
-            .await?
-            .ok_or(SessionStoreError::CredentialRejected)?;
+        let credential =
+            read_credential_read_only(&mut tx, &snapshot.credential_id, &family.family_id)
+                .await?
+                .ok_or(SessionStoreError::CredentialRejected)?;
         validate_live_credential(&credential, &family, CredentialPurpose::SessionAccess, now)?;
         if credential.access_generation != family.access_generation
             || credential.access_generation != snapshot.access_generation
@@ -258,8 +283,13 @@ impl CodexSessionStore for PostgresStorage {
         validate_discovery_source(&mut tx, principal_id, &family).await?;
 
         let aliases = super::account_owner::list_owner_workspace_aliases_in_read_tx(
-            &mut tx, principal_id, &family.provider, &family.local_user_id,
-        ).await.map_err(|error| match error {
+            &mut tx,
+            principal_id,
+            &family.provider,
+            &family.local_user_id,
+        )
+        .await
+        .map_err(|error| match error {
             StorageError::Conflict { .. } => SessionStoreError::OwnerConflict,
             StorageError::Unavailable { .. } => SessionStoreError::Storage(error),
             other => SessionStoreError::Storage(other),
@@ -300,7 +330,9 @@ pub(crate) async fn validate_session_family_in_tx(
     snapshot: &SessionSnapshot,
     now: u64,
 ) -> SessionStoreResult<SessionFamily> {
-    validate_family_authority_in_tx(tx, principal_id, snapshot, now, None).await.map(|(family, _)| family)
+    validate_family_authority_in_tx(tx, principal_id, snapshot, now, None)
+        .await
+        .map(|(family, _)| family)
 }
 
 async fn validate_family_authority_in_tx(
@@ -396,8 +428,8 @@ async fn validate_live_principal_and_parent(
     family: &SessionFamily,
     now: u64,
 ) -> SessionStoreResult<()> {
-    let principal_id = Uuid::parse_str(&family.principal_id)
-        .map_err(|_| SessionStoreError::CredentialRejected)?;
+    let principal_id =
+        Uuid::parse_str(&family.principal_id).map_err(|_| SessionStoreError::CredentialRejected)?;
     let principal: Option<(bool, bool)> = sqlx::query_as(
         "SELECT enabled, deleted_at IS NOT NULL
          FROM principals_v1
@@ -476,18 +508,19 @@ async fn validate_discovery_source(
         .try_get("revoked_at_unix_secs")
         .map_err(map_sqlx_error)?;
     let upstream_id: Uuid = source.try_get("upstream_id").map_err(map_sqlx_error)?;
-    let allowed_workspaces: Vec<String> = serde_json::from_str(&allowed_workspaces).map_err(|error| {
-        StorageError::Conflict {
+    let allowed_workspaces: Vec<String> =
+        serde_json::from_str(&allowed_workspaces).map_err(|error| StorageError::Conflict {
             message: format!("allowed_workspaces_json is malformed: {error}"),
-        }
-    })?;
+        })?;
     if binding_principal != principal_id
         || provider != family.provider
         || local_user_id != family.local_user_id
         || owner_generation != u64_to_i64(family.owner_generation, "owner_generation")?
         || revision != u64_to_i64(family.binding_revision, "binding_revision")?
         || revoked_at.is_some()
-        || !allowed_workspaces.iter().any(|workspace| workspace == &family.workspace_id)
+        || !allowed_workspaces
+            .iter()
+            .any(|workspace| workspace == &family.workspace_id)
     {
         return Err(SessionStoreError::OwnerConflict);
     }
@@ -576,8 +609,8 @@ async fn lock_principal_and_parent(
     family: &SessionFamily,
     now: u64,
 ) -> SessionStoreResult<()> {
-    let principal_id = Uuid::parse_str(&family.principal_id)
-        .map_err(|_| SessionStoreError::CredentialRejected)?;
+    let principal_id =
+        Uuid::parse_str(&family.principal_id).map_err(|_| SessionStoreError::CredentialRejected)?;
     let principal: Option<(bool, bool)> = sqlx::query_as(
         "SELECT enabled, deleted_at IS NOT NULL FROM principals_v1 WHERE id = $1 FOR UPDATE",
     )
@@ -605,7 +638,9 @@ async fn lock_principal_and_parent(
     let Some((status, revoked_at, expires_at)) = parent else {
         return Err(SessionStoreError::CredentialRejected);
     };
-    let expires_at = expires_at.map(|value| i64_to_u64(value, "parent.expires_at")).transpose()?;
+    let expires_at = expires_at
+        .map(|value| i64_to_u64(value, "parent.expires_at"))
+        .transpose()?;
     // Keep the established ordinary managed-key expiry boundary unchanged.
     if status != "active" || revoked_at.is_some() || expires_at.is_some_and(|expiry| now > expiry) {
         return Err(SessionStoreError::CredentialRejected);
@@ -637,11 +672,20 @@ fn validate_live_credential(
 fn validate_issue(command: &IssueSession, now: u64) -> SessionStoreResult<()> {
     let family = &command.family;
     if [
-        family.family_id.as_str(), family.principal_id.as_str(), family.parent_key_id.as_str(),
-        family.owner_binding_id.as_str(), family.provider.as_str(), family.workspace_id.as_str(),
-        family.local_user_id.as_str(), family.plan_type.as_str(), family.origin.as_str(),
-        command.access.credential_id.as_str(), command.renewal.credential_id.as_str(),
-    ].iter().any(|value| value.is_empty())
+        family.family_id.as_str(),
+        family.principal_id.as_str(),
+        family.parent_key_id.as_str(),
+        family.owner_binding_id.as_str(),
+        family.provider.as_str(),
+        family.workspace_id.as_str(),
+        family.local_user_id.as_str(),
+        family.plan_type.as_str(),
+        family.origin.as_str(),
+        command.access.credential_id.as_str(),
+        command.renewal.credential_id.as_str(),
+    ]
+    .iter()
+    .any(|value| value.is_empty())
         || family.owner_generation == 0
         || family.binding_revision == 0
         || family.workspace_generation != 1
@@ -679,8 +723,10 @@ fn validate_new_access(
     family: &SessionFamily,
     now: u64,
 ) -> SessionStoreResult<()> {
-    let expires_at = now.checked_add(family.access_ttl_secs)
-        .ok_or(SessionStoreError::InvalidOperation)?.min(family.expires_at);
+    let expires_at = now
+        .checked_add(family.access_ttl_secs)
+        .ok_or(SessionStoreError::InvalidOperation)?
+        .min(family.expires_at);
     if access.credential_id.is_empty()
         || access.family_id != family.family_id
         || access.purpose != CredentialPurpose::SessionAccess
@@ -696,7 +742,11 @@ fn validate_new_access(
     Ok(())
 }
 
-fn family_snapshot(family: &SessionFamily, credential_id: &str, purpose: CredentialPurpose) -> SessionSnapshot {
+fn family_snapshot(
+    family: &SessionFamily,
+    credential_id: &str,
+    purpose: CredentialPurpose,
+) -> SessionSnapshot {
     SessionSnapshot {
         family_id: family.family_id.clone(),
         parent_key_id: family.parent_key_id.clone(),
@@ -723,8 +773,15 @@ async fn read_family(
     } else {
         "SELECT * FROM codex_session_families_v1 WHERE family_id = $1"
     };
-    let row = sqlx::query(sql).bind(family_id).fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
-    row.as_ref().map(decode_family).transpose().map_err(Into::into)
+    let row = sqlx::query(sql)
+        .bind(family_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.as_ref()
+        .map(decode_family)
+        .transpose()
+        .map_err(Into::into)
 }
 
 async fn read_credential(
@@ -734,7 +791,10 @@ async fn read_credential(
 ) -> SessionStoreResult<Option<SessionCredential>> {
     let row = sqlx::query("SELECT * FROM codex_session_credentials_v1 WHERE credential_id = $1 AND family_id = $2 FOR UPDATE")
         .bind(credential_id).bind(family_id).fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
-    row.as_ref().map(|row| decode_credential(row, false)).transpose().map_err(Into::into)
+    row.as_ref()
+        .map(|row| decode_credential(row, false))
+        .transpose()
+        .map_err(Into::into)
 }
 
 async fn read_credential_read_only(
@@ -757,7 +817,10 @@ async fn read_credential_read_only(
         .map_err(Into::into)
 }
 
-async fn insert_family(tx: &mut Transaction<'_, Postgres>, family: &SessionFamily) -> SessionStoreResult<()> {
+async fn insert_family(
+    tx: &mut Transaction<'_, Postgres>,
+    family: &SessionFamily,
+) -> SessionStoreResult<()> {
     sqlx::query(
         "INSERT INTO codex_session_families_v1 (family_id, principal_id, parent_key_id, \
          owner_binding_id, provider, owner_generation, binding_revision, workspace_id, \
@@ -765,22 +828,41 @@ async fn insert_family(tx: &mut Transaction<'_, Postgres>, family: &SessionFamil
          access_ttl_secs, created_at, expires_at, revoked_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
     )
-    .bind(&family.family_id).bind(&family.principal_id).bind(&family.parent_key_id)
-    .bind(&family.owner_binding_id).bind(&family.provider)
+    .bind(&family.family_id)
+    .bind(&family.principal_id)
+    .bind(&family.parent_key_id)
+    .bind(&family.owner_binding_id)
+    .bind(&family.provider)
     .bind(u64_to_i64(family.owner_generation, "owner_generation")?)
-    .bind(u64_to_i64(family.binding_revision, "binding_revision")?).bind(&family.workspace_id)
-    .bind(u64_to_i64(family.workspace_generation, "workspace_generation")?)
+    .bind(u64_to_i64(family.binding_revision, "binding_revision")?)
+    .bind(&family.workspace_id)
+    .bind(u64_to_i64(
+        family.workspace_generation,
+        "workspace_generation",
+    )?)
     .bind(u64_to_i64(family.access_generation, "access_generation")?)
-    .bind(&family.local_user_id).bind(&family.plan_type).bind(&family.origin)
+    .bind(&family.local_user_id)
+    .bind(&family.plan_type)
+    .bind(&family.origin)
     .bind(u64_to_i64(family.access_ttl_secs, "access_ttl_secs")?)
     .bind(u64_to_i64(family.created_at, "created_at")?)
     .bind(u64_to_i64(family.expires_at, "expires_at")?)
-    .bind(family.revoked_at.map(|value| u64_to_i64(value, "revoked_at")).transpose()?)
-    .execute(&mut **tx).await.map_err(map_sqlx_error)?;
+    .bind(
+        family
+            .revoked_at
+            .map(|value| u64_to_i64(value, "revoked_at"))
+            .transpose()?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
     Ok(())
 }
 
-async fn insert_credential(tx: &mut Transaction<'_, Postgres>, credential: &SessionCredential) -> SessionStoreResult<()> {
+async fn insert_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    credential: &SessionCredential,
+) -> SessionStoreResult<()> {
     let purpose = match credential.purpose {
         CredentialPurpose::SessionAccess => "access",
         CredentialPurpose::SessionRenewal => "renewal",
@@ -807,8 +889,10 @@ fn number(row: &PgRow, column: &str) -> StorageResult<u64> {
 }
 
 fn optional_number(row: &PgRow, column: &str) -> StorageResult<Option<u64>> {
-    row.try_get::<Option<i64>, _>(column).map_err(map_sqlx_error)?
-        .map(|value| i64_to_u64(value, column)).transpose()
+    row.try_get::<Option<i64>, _>(column)
+        .map_err(map_sqlx_error)?
+        .map(|value| i64_to_u64(value, column))
+        .transpose()
 }
 
 fn bytes<const N: usize>(row: &PgRow, column: &str) -> StorageResult<[u8; N]> {
@@ -848,22 +932,77 @@ fn decode_credential(row: &PgRow, joined: bool) -> StorageResult<SessionCredenti
         purpose: match purpose.as_str() {
             "access" => CredentialPurpose::SessionAccess,
             "renewal" => CredentialPurpose::SessionRenewal,
-            _ => return Err(StorageError::Corrupted { message: "invalid session purpose".into() }),
+            _ => {
+                return Err(StorageError::Corrupted {
+                    message: "invalid session purpose".into(),
+                });
+            }
         },
-        index_hash: bytes(row, if joined { "credential_index_hash" } else { "index_hash" })?,
-        verify_hash: bytes(row, if joined { "credential_verify_hash" } else { "verify_hash" })?,
+        index_hash: bytes(
+            row,
+            if joined {
+                "credential_index_hash"
+            } else {
+                "index_hash"
+            },
+        )?,
+        verify_hash: bytes(
+            row,
+            if joined {
+                "credential_verify_hash"
+            } else {
+                "verify_hash"
+            },
+        )?,
         salt: bytes(row, if joined { "credential_salt" } else { "salt" })?,
-        workspace_generation: number(row, if joined { "credential_workspace_generation" } else { "workspace_generation" })?,
-        access_generation: number(row, if joined { "credential_access_generation" } else { "access_generation" })?,
-        issued_at: number(row, if joined { "credential_issued_at" } else { "issued_at" })?,
-        expires_at: number(row, if joined { "credential_expires_at" } else { "expires_at" })?,
-        revoked_at: optional_number(row, if joined { "credential_revoked_at" } else { "revoked_at" })?,
+        workspace_generation: number(
+            row,
+            if joined {
+                "credential_workspace_generation"
+            } else {
+                "workspace_generation"
+            },
+        )?,
+        access_generation: number(
+            row,
+            if joined {
+                "credential_access_generation"
+            } else {
+                "access_generation"
+            },
+        )?,
+        issued_at: number(
+            row,
+            if joined {
+                "credential_issued_at"
+            } else {
+                "issued_at"
+            },
+        )?,
+        expires_at: number(
+            row,
+            if joined {
+                "credential_expires_at"
+            } else {
+                "expires_at"
+            },
+        )?,
+        revoked_at: optional_number(
+            row,
+            if joined {
+                "credential_revoked_at"
+            } else {
+                "revoked_at"
+            },
+        )?,
     })
 }
 
 fn decode_parent(row: &PgRow) -> StorageResult<StoredApiKeyRecord> {
     let status: String = row.try_get("parent_status").map_err(map_sqlx_error)?;
-    let limits: serde_json::Value = row.try_get("parent_limit_overrides").map_err(map_sqlx_error)?;
+    let limits: serde_json::Value = row
+        .try_get("parent_limit_overrides")
+        .map_err(map_sqlx_error)?;
     Ok(StoredApiKeyRecord {
         label: row.try_get("parent_label").map_err(map_sqlx_error)?,
         issued_at_unix_secs: number(row, "parent_issued_at")?,
@@ -877,7 +1016,11 @@ fn decode_parent(row: &PgRow) -> StorageResult<StoredApiKeyRecord> {
         status: match status.as_str() {
             "active" => KeyStatus::Active,
             "revoked" => KeyStatus::Revoked,
-            _ => return Err(StorageError::Corrupted { message: "invalid parent key status".into() }),
+            _ => {
+                return Err(StorageError::Corrupted {
+                    message: "invalid parent key status".into(),
+                });
+            }
         },
         expires_at_unix_secs: optional_number(row, "parent_expires_at")?,
         last_4: row.try_get("parent_last_4").map_err(map_sqlx_error)?,

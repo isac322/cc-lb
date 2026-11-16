@@ -5286,7 +5286,10 @@ impl Lifecycle {
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
-        let session_owner = req.extensions().get::<crate::codex_sessions::SessionOwnerConstraint>().cloned();
+        let session_owner = req
+            .extensions()
+            .get::<crate::codex_sessions::SessionOwnerConstraint>()
+            .cloned();
         let (mut ctx, body_too_large) = self.parse(req);
         let multipart = is_multipart_operation(&ctx.path)
             && ctx
@@ -5427,11 +5430,15 @@ impl Lifecycle {
         if auth.session().is_some() {
             let Some(owner) = session_owner.as_ref() else {
                 return Ok(crate::codex_sessions::session_error_response(
-                    crate::codex_sessions::SessionError::OwnerConflict, observer.as_ref(),
+                    crate::codex_sessions::SessionError::OwnerConflict,
+                    observer.as_ref(),
                 ));
             };
             if let Err(error) = owner.validate(auth).await {
-                return Ok(crate::codex_sessions::session_error_response(error, observer.as_ref()));
+                return Ok(crate::codex_sessions::session_error_response(
+                    error,
+                    observer.as_ref(),
+                ));
             }
         }
         if body_view
@@ -5656,7 +5663,8 @@ impl Lifecycle {
             && owner.upstream_id() != affinity.target_upstream_id
         {
             return Ok(crate::codex_sessions::session_error_response(
-                crate::codex_sessions::SessionError::OwnerConflict, observer.as_ref(),
+                crate::codex_sessions::SessionError::OwnerConflict,
+                observer.as_ref(),
             ));
         }
         let keepalive_response_enabled =
@@ -5764,7 +5772,9 @@ impl Lifecycle {
                 .retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
         }
         if let Some(owner) = session_owner.as_ref() {
-            pipeline_result.candidates.retain(|candidate| candidate.upstream_id == owner.upstream_id());
+            pipeline_result
+                .candidates
+                .retain(|candidate| candidate.upstream_id == owner.upstream_id());
         }
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
@@ -5779,7 +5789,9 @@ impl Lifecycle {
             "cc_lb.route.candidate_count",
             numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
         );
-        if (request_affinity.is_some() || session_owner.is_some()) && pipeline_result.candidates.is_empty() {
+        if (request_affinity.is_some() || session_owner.is_some())
+            && pipeline_result.candidates.is_empty()
+        {
             route_span.record("cc_lb.route.outcome", "error");
             route_span.record("otel.status_code", "ERROR");
             route_span.record("error.type", error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
@@ -5962,7 +5974,10 @@ impl Lifecycle {
             if let Some(owner) = session_owner.as_ref()
                 && let Err(error) = owner.validate(auth).await
             {
-                return Ok(crate::codex_sessions::session_error_response(error, observer.as_ref()));
+                return Ok(crate::codex_sessions::session_error_response(
+                    error,
+                    observer.as_ref(),
+                ));
             }
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's

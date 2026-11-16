@@ -12,7 +12,8 @@ const RENEWAL_PREFIX: &str = "cclb-renew-v1.";
 const RELAY_PREFIX: &str = "cclb-relay-v1.";
 const MAX_PAYLOAD_ENCODED_BYTES: usize = 8192;
 const SECRET_ENCODED_BYTES: usize = 43;
-const MAX_ACCESS_BYTES: usize = HEADER.len() + 1 + MAX_PAYLOAD_ENCODED_BYTES + 1 + SECRET_ENCODED_BYTES;
+const MAX_ACCESS_BYTES: usize =
+    HEADER.len() + 1 + MAX_PAYLOAD_ENCODED_BYTES + 1 + SECRET_ENCODED_BYTES;
 
 /// Caller-supplied local metadata, not vendor identity or granted permissions.
 /// `plan` must be verified provider metadata, or `"unknown"`.
@@ -89,10 +90,16 @@ struct ConsumerMetadata<'a> {
 pub fn mint_access(claims: &Claims) -> Result<MintedToken, MintError> {
     // Bound input before serialization, including pathological local metadata.
     let strings = [
-        claims.issuer.as_str(), claims.local_user_id.as_str(), claims.workspace_id.as_str(),
-        claims.family_id.as_str(), claims.access_id.as_str(), claims.plan.as_str(),
+        claims.issuer.as_str(),
+        claims.local_user_id.as_str(),
+        claims.workspace_id.as_str(),
+        claims.family_id.as_str(),
+        claims.access_id.as_str(),
+        claims.plan.as_str(),
     ];
-    if strings.iter().any(|s| s.is_empty() || s.len() > MAX_PAYLOAD_ENCODED_BYTES)
+    if strings
+        .iter()
+        .any(|s| s.is_empty() || s.len() > MAX_PAYLOAD_ENCODED_BYTES)
         || claims.expires_at <= claims.issued_at
     {
         return Err(MintError);
@@ -110,7 +117,8 @@ pub fn mint_access(claims: &Claims) -> Result<MintedToken, MintError> {
             chatgpt_account_id: &claims.workspace_id,
             chatgpt_plan_type: &claims.plan,
         },
-    }).map_err(|_| MintError)?;
+    })
+    .map_err(|_| MintError)?;
     let encoded_len = base64::encoded_len(payload.len(), false).ok_or(MintError)?;
     if encoded_len > MAX_PAYLOAD_ENCODED_BYTES {
         return Err(MintError);
@@ -247,41 +255,74 @@ mod tests {
         let token = mint_access(&claims()).unwrap();
         let parts: Vec<_> = token.plaintext.expose().split('.').collect();
         assert_eq!(parts.len(), 3);
-        let header: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
-        assert_eq!(header, serde_json::json!({"typ":"cc-lb-session-v1","alg":"CCLB-STATEFUL"}));
-        let payload: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        assert_eq!(payload, serde_json::json!({
-            "iss":"https://proxy.example.com", "aud":"cc-lb-session-v1", "sub":"local-user",
-            "sid":"family", "jti":"access", "iat":100, "exp":200,
-            "https://api.openai.com/auth": {"chatgpt_user_id":"local-user", "chatgpt_account_id":"local-workspace", "chatgpt_plan_type":"unknown"}
-        }));
+        let header: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+        assert_eq!(
+            header,
+            serde_json::json!({"typ":"cc-lb-session-v1","alg":"CCLB-STATEFUL"})
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "iss":"https://proxy.example.com", "aud":"cc-lb-session-v1", "sub":"local-user",
+                "sid":"family", "jti":"access", "iat":100, "exp":200,
+                "https://api.openai.com/auth": {"chatgpt_user_id":"local-user", "chatgpt_account_id":"local-workspace", "chatgpt_plan_type":"unknown"}
+            })
+        );
         assert_eq!(URL_SAFE_NO_PAD.decode(parts[2]).unwrap().len(), 32);
-        assert_eq!(token.index_hash, compute_index_hash(token.plaintext.expose().as_bytes()));
+        assert_eq!(
+            token.index_hash,
+            compute_index_hash(token.plaintext.expose().as_bytes())
+        );
     }
 
     #[test]
     fn session_token_full_bytes_are_verified() {
         let token = mint_access(&claims()).unwrap();
         let bearer = token.plaintext.expose();
-        assert!(verify(bearer, Purpose::Access, &token.verify_hash, &token.secret_salt));
-        for start in [0, bearer.find('.').unwrap() + 1, bearer.rfind('.').unwrap() + 1] {
+        assert!(verify(
+            bearer,
+            Purpose::Access,
+            &token.verify_hash,
+            &token.secret_salt
+        ));
+        for start in [
+            0,
+            bearer.find('.').unwrap() + 1,
+            bearer.rfind('.').unwrap() + 1,
+        ] {
             let mut changed = bearer.as_bytes().to_vec();
             changed[start] = if changed[start] == b'A' { b'B' } else { b'A' };
-            assert!(!verify(std::str::from_utf8(&changed).unwrap(), Purpose::Access, &token.verify_hash, &token.secret_salt));
+            assert!(!verify(
+                std::str::from_utf8(&changed).unwrap(),
+                Purpose::Access,
+                &token.verify_hash,
+                &token.secret_salt
+            ));
         }
         for suffix in [".AAAA", " ", "\n"] {
             assert!(!validate(&format!("{bearer}{suffix}"), Purpose::Access));
         }
         let mut noncanonical = bearer.as_bytes().to_vec();
         *noncanonical.last_mut().unwrap() = b'B';
-        assert!(!validate(std::str::from_utf8(&noncanonical).unwrap(), Purpose::Access));
+        assert!(!validate(
+            std::str::from_utf8(&noncanonical).unwrap(),
+            Purpose::Access
+        ));
         // Valid metadata replacements cannot reuse a verifier, even with the
         // original entropy segment retained.
         let parts: Vec<_> = bearer.split('.').collect();
         let changed_payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"other-user"}"#);
         let changed = format!("{}.{}.{}", parts[0], changed_payload, parts[2]);
         assert!(validate(&changed, Purpose::Access));
-        assert!(!verify(&changed, Purpose::Access, &token.verify_hash, &token.secret_salt));
+        assert!(!verify(
+            &changed,
+            Purpose::Access,
+            &token.verify_hash,
+            &token.secret_salt
+        ));
     }
 
     #[test]
@@ -289,7 +330,12 @@ mod tests {
         let access = mint_access(&claims()).unwrap();
         let renewal = mint_renewal();
         assert!(validate(renewal.plaintext.expose(), Purpose::Renewal));
-        assert!(verify(renewal.plaintext.expose(), Purpose::Renewal, &renewal.verify_hash, &renewal.secret_salt));
+        assert!(verify(
+            renewal.plaintext.expose(),
+            Purpose::Renewal,
+            &renewal.verify_hash,
+            &renewal.secret_salt
+        ));
         assert!(!validate(renewal.plaintext.expose(), Purpose::Access));
         assert!(!validate(access.plaintext.expose(), Purpose::Renewal));
         assert!(!validate("sk-cclb-key_secret", Purpose::Access));
@@ -302,11 +348,19 @@ mod tests {
         let secret = bearer.strip_prefix("cclb-relay-v1.").unwrap();
         assert_eq!(URL_SAFE_NO_PAD.decode(secret).unwrap().len(), 32);
         assert_eq!(relay.index_hash, compute_index_hash(bearer.as_bytes()));
-        assert!(verify(bearer, Purpose::Relay, &relay.verify_hash, &relay.secret_salt));
+        assert!(verify(
+            bearer,
+            Purpose::Relay,
+            &relay.verify_hash,
+            &relay.secret_salt
+        ));
         assert!(!validate(bearer, Purpose::Access));
         assert!(!validate(bearer, Purpose::Renewal));
         assert!(!validate(mint_renewal().plaintext.expose(), Purpose::Relay));
-        assert!(!validate(mint_access(&claims()).unwrap().plaintext.expose(), Purpose::Relay));
+        assert!(!validate(
+            mint_access(&claims()).unwrap().plaintext.expose(),
+            Purpose::Relay
+        ));
         for suffix in [".AAAA", " ", "\n"] {
             assert!(!validate(&format!("{bearer}{suffix}"), Purpose::Relay));
         }
@@ -319,7 +373,12 @@ mod tests {
             replacement
         };
         assert!(validate(&replacement, Purpose::Relay));
-        assert!(!verify(&replacement, Purpose::Relay, &relay.verify_hash, &relay.secret_salt));
+        assert!(!verify(
+            &replacement,
+            Purpose::Relay,
+            &relay.verify_hash,
+            &relay.secret_salt
+        ));
         assert_eq!(format!("{}", relay.plaintext), "[REDACTED]");
         assert_eq!(format!("{:?}", relay.plaintext), "[REDACTED]");
         assert!(!format!("{relay:?}").contains(bearer));
@@ -336,9 +395,19 @@ mod tests {
     #[test]
     fn syntax_work_is_bounded_and_canonical() {
         for payload in ["", "A", "AB", "AAA=", "AA AA"] {
-            assert!(!validate(&format!("{HEADER}.{payload}.{}", "A".repeat(43)), Purpose::Access));
+            assert!(!validate(
+                &format!("{HEADER}.{payload}.{}", "A".repeat(43)),
+                Purpose::Access
+            ));
         }
-        assert!(!validate(&format!("{HEADER}.{}.{}", "A".repeat(MAX_PAYLOAD_ENCODED_BYTES + 1), "A".repeat(43)), Purpose::Access));
+        assert!(!validate(
+            &format!(
+                "{HEADER}.{}.{}",
+                "A".repeat(MAX_PAYLOAD_ENCODED_BYTES + 1),
+                "A".repeat(43)
+            ),
+            Purpose::Access
+        ));
         let mut oversized = claims();
         oversized.issuer = "x".repeat(MAX_PAYLOAD_ENCODED_BYTES);
         assert!(mint_access(&oversized).is_err());
