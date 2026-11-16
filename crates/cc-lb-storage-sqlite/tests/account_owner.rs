@@ -648,3 +648,162 @@ async fn invalid_create_and_immutable_replacements_leave_no_changes() {
         Some(first)
     );
 }
+
+#[tokio::test]
+async fn workspace_list_is_sorted_scoped_and_intersects_permanent_reservations() {
+    let (_temp_dir, storage, _) = open("owner-workspace-list.sqlite").await;
+    let (principal_id, upstream_id) = seed(&storage).await;
+    let mut first = binding(principal_id, upstream_id);
+    first.allowed_workspaces = vec!["z".into(), "A".into(), "a".into(), "withdrawn".into()];
+    storage
+        .create_owner_binding(first.clone())
+        .await
+        .expect("first");
+    let mut second = first.clone();
+    second.binding_id = "binding-2".into();
+    second.owner_id = "owner-2".into();
+    second.allowed_workspaces = vec!["b".into()];
+    storage.create_owner_binding(second).await.expect("second");
+    first.allowed_workspaces = vec!["z".into(), "A".into(), "a".into()];
+    first.revision += 1;
+    storage
+        .compare_and_replace_owner_binding(first.clone(), 1)
+        .await
+        .expect("withdraw");
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&first.principal_id, "openai", &first.local_user_id)
+            .await
+            .expect("list"),
+        ["A", "a", "b", "z"]
+    );
+    for (principal, provider, user) in [
+        (
+            Uuid::new_v4().to_string(),
+            "openai",
+            first.local_user_id.as_str(),
+        ),
+        (
+            first.principal_id.clone(),
+            "anthropic",
+            first.local_user_id.as_str(),
+        ),
+        (first.principal_id.clone(), "openai", "other-user"),
+    ] {
+        assert!(
+            storage
+                .list_owner_workspace_targets(&principal, provider, user)
+                .await
+                .expect("isolated")
+                .is_empty()
+        );
+    }
+    for invalid in [
+        "invalid".to_owned(),
+        principal_id.simple().to_string(),
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".to_owned(),
+    ] {
+        assert_conflict(
+            storage
+                .list_owner_workspace_targets(&invalid, "openai", &first.local_user_id)
+                .await,
+        );
+    }
+    let reserved: String = sqlx::query_scalar(
+        "SELECT binding_id FROM account_owner_workspaces_v1 WHERE principal_id = ? AND provider = 'openai' AND workspace_id = 'withdrawn'",
+    ).bind(&first.principal_id).fetch_one(storage.pool()).await.expect("reservation retained");
+    assert_eq!(reserved, first.binding_id);
+    // A current grant without its matching permanent reservation is not listed.
+    sqlx::query("UPDATE account_owner_bindings_v1 SET allowed_workspaces_json = '[\"unreserved\"]' WHERE binding_id = ?")
+        .bind(&first.binding_id).execute(storage.pool()).await.expect("simulate unreserved grant");
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&first.principal_id, "openai", &first.local_user_id)
+            .await
+            .expect("reserved only"),
+        ["b"]
+    );
+}
+
+#[tokio::test]
+async fn workspace_list_filters_binding_principal_and_upstream_state() {
+    let (_temp_dir, storage, _) = open("owner-workspace-list-state.sqlite").await;
+    let (principal_id, upstream_id) = seed(&storage).await;
+    let stored = binding(principal_id, upstream_id);
+    storage
+        .create_owner_binding(stored.clone())
+        .await
+        .expect("binding");
+    let list = || {
+        storage.list_owner_workspace_targets(&stored.principal_id, "openai", &stored.local_user_id)
+    };
+    assert_eq!(list().await.expect("unrestricted").len(), 2);
+    for restriction in [
+        vec![Uuid::new_v4().to_string()],
+        vec![upstream_id.to_string()],
+        vec![],
+    ] {
+        sqlx::query("UPDATE principals_v1 SET allowed_upstreams = ? WHERE id = ?")
+            .bind(serde_json::to_string(&restriction).expect("json"))
+            .bind(&stored.principal_id)
+            .execute(storage.pool())
+            .await
+            .expect("restrict principal");
+        assert_eq!(
+            list().await.expect("restricted").len(),
+            if restriction.is_empty() || restriction[0] == upstream_id.to_string() {
+                2
+            } else {
+                0
+            }
+        );
+    }
+    for (hide, restore) in [
+        (
+            "UPDATE account_owner_bindings_v1 SET revoked_at_unix_secs = 1",
+            "UPDATE account_owner_bindings_v1 SET revoked_at_unix_secs = NULL",
+        ),
+        (
+            "UPDATE upstream_spec_v1 SET enabled = 0",
+            "UPDATE upstream_spec_v1 SET enabled = 1",
+        ),
+        (
+            "UPDATE upstream_spec_v1 SET deleted_at = 1",
+            "UPDATE upstream_spec_v1 SET deleted_at = NULL",
+        ),
+        (
+            "UPDATE upstream_spec_v1 SET kind = 'anthropic_api_key'",
+            "UPDATE upstream_spec_v1 SET kind = 'openai_api_key'",
+        ),
+        (
+            "UPDATE principals_v1 SET enabled = 0",
+            "UPDATE principals_v1 SET enabled = 1",
+        ),
+        (
+            "UPDATE principals_v1 SET deleted_at = 1",
+            "UPDATE principals_v1 SET deleted_at = NULL",
+        ),
+    ] {
+        sqlx::query(hide)
+            .execute(storage.pool())
+            .await
+            .expect("hide candidate");
+        assert!(list().await.expect("filtered").is_empty(), "{hide}");
+        sqlx::query(restore)
+            .execute(storage.pool())
+            .await
+            .expect("restore candidate");
+        assert_eq!(list().await.expect("restored").len(), 2, "{restore}");
+    }
+    UpstreamStore::set_status(
+        &storage,
+        upstream_id,
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("apply failed".into())),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await
+    .expect("apply error");
+    assert!(list().await.expect("unhealthy").is_empty());
+}
