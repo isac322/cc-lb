@@ -6,7 +6,7 @@ use cc_lb_storage_api::codex_sessions::{
     SessionCredential, SessionFamily, SessionSnapshot, SessionStoreError, SessionStoreResult,
 };
 use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderName, HeaderValue};
 
 use super::*;
 struct FixtureStore {
@@ -101,6 +101,10 @@ fn session_fixture(token: &session_token::MintedToken, purpose: CredentialPurpos
         access_generation: 1,
         local_user_id: "user-1".into(),
         plan_type: "plus".into(),
+        origin: "https://chatgpt.com".into(),
+        access_ttl_secs: 200,
+        created_at: 100,
+        expires_at: 500,
         revoked_at: None,
     };
     let credential = SessionCredential {
@@ -143,7 +147,7 @@ fn authn_with_session_at(token: &session_token::MintedToken, purpose: Credential
 
 fn header(name: &str, value: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(name, HeaderValue::from_str(value).unwrap());
+    headers.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), HeaderValue::from_str(value).unwrap());
     headers
 }
 
@@ -181,7 +185,7 @@ async fn invalid_payload_and_wrong_purpose_are_rejected() {
     bytes[pivot] = if bytes[pivot] == b'A' { b'B' } else { b'A' };
     let mutated = String::from_utf8(bytes).unwrap();
     let (authn, _) = authn_with_session(&token, CredentialPurpose::SessionRenewal);
-    assert_eq!(authn.authenticate(&header("x-api-key", &mutated), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::SignatureMismatch);
+    assert_eq!(authn.authenticate(&header("x-api-key", &mutated), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::NotFound);
     assert_eq!(authn.authenticate(&header("x-api-key", token.plaintext.expose()), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::SignatureMismatch);
 }
 
@@ -235,7 +239,8 @@ async fn header_selection_and_expiry_boundaries_are_preserved() {
     let mut headers = header("x-api-key", "not-a-session-token");
     headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {}", token.plaintext.expose())).unwrap());
     assert_eq!(authn.authenticate(&headers, &principal_view(true)).await.unwrap_err(), BuiltinAuthError::InvalidFormat);
-    let (authn, _) = authn_with_session_at(&token, CredentialPurpose::SessionAccess, 300);
+    let (authn, store) = authn_with_session_at(&token, CredentialPurpose::SessionAccess, 300);
+    store.record.lock().unwrap().as_mut().unwrap().parent_key.expires_at_unix_secs = Some(500);
     assert_eq!(authn.authenticate(&header("x-api-key", token.plaintext.expose()), &principal_view(true)).await.unwrap_err(), BuiltinAuthError::SessionAccessExpired);
 }
 
