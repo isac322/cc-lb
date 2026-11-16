@@ -6,7 +6,13 @@
 
 use std::fmt;
 
-use serde::Deserialize;
+use axum::{
+    Json,
+    response::{IntoResponse, Response},
+};
+use http::header::{CACHE_CONTROL, HeaderValue};
+use serde::ser::{SerializeSeq, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
@@ -82,6 +88,60 @@ pub fn workspace_switch_target(
         return Err(WorkspaceSwitchRequestError::InvalidRequest);
     }
     Ok(request.workspace_id)
+}
+
+#[derive(Serialize)]
+struct WorkspaceDiscoveryWire<'a> {
+    session_id: &'a str,
+    workspace_generation: u64,
+    selected_workspace_id: &'a str,
+    workspaces: WorkspaceDiscoveryWorkspaces<'a>,
+}
+
+struct WorkspaceDiscoveryWorkspaces<'a>(&'a [String]);
+
+#[derive(Serialize)]
+struct WorkspaceDiscoveryEntry<'a> {
+    workspace_id: &'a str,
+}
+
+impl Serialize for WorkspaceDiscoveryWorkspaces<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for workspace_id in self.0 {
+            sequence.serialize_element(&WorkspaceDiscoveryEntry {
+                workspace_id: workspace_id.as_str(),
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+/// Build the authenticated workspace-discovery response.
+///
+/// Credential and route-purpose admission and target authorization are owned by the surrounding
+/// services. This helper only serializes their already-authorized result.
+pub fn workspace_discovery_response(
+    _auth: &Authenticated,
+    session_id: &str,
+    workspace_generation: u64,
+    selected_workspace_id: &str,
+    aliases: &[String],
+) -> Response {
+    let wire = WorkspaceDiscoveryWire {
+        session_id,
+        workspace_generation,
+        selected_workspace_id,
+        workspaces: WorkspaceDiscoveryWorkspaces(aliases),
+    };
+    let mut response = Json(wire).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Project one authenticated provider workspace into the canonical Codex list response.

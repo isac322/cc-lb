@@ -2,10 +2,11 @@ use crate::common::{TestAuthn, TestState, managed_api_key};
 use cc_lb_engine::authn_rail::authenticate_first;
 use cc_lb_engine::codex_account::{
     AccountProjectionError, AccountProjectionMetadata, WorkspaceSwitchRequestError,
-    project_codex_accounts, workspace_switch_target,
+    project_codex_accounts, workspace_discovery_response, workspace_switch_target,
 };
 use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 async fn authenticated() -> cc_lb_engine::Authenticated {
@@ -91,6 +92,73 @@ async fn workspace_switch_parser_rejects_invalid_requests_without_details() {
     assert_eq!(error, WorkspaceSwitchRequestError::InvalidRequest);
     assert!(!error.to_string().contains(secret));
     assert!(!format!("{error:?}").contains(secret));
+}
+
+#[tokio::test]
+async fn workspace_discovery_response_has_exact_nested_wire_shape() {
+    let auth = authenticated().await;
+    let aliases = vec![
+        "workspace \"quoted\"".to_owned(),
+        "space\\path".to_owned(),
+        "유니코드 workspace".to_owned(),
+        "space workspace".to_owned(),
+        "space workspace".to_owned(),
+    ];
+    let response = workspace_discovery_response(
+        &auth,
+        "session \"opaque\"",
+        42,
+        "selected workspace",
+        &aliases,
+    );
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert!(
+        response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let object = value.as_object().unwrap();
+    let mut keys: Vec<_> = object.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "selected_workspace_id".to_owned(),
+            "session_id".to_owned(),
+            "workspace_generation".to_owned(),
+            "workspaces".to_owned(),
+        ]
+    );
+    assert_eq!(object["session_id"], "session \"opaque\"");
+    assert_eq!(object["workspace_generation"].as_u64(), Some(42));
+    assert_eq!(object["selected_workspace_id"], "selected workspace");
+
+    let workspaces = object["workspaces"].as_array().unwrap();
+    assert_eq!(workspaces.len(), aliases.len());
+    for (entry, alias) in workspaces.iter().zip(&aliases) {
+        let entry = entry.as_object().unwrap();
+        assert_eq!(
+            entry.keys().map(|key| key.as_str()).collect::<Vec<_>>(),
+            vec!["workspace_id"]
+        );
+        assert_eq!(entry["workspace_id"].as_str(), Some(alias.as_str()));
+    }
+
+    let empty = workspace_discovery_response(&auth, "session", 0, "selected", &[]);
+    let empty_body = empty.into_body().collect().await.unwrap().to_bytes();
+    let empty_value: Value = serde_json::from_slice(&empty_body).unwrap();
+    assert_eq!(empty_value["workspaces"], json!([]));
 }
 
 #[tokio::test]
