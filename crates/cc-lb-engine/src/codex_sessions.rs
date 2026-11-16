@@ -222,11 +222,10 @@ impl CodexSessionService {
         auth: &Authenticated,
     ) -> Result<SessionWorkspaceDiscovery, SessionError> {
         let family = self.family(auth, CredentialPurpose::SessionAccess).await?;
-        let mut workspaces = self.owners.list_owner_workspace_targets(
-            &family.principal_id,
-            &family.provider,
-            &family.local_user_id,
-        ).await.map_err(map_owner_error)?;
+        let snapshot = auth.session().ok_or(SessionError::InvalidRequest)?;
+        let mut workspaces = self.store.list_session_workspace_aliases(
+            auth.principal_id(), snapshot, unix_secs(self.clock.now()),
+        ).await.map_err(Into::into)?;
         workspaces.sort();
         workspaces.dedup();
         if !workspaces.iter().any(|workspace| workspace == &family.workspace_id) {

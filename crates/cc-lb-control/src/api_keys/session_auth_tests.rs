@@ -72,7 +72,21 @@ impl CodexSessionStore for FixtureStore {
         current.credential.revoked_at = Some(now);
         Ok(())
     }
-
+    async fn list_session_workspace_aliases(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        _now: u64,
+    ) -> SessionStoreResult<Vec<String>> {
+        let record = self.record.lock().unwrap();
+        let current = record.as_ref().ok_or(SessionStoreError::CredentialRejected)?;
+        if current.family.principal_id != principal_id
+            || current.family.workspace_id != snapshot.workspace_id
+        {
+            return Err(SessionStoreError::OwnerConflict);
+        }
+        Ok(vec![current.family.workspace_id.clone()])
+    }
     async fn fence_session_dispatch(&self, principal_id: &str, snapshot: &SessionSnapshot, _now: u64) -> SessionStoreResult<()> {
         let record = self.record.lock().unwrap();
         let current = record.as_ref().ok_or(SessionStoreError::CredentialRejected)?;

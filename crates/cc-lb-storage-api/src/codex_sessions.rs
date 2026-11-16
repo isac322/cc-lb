@@ -134,7 +134,12 @@ pub trait CodexSessionStore: Send + Sync {
         renewal_credential_id: &str,
         now: u64,
     ) -> SessionStoreResult<()>;
-
+    async fn list_session_workspace_aliases(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        now: u64,
+    ) -> SessionStoreResult<Vec<String>>;
     async fn fence_session_dispatch(
         &self,
         principal_id: &str,

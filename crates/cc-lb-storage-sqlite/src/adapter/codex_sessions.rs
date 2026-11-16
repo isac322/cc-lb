@@ -333,7 +333,24 @@ impl CodexSessionStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
-
+    async fn list_session_workspace_aliases(
+        &self,
+        principal_id: &str,
+        snapshot: &SessionSnapshot,
+        now: u64,
+    ) -> Result<Vec<String>> {
+        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let family = validate_session_family_in_tx(&mut tx, principal_id, snapshot, now).await?;
+        let aliases = super::account_owner::list_owner_workspace_aliases_in_read_tx(
+            &mut tx, principal_id, &family.provider, &family.local_user_id,
+        ).await.map_err(|error| match error {
+            StorageError::Conflict { .. } => SessionStoreError::OwnerConflict,
+            StorageError::Unavailable { .. } => SessionStoreError::Storage(error),
+            other => SessionStoreError::Storage(other),
+        })?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(aliases)
+    }
     async fn fence_session_dispatch(&self, principal_id: &str, snapshot: &SessionSnapshot, now: u64) -> Result<()> {
         let mut tx = self.begin_immediate().await?;
         if snapshot.purpose != CredentialPurpose::SessionAccess {
