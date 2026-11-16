@@ -361,16 +361,23 @@ async fn owner_generation_replacement_and_revocation_reject_old_file_access() {
         .await
         .expect("read replacement")
         .expect("replacement exists");
+    let replacement_expected = Fixture::expectation(&live);
+    let replacement_access = CodexFiles::new(&fixture.storage)
+        .reference(&auth, &replacement_expected, "input_file", file_id)
+        .await
+        .expect("current replacement owner can query its own namespace");
+    assert!(replacement_access.is_none());
     let mut revoked = live.clone();
     revoked.revision = 3;
     revoked.revoked_at_unix_secs = Some(CREATED_AT);
+    let revoked_expected = Fixture::expectation(&revoked);
     fixture
         .storage
         .compare_and_replace_owner_binding(revoked, 2)
         .await
         .expect("revoke owner binding");
     let revoked_access = CodexFiles::new(&fixture.storage)
-        .reference(&auth, &expected, "input_file", file_id)
+        .reference(&auth, &revoked_expected, "input_file", file_id)
         .await;
     assert!(matches!(revoked_access, Err(StorageError::Conflict { .. })));
 }
