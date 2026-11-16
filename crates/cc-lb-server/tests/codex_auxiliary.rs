@@ -144,3 +144,40 @@ async fn notes_reject_a_revoked_owner_without_dispatch() {
         assert!(alternate.records.lock().unwrap().is_empty(), "revocation must not switch owners");
     }
 }
+
+#[tokio::test]
+async fn model_auxiliary_routes_preserve_requests_on_the_session_owner() {
+    let selected = Provider::start().await;
+    let alternate = Provider::start().await;
+    let support = build_oauth_session_app(selected.url.clone(), alternate.url.clone(), vec![]).await;
+    for (method, suffix, body) in [
+        ("GET", "models", ""),
+        ("POST", "alpha/search", r#"{"query":"owner-scoped search"}"#),
+        ("POST", "images/generations", r#"{"model":"gpt-image-1","prompt":"blue square"}"#),
+        ("POST", "images/edits", r#"{"model":"gpt-image-1","prompt":"red square","images":[{"image_url":"data:image/png;base64,b3BhcXVl"}]}"#),
+        ("POST", "memories/trace_summarize", r#"{"trace":"opaque trace"}"#),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(format!("/backend-api/codex/{suffix}?client_version=0.169.0"))
+            .header(header::AUTHORIZATION, format!("Bearer {}", support.access))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body)).unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            support.app.router.clone().oneshot(request),
+        ).await.expect("auxiliary request completes").unwrap();
+        let status = response.status();
+        let response_body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{suffix}: {response_body:?}");
+        assert_eq!(response_body.as_ref(), br#"{"result":"selected-owner-result"}"#);
+        let records = selected.records.lock().unwrap();
+        let (uri, headers, sent_body) = records.last().expect("selected owner receives request");
+        assert_eq!(uri.path(), format!("/backend-api/codex/{suffix}"));
+        assert_eq!(uri.query(), Some("client_version=0.169.0"));
+        assert_eq!(headers[header::AUTHORIZATION], format!("Bearer {PROVIDER_TOKEN}"));
+        assert_eq!(sent_body.as_ref(), body.as_bytes());
+        assert!(alternate.records.lock().unwrap().is_empty());
+    }
+    assert_eq!(selected.records.lock().unwrap().len(), 5);
+}
