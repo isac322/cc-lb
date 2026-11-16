@@ -72,6 +72,8 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     assert!(headers.get(CONTENT_ENCODING).is_none());
     assert!(headers.get("x-cc-lb-spoof").is_none());
     assert!(headers.get("x-cc-lb-secret").is_none());
+    assert_eq!(headers.get("cc-lb-error-origin"), Some(&HeaderValue::from_static("upstream")));
+    assert!(!headers.contains_key("cc-lb-auth-reason"));
     assert!(headers.get("x-ratelimit-limit").is_none());
     assert!(headers.get("authorization").is_none());
     assert!(headers.get("x-api-key").is_none());
@@ -5319,6 +5321,8 @@ fn spoofed_plugin_headers(content_len: usize) -> HeaderMap {
     headers.insert("x-sneaky", HeaderValue::from_static("remove-me"));
     headers.insert("x-cc-lb-spoof", HeaderValue::from_static("remove-me"));
     headers.insert("x-cc-lb-secret", HeaderValue::from_static("remove-me"));
+    headers.insert("cc-lb-error-origin", HeaderValue::from_static("principal"));
+    headers.insert("cc-lb-auth-reason", HeaderValue::from_static("expired"));
     headers.insert("x-ratelimit-limit", HeaderValue::from_static("remove-me"));
     headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
     headers.insert("x-api-key", HeaderValue::from_static("secret"));

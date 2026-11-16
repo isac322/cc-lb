@@ -204,6 +204,8 @@ pub(crate) fn apply_buffered_transform_result(
                     upstream_headers
                 }
             };
+            // Replacement headers are untrusted, even after an authenticated dispatch.
+            crate::codex_sessions::mark_upstream_response(&mut headers);
             set_downstream_response_framing(&mut headers, body.len(), content_encoding);
             BufferedTransformParts {
                 status: status.unwrap_or(upstream_status),
@@ -248,6 +250,7 @@ pub(crate) fn sanitize_downstream_stream_headers(headers: &mut HeaderMap) {
 }
 
 fn sanitize_host_owned_headers(headers: &mut HeaderMap) {
+    crate::codex_sessions::strip_untrusted_provenance(headers);
     sanitize_response_headers_except(headers, |_| false);
 }
 
