@@ -115,6 +115,13 @@ pub struct SessionGrant {
     pub user_id: String,
     pub workspace_generation: u64,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionWorkspaceDiscovery {
+    pub session_id: String,
+    pub workspace_generation: u64,
+    pub selected_workspace_id: String,
+    pub workspaces: Vec<String>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -209,6 +216,28 @@ impl CodexSessionService {
         // This lookup only locates the candidate. Storage locks and validates both
         // bindings with the source family in the replacement transaction.
         self.replace_access(auth, family, Some(target)).await
+    }
+    pub async fn list_session_workspaces(
+        &self,
+        auth: &Authenticated,
+    ) -> Result<SessionWorkspaceDiscovery, SessionError> {
+        let family = self.family(auth, CredentialPurpose::SessionAccess).await?;
+        let mut workspaces = self.owners.list_owner_workspace_targets(
+            &family.principal_id,
+            &family.provider,
+            &family.local_user_id,
+        ).await.map_err(map_owner_error)?;
+        workspaces.sort();
+        workspaces.dedup();
+        if !workspaces.iter().any(|workspace| workspace == &family.workspace_id) {
+            return Err(SessionError::OwnerConflict);
+        }
+        Ok(SessionWorkspaceDiscovery {
+            session_id: family.family_id,
+            workspace_generation: family.workspace_generation,
+            selected_workspace_id: family.workspace_id,
+            workspaces,
+        })
     }
 
     pub async fn revoke_session(&self, auth: &Authenticated) -> Result<(), SessionError> {
