@@ -340,6 +340,24 @@ impl AccountOwnerStore for PostgresStorage {
         Ok(binding)
     }
 
+    async fn list_owner_workspace_targets(
+        &self,
+        principal_id: &str,
+        provider: &str,
+        local_user_id: &str,
+    ) -> StorageResult<Vec<String>> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let aliases =
+            list_owner_workspace_aliases_in_read_tx(&mut tx, principal_id, provider, local_user_id)
+                .await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(aliases)
+    }
+
     async fn compare_and_replace_owner_binding(
         &self,
         replacement: AccountOwnerBinding,
@@ -409,6 +427,68 @@ impl AccountOwnerStore for PostgresStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(binding)
     }
+}
+
+/// Lists local aliases in the caller's read snapshot without granting authority.
+///
+/// This helper performs only a SELECT and does not acquire writer locks, update
+/// bindings or leases, or contact a provider. Callers that need a multi-query
+/// snapshot may supply their own repeatable-read, read-only transaction.
+pub(crate) async fn list_owner_workspace_aliases_in_read_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    principal_id: &str,
+    provider: &str,
+    local_user_id: &str,
+) -> StorageResult<Vec<String>> {
+    let principal_id = parse_principal_id(principal_id)?;
+    sqlx::query_scalar(
+        r#"SELECT alias.workspace_id COLLATE "C"
+           FROM account_owner_workspaces_v1 alias
+           JOIN account_owner_bindings_v1 binding
+             ON binding.binding_id = alias.binding_id
+           JOIN principals_v1 principal
+             ON principal.id = alias.principal_id
+           JOIN upstream_spec_v1 upstream
+             ON upstream.id = binding.upstream_id
+           LEFT JOIN upstream_status_v1 status
+             ON status.upstream_id = upstream.id
+           WHERE alias.principal_id = $1
+             AND alias.provider = $2
+             AND binding.principal_id = alias.principal_id
+             AND binding.provider = alias.provider
+             AND binding.local_user_id = $3
+             AND binding.revoked_at_unix_secs IS NULL
+             AND principal.enabled = TRUE
+             AND principal.deleted_at IS NULL
+             AND upstream.enabled = TRUE
+             AND upstream.deleted_at IS NULL
+             AND status.last_apply_error IS NULL
+             AND (
+                   (binding.provider = 'anthropic'
+                    AND upstream.kind IN ('anthropic_api_key', 'anthropic_oauth'))
+                OR (binding.provider = 'openai'
+                    AND upstream.kind IN ('openai_api_key', 'openai_oauth'))
+                OR (binding.provider = 'gemini'
+                    AND upstream.kind IN ('gemini_api_key', 'gemini_oauth'))
+             )
+             AND EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements(binding.allowed_workspaces_json::jsonb) allowed(value)
+                   WHERE jsonb_typeof(allowed.value) = 'string'
+                     AND allowed.value = to_jsonb(alias.workspace_id)
+             )
+             AND (
+                   cardinality(principal.allowed_upstreams) = 0
+                   OR upstream.id = ANY(principal.allowed_upstreams)
+             )
+           ORDER BY alias.workspace_id COLLATE "C""#,
+    )
+    .bind(principal_id)
+    .bind(provider)
+    .bind(local_user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)
 }
 
 #[cfg(test)]
@@ -699,6 +779,120 @@ mod tests {
             Err(StorageError::Unavailable { .. })
         ));
         post_update_tx.rollback().await?;
+        pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
+            .execute(&admin)
+            .await?;
+        admin.close().await;
+        Ok(())
+    }
+    #[tokio::test]
+    #[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+    async fn workspace_alias_read_snapshot_stays_stable_until_fresh_list() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let schema = format!("account_owner_alias_snapshot_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await?;
+        let options = PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]);
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await?;
+        let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+        storage.initialize().await?;
+        let principal = PrincipalStore::create(
+            &storage,
+            PrincipalCreate {
+                name: format!("alias-snapshot-principal-{}", Uuid::new_v4().simple()),
+                kind: PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await?;
+        let upstream = UpstreamStore::create(
+            &storage,
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "alias-snapshot-upstream".to_owned(),
+                kind: UpstreamKind::OpenaiApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await?;
+        let binding = AccountOwnerBinding {
+            binding_id: "alias-snapshot-binding".to_owned(),
+            principal_id: principal.id.to_string(),
+            provider: "openai".to_owned(),
+            owner_id: "alias-snapshot-owner".to_owned(),
+            upstream_id: upstream.id,
+            owner_generation: 1,
+            local_user_id: "alias-snapshot-user".to_owned(),
+            allowed_workspaces: vec!["before".to_owned(), "after".to_owned()],
+            provider_workspace_id: "alias-snapshot-vendor-workspace".to_owned(),
+            outbound_region: None,
+            revision: 1,
+            revoked_at_unix_secs: None,
+        };
+        storage.create_owner_binding(binding.clone()).await?;
+
+        let mut snapshot = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *snapshot)
+            .await?;
+        let before = list_owner_workspace_aliases_in_read_tx(
+            &mut snapshot,
+            &principal.id.to_string(),
+            "openai",
+            "alias-snapshot-user",
+        )
+        .await?;
+        assert_eq!(before, ["after", "before"]);
+
+        let mut withdrawn = binding.clone();
+        withdrawn.allowed_workspaces = vec!["after".to_owned()];
+        withdrawn.revision = 2;
+        storage
+            .compare_and_replace_owner_binding(withdrawn, 1)
+            .await?;
+
+        let during = list_owner_workspace_aliases_in_read_tx(
+            &mut snapshot,
+            &principal.id.to_string(),
+            "openai",
+            "alias-snapshot-user",
+        )
+        .await?;
+        assert_eq!(during, ["after", "before"]);
+        snapshot.rollback().await?;
+
+        assert_eq!(
+            storage
+                .list_owner_workspace_targets(
+                    &principal.id.to_string(),
+                    "openai",
+                    "alias-snapshot-user",
+                )
+                .await?,
+            ["after"]
+        );
+
         pool.close().await;
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
             .execute(&admin)

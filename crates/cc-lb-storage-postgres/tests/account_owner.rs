@@ -375,6 +375,223 @@ async fn noncanonical_principal_spelling_is_rejected_without_orphan_mutation() -
     fixture.drop_schema().await
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn list_workspace_targets_filters_scope_health_and_permissions() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+    let principal_id = create_principal(&storage).await?;
+    let upstream_id = create_upstream(&storage, "workspace-targets").await?;
+    let mut initial = binding(upstream_id, 1, 1, None);
+    initial.principal_id = principal_id.clone();
+    initial.allowed_workspaces = vec!["b".to_owned(), "A".to_owned(), "a".to_owned()];
+    storage.create_owner_binding(initial.clone()).await?;
+
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?,
+        ["A", "a", "b"]
+    );
+    let uppercase = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE";
+    assert!(matches!(
+        storage
+            .list_owner_workspace_targets(uppercase, "openai", "local-user-1")
+            .await,
+        Err(StorageError::Conflict { .. })
+    ));
+    assert!(
+        storage
+            .list_owner_workspace_targets(&Uuid::new_v4().to_string(), "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "anthropic", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "foreign-user")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE upstream_spec_v1 SET kind = 'anthropic_api_key' WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE upstream_spec_v1 SET kind = 'openai_api_key' WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+
+    let anthropic_upstream_id = create_upstream(&storage, "workspace-targets-anthropic").await?;
+    sqlx::query("UPDATE upstream_spec_v1 SET kind = 'anthropic_api_key' WHERE id = $1")
+        .bind(anthropic_upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+    let mut foreign_namespace = binding(anthropic_upstream_id, 1, 1, None);
+    foreign_namespace.binding_id = "binding-anthropic".to_owned();
+    foreign_namespace.principal_id = principal_id.clone();
+    foreign_namespace.provider = "anthropic".to_owned();
+    foreign_namespace.allowed_workspaces = vec!["foreign-namespace".to_owned()];
+    storage.create_owner_binding(foreign_namespace).await?;
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "anthropic", "local-user-1")
+            .await?,
+        ["foreign-namespace"]
+    );
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?,
+        ["A", "a", "b"]
+    );
+
+    let other_upstream_id = create_upstream(&storage, "workspace-targets-other").await?;
+    sqlx::query("UPDATE principals_v1 SET allowed_upstreams = ARRAY[$1]::uuid[] WHERE id = $2")
+        .bind(other_upstream_id)
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE principals_v1 SET allowed_upstreams = '{}'::uuid[] WHERE id = $1")
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?,
+        ["A", "a", "b"]
+    );
+
+    let mut withdrawn = initial.clone();
+    withdrawn.allowed_workspaces = vec!["a".to_owned()];
+    withdrawn.revision = 2;
+    storage
+        .compare_and_replace_owner_binding(withdrawn, 1)
+        .await?;
+    assert_eq!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?,
+        ["a"]
+    );
+
+    sqlx::query("UPDATE upstream_spec_v1 SET enabled = FALSE WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE upstream_spec_v1 SET enabled = TRUE WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, updated_at)
+         VALUES ($1, 'apply failed', NOW())
+         ON CONFLICT (upstream_id)
+         DO UPDATE SET last_apply_error = EXCLUDED.last_apply_error, updated_at = EXCLUDED.updated_at",
+    )
+    .bind(upstream_id)
+    .execute(&fixture.pool)
+    .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE upstream_status_v1 SET last_apply_error = NULL WHERE upstream_id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+
+    sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = NOW() WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = NULL WHERE id = $1")
+        .bind(upstream_id)
+        .execute(&fixture.pool)
+        .await?;
+
+    sqlx::query("UPDATE principals_v1 SET enabled = FALSE WHERE id = $1")
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE principals_v1 SET enabled = TRUE WHERE id = $1")
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query("UPDATE principals_v1 SET deleted_at = NOW() WHERE id = $1")
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+    sqlx::query("UPDATE principals_v1 SET deleted_at = NULL WHERE id = $1")
+        .bind(Uuid::parse_str(&principal_id)?)
+        .execute(&fixture.pool)
+        .await?;
+
+    sqlx::query(
+        "UPDATE account_owner_bindings_v1
+         SET revoked_at_unix_secs = 1700000000
+         WHERE binding_id = $1",
+    )
+    .bind(&initial.binding_id)
+    .execute(&fixture.pool)
+    .await?;
+    assert!(
+        storage
+            .list_owner_workspace_targets(&principal_id, "openai", "local-user-1")
+            .await?
+            .is_empty()
+    );
+
+    fixture.drop_schema().await
+}
+
 async fn create_principal(storage: &PostgresStorage) -> TestResult<String> {
     Ok(PrincipalStore::create(
         storage,

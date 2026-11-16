@@ -55,6 +55,14 @@ pub trait AccountOwnerStore: Send + Sync {
         &self,
         target: &AccountOwnerWorkspaceTarget,
     ) -> StorageResult<AccountOwnerBinding>;
+    /// Returns permitted local aliases only. This discovery snapshot is not
+    /// authorization for a later workspace switch or provider request.
+    async fn list_owner_workspace_targets(
+        &self,
+        principal_id: &str,
+        provider: &str,
+        local_user_id: &str,
+    ) -> StorageResult<Vec<String>>;
     async fn compare_and_replace_owner_binding(
         &self,
         binding: AccountOwnerBinding,
