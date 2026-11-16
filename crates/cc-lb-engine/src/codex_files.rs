@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use crate::authn_rail::Authenticated;
 use cc_lb_storage_api::{
     AccountOwnerStore, CodexFileResource, CodexFileStore, OwnerBindingExpectation, StorageError,
     StorageResult,
@@ -24,7 +25,6 @@ impl fmt::Debug for SignedUrlMetadata {
             .debug_struct("SignedUrlMetadata")
             .field("origin", &self.origin)
             .field("url", &"[redacted]")
-            .field("requires_proxy_fetch", &false)
             .finish()
     }
 }
@@ -37,7 +37,7 @@ impl SignedUrlMetadata {
         })?;
         if parsed.scheme() != "https"
             || parsed.host_str().is_none()
-            || parsed.username().is_empty() == false
+            || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
         {
@@ -45,10 +45,7 @@ impl SignedUrlMetadata {
                 message: "signed file URL must be HTTPS without userinfo or fragment".into(),
             });
         }
-        let origin = match parsed.port() {
-            Some(port) => format!("{}://{}:{}", parsed.scheme(), parsed.host_str().unwrap_or_default(), port),
-            None => format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or_default()),
-        };
+        let origin = parsed.origin().ascii_serialization();
         Ok(Self { url, origin })
     }
 
@@ -58,14 +55,6 @@ impl SignedUrlMetadata {
 
     pub fn origin(&self) -> &str {
         &self.origin
-    }
-
-    pub const fn requires_proxy_fetch(&self) -> bool {
-        false
-    }
-
-    pub const fn sends_credentials(&self) -> bool {
-        false
     }
 }
 
@@ -83,12 +72,14 @@ where
 
     pub async fn create_success(
         &self,
+        auth: &Authenticated,
         expected: &OwnerBindingExpectation,
         file_id: String,
         kind: String,
         created_at_unix_secs: u64,
         expires_at_unix_secs: Option<u64>,
     ) -> StorageResult<CodexFileResource> {
+        ensure_principal(auth, expected)?;
         let binding = self.storage.resolve_owner_binding(expected).await?;
         let resource = CodexFileResource::bind(
             file_id,
@@ -106,23 +97,40 @@ where
 
     pub async fn finalize(
         &self,
+        auth: &Authenticated,
         expected: &OwnerBindingExpectation,
+        kind: &str,
         file_id: &str,
         reference: String,
         expires_at_unix_secs: Option<u64>,
-    ) -> StorageResult<CodexFileResource> {
+    ) -> StorageResult<Option<CodexFileResource>> {
+        ensure_principal(auth, expected)?;
         self.storage.resolve_owner_binding(expected).await?;
         self.storage
-            .finalize_codex_file(expected, file_id, reference, expires_at_unix_secs)
+            .finalize_codex_file(expected, kind, file_id, reference, expires_at_unix_secs)
             .await
     }
 
     pub async fn reference(
         &self,
+        auth: &Authenticated,
         expected: &OwnerBindingExpectation,
+        kind: &str,
         file_id: &str,
-    ) -> StorageResult<CodexFileResource> {
+    ) -> StorageResult<Option<CodexFileResource>> {
+        ensure_principal(auth, expected)?;
         self.storage.resolve_owner_binding(expected).await?;
-        self.storage.resolve_codex_file(expected, file_id).await
+        self.storage
+            .resolve_codex_file(expected, kind, file_id)
+            .await
     }
+}
+
+fn ensure_principal(auth: &Authenticated, expected: &OwnerBindingExpectation) -> StorageResult<()> {
+    if auth.principal_id() != expected.principal_id {
+        return Err(StorageError::Conflict {
+            message: "file owner principal differs from authenticated principal".into(),
+        });
+    }
+    Ok(())
 }

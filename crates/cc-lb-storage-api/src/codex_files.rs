@@ -34,7 +34,14 @@ pub struct CodexFileResource {
 }
 
 impl CodexFileResource {
-    pub fn bind(file_id: String, kind: String, binding: &AccountOwnerBinding, workspace_id: String, created_at_unix_secs: u64, expires_at_unix_secs: Option<u64>) -> Self {
+    pub fn bind(
+        file_id: String,
+        kind: String,
+        binding: &AccountOwnerBinding,
+        workspace_id: String,
+        created_at_unix_secs: u64,
+        expires_at_unix_secs: Option<u64>,
+    ) -> Self {
         Self {
             file_id,
             principal_id: binding.principal_id.clone(),
@@ -67,15 +74,17 @@ pub trait CodexFileStore: Send + Sync {
     async fn finalize_codex_file(
         &self,
         expected: &OwnerBindingExpectation,
+        kind: &str,
         file_id: &str,
         reference: String,
         expires_at_unix_secs: Option<u64>,
-    ) -> StorageResult<CodexFileResource>;
+    ) -> StorageResult<Option<CodexFileResource>>;
 
     /// Validates the live owner binding before returning a reference record.
     async fn resolve_codex_file(
         &self,
         expected: &OwnerBindingExpectation,
+        kind: &str,
         file_id: &str,
-    ) -> StorageResult<CodexFileResource>;
+    ) -> StorageResult<Option<CodexFileResource>>;
 }

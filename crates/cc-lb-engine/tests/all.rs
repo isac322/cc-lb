@@ -4,6 +4,8 @@ mod gemini_oauth_catalog;
 mod prompt_cache_routing_support;
 mod router_lifecycle_support;
 
+#[path = "codex_account.rs"]
+mod codex_account;
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;
 #[path = "attempt_rail_trybuild.rs"]
@@ -26,8 +28,8 @@ mod case_insensitive;
 mod circuit_breaker_isolation;
 #[path = "closed_to_open_on_failures.rs"]
 mod closed_to_open_on_failures;
-#[path = "codex_account.rs"]
-mod codex_account;
+#[path = "codex_files.rs"]
+mod codex_files;
 #[path = "concurrent_guard_smoke.rs"]
 mod concurrent_guard_smoke;
 #[path = "half_open_concurrent_only_one_probe.rs"]

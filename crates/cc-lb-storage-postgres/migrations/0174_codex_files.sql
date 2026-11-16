@@ -1,7 +1,7 @@
-SELECT pg_advisory_xact_lock(410172);
+SELECT pg_advisory_xact_lock(410174);
 
 CREATE TABLE IF NOT EXISTS codex_files_v1 (
-    file_id TEXT PRIMARY KEY CHECK (btrim(file_id) <> ''),
+    file_id TEXT NOT NULL CHECK (btrim(file_id) <> ''),
     principal_id UUID NOT NULL REFERENCES principals_v1(id) ON DELETE RESTRICT,
     provider TEXT NOT NULL CHECK (btrim(provider) <> ''),
     kind TEXT NOT NULL CHECK (btrim(kind) <> ''),
@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS codex_files_v1 (
     state TEXT NOT NULL CHECK (state IN ('created', 'finalized')),
     created_at_unix_secs BIGINT NOT NULL CHECK (created_at_unix_secs >= 0),
     expires_at_unix_secs BIGINT CHECK (expires_at_unix_secs >= 0),
-    reference TEXT
+    reference TEXT,
+    PRIMARY KEY (principal_id, provider, kind, owner_binding_id, owner_generation, file_id)
 );
 CREATE INDEX IF NOT EXISTS codex_files_v1_owner_idx
     ON codex_files_v1 (owner_binding_id, principal_id, provider, workspace_id);
