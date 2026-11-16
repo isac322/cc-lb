@@ -294,7 +294,7 @@ test('signed file upload keeps create, binary PUT and finalize identities and cr
   assert.deepEqual(new URL(put.request.path).searchParams.getAll('part'), ['one', 'two']);
   assert.equal(finalize.request.path, `/files/${payload(create).file_id}/uploaded`);
   assert.deepEqual(finalize.request.body, {});
-  assert.equal(payload(finalize).status, 'ready');
+  assert.equal(payload(finalize).status, 'success');
   assert.equal(payload(finalize).file_size_bytes, bytes.length);
   safeExtension(payload(create));
 });

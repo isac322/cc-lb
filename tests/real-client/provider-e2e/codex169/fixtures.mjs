@@ -184,8 +184,8 @@ f.push(fixture('file-put', ['codex:files-upload-blob'], 'Signed blob PUT is dist
   response([], 'eof', 201, [['etag', 'synthetic-etag']]),
   { fileId: 'file_synthetic_169', bodyEncoding: 'base64', byteLength: 4, next: 'codex169-file-finalize', credentialBoundary: 'Do not forward account Authorization to the signed blob host.' }, [refs.files]));
 f.push(fixture('file-finalize', ['codex:files-finalize'], 'Finalize uses /uploaded and download status schema',
-  request('POST', '/files/file_synthetic_169/uploaded', {}), response([json({ status: 'ready', download_url: 'https://blob.synthetic.invalid/download?sig=synthetic-download', file_name: 'synthetic.txt', mime_type: 'text/plain', file_size_bytes: 4, error_message: null, ...safeOpaque })]),
-  { fileId: 'file_synthetic_169', state: 'ready' }, [refs.files]));
+  request('POST', '/files/file_synthetic_169/uploaded', {}), response([json({ status: 'success', download_url: 'https://blob.synthetic.invalid/download?sig=synthetic-download', file_name: 'synthetic.txt', mime_type: 'text/plain', file_size_bytes: 4, error_message: null, ...safeOpaque })]),
+  { fileId: 'file_synthetic_169', state: 'success' }, [refs.files]));
 const remotePrefix = '/wham/remote/control/server';
 const remoteResponse = { server_id: 'server_synthetic_169', environment_id: 'env_synthetic', remote_control_token: 'synthetic-remote-token-not-valid', expires_at: '2030-01-01T00:00:00Z', ...safeOpaque };
 f.push(fixture('remote-enroll', ['codex:remote-control-enroll'], 'Remote enrollment returns server identity and expiring token',
