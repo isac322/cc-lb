@@ -9114,7 +9114,81 @@ index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d
 +        "https://proxy.example", Some("https://proxy.example/backend-api/ps/mcp"),
 +        http::StatusCode::UNAUTHORIZED, &headers,
 +    ).is_none());
-+}
+ 
+#[tokio::test]
+async fn local_apps_mcp_post_applies_managed_session_bearer() -> anyhow::Result<()> {
+    use codex_exec_server::RouteAwareHttpClient;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+    use rmcp::transport::streamable_http_client::StreamableHttpClient;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    struct LocalSessionAuth;
+    impl codex_api::AuthProvider for LocalSessionAuth {
+        fn add_auth_headers(&self, _headers: &mut http::HeaderMap) -> Result<(), codex_api::AuthError> {
+            Ok(())
+        }
+
+        fn apply_auth_headers(&self, mut headers: http::HeaderMap) -> codex_api::AuthHeadersFuture<'_> {
+            Box::pin(async move {
+                headers.insert(
+                    http::header::AUTHORIZATION,
+                    http::HeaderValue::from_static("Bearer cc-lb-session"),
+                );
+                Ok(headers)
+            })
+        }
+    }
+
+    struct LocalSessionResolver;
+    impl crate::AuthProviderResolver for LocalSessionResolver {
+        fn resolve<'a>(
+            &'a self,
+            _headers: &'a http::HeaderMap,
+        ) -> futures::future::BoxFuture<'a, Result<codex_api::SharedAuthProvider, codex_api::AuthError>> {
+            Box::pin(async { Ok(Arc::new(LocalSessionAuth) as codex_api::SharedAuthProvider) })
+        }
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/ps/mcp"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+    let adapter = super::StreamableHttpClientAdapter::new(
+        Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
+            OutboundProxyPolicy::ReqwestDefault,
+        ))),
+        http::HeaderMap::new(),
+        Some(Arc::new(LocalSessionResolver)),
+        false,
+        StreamableHttpRedirectMode::Legacy,
+        Default::default(),
+    );
+    let message: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0", "method": "notifications/initialized",
+    }))?;
+    adapter
+        .post_message(
+            format!("{}/backend-api/ps/mcp", server.uri()).into(),
+            message,
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await?;
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].headers["authorization"], "Bearer cc-lb-session");
+    Ok(())
+}
 diff --git a/codex-rs/runtime-agent-instance/src/binding.rs b/codex-rs/runtime-agent-instance/src/binding.rs
 index 7302f8c38a2757844fd0a4c3e28699ed38fa0fde..4ae2eabd0aa0e7329cc777612c52ffb92d602fb4 100644
 --- a/codex-rs/runtime-agent-instance/src/binding.rs
