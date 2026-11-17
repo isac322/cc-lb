@@ -308,6 +308,8 @@ impl RelayFixture {
             .with_event_bus(bus as Arc<dyn RequestEventBus>),
         );
         let state = ProxyState {
+            remote_control_dispatch: dispatcher(&Config::default(), clock.clone()).0,
+            remote_control_websocket: codex_remote_control::WebSocketClient::new(),
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
                 Arc::new(storage.clone()),
                 Arc::new(storage.clone()),
