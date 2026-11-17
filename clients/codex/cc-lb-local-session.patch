@@ -6613,10 +6613,58 @@ index 03ee83418d..6f20f25089 100644
  
  [dev-dependencies]
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index 9a3df938f4..64b6288522 100644
+index 9a3df938f4..91d9219280 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
-@@ -1383,6 +1383,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
+@@ -34,6 +34,47 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
+ const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
+ const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
+ 
++#[tokio::test]
++async fn local_session_refresh_window_scales_with_issued_lifetime() {
++    let now = Utc::now().timestamp();
++    for (issued_at, expires_at, should_refresh) in [
++        (now, now + 300, false),
++        (now, now + 60, false),
++        (now - 240, now + 60, true),
++        (now - 4000, now - 1, true),
++    ] {
++        let home = tempdir().unwrap();
++        let profile = codex_config::CcLbConfig { origin: "https://proxy.example".into(), profile: "refresh".into() };
++        let encode = |value: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap());
++        let token = format!("{}.{}.{}",
++            encode(json!({"typ":"cc-lb-session-v1","alg":"CCLB-STATEFUL"})),
++            encode(json!({
++                "iss":profile.origin, "aud":"cc-lb-session-v1", "sub":"local-user", "sid":"local-family",
++                "iat":issued_at, "exp":expires_at,
++                "https://api.openai.com/auth":{"chatgpt_user_id":"local-user","chatgpt_account_id":"workspace"}
++            })),
++            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([17;32]));
++        let session = super::super::cc_lb::LocalSession {
++            session_id:"local-family".into(), access_token:token,
++            renewal_token:format!("cclb-renew-v1.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([29;32])),
++            token_type:"Bearer".into(), expires_at, session_expires_at:now+7200,
++            origin:profile.origin.clone(), account_id:"workspace".into(), user_id:"local-user".into(), workspace_generation:1,
++        };
++        super::super::cc_lb::import_session(home.path(), &profile, serde_json::to_vec(&session).unwrap().as_slice()).unwrap();
++        let manager = AuthManager::shared_from_auth_config(AuthConfig {
++            codex_home:home.path().to_path_buf(), cc_lb:Some(profile.clone()),
++            auth_credentials_store_mode:AuthCredentialsStoreMode::File,
++            keyring_backend_kind:Default::default(), forced_login_method:None,
++            chatgpt_base_url:Some(profile.backend_base()), forced_chatgpt_workspace_id:None,
++            managed_auth_policy:Default::default(),
++            auth_route_config:crate::test_support::transport_default_auth_route_config(),
++        }, false).await.unwrap();
++        let auth = manager.auth_cached().unwrap();
++        assert_eq!(AuthManager::proactive_refresh_reason(&auth).is_some(), should_refresh,
++            "issued lifetime={}, remaining={}", expires_at-issued_at, expires_at-now);
++    }
++}
++
+ #[test]
+ fn header_auth_exposes_a_valid_chatgpt_account_id() {
+     for (account_id_header, expected_account_id) in [
+@@ -1383,6 +1424,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
          step: UnauthorizedRecoveryStep::Reload,
          expected_account_id: None,
          mode: UnauthorizedRecoveryMode::Managed,
@@ -6624,7 +6672,7 @@ index 9a3df938f4..64b6288522 100644
      };
      assert_eq!(managed.mode_name(), "managed");
      assert_eq!(managed.step_name(), "reload");
-@@ -1392,6 +1393,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
+@@ -1392,6 +1434,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
          step: UnauthorizedRecoveryStep::ExternalRefresh,
          expected_account_id: None,
          mode: UnauthorizedRecoveryMode::External,
@@ -6632,7 +6680,7 @@ index 9a3df938f4..64b6288522 100644
      };
      assert_eq!(external.mode_name(), "external");
      assert_eq!(external.step_name(), "external_refresh");
-@@ -2277,6 +2279,7 @@ async fn build_config(
+@@ -2277,6 +2320,7 @@ async fn build_config(
  ) -> AuthConfig {
      AuthConfig {
          codex_home: codex_home.to_path_buf(),
@@ -6640,7 +6688,7 @@ index 9a3df938f4..64b6288522 100644
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::Direct,
          forced_login_method,
-@@ -2372,6 +2375,7 @@ impl AuthManagerConfig for TestAuthManagerConfig {
+@@ -2372,6 +2416,7 @@ impl AuthManagerConfig for TestAuthManagerConfig {
  fn test_auth_manager_config(codex_home: &Path) -> TestAuthManagerConfig {
      TestAuthManagerConfig(AuthConfig {
          codex_home: codex_home.to_path_buf(),
@@ -6648,7 +6696,7 @@ index 9a3df938f4..64b6288522 100644
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::Direct,
          forced_login_method: Some(ForcedLoginMethod::Chatgpt),
-@@ -2955,6 +2959,7 @@ async fn enforce_login_restrictions_logs_out_for_personal_access_token_workspace
+@@ -2955,6 +3000,7 @@ async fn enforce_login_restrictions_logs_out_for_personal_access_token_workspace
  
      let config = AuthConfig {
          codex_home: codex_home.path().to_path_buf(),
@@ -6656,7 +6704,7 @@ index 9a3df938f4..64b6288522 100644
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::default(),
          forced_login_method: None,
-@@ -3081,6 +3086,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
+@@ -3081,6 +3127,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
  
      let config = AuthConfig {
          codex_home: codex_home.path().to_path_buf(),
@@ -7691,7 +7739,7 @@ index 9d8af7f09a..b18a1c4cbd 100644
      http_client_factory: HttpClientFactory,
      request_url: String,
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index 7a3a2e68aa..dcf6d4562b 100644
+index 7a3a2e68aa..d66eef5ba4 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -214,8 +214,8 @@ impl Debug for ApiKeyAuth {
@@ -8068,7 +8116,37 @@ index 7a3a2e68aa..dcf6d4562b 100644
          let auth_dot_json = self
              .auth_cached()
              .and_then(|auth| auth.get_current_auth_json());
-@@ -3745,6 +3866,12 @@ impl AuthManager {
+@@ -3665,10 +3786,25 @@ impl AuthManager {
+         if let Some(tokens) = auth_dot_json.tokens.as_ref()
+             && let Ok(Some(expires_at)) = parse_jwt_expiration(&tokens.access_token)
+         {
+-            return (expires_at
+-                <= Utc::now()
+-                    + chrono::Duration::minutes(CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES))
+-            .then_some(RefreshReason::ProactiveExpiry);
++            let mut window = chrono::Duration::minutes(CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES);
++            if auth.is_cc_lb_local() {
++                #[derive(serde::Deserialize)]
++                struct LocalLifetime {
++                    iat: Option<i64>,
++                    exp: i64,
++                }
++                // Short local grants must survive renewal without immediately becoming due again.
++                // Without an issued lifetime, renew at expiry rather than inventing a lifetime.
++                let half_lifetime = crate::token_data::decode_jwt_payload::<LocalLifetime>(&tokens.access_token)
++                    .ok()
++                    .and_then(|claims| claims.iat.and_then(|iat| claims.exp.checked_sub(iat)))
++                    .filter(|lifetime| *lifetime > 0)
++                    .map(|lifetime| lifetime / 2)
++                    .unwrap_or(0);
++                window = chrono::Duration::seconds(half_lifetime.min(window.num_seconds()));
++            }
++            return (expires_at <= Utc::now() + window)
++                .then_some(RefreshReason::ProactiveExpiry);
+         }
+         let last_refresh = auth_dot_json.last_refresh?;
+         (last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL))
+@@ -3745,6 +3881,12 @@ impl AuthManager {
          tokens: TokenData,
          reason: RefreshReason,
      ) -> Result<(), RefreshTokenError> {
@@ -8081,7 +8159,7 @@ index 7a3a2e68aa..dcf6d4562b 100644
          let endpoint = refresh_token_endpoint(tokens.oauth_provenance.as_ref());
          let client_id = tokens
              .oauth_provenance
-@@ -3818,6 +3945,7 @@ impl AuthManager {
+@@ -3818,6 +3960,7 @@ impl AuthManager {
  fn auth_config_from(config: &impl AuthManagerConfig) -> AuthConfig {
      AuthConfig {
          codex_home: config.codex_home(),
