@@ -40,7 +40,7 @@ enum AdminCliError {
     HttpStatus(StatusCode),
     #[error("failed to write admin response: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid credential JSON: {0}")]
+    #[error("invalid admin JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     InvalidInput(&'static str),
