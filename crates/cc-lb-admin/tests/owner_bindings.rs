@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use cc_lb_storage_api::{
@@ -58,7 +58,10 @@ async fn owner_binding_create_get_and_auth_boundary() {
         .json("POST", "/admin/v1/account-owner-bindings", Some(body), &[])
         .await;
     assert_eq!(status, axum::http::StatusCode::CREATED);
-    assert_eq!(headers.get("etag").and_then(|v| v.to_str().ok()), Some("W/\"1\""));
+    assert_eq!(
+        headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some("W/\"1\"")
+    );
     assert_eq!(created["binding_id"], binding_id);
     assert_eq!(created["revision"], 1);
     assert_eq!(created["owner_generation"], 1);
@@ -91,9 +94,9 @@ async fn owner_binding_create_get_and_auth_boundary() {
         .await;
     assert_eq!(duplicate.0, axum::http::StatusCode::CONFLICT);
 
-    let unauthenticated = server.client.get_without_auth(
-        "/admin/v1/account-owner-bindings/owner-binding-test",
-    )
-    .await;
+    let unauthenticated = server
+        .client
+        .get_without_auth("/admin/v1/account-owner-bindings/owner-binding-test")
+        .await;
     assert_eq!(unauthenticated.0, axum::http::StatusCode::UNAUTHORIZED);
 }
