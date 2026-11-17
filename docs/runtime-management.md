@@ -19,6 +19,8 @@ The runtime architecture relies on a lock-free `DynamicView` snapshot managed vi
 In multi-replica deployments, replicas synchronize their local views using Postgres `LISTEN/NOTIFY` channels for sub-second updates. If a notification is missed, a background reconciler polls the database every 60 seconds as a fallback. The system uses a single rebind primitive to safely commit staged plugin slots and rebuild the routing table.
 
 
+## Admin v1 REST API
+
 ### Codex subscription sessions
 
 The admin API issues the short-lived session credentials used by native Codex subscription routes. The route is protected by the admin write-auth layer:

@@ -20,6 +20,29 @@ The [consistency contract](/docs/reference/source/consistency-contract/) lists w
 
 Every mutating request should use the current ETag or revision when the endpoint documents one. Handle `409` conflicts by reading the latest resource and presenting the new state to the operator.
 
+## Codex subscription sessions
+
+Issue an owner-bound session for a maintained Codex client:
+
+`POST /admin/v1/principals/{id}/codex-sessions`
+
+The endpoint requires admin write authorization. Its JSON body is:
+
+```json
+{
+  "parent_key_id": "<principal key id>",
+  "owner_binding_id": "<owner binding id>",
+  "workspace_id": "<allowed workspace>",
+  "origin": "https://client.example",
+  "access_ttl_seconds": 300,
+  "session_ttl_seconds": 3600
+}
+```
+
+The owner binding must belong to the principal, remain active, and allow `workspace_id`. A successful response is `201` with access and renewal credentials and `Cache-Control: no-store`. Store the returned grant only in the client session store and pass it through the client's local-session login flow. Do not put credentials in command arguments or logs.
+
+The session captures the owner generation and binding revision. A revoked or conflicting owner returns `400`; an unavailable bound upstream returns `503`. The request never fails over to another owner.
+
 ## OAuth flow
 
 OAuth draft start accepts `{ "provider": "anthropic" | "openai" | "gemini", "flow": "device_code" | "browser" }`. Omitting `provider` keeps Anthropic compatibility; omitting `flow` uses OpenAI's device-code flow. The browser flow is supported for OpenAI and Gemini. Paste-code providers return `flow: "paste_code"` and an `authorize_url`. OpenAI device start returns `flow: "device_code"`, a verification URL, one-time user code, polling interval, and expiry. OpenAI browser start returns `flow: "paste_code"`, `provider: "openai"`, `authorize_url`, and `state_token`; Gemini browser start returns `flow: "browser"`, `provider: "gemini"`, `authorize_url`, and `state_token`.
