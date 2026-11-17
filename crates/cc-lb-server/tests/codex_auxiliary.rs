@@ -9,7 +9,7 @@ use axum::routing::any;
 use tower::ServiceExt;
 
 use crate::codex_control_support::{
-    ALTERNATE_PROVIDER_TOKEN, PROVIDER_TOKEN, VENDOR_WORKSPACE, build_oauth_session_app,
+    ALTERNATE_PROVIDER_TOKEN, PROVIDER_TOKEN, BUNDLE_ACCOUNT, build_oauth_session_app,
 };
 
 type Records = Arc<Mutex<Vec<(Uri, HeaderMap, Bytes)>>>;
@@ -120,7 +120,7 @@ async fn notes_preserve_wire_and_use_only_the_session_owner() {
             headers[header::AUTHORIZATION],
             format!("Bearer {PROVIDER_TOKEN}")
         );
-        assert_eq!(headers["chatgpt-account-id"], VENDOR_WORKSPACE);
+        assert_eq!(headers["chatgpt-account-id"], BUNDLE_ACCOUNT);
         assert_eq!(headers["x-openai-encrypted-tool-arguments"], "true");
         assert_eq!(
             headers["x-openai-tool-output-truncation-policy"],
