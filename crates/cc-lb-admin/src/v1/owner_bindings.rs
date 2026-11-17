@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use cc_lb_storage_api::{AccountOwnerBinding, AccountOwnerStore, StorageError};
+use cc_lb_storage_api::{AccountOwnerBinding, AccountOwnerStore, StorageError, UpstreamStore};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -64,7 +64,9 @@ async fn create_owner_binding(
     if upstream_id.to_string() != body.upstream_id {
         return error_response(StatusCode::BAD_REQUEST, "invalid_upstream_id");
     }
-
+    if let Err(response) = ensure_live_upstream(storage, upstream_id).await {
+        return response;
+    }
     let binding = AccountOwnerBinding {
         binding_id: body.binding_id,
         principal_id: body.principal_id,
@@ -161,6 +163,21 @@ async fn get_owner_binding(State(state): State<AdminState>, Path(id): Path<Strin
         Err(error) => storage_error(error),
     }
 }
+async fn ensure_live_upstream(
+    storage: &dyn UpstreamStore,
+    upstream_id: Uuid,
+) -> Result<(), Response> {
+    let record = match storage.get_by_id(upstream_id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return Err(upstream_unavailable()),
+        Err(error) => return Err(storage_error(error)),
+    };
+    if !record.enabled || record.deleted_at_unix_secs.is_some() || record.last_apply_error.is_some()
+    {
+        return Err(upstream_unavailable());
+    }
+    Ok(())
+}
 
 fn is_safe_binding_id(value: &str) -> bool {
     !value.is_empty()
@@ -203,6 +220,14 @@ fn storage_error(error: StorageError) -> Response {
         }
         _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
     }
+}
+
+fn upstream_unavailable() -> Response {
+    let mut response = error_response(StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable");
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 fn storage_unavailable() -> Response {
