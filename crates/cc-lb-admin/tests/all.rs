@@ -7,6 +7,8 @@ mod api_key_support;
 #[path = "audit_actor.rs"]
 mod audit_actor;
 
+#[path = "owner_bindings.rs"]
+mod owner_bindings;
 #[path = "audit_pagination.rs"]
 mod audit_pagination;
 #[path = "auth_required.rs"]
