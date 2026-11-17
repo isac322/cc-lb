@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Responses WebSocket admission and per-response ownership.
 //!
 //! Transport I/O lives in the server. This single-owner state machine keeps
