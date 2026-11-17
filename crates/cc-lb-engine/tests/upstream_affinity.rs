@@ -1,5 +1,7 @@
-#![allow(clippy::result_large_err)]
-
+#![allow(
+    clippy::result_large_err,
+    reason = "The integration test exercises the unboxed WebSocketError API used by the Responses state machine."
+)]
 #[path = "upstream_affinity/codex_compaction.rs"]
 mod codex_compaction;
 

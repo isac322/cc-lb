@@ -1,3 +1,7 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "Responses WebSocket errors retain bounded provider metadata for protocol fidelity."
+)]
 use super::*;
 use crate::realtime_websocket::{
     RealtimeWebSocketKind, RealtimeWebSocketObservation, RealtimeWebSocketSession,

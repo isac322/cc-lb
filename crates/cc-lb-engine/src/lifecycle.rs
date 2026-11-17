@@ -1,3 +1,7 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "Responses WebSocket errors retain bounded provider metadata for protocol fidelity."
+)]
 mod codex_account_dispatch;
 
 mod gemini_native;

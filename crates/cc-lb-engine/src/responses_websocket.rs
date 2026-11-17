@@ -4,6 +4,10 @@
 //!
 //! Transport I/O lives in the server. This single-owner state machine keeps
 //! connection-local continuation separate from durable response ownership.
+#![allow(
+    clippy::result_large_err,
+    reason = "WebSocketError carries bounded provider response metadata for protocol fidelity; boxing it would widen the C-AUTH state-machine API."
+)]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;

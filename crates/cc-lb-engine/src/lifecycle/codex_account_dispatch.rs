@@ -99,7 +99,7 @@ impl Lifecycle {
             .sign_for_workspace(signer.as_ref(), shaped, workspace)
             .await
             .map_err(|_| SessionError::Unavailable)?;
-        if signed.url() != &expected_url || signed.method() != &context.method {
+        if signed.url().as_str() != expected_url.as_str() || signed.method() != context.method {
             return Err(SessionError::Unavailable);
         }
         // Signing may await credential refresh. A switch/revoke during that wait
