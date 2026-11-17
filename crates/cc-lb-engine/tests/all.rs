@@ -30,8 +30,10 @@ mod closed_to_open_on_failures;
 mod codex_account;
 #[path = "concurrent_guard_smoke.rs"]
 mod concurrent_guard_smoke;
-#[path = "half_open_success_closes.rs"]
-mod half_open_success_closes;
+#[path = "half_open_concurrent_only_one_probe.rs"]
+mod half_open_concurrent_only_one_probe;
+#[path = "half_open_failure_reopens.rs"]
+mod half_open_failure_reopens;
 #[path = "key_store_smoke.rs"]
 mod key_store_smoke;
 #[path = "latency_stages_emit.rs"]
