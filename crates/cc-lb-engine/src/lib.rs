@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::result_large_err)]
 //! cc-lb data-plane engine for request routing, dispatch, lifecycle production, and runtime subscribers.
 
