@@ -8900,22 +8900,26 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
          if response.status == StatusCode::METHOD_NOT_ALLOWED.as_u16() {
              return Err(StreamableHttpError::ServerDoesNotSupportSse);
 @@ -623,7 +624,7 @@ impl StreamableHttpClientAdapter {
-     async fn add_auth_headers(
-         &self,
-         headers: &mut HeaderMap,
--    ) -> Result<(), StreamableHttpError<StreamableHttpClientAdapterError>> {
++    async fn add_auth_headers(
++        &self,
++        headers: &mut HeaderMap,
 +    ) -> Result<Option<codex_api::SharedAuthProvider>, StreamableHttpError<StreamableHttpClientAdapterError>> {
-         if let Some(resolver) = &self.auth_provider {
-             let provider = resolver
-                 .resolve(headers)
-@@ -635,9 +636,155 @@ impl StreamableHttpClientAdapter {
-                 .await
-                 .map_err(StreamableHttpClientAdapterError::from)
-                 .map_err(StreamableHttpError::Client)?;
++        if let Some(resolver) = &self.auth_provider {
++            let provider = resolver
++                .resolve(headers)
++                .await
++                .map_err(StreamableHttpClientAdapterError::from)
++                .map_err(StreamableHttpError::Client)?;
++            let resolved_headers = provider
++                .apply_auth_headers(std::mem::take(headers))
++                .await
++                .map_err(StreamableHttpClientAdapterError::from)
++                .map_err(StreamableHttpError::Client)?;
++            *headers = resolved_headers;
 +            return Ok(Some(provider));
-         }
--        Ok(())
++        }
 +        Ok(None)
++    }
      }
 +
 +    /// Retries a local cc-lb request at most once, only after transport-proven principal expiry.
