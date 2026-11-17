@@ -73,7 +73,13 @@ async fn owner_binding_create_get_and_auth_boundary() {
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(fetched["principal_id"], principal.id.to_string());
     assert_eq!(fetched["upstream_id"], upstream.id.to_string());
-
+    let (status, _, audit) = server.client.get("/admin/v1/audit?limit=100").await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(audit["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["admin_action"] == "owner_binding_create"
+            && entry["principal_id"] == principal.id.to_string()
+            && entry["upstream"] == upstream.id.to_string()
+    }));
     let duplicate = server
         .client
         .json(
