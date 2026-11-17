@@ -867,7 +867,7 @@ mod tests {
         assert!(matches!(
             s.fence_session_dispatch("principal", &snapshot(&family(), "credential", 1), 101)
                 .await,
-            Err(SessionStoreError::Storage(StorageError::Unavailable { .. }))
+            Err(SessionStoreError::UpstreamUnavailable { .. })
         ));
     }
 
