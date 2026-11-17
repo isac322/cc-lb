@@ -74,6 +74,7 @@ pub fn build_router(state: AdminState) -> Router {
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())
         .merge(crate::v1::oauth::router())
+        .merge(crate::v1::owner_bindings::router())
         .merge(crate::v1::principals::router())
         .merge(crate::v1::keys::router())
         .merge(crate::v1::router::router())

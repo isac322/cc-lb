@@ -494,7 +494,7 @@ fn conflict(message: impl Into<String>) -> StorageError {
 }
 
 fn upstream_unavailable(message: impl Into<String>) -> StorageError {
-    StorageError::Unavailable {
+    StorageError::UpstreamUnavailable {
         message: message.into(),
     }
 }
@@ -755,7 +755,10 @@ mod tests {
             .expect("restore fixture FK");
         drop(connection);
         let result = storage.resolve_owner_binding(&expected(&source)).await;
-        assert!(matches!(result, Err(StorageError::Unavailable { .. })));
+        assert!(matches!(
+            result,
+            Err(StorageError::UpstreamUnavailable { .. })
+        ));
         let mut foreign = expected(&source);
         foreign.principal_id = Uuid::new_v4().to_string();
         let result = storage.resolve_owner_binding(&foreign).await;
@@ -782,7 +785,10 @@ mod tests {
                 Some(&expected(&target)),
             )
             .await;
-            assert!(matches!(unavailable, Err(StorageError::Unavailable { .. })));
+            assert!(matches!(
+                unavailable,
+                Err(StorageError::UpstreamUnavailable { .. })
+            ));
             tx.rollback().await.expect("rollback unavailable control");
 
             let mut target_expected = expected(&target);

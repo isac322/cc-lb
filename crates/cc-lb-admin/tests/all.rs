@@ -13,6 +13,8 @@ mod audit_pagination;
 mod auth_required;
 #[path = "cloudflare_access_auth.rs"]
 mod cloudflare_access_auth;
+#[path = "owner_bindings.rs"]
+mod owner_bindings;
 
 #[path = "cache_keepalive_contracts.rs"]
 mod cache_keepalive_contracts;
