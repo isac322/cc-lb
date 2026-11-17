@@ -8,7 +8,9 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::routing::any;
 use tower::ServiceExt;
 
-use crate::codex_control_support::{PROVIDER_TOKEN, build_oauth_session_app};
+use crate::codex_control_support::{
+    ALTERNATE_PROVIDER_TOKEN, PROVIDER_TOKEN, VENDOR_WORKSPACE, build_oauth_session_app,
+};
 
 type Records = Arc<Mutex<Vec<(Uri, HeaderMap, Bytes)>>>;
 
@@ -88,6 +90,7 @@ async fn notes_preserve_wire_and_use_only_the_session_owner() {
             ))
             .header(header::AUTHORIZATION, format!("Bearer {}", support.access))
             .header(header::CONTENT_TYPE, "application/json")
+            .header("chatgpt-account-id", "untrusted-client-workspace")
             .header("x-openai-encrypted-tool-arguments", "true")
             .header("x-openai-tool-output-truncation-policy", "opaque-policy")
             .body(Body::from(body))
@@ -117,6 +120,7 @@ async fn notes_preserve_wire_and_use_only_the_session_owner() {
             headers[header::AUTHORIZATION],
             format!("Bearer {PROVIDER_TOKEN}")
         );
+        assert_eq!(headers["chatgpt-account-id"], VENDOR_WORKSPACE);
         assert_eq!(headers["x-openai-encrypted-tool-arguments"], "true");
         assert_eq!(
             headers["x-openai-tool-output-truncation-policy"],
@@ -129,6 +133,68 @@ async fn notes_preserve_wire_and_use_only_the_session_owner() {
         );
     }
     assert_eq!(selected.records.lock().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn two_issued_sessions_keep_distinct_owner_credentials() {
+    let selected = Provider::start().await;
+    let alternate = Provider::start().await;
+    let support =
+        build_oauth_session_app(selected.url.clone(), alternate.url.clone(), vec![]).await;
+    for (
+        access,
+        expected_token,
+        expected_account,
+        provider_records,
+        unused_records,
+        workspace,
+    ) in [
+        (
+            &support.access,
+            PROVIDER_TOKEN,
+            "oauth-bundle-account",
+            &selected.records,
+            &alternate.records,
+            "selected-owner",
+        ),
+        (
+            &support.alternate_access,
+            ALTERNATE_PROVIDER_TOKEN,
+            "alternate-oauth-bundle-account",
+            &alternate.records,
+            &selected.records,
+            "alternate-owner",
+        ),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/backend-api/codex/alpha/notes/v2/append_to_file")
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"path":"{workspace}.txt","content":"owner-fenced"}}"#
+            )))
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            support.app.router.clone().oneshot(request),
+        )
+        .await
+        .expect("owner request completes")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = provider_records.lock().unwrap();
+        let (_, headers, body) = records.last().expect("selected owner receives request");
+        assert_eq!(headers[header::AUTHORIZATION], format!("Bearer {expected_token}"));
+        assert_eq!(headers["chatgpt-account-id"], expected_account);
+        assert_eq!(
+            body.as_ref(),
+            format!(r#"{{"path":"{workspace}.txt","content":"owner-fenced"}}"#).as_bytes()
+        );
+        assert!(unused_records.lock().unwrap().is_empty(), "{workspace} must not fail over");
+    }
+    assert_eq!(selected.records.lock().unwrap().len(), 1);
+    assert_eq!(alternate.records.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

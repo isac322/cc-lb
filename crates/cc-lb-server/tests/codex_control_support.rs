@@ -29,6 +29,8 @@ pub const ALTERNATE_PROVIDER_TOKEN: &str = "alternate-provider-oauth-access";
 pub const ALTERNATE_BUNDLE_ACCOUNT: &str = "alternate-oauth-bundle-account";
 pub const LOCAL_WORKSPACE: &str = "local-session-workspace";
 pub const VENDOR_WORKSPACE: &str = "selected-vendor-workspace";
+pub const ALTERNATE_LOCAL_WORKSPACE: &str = "alternate-local-session-workspace";
+pub const ALTERNATE_VENDOR_WORKSPACE: &str = "alternate-vendor-workspace";
 
 pub struct OAuthSessionApp {
     pub app: App,
@@ -42,6 +44,10 @@ pub struct OAuthSessionApp {
     pub owner_binding_id: String,
     pub selected_upstream_id: Uuid,
     pub alternate_upstream_id: Uuid,
+    pub alternate_access: String,
+    pub alternate_parent: String,
+    pub alternate_principal_id: String,
+    pub alternate_owner_binding_id: String,
 }
 
 pub async fn build_oauth_session_app(
@@ -118,7 +124,7 @@ pub async fn build_oauth_session_app(
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
             allowed_upstreams: upstream_ids.clone(),
-            default_limits: principal_limits,
+            default_limits: principal_limits.clone(),
             cache_keepalive: None,
         },
         now,
@@ -169,6 +175,61 @@ pub async fn build_oauth_session_app(
     .await
     .expect("bind selected owner");
 
+    let alternate_principal = PrincipalStore::create(
+        storage.as_ref(),
+        PrincipalCreate {
+            name: "codex-control-alternate-session-parent".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: upstream_ids.clone(),
+            default_limits: principal_limits,
+            cache_keepalive: None,
+        },
+        now,
+    )
+    .await
+    .expect("seed alternate principal");
+    let (_, alternate_parent) = keys
+        .create(
+            &alternate_principal.id.to_string(),
+            CreateParams {
+                label: "codex control alternate parent".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("issue alternate parent key");
+    let alternate_parent_key_id = keys
+        .list_all()
+        .await
+        .expect("list alternate parent key")
+        .into_iter()
+        .find(|(principal_id, _, _)| principal_id == &alternate_principal.id.to_string())
+        .map(|(_, key_id, _)| key_id)
+        .expect("alternate parent key identity");
+    let alternate_owner_binding_id = "codex-control-alternate-owner".to_owned();
+    AccountOwnerStore::create_owner_binding(
+        storage.as_ref(),
+        AccountOwnerBinding {
+            binding_id: alternate_owner_binding_id.clone(),
+            principal_id: alternate_principal.id.to_string(),
+            provider: "openai".to_owned(),
+            owner_id: "alternate-provider-owner".to_owned(),
+            upstream_id: upstream_ids[1],
+            owner_generation: 1,
+            local_user_id: "alternate-apps-local-user".to_owned(),
+            allowed_workspaces: vec![ALTERNATE_LOCAL_WORKSPACE.to_owned()],
+            provider_workspace_id: ALTERNATE_VENDOR_WORKSPACE.to_owned(),
+            outbound_region: None,
+            revision: 1,
+            revoked_at_unix_secs: None,
+        },
+    )
+    .await
+    .expect("bind alternate owner");
+
     let mut config = Config {
         storage: StorageConfig::Sqlite { path },
         ..Config::default()
@@ -190,46 +251,22 @@ pub async fn build_oauth_session_app(
     .await
     .expect("build real App");
 
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!(
-            "/admin/v1/principals/{}/codex-sessions",
-            principal.id
-        ))
-        .header(
-            header::AUTHORIZATION,
-            format!("Bearer {}", env!("CARGO_PKG_NAME")),
-        )
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            json!({
-                "parent_key_id": parent_key_id,
-                "owner_binding_id": owner_binding_id,
-                "workspace_id": LOCAL_WORKSPACE,
-                "origin": "https://apps.example.test",
-                "access_ttl_seconds": 300,
-                "session_ttl_seconds": 600,
-            })
-            .to_string(),
-        ))
-        .expect("issuance request");
-    let response = app
-        .admin_router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("issue session");
-    assert_eq!(
-        response.status(),
-        StatusCode::CREATED,
-        "session bootstrap must be mounted"
-    );
-    let grant: Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("grant bytes"),
+    let grant = issue_session(
+        &app,
+        &principal.id.to_string(),
+        &parent_key_id,
+        &owner_binding_id,
+        LOCAL_WORKSPACE,
     )
-    .expect("grant JSON");
+    .await;
+    let alternate_grant = issue_session(
+        &app,
+        &alternate_principal.id.to_string(),
+        &alternate_parent_key_id,
+        &alternate_owner_binding_id,
+        ALTERNATE_LOCAL_WORKSPACE,
+    )
+    .await;
 
     OAuthSessionApp {
         app,
@@ -249,5 +286,58 @@ pub async fn build_oauth_session_app(
         owner_binding_id,
         selected_upstream_id: upstream_ids[0],
         alternate_upstream_id: upstream_ids[1],
+        alternate_access: alternate_grant["access_token"]
+            .as_str()
+            .expect("alternate access token")
+            .to_owned(),
+        alternate_parent: alternate_parent.expose().to_owned(),
+        alternate_principal_id: alternate_principal.id.to_string(),
+        alternate_owner_binding_id,
     }
+}
+
+async fn issue_session(
+    app: &App,
+    principal_id: &str,
+    parent_key_id: &str,
+    owner_binding_id: &str,
+    workspace_id: &str,
+) -> Value {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/admin/v1/principals/{principal_id}/codex-sessions"))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", env!("CARGO_PKG_NAME")),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "parent_key_id": parent_key_id,
+                "owner_binding_id": owner_binding_id,
+                "workspace_id": workspace_id,
+                "origin": "https://apps.example.test",
+                "access_ttl_seconds": 300,
+                "session_ttl_seconds": 600,
+            })
+            .to_string(),
+        ))
+        .expect("issuance request");
+    let response = app
+        .admin_router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("issue session");
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "session bootstrap must be mounted"
+    );
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("grant bytes"),
+    )
+    .expect("grant JSON")
 }
