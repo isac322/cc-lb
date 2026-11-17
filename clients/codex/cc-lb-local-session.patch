@@ -9073,7 +9073,7 @@ diff --git a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs b/codex-rs/rm
 index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d86baf795 100644
 --- a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
 +++ b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
-@@ -609,3 +609,116 @@ async fn automatic_event_stream_reconnect_refreshes_request_auth() -> anyhow::Result() {
+@@ -609,3 +609,117 @@ async fn automatic_event_stream_reconnect_refreshes_request_auth() -> anyhow::Re
      client.shutdown().await;
      Ok(())
  }
@@ -9115,6 +9115,7 @@ index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d
 +        http::StatusCode::UNAUTHORIZED, &headers,
 +    ).is_none());
 +
++}
 +
 +#[tokio::test]
 +async fn local_apps_mcp_post_applies_managed_session_bearer() -> anyhow::Result<()> {
