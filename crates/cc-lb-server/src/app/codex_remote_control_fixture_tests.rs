@@ -55,6 +55,9 @@ impl UpstreamDispatch for RemoteDispatch {
         response.headers_mut().insert("cc-lb-auth-reason", HeaderValue::from_static("expired"));
         response.headers_mut().insert("x-codex-primary-used-percent", HeaderValue::from_static("17.5"));
         response.headers_mut().insert("set-cookie", HeaderValue::from_static("synthetic-cookie=must-not-capture"));
+        response.headers_mut().insert("authorization", HeaderValue::from_static("Bearer synthetic-provider-secret"));
+        response.headers_mut().insert("x-api-key", HeaderValue::from_static("synthetic-provider-key"));
+        response.headers_mut().insert("retry-after", HeaderValue::from_static("7"));
         Ok(response)
     }
 }
@@ -187,6 +190,11 @@ async fn remote_runtime_enrollment_refresh_and_account_client_scope() {
         assert_eq!(response.status(),if method == "DELETE" {StatusCode::NO_CONTENT} else {StatusCode::OK});
         assert_eq!(response.headers()["cc-lb-error-origin"],"upstream");
         assert!(!response.headers().contains_key("cc-lb-auth-reason"));
+        for name in ["set-cookie", "authorization", "x-api-key"] {
+            assert!(!response.headers().contains_key(name), "provider credential leaked: {name}");
+        }
+        assert_eq!(response.headers()["retry-after"], "7");
+        assert_eq!(response.headers()["x-codex-primary-used-percent"], "17.5");
     }
     let requests = fixture.dispatch.requests.lock().unwrap();
     assert_eq!(requests.len(),6);
@@ -345,7 +353,7 @@ async fn remote_ws_provider_rejection_is_preserved_before_downstream_101() {
             assert!(n > 0 && request.len()+n <= 8192);
             request.extend_from_slice(&chunk[..n]);
         }
-        let response = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nCc-Lb-Error-Origin: principal\r\nCc-Lb-Auth-Reason: expired\r\nConnection: close\r\n\r\n{REJECT_BODY}",REJECT_BODY.len());
+        let response = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nCc-Lb-Error-Origin: principal\r\nCc-Lb-Auth-Reason: expired\r\nSet-Cookie: synthetic-session=private\r\nAuthorization: Bearer synthetic-private\r\nX-Api-Key: synthetic-key\r\nRetry-After: 7\r\nConnection: close\r\n\r\n{REJECT_BODY}",REJECT_BODY.len());
         stream.write_all(response.as_bytes()).await.unwrap();
     }));
     let (address,task) = spawn_proxy_router(fixture.router.clone()).await;
@@ -358,6 +366,10 @@ async fn remote_ws_provider_rejection_is_preserved_before_downstream_101() {
     assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
     assert_eq!(response.headers()["cc-lb-error-origin"],"upstream");
     assert!(!response.headers().contains_key("cc-lb-auth-reason"));
+    for name in ["set-cookie", "authorization", "x-api-key"] {
+        assert!(!response.headers().contains_key(name), "provider credential leaked: {name}");
+    }
+    assert_eq!(response.headers()["retry-after"], "7");
     assert_eq!(response.body().as_deref(),Some(REJECT_BODY.as_bytes()));
     tokio::time::timeout(Duration::from_secs(5),&mut provider_task.0).await.unwrap().unwrap();
 }
