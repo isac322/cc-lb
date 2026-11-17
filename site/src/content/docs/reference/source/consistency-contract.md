@@ -84,6 +84,8 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 - `POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance` takes no revision at all.
 - Configuration draft routes carry `expected_revision` in the request body.
 
+| Routes | State | Audit | Dynamic view on serving replica |
+|---|---|---|---|
 | `POST /admin/v1/account-owner-bindings` | Committed | After state | Not rebuilt |
 | `POST /admin/v1/principals`; `PUT`, `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys` | Committed | After state; on failure, revocation of the key is attempted but can fail | Rebuilt |
