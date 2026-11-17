@@ -288,6 +288,7 @@ impl DiscoveryFixture {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn request_with_body(
         &mut self,
         method: Method,

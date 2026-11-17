@@ -1,3 +1,7 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "WebSocketError retains bounded provider response metadata for WebSocket protocol fidelity."
+)]
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
