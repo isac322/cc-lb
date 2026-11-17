@@ -4738,32 +4738,11 @@ index b10fa50794..22914e309b 100644
 +        }
 +    }
 +}
-diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
-index 493320a154..974f98e16d 100644
---- a/codex-rs/codex-mcp/src/connection_manager.rs
-+++ b/codex-rs/codex-mcp/src/connection_manager.rs
-@@ -484,7 +484,15 @@ impl McpConnectionSet {
-                 MAX_MCP_CATALOG_ITEMS
-             };
-             let metadata = McpServerMetadata::from(&server);
--            let configured_config = server.config().clone();
-+            let mut configured_config = server.config().clone();
-+            if is_host_owned_codex_apps
-+                && auth.is_some_and(codex_login::CodexAuth::is_cc_lb_local)
-+                && let McpServerTransportConfig::StreamableHttp { bearer_token_env_var, .. } =
-+                    &mut configured_config.transport
-+            {
-+                // The private local session is the only credential path in a cc-lb profile.
-+                *bearer_token_env_var = None;
-+            }
-             let protocol_mode = if matches!(
-                 &configured_config.transport,
-                 McpServerTransportConfig::StreamableHttp { .. }
 diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
-index 492d72a065..973dd2d178 100644
+index 492d72a065..5bf0b0e2e7 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod.rs
-@@ -443,7 +443,23 @@ pub fn effective_mcp_servers_from_configured(
+@@ -443,7 +443,28 @@ pub fn effective_mcp_servers_from_configured(
                  .expect("materialized MCP server must have a catalog registration");
              match server.auth.clone() {
                  McpServerAuth::ChatGpt => {
@@ -4784,11 +4763,16 @@ index 492d72a065..973dd2d178 100644
 +                                && destination.query().is_none()
 +                                && destination.fragment().is_none()
 +                        });
++                    if local_apps
++                        && let McpServerTransportConfig::StreamableHttp { bearer_token_env_var, .. } = &mut server.transport
++                    {
++                        *bearer_token_env_var = None;
++                    }
 +                    if !local_apps && !is_trusted_chatgpt_mcp_server(&server.transport, &config.chatgpt_base_url) {
                          server.auth = McpServerAuth::OAuth;
                      }
                  }
-@@ -603,7 +619,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
+@@ -603,7 +624,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
              codex_apps_tools_cache_key: connector_runtime_context_key(auth),
              client_mcp_extensions: ClientMcpExtensions::default(),
              auth: auth.cloned(),
@@ -4800,10 +4784,10 @@ index 492d72a065..973dd2d178 100644
              elicitation_lifecycle: None,
          },
 diff --git a/codex-rs/codex-mcp/src/mcp/mod_tests.rs b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
-index 8367b530c0..48673df72c 100644
+index 8367b530c0..1962f63f7c 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod_tests.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
-@@ -730,6 +730,60 @@ fn effective_mcp_servers_require_catalog_registration() {
+@@ -730,6 +730,71 @@ fn effective_mcp_servers_require_catalog_registration() {
      );
  }
  
@@ -4847,7 +4831,10 @@ index 8367b530c0..48673df72c 100644
 +        let mut config = test_mcp_config(home.path().to_path_buf());
 +        config.apps_enabled = true;
 +        config.chatgpt_base_url = profile.backend_base();
-+        let server = codex_apps_mcp_server_config(base, None, None);
++        let mut server = codex_apps_mcp_server_config(base, None, None);
++        if let McpServerTransportConfig::StreamableHttp { bearer_token_env_var, .. } = &mut server.transport {
++            *bearer_token_env_var = Some("CODEX_CONNECTORS_TOKEN".into());
++        }
 +        let mut catalog = ResolvedMcpCatalog::builder();
 +        let name = CODEX_APPS_MCP_SERVER_NAME.to_string();
 +        catalog.register(if host_owned {
@@ -4858,6 +4845,14 @@ index 8367b530c0..48673df72c 100644
 +        config.mcp_server_catalog = catalog.build();
 +        let effective = effective_mcp_servers(&config, Some(&auth));
 +        assert_eq!(effective[&name].config().auth, expected, "{base}, host_owned={host_owned}");
++        let McpServerTransportConfig::StreamableHttp { bearer_token_env_var, .. } = &effective[&name].config().transport else {
++            panic!("expected HTTP Apps transport");
++        };
++        if expected == McpServerAuth::ChatGpt {
++            assert!(bearer_token_env_var.is_none(), "local Apps startup must not resolve an environment bearer");
++        } else {
++            assert_eq!(bearer_token_env_var.as_deref(), Some("CODEX_CONNECTORS_TOKEN"));
++        }
 +    }
 +}
 +
