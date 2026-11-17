@@ -8899,7 +8899,7 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
  
          if response.status == StatusCode::METHOD_NOT_ALLOWED.as_u16() {
              return Err(StreamableHttpError::ServerDoesNotSupportSse);
-@@ -623,17 +624,168 @@ impl StreamableHttpClientAdapter {
+@@ -623,21 +624,167 @@ impl StreamableHttpClientAdapter {
      async fn add_auth_headers(
          &self,
          headers: &mut HeaderMap,
@@ -8911,13 +8911,11 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
                  .await
                  .map_err(StreamableHttpClientAdapterError::from)
                  .map_err(StreamableHttpError::Client)?;
-+            let resolved_headers = provider
-+                .apply_auth_headers(std::mem::take(headers))
-+                .await
-+                .map_err(StreamableHttpClientAdapterError::from)
-+                .map_err(StreamableHttpError::Client)?;
-+            *headers = resolved_headers;
--            return Ok(());
+             *headers = provider
+                 .apply_auth_headers(std::mem::take(headers))
+                 .await
+                 .map_err(StreamableHttpClientAdapterError::from)
+                 .map_err(StreamableHttpError::Client)?;
 +            return Ok(Some(provider));
          }
 -        Ok(())
@@ -9075,7 +9073,7 @@ diff --git a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs b/codex-rs/rm
 index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d86baf795 100644
 --- a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
 +++ b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
-@@ -609,4 +609,116 @@ async fn automatic_event_stream_reconnects_refreshes_request_auth() -> anyhow::Result<()> {
+@@ -609,3 +609,116 @@ async fn automatic_event_stream_reconnect_refreshes_request_auth() -> anyhow::Result() {
      client.shutdown().await;
      Ok(())
  }
@@ -9116,7 +9114,7 @@ index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d
 +        "https://proxy.example", Some("https://proxy.example/backend-api/ps/mcp"),
 +        http::StatusCode::UNAUTHORIZED, &headers,
 +    ).is_none());
- 
++
 +
 +#[tokio::test]
 +async fn local_apps_mcp_post_applies_managed_session_bearer() -> anyhow::Result<()> {
