@@ -6,8 +6,8 @@
   "annotated_tag_object": "a41fe5b443652cbdbee57717fbb9fd78d8d8b32a",
   "verification": "Official upstream HTTPS clone; commit, tree and annotated tag target were checked with git object commands. The tag is not treated as a signed vendor identity assertion.",
   "patch": "cc-lb-local-session.patch",
-  "patch_sha256": "7f2710b08cece97bafb7006af3955dcc191c5135240ea66d3f0060731360a6e3",
-  "patch_files": 122,
+  "patch_sha256": "0ca6bc6a644b65478c6c1fe1726bf68fa4a4b45dc741734b11c5cd6a88314398",
+  "patch_files": 123,
   "source_preparation": "bash clients/codex/prepare-source.sh /absolute/new/isolated/source-directory",
   "build": "bash clients/codex/build.sh /absolute/isolated/source-directory",
   "install": "bash clients/codex/build.sh /absolute/isolated/source-directory /absolute/new/install-path/codex",
@@ -15,10 +15,10 @@
   "toolchain": "Rust 1.95.0, as pinned by upstream codex-rs/rust-toolchain.toml",
   "lockfile_resolution": "Cargo reconciled workspace package versions 0.0.0 to pinned manifest 0.169.0 and the three added dependency edges. Parsed comparison found zero external package additions, removals, or changed records. Subsequent --locked check reached dependency compilation.",
   "fetch_transport": "CARGO_NET_GIT_FETCH_WITH_CLI=true; certificate validation remains enabled. Initial libgit2 SecureTransport/submodule timeout was bypassed by using system git, not by weakening TLS. Package-scoped codex-login still resolves root rusty_v8 workspace patch. The next check timed out at 1800 seconds during cold dependency compilation, not a Rust PASS.",
-  "compiler_status": "Locked codex-login library check, 19 local-session unit tests, four remote-control URL tests, and the full locked codex-cli release build passed. Isolated --version, login --help, and remote-control --help smoke passed. Actual-client server/provider acceptance remains pending.",
+  "compiler_status": "Locked codex-cli release build passed. Local Apps startup regression and five adjacent tests passed; local-session lifetime regression and 33 refresh tests passed. Managed loopback captures verify MCP Authorization and eliminate immediate renewal for a fresh 300-second grant. Full client/server/provider acceptance remains pending.",
   "verified_build": {
     "platform": "aarch64-apple-darwin",
-    "binary_sha256": "b7e6f44c13b3970ce5127f16cd986509308492abf7e4f5d675e84c901090a158",
+    "binary_sha256": "162912afe4bacd6346660e41dd6d1c6d29e51ded289788ef4223270582f6873b",
     "version_output": "codex-cli 0.169.0",
     "profile": "release",
     "cargo_locked": true
