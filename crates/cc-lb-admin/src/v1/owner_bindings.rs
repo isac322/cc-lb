@@ -64,8 +64,11 @@ async fn create_owner_binding(
     if upstream_id.to_string() != body.upstream_id {
         return error_response(StatusCode::BAD_REQUEST, "invalid_upstream_id");
     }
-    if let Err(response) = ensure_live_upstream(storage, upstream_id).await {
-        return response;
+    if let Err(error) = ensure_live_upstream(storage, upstream_id).await {
+        return match error {
+            UpstreamPreflightError::Unavailable => upstream_unavailable(),
+            UpstreamPreflightError::Storage(error) => storage_error(*error),
+        };
     }
     let binding = AccountOwnerBinding {
         binding_id: body.binding_id,
@@ -163,18 +166,23 @@ async fn get_owner_binding(State(state): State<AdminState>, Path(id): Path<Strin
         Err(error) => storage_error(error),
     }
 }
+enum UpstreamPreflightError {
+    Unavailable,
+    Storage(Box<StorageError>),
+}
+
 async fn ensure_live_upstream(
     storage: &dyn UpstreamStore,
     upstream_id: Uuid,
-) -> Result<(), Response> {
+) -> Result<(), UpstreamPreflightError> {
     let record = match storage.get_by_id(upstream_id).await {
         Ok(Some(record)) => record,
-        Ok(None) => return Err(upstream_unavailable()),
-        Err(error) => return Err(storage_error(error)),
+        Ok(None) => return Err(UpstreamPreflightError::Unavailable),
+        Err(error) => return Err(UpstreamPreflightError::Storage(Box::new(error))),
     };
     if !record.enabled || record.deleted_at_unix_secs.is_some() || record.last_apply_error.is_some()
     {
-        return Err(upstream_unavailable());
+        return Err(UpstreamPreflightError::Unavailable);
     }
     Ok(())
 }
