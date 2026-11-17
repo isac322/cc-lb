@@ -90,7 +90,7 @@ async fn create_owner_binding(
             );
             (StatusCode::CREATED, headers, Json(binding)).into_response()
         }
-        Err(error) => storage_error(error),
+        Err(error) => storage_error(error, true),
     }
 }
 
@@ -112,12 +112,14 @@ async fn get_owner_binding(State(state): State<AdminState>, Path(id): Path<Strin
             (headers, Json(binding)).into_response()
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_owner_binding"),
-        Err(error) => storage_error(error),
+        Err(error) => storage_error(error, false),
     }
 }
 
 fn is_safe_binding_id(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -132,7 +134,7 @@ fn header_value(value: &str) -> HeaderValue {
     HeaderValue::from_str(value).expect("owner binding response header is valid")
 }
 
-fn storage_error(error: StorageError) -> Response {
+fn storage_error(error: StorageError, upstream_context: bool) -> Response {
     match error {
         StorageError::Conflict { message } => (
             StatusCode::CONFLICT,
@@ -140,8 +142,12 @@ fn storage_error(error: StorageError) -> Response {
         )
             .into_response(),
         StorageError::Unavailable { .. } => {
-            let mut response =
-                error_response(StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable");
+            let error = if upstream_context {
+                "upstream_unavailable"
+            } else {
+                "storage_unavailable"
+            };
+            let mut response = error_response(StatusCode::SERVICE_UNAVAILABLE, error);
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));

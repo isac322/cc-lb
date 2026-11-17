@@ -60,6 +60,8 @@ const ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 
 fn is_safe_owner_binding_id(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
