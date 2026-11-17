@@ -235,8 +235,27 @@ async fn dispatch_checked(
             relay.as_ref().ok_or(Error::Invalid)?.generation, observer, observation).await;
     }
     *observation = Some(RemoteControlObservation::begin(auth, observer, record, &state.clock));
-    let response = tokio::time::timeout(IO_TIMEOUT, state.remote_control_dispatch.dispatch(signed)).await
-        .map_err(|_| Error::Transport)?.map_err(|_| Error::Transport)?;
+    let response = tokio::time::timeout(IO_TIMEOUT, async {
+        let bulkhead = state.remote_control_dispatch.bulkhead_for(&signed);
+        let _permit = bulkhead.acquire_owned().await.map_err(|_| Error::Affinity)?;
+        let admitted = state.lifecycle.authenticate(&parts.headers).await
+            .map_err(|error| Error::Session(cc_lb_engine::codex_sessions::SessionError::Unauthenticated(error)))?;
+        if !same_proof(auth, &admitted) {
+            return Err(Error::Invalid);
+        }
+        if let Some(expected) = relay.as_ref() {
+            let current = fenced_relay(state, &admitted, unix_secs(state.clock.now())).await?;
+            if current.enrollment_id != expected.enrollment_id || current.generation != expected.generation {
+                return Err(Error::Affinity);
+            }
+        } else {
+            let current = state.codex_sessions.fence_session_dispatch(&admitted).await.map_err(owner_error)?;
+            if current != binding {
+                return Err(Error::Affinity);
+            }
+        }
+        bulkhead.client.dispatch(signed).await.map_err(|_| Error::Transport)
+    }).await.map_err(|_| Error::Transport)??;
     if let Some(observation) = observation.as_mut() {
         observation.response_started(response.status(), response.headers());
     }

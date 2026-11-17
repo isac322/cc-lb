@@ -60,6 +60,7 @@ impl UpstreamDispatch for RemoteDispatch {
 }
 
 struct RemoteFixture {
+    state: ProxyState,
     router: Router,
     storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
     dispatch: Arc<RemoteDispatch>,
@@ -129,12 +130,17 @@ async fn remote_fixture_config(origin: Url, timeout_secs:u64) -> RemoteFixture {
     state.lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(builtin_authn.clone(), state.dynamic_view.clone(),
         dispatch.clone(), LifecycleConfig::default(), clock.clone()).with_event_bus(bus.clone()));
     state.builtin_authn = builtin_authn;
-    state.remote_control_dispatch = dispatch.clone();
+    let remote_dispatch = dispatch.clone();
+    state.remote_control_dispatch = Arc::new(BulkheadDispatch::with_dispatcher_factory(
+        Arc::new(BulkheadRegistry::new()), state.websocket_bulkhead_config,
+        Arc::new(|request| request.url().host_str().unwrap_or("unknown").to_owned()),
+        Arc::new(move |_| remote_dispatch.clone()),
+    ));
     state.codex_sessions = Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(storage.clone(),storage.clone(),clock.clone()));
     state.storage = storage.clone();
     state.clock = clock;
     RemoteFixture { dynamic_view:state.dynamic_view.clone(),drain:state.drain_controller.clone(),
-        router:proxy_router(state,timeout_secs),storage,dispatch,bus,access:access.plaintext,renewal:renewal.plaintext }
+        router:proxy_router(state.clone(),timeout_secs),state,storage,dispatch,bus,access:access.plaintext,renewal:renewal.plaintext }
 }
 
 fn remote_request(method: &str, path: &str, credential: &str, body: Body) -> Request<Body> {
@@ -222,6 +228,42 @@ async fn remote_runtime_preserves_provider_401_without_local_auth_recovery() {
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(response.into_body().collect().await.unwrap().to_bytes(),"unaltered provider refusal");
     assert_eq!(fixture.dispatch.requests.lock().unwrap().len(),2);
+}
+
+
+#[tokio::test]
+async fn remote_http_revocation_while_queued_prevents_provider_send() {
+    let fixture = remote_fixture().await;
+    let relay = enroll(&fixture).await;
+    let registry = Arc::new(BulkheadRegistry::new());
+    let mut config = fixture.state.websocket_bulkhead_config;
+    config.semaphore_permits = 1;
+    let provider = fixture.dispatch.clone();
+    let bulkhead = registry.bulkhead_with_dispatcher("queued-owner", config, provider.clone());
+    let permit = bulkhead.acquire_owned().await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_for_dispatch = entered.clone();
+    let queued = Arc::new(BulkheadDispatch::with_dispatcher_factory(
+        registry, config, Arc::new(move |_| {
+            entered_for_dispatch.notify_one();
+            "queued-owner".to_owned()
+        }), Arc::new(move |_| provider.clone()),
+    ));
+    let mut state = fixture.state.clone();
+    state.remote_control_dispatch = queued.clone();
+    let request = proxy_router(state, 30).oneshot(remote_request(
+        "POST", codex_remote_control::PAIR, &relay, Body::from(r#"{"manual_code":false}"#),
+    ));
+    tokio::pin!(request);
+    tokio::select! {
+        response = &mut request => panic!("request escaped occupied bulkhead: {:?}", response.unwrap().status()),
+        _ = entered.notified() => {}
+    }
+    fixture.storage.revoke_session_family("family", "renewal", 100).await.unwrap();
+    drop(permit);
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(fixture.dispatch.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

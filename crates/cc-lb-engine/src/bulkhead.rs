@@ -290,7 +290,10 @@ impl BulkheadDispatch {
         }
     }
 
-    fn bulkhead_for(&self, request: &SignedRequest) -> Arc<Bulkhead> {
+    /// Select the same admission gate and provider client used by `dispatch`.
+    /// Callers performing authorization after admission must hold its guard
+    /// while invoking `client`, rather than entering `execute` a second time.
+    pub fn bulkhead_for(&self, request: &SignedRequest) -> Arc<Bulkhead> {
         let upstream_name = (self.upstream_name)(request);
         let config = self.config;
         let dispatcher_factory = Arc::clone(&self.dispatcher_factory);

@@ -1500,7 +1500,7 @@ async fn build_app_with_storage_inner(
         AnthropicKeepaliveDispatcher::new(
             Arc::clone(&dynamic_view_holder),
             Arc::clone(&stores.upstreams),
-            Arc::clone(&dispatcher),
+            dispatcher.clone(),
             clock.clone(),
         )
         .with_timeout(Duration::from_secs(
@@ -2304,7 +2304,7 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
 
 #[derive(Clone)]
 struct ProxyState {
-    remote_control_dispatch: Arc<dyn UpstreamDispatch>,
+    remote_control_dispatch: Arc<BulkheadDispatch>,
     remote_control_websocket: codex_remote_control::WebSocketClient,
     codex_sessions: Arc<cc_lb_engine::codex_sessions::CodexSessionService>,
     lifecycle: Arc<Lifecycle>,
@@ -4604,7 +4604,7 @@ fn dispatcher(
     config: &Config,
     clock: ClockHandle,
 ) -> (
-    Arc<dyn UpstreamDispatch>,
+    Arc<BulkheadDispatch>,
     Arc<BreakerRegistry>,
     BreakerRuntimeConfig,
     Arc<BulkheadRegistry>,
@@ -5976,7 +5976,7 @@ mod tests {
             .with_event_bus(bus as Arc<dyn RequestEventBus>),
         );
         let state = ProxyState {
-            remote_control_dispatch: make_default_dispatcher(50),
+            remote_control_dispatch: dispatcher(&Config::default(), clock.clone()).0,
             remote_control_websocket: codex_remote_control::WebSocketClient::new(),
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
                 Arc::new(storage.clone()),
@@ -6447,7 +6447,7 @@ mod tests {
             clock.clone(),
         ));
         ProxyState {
-            remote_control_dispatch: make_default_dispatcher(50),
+            remote_control_dispatch: dispatcher(&Config::default(), clock.clone()).0,
             remote_control_websocket: codex_remote_control::WebSocketClient::new(),
             codex_sessions: Arc::new(cc_lb_engine::codex_sessions::CodexSessionService::new(
                 storage.clone(),
