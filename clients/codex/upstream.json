@@ -6,13 +6,23 @@
   "annotated_tag_object": "a41fe5b443652cbdbee57717fbb9fd78d8d8b32a",
   "verification": "Official upstream HTTPS clone; commit, tree and annotated tag target were checked with git object commands. The tag is not treated as a signed vendor identity assertion.",
   "patch": "cc-lb-local-session.patch",
-  "patch_sha256": "09a3d67e08de37c626ee09b6d1593a77443e36cec4d73732775e4088237d6553",
-  "patch_files": 121,
+  "patch_sha256": "7f2710b08cece97bafb7006af3955dcc191c5135240ea66d3f0060731360a6e3",
+  "patch_files": 122,
   "source_preparation": "bash clients/codex/prepare-source.sh /absolute/new/isolated/source-directory",
   "build": "bash clients/codex/build.sh /absolute/isolated/source-directory",
   "install": "bash clients/codex/build.sh /absolute/isolated/source-directory /absolute/new/install-path/codex",
   "patch_regeneration": "bash clients/codex/export-patch.sh /absolute/patched/source-directory",
   "toolchain": "Rust 1.95.0, as pinned by upstream codex-rs/rust-toolchain.toml",
+  "lockfile_resolution": "Cargo reconciled workspace package versions 0.0.0 to pinned manifest 0.169.0 and the three added dependency edges. Parsed comparison found zero external package additions, removals, or changed records. Subsequent --locked check reached dependency compilation.",
+  "fetch_transport": "CARGO_NET_GIT_FETCH_WITH_CLI=true; certificate validation remains enabled. Initial libgit2 SecureTransport/submodule timeout was bypassed by using system git, not by weakening TLS. Package-scoped codex-login still resolves root rusty_v8 workspace patch. The next check timed out at 1800 seconds during cold dependency compilation, not a Rust PASS.",
+  "compiler_status": "Locked codex-login library check, 19 local-session unit tests, four remote-control URL tests, and the full locked codex-cli release build passed. Isolated --version, login --help, and remote-control --help smoke passed. Actual-client server/provider acceptance remains pending.",
+  "verified_build": {
+    "platform": "aarch64-apple-darwin",
+    "binary_sha256": "b7e6f44c13b3970ce5127f16cd986509308492abf7e4f5d675e84c901090a158",
+    "version_output": "codex-cli 0.169.0",
+    "profile": "release",
+    "cargo_locked": true
+  },
   "package": "codex-cli",
   "binary": "codex",
   "build_output": "<isolated-source>/codex-rs/target/release/codex (unless CARGO_TARGET_DIR is explicitly configured)",
@@ -26,13 +36,15 @@
     "fields": ["session_id", "access_token", "renewal_token", "token_type", "expires_at", "session_expires_at", "origin", "account_id", "user_id", "workspace_generation"],
     "metadata": "The runtime id_token is the actual local access token, never a generated vendor identity. Issuer, user and workspace metadata must match the stored record.",
     "renewal": "POST {origin}/oauth/token, Authorization: Bearer <renewal_token>, body {\"grant_type\":\"refresh_token\",\"expected_workspace_generation\":<stored u64>}; the response is committed only if the stored session is unchanged.",
-    "workspace_switch": "POST {origin}/backend-api/accounts/switch-workspace-token with the access bearer; response {access_token, workspace_generation} must carry a higher generation and matching local metadata. Rollback is a reverse exchange.",
+    "workspace_discovery": "Local-only GET {origin}/backend-api/cc-lb/workspaces, access Authorization, no query/body selectors, semantic Cache-Control no-store; response session_id/workspace_generation/selected_workspace_id/workspaces[{workspace_id}] must match the captured private session. Existing upstream account-session list, pre-switch target check and post-switch routing consume this helper. Unknown future JSON fields are allowed; aliases remain opaque.",
+    "workspace_switch": "POST {origin}/backend-api/accounts/switch-workspace-token with the access bearer after dedicated local discovery permits the target; response {access_token, workspace_generation} must carry a higher generation and matching local metadata. Exact-session CAS and upstream auth-state generation checks reject A-to-B-to-A stale responses. Routing revalidates the current local discovery. Rollback is a fresh reverse exchange, never old credential restoration. Lost switch-response reconciliation is not guaranteed and must not be reported as success.",
     "revocation": "POST {origin}/oauth/revoke, Authorization: Bearer <renewal_token>, body {}; only 204 counts as server-confirmed. codex logout exits non-zero when the session was erased locally without confirmation."
   },
   "destinations": {
     "responses_base": "{origin}/backend-api/codex",
     "account_cloud_remote_control_base": "{origin}/backend-api",
     "apps_mcp": "{origin}/backend-api/ps/mcp",
+    "local_workspace_discovery": "{origin}/backend-api/cc-lb/workspaces",
     "renewal": "{origin}/oauth/token",
     "revocation": "{origin}/oauth/revoke"
   },
@@ -58,5 +70,12 @@
     "cd <isolated-source>/codex-rs && cargo test --locked -p codex-core config",
     "cd <isolated-source>/codex-rs && cargo test --locked -p codex-cli -p codex-tui"
   ],
-  "support_status": "Maintained source patch, not stock CLI support and not an upstream release. The patch has never been compiled, formatted, linted or tested; Cargo.lock and the app-server protocol schema files were edited by hand and need generator parity checks. TLS recorder runs, real client runs and the full inventory acceptance are pending."
+  "dependency_fetch_status": {
+    "parent_check": "bg88 cargo check --locked --lib -p codex-login ended at TIMEOUT1800 during Chromium/V8 upstream submodule resolution; there is no compilation verdict.",
+    "cause": "The pinned upstream root [patch.crates-io] entry for rusty_v8 revision 90a65f forces workspace dependency/submodule resolution even for codex-login, which has no direct V8/WebRTC dependency.",
+    "next_parent_diagnosis": "bg108 with CARGO_NET_GIT_FETCH_WITH_CLI=true progressed through pinned Chromium/V8 and other git dependencies without the prior SecureTransport failure, then cargo check --locked failed because the maintained manifest graph requires an updated Cargo.lock. There is no compilation verdict. The patch contains hand-written dependency edges only; parent owns minimal offline lock resolution, final re-export/checksum and Q-ACCEPT reproducible build.",
+    "manifest_additions": ["config/Cargo.toml: url workspace dependency", "cloud-tasks/Cargo.toml: codex-config workspace dependency", "login/Cargo.toml: Windows-only codex-uds workspace dependency"],
+    "prohibited_workarounds": "No dependency/feature removal, TLS weakening, or alternate source pin."
+  },
+  "support_status": "Maintained source patch, not stock CLI support and not an upstream release. This worker ran no build/test/lint/formatter. Parent dependency fetch first timed out, then system-git fetch progressed but --locked reported a lockfile update requirement before compilation. Cargo.lock and app-server protocol schema files were edited by hand and require parent reconciliation. TLS recorder, real client and full-inventory acceptance remain pending."
 }

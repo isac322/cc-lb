@@ -18,7 +18,7 @@ trap 'rm -f -- "$output"' EXIT
 git -C "$source_dir" -c core.quotePath=false diff --binary --full-index --no-color --no-ext-diff \
   --src-prefix=a/ --dst-prefix=b/ "$commit" -- . >"$output"
 [[ -s $output ]]
-chmod 644 -- "$output"
-mv -- "$output" "$script_dir/cc-lb-local-session.patch"
+chmod 644 "$output"
+mv "$output" "$script_dir/cc-lb-local-session.patch"
 trap - EXIT
 printf 'Wrote %s\n' "$script_dir/cc-lb-local-session.patch"

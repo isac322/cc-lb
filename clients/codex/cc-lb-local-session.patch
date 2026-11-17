@@ -1,7 +1,300 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index d719a520b78e32c58f4ccc5581a527044a368d6f..f6a94c3486b875d9a6960252142028374d1e1b30 100644
+index d719a520b78e32c58f4ccc5581a527044a368d6f..37209fbe496217b8ca8e5e12d78b3a0b3f893f46 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
+@@ -287,7 +287,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1888,7 +1888,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1900,7 +1900,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1915,7 +1915,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1935,7 +1935,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-message-board-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -1958,7 +1958,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-message-board-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-agent-message-board-client",
+  "codex-config",
+@@ -1977,7 +1977,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-message-board-host"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "chrono",
+  "codex-agent-message-board-client",
+@@ -1994,7 +1994,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-roles"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-config",
+  "codex-file-system",
+@@ -2007,7 +2007,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-features",
+@@ -2035,7 +2035,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "ansi-to-tui",
+  "pretty_assertions",
+@@ -2046,7 +2046,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2084,7 +2084,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2205,7 +2205,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2238,7 +2238,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "blake3",
+@@ -2268,7 +2268,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2303,11 +2303,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.169.0"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2330,7 +2330,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2378,7 +2378,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2398,7 +2398,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2421,7 +2421,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "rand 0.9.3",
+@@ -2431,7 +2431,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-attachment-store"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde",
+@@ -2441,7 +2441,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2467,7 +2467,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2494,7 +2494,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2503,7 +2503,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2516,7 +2516,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2525,7 +2525,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2553,7 +2553,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2658,7 +2658,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2672,7 +2672,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "async-stream",
+@@ -2698,7 +2698,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2726,7 +2726,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
 @@ -2736,6 +2736,7 @@ dependencies = [
   "codex-backend-client",
   "codex-cloud-tasks-client",
@@ -10,6 +303,74 @@ index d719a520b78e32c58f4ccc5581a527044a368d6f..f6a94c3486b875d9a696025214202837
   "codex-core",
   "codex-features",
   "codex-git-utils",
+@@ -2768,7 +2769,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2783,7 +2784,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2792,7 +2793,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2816,7 +2817,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2847,7 +2848,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2865,7 +2866,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2887,11 +2888,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.169.0"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
 @@ -2937,6 +2938,7 @@ dependencies = [
   "tonic-prost",
   "tonic-prost-build",
@@ -18,6 +379,393 @@ index d719a520b78e32c58f4ccc5581a527044a368d6f..f6a94c3486b875d9a696025214202837
   "wildmatch",
   "winapi-util",
   "windows-sys 0.61.2",
+@@ -2945,7 +2947,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-config-schema"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2954,7 +2956,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2976,7 +2978,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2990,7 +2992,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-protocol-test-support",
+@@ -3001,7 +3003,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3155,7 +3157,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -3179,7 +3181,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugin-common"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "semver",
+@@ -3190,7 +3192,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3251,7 +3253,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3259,7 +3261,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-direct-tool-timing"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-critical-path",
+  "pretty_assertions",
+@@ -3270,7 +3272,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3324,7 +3326,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3396,7 +3398,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-cli"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -3440,7 +3442,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3458,7 +3460,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3473,7 +3475,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "caseless",
+@@ -3493,7 +3495,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3502,7 +3504,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-api",
+  "codex-config",
+@@ -3525,7 +3527,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3537,7 +3539,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3568,7 +3570,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-network-proxy",
+  "codex-protocol",
+@@ -3582,7 +3584,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3610,7 +3612,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3626,7 +3628,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3640,7 +3642,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3651,7 +3653,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3667,7 +3669,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3695,7 +3697,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3720,7 +3722,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-context"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-context-fragments",
+  "codex-history",
+@@ -3734,7 +3736,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-reviewer"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3771,7 +3773,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3813,7 +3815,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v3"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3844,7 +3846,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3858,7 +3860,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history-notes-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-client",
+@@ -3884,7 +3886,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3896,7 +3898,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3925,7 +3927,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3965,7 +3967,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3997,7 +3999,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -4010,7 +4012,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "keyring",
+  "pretty_assertions",
+@@ -4021,7 +4023,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -4053,7 +4055,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -4067,7 +4069,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
 @@ -4081,6 +4083,7 @@ dependencies = [
   "codex-protocol",
   "codex-secrets",
@@ -26,6 +774,792 @@ index d719a520b78e32c58f4ccc5581a527044a368d6f..f6a94c3486b875d9a696025214202837
   "codex-utils-cargo-bin",
   "codex-utils-path",
   "codex-utils-process",
+@@ -4116,7 +4119,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -4167,7 +4170,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4200,7 +4203,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -4222,7 +4225,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4232,7 +4235,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4271,7 +4274,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mermaid"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "insta",
+  "pretty_assertions",
+@@ -4280,7 +4283,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-board"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "caseless",
+@@ -4305,7 +4308,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-board-mcp"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4333,7 +4336,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -4347,7 +4350,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4387,7 +4390,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-client",
+  "codex-http-client",
+@@ -4405,7 +4408,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "chrono",
+  "codex-http-client",
+@@ -4424,7 +4427,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-multi-env-copy-file"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-config",
+@@ -4450,7 +4453,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mxc-sandbox"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-network-proxy",
+@@ -4471,7 +4474,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "aws-credential-types",
+@@ -4522,7 +4525,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -4542,7 +4545,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "bytes",
+  "chrono",
+@@ -4580,7 +4583,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel-trace-websocket"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4591,7 +4594,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-config",
+  "codex-core-plugin-common",
+@@ -4606,7 +4609,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin-host"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-cargo-bin",
+  "codex-utils-process",
+@@ -4623,7 +4626,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4631,7 +4634,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-collaboration-mode-templates",
+@@ -4649,7 +4652,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4695,7 +4698,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol-test-support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "uuid",
+@@ -4703,7 +4706,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4724,7 +4727,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-realtime-webrtc"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-build-info",
+@@ -4743,7 +4746,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4754,7 +4757,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -4778,7 +4781,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4830,7 +4833,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4863,7 +4866,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4880,7 +4883,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-runtime-agent-instance"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "bytes",
+@@ -4909,7 +4912,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-mxc-sandbox",
+@@ -4937,7 +4940,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4958,7 +4961,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4981,7 +4984,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4998,7 +5001,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "assert_matches",
+  "blake3",
+@@ -5038,7 +5041,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -5067,7 +5070,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -5079,7 +5082,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tcp-tunnel"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5101,7 +5104,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -5109,7 +5112,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -5117,7 +5120,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -5128,7 +5131,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "caseless",
+  "chrono",
+@@ -5161,7 +5164,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-attachment-store",
+@@ -5187,7 +5190,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -5319,7 +5322,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "async-io",
+  "libc",
+@@ -5333,7 +5336,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-user-verification"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "block2",
+@@ -5354,7 +5357,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -5368,14 +5371,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -5389,7 +5392,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -5398,7 +5401,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -5407,7 +5410,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -5419,22 +5422,22 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-critical-path"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.169.0"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.169.0"
+ 
+ [[package]]
+ name = "codex-utils-git-discovery"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-git-utils",
+  "codex-utils-absolute-path",
+@@ -5447,14 +5450,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-head-tail-buffer"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -5464,7 +5467,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -5478,7 +5481,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -5487,7 +5490,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-model-facing-id"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "blake3",
+  "pretty_assertions",
+@@ -5500,7 +5503,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -5510,7 +5513,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -5520,7 +5523,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -5531,7 +5534,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -5547,7 +5550,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -5561,7 +5564,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-process"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -5569,7 +5572,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-utils-cargo-bin",
+@@ -5588,7 +5591,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -5598,7 +5601,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-redacted-string"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "schemars 0.8.22",
+  "serde",
+@@ -5606,14 +5609,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -5623,7 +5626,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -5633,14 +5636,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -5650,14 +5653,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -5665,7 +5668,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-voice-host"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -5692,7 +5695,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -5716,7 +5719,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-auth"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5735,7 +5738,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -5751,7 +5754,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5782,7 +5785,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox-service"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-cloud-config",
+@@ -5800,14 +5803,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox-test-support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "dirs",
+ ]
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5822,7 +5825,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-worktree"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "codex-git-utils",
+@@ -6075,7 +6078,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.169.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
 diff --git a/codex-rs/app-server-client/src/cloud_backend/auth.rs b/codex-rs/app-server-client/src/cloud_backend/auth.rs
 index bd0f293d040388a750d2bc7bbb5700f5a5485398..84f13411000868a8c1f449ef5827d1404a23ea08 100644
 --- a/codex-rs/app-server-client/src/cloud_backend/auth.rs
@@ -991,7 +2525,7 @@ index 1d32b0c0b3b93abab930e8cf753db4daae3dfa3b..d8c612b70d249184f7f9a75371f76307
  
      serde_json::from_slice::<Response>(&body).map_err(|err| {
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs b/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
-index d5451c664569c4c009f39a6d4788c42230fc8457..5be5ab6d42606a469e7b582237ac09529567653a 100644
+index d5451c664569c4c009f39a6d4788c42230fc8457..a14549c076799f7d9f91cf63ce520c669e1dd80c 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
 @@ -599,8 +599,8 @@ impl RemoteControlWebsocket {
@@ -1005,7 +2539,19 @@ index d5451c664569c4c009f39a6d4788c42230fc8457..5be5ab6d42606a469e7b582237ac0952
          ) {
              Ok(remote_control_target) => remote_control_target,
              Err(err) => {
-@@ -1553,12 +1553,30 @@ pub(super) async fn connect_remote_control_websocket(
+@@ -703,7 +703,10 @@ impl RemoteControlWebsocket {
+             .publish_status(RemoteControlConnectionStatus::Connecting);
+         let remote_control_target = match self.remote_control_target.as_ref() {
+             Some(remote_control_target) => remote_control_target.clone(),
+-            None => match super::protocol::normalize_remote_control_url(&self.remote_control_url) {
++            None => match super::protocol::normalize_remote_control_url_with_cc_lb_origin(
++                &self.remote_control_url,
++                self.auth_manager.cc_lb_origin(),
++            ) {
+                 Ok(remote_control_target) => {
+                     self.remote_control_target = Some(remote_control_target.clone());
+                     remote_control_target
+@@ -1553,12 +1556,30 @@ pub(super) async fn connect_remote_control_websocket(
                  tungstenite::Error::Http(response)
                      if matches!(response.status().as_u16(), 401 | 403) =>
                  {
@@ -1041,7 +2587,7 @@ index d5451c664569c4c009f39a6d4788c42230fc8457..5be5ab6d42606a469e7b582237ac0952
                  }
                  _ => {}
              }
-@@ -1695,6 +1713,7 @@ async fn prepare_remote_control_enrollment(
+@@ -1695,6 +1716,7 @@ async fn prepare_remote_control_enrollment(
                  .await?;
              }
              Err(err) if super::auth::is_auth_error(&err) => {
@@ -1049,7 +2595,7 @@ index d5451c664569c4c009f39a6d4788c42230fc8457..5be5ab6d42606a469e7b582237ac0952
                  if recover_remote_control_auth(
                      auth_context.auth_recovery,
                      auth_context.auth_change_rx,
-@@ -1820,6 +1839,7 @@ async fn enroll_and_persist_remote_control_server(
+@@ -1820,6 +1842,7 @@ async fn enroll_and_persist_remote_control_server(
          Ok(new_enrollment) => new_enrollment,
          Err(err)
              if super::auth::is_auth_error(&err)
@@ -1099,7 +2645,7 @@ index 92fb15278783b98c8d1237d0fde25bd8e620f127..1fac9a712d8841c7a3a17168456a8a10
              assert_eq!(workspace_messages_feature_disabled(&err), expected);
          }
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs b/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
-index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..b66c7089df65d61c5929cd7e89502a52db92228e 100644
+index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..ea978537f9043df479da9bdf00ce9bec45e75927 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
 @@ -52,6 +52,7 @@ pub(super) struct AccountRead {
@@ -1121,7 +2667,59 @@ index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..b66c7089df65d61c5929cd7e89502a52
          }
          Ok(Some(
              GetAccountResponse {
-@@ -430,7 +432,7 @@ impl AccountRequestProcessor {
+@@ -351,7 +353,50 @@ impl AccountRequestProcessor {
+                     )
+                 })
+                 .and_then(CodexAuth::get_chatgpt_user_id);
+-            let mut workspace_routing = if let Some((auth, account_id)) = auth
++            let mut workspace_routing = if self.auth_manager.cc_lb_config().is_some() {
++                if let Some((auth, account_id)) = auth
++                    .as_ref()
++                    .and_then(|auth| auth.get_account_id().map(|account_id| (auth, account_id)))
++                {
++                    if account_id.is_empty() {
++                        return Err(WorkspaceRoutingError::MissingAccountId.into());
++                    }
++                    let profile = self
++                        .auth_manager
++                        .cc_lb_config()
++                        .ok_or(WorkspaceRoutingError::DiscoveryFailed)?;
++                    let discovery = codex_login::cc_lb::list_workspaces(
++                        &self.config.codex_home,
++                        profile,
++                        &self.config.auth_route_config(),
++                        &auth.get_token().map_err(|_| WorkspaceRoutingError::AccountChanged)?,
++                    )
++                    .await
++                    .map_err(|_| WorkspaceRoutingError::DiscoveryFailed)?;
++                    if discovery.selected_workspace_id != account_id
++                        || auth.get_chatgpt_user_id().is_none()
++                        || current_auth_changes.borrow().generation != auth_state.generation
++                    {
++                        return Err(WorkspaceRoutingError::AccountChanged.into());
++                    }
++                    Some(CachedWorkspaceRouting {
++                        key: WorkspaceRoutingKey {
++                            auth_generation: auth_state.generation,
++                            chatgpt_account_id: account_id,
++                            effective_chatgpt_base_url: config.chatgpt_base_url.clone(),
++                            required_chatgpt_base_url: None,
++                        },
++                        routing: WorkspaceRouting {
++                            chatgpt_account_id: discovery.selected_workspace_id,
++                            backend_origin: profile.origin.clone(),
++                            account_routing_override: "NO_CONSTRAINT".to_owned(),
++                        },
++                        name: None,
++                    })
++                } else {
++                    None
++                }
++            } else if let Some((auth, account_id)) = auth
+                 .as_ref()
+                 .filter(|auth| {
+                     auth.is_chatgpt_auth()
+@@ -430,7 +475,7 @@ impl AccountRequestProcessor {
                          match client.get_accounts_check().await {
                              Ok(response) => break response,
                              Err(error) => {
@@ -1130,7 +2728,7 @@ index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..b66c7089df65d61c5929cd7e89502a52
                                  if unauthorized && recovery.has_next() {
                                      let result = recovery.next().await;
                                      let refreshed = *current_auth_changes.borrow();
-@@ -559,6 +561,8 @@ impl AccountRequestProcessor {
+@@ -559,6 +604,8 @@ impl AccountRequestProcessor {
                  user_id,
                  workspace_routing,
                  workspace_name,
@@ -1139,6 +2737,151 @@ index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..b66c7089df65d61c5929cd7e89502a52
              })
          });
          let result = tokio::select! {
+diff --git a/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs b/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
+index accb05129832b12d02695b1b950bd8d2359c22df..5fb29c3f5dbac1306c694cc499b1e2deacddcf17 100644
+--- a/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
++++ b/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
+@@ -15,7 +15,7 @@ impl AccountRequestProcessor {
+         &self,
+         params: AccountSessionsListParams,
+     ) -> Result<AccountSessionsResponse, JSONRPCErrorError> {
+-        let auth = if params.refresh_workspace_metadata {
++        let auth = if params.refresh_workspace_metadata || self.auth_manager.cc_lb_config().is_some() {
+             self.auth_manager.auth().await
+         } else {
+             self.auth_manager.auth_cached()
+@@ -30,17 +30,55 @@ impl AccountRequestProcessor {
+                 sessions: vec![],
+             });
+         };
+-        let account_id = auth.get_account_id();
+-        let mut workspaces = account_id
+-            .iter()
+-            .map(|id| AccountSessionWorkspace {
+-                account_id: id.clone(),
+-                name: None,
+-                image_url: None,
+-                kind: None,
++        let auth_changes = self.auth_manager.auth_change_state_receiver();
++        let captured_generation = auth_changes.borrow().generation;
++        let local_discovery = if let Some(profile) = self.auth_manager.cc_lb_config() {
++            Some(
++                codex_login::cc_lb::list_workspaces(
++                    &self.config.codex_home,
++                    profile,
++                    &self.config.auth_route_config(),
++                    &auth.get_token().map_err(|_| internal_error("Local session is unavailable"))?,
++                )
++                .await
++                .map_err(|_| internal_error("Failed to fetch local workspace metadata"))?,
++            )
++        } else {
++            None
++        };
++        if local_discovery.is_some() && auth_changes.borrow().generation != captured_generation {
++            return Err(invalid_request("Authentication changed while listing account sessions"));
++        }
++        let account_id = local_discovery
++            .as_ref()
++            .map(|discovery| discovery.selected_workspace_id.clone())
++            .or_else(|| auth.get_account_id());
++        let mut workspaces = local_discovery
++            .as_ref()
++            .map(|discovery| {
++                discovery
++                    .workspaces
++                    .iter()
++                    .map(|workspace| AccountSessionWorkspace {
++                        account_id: workspace.workspace_id.clone(),
++                        name: None,
++                        image_url: None,
++                        kind: None,
++                    })
++                    .collect::<Vec<_>>()
+             })
+-            .collect();
+-        if params.refresh_workspace_metadata {
++            .unwrap_or_else(|| {
++                account_id
++                    .iter()
++                    .map(|id| AccountSessionWorkspace {
++                        account_id: id.clone(),
++                        name: None,
++                        image_url: None,
++                        kind: None,
++                    })
++                    .collect()
++            });
++        if local_discovery.is_none() && params.refresh_workspace_metadata {
+             let accounts = self.workspace_memberships(&auth).await?;
+             workspaces = accounts
+                 .accounts
+@@ -132,12 +170,57 @@ impl AccountRequestProcessor {
+             .as_deref()
+             == Some(&params.account_id)
+         {
++            let auth_changes = self.auth_manager.auth_change_state_receiver();
++            let captured_generation = auth_changes.borrow().generation;
++            let expected_auth = self
++                .auth_manager
++                .auth_cached()
++                .ok_or_else(|| invalid_request("Authentication is unavailable"))?;
++            if let Some(profile) = self.auth_manager.cc_lb_config() {
++                let discovery = codex_login::cc_lb::list_workspaces(
++                    &self.config.codex_home,
++                    profile,
++                    &self.config.auth_route_config(),
++                    &expected_auth.get_token().map_err(|_| invalid_request("Local session is unavailable"))?,
++                )
++                .await
++                .map_err(|_| invalid_request("Failed to fetch local workspace metadata"))?;
++                if !discovery
++                    .workspaces
++                    .iter()
++                    .any(|candidate| candidate.workspace_id == params.account_id)
++                {
++                    return Err(invalid_request("The selected workspace is unavailable"));
++                }
++                if auth_changes.borrow().generation != captured_generation {
++                    return Err(invalid_request("Authentication changed during workspace discovery"));
++                }
++            }
+             return self.account_session_switch_response(&params).await;
+         }
+         let auth = self
+             .auth_manager
+             .auth_cached()
+             .ok_or_else(|| invalid_request("Authentication is unavailable"))?;
++        if let Some(profile) = self.auth_manager.cc_lb_config() {
++        let auth_changes = self.auth_manager.auth_change_state_receiver();
++        let captured_generation = auth_changes.borrow().generation;
++            let discovery = codex_login::cc_lb::list_workspaces(
++                &self.config.codex_home,
++                profile,
++                &self.config.auth_route_config(),
++                &auth.get_token().map_err(|_| invalid_request("Local session is unavailable"))?,
++            )
++            .await
++            .map_err(|_| invalid_request("Failed to fetch local workspace metadata"))?;
++            if discovery.session_id != params.session_id
++                || auth_changes.borrow().generation != captured_generation
++                || !discovery.workspaces.iter().any(|candidate| candidate.workspace_id == params.account_id)
++            {
++                return Err(invalid_request("The selected workspace is unavailable"));
++            }
++        }
++        if self.auth_manager.cc_lb_config().is_none() {
+         let memberships = self.workspace_memberships(&auth).await?;
+         let mut matches = memberships
+             .accounts
+@@ -185,6 +268,7 @@ impl AccountRequestProcessor {
+             let (login_id, auth_url) = self.start_browser_login(opts, Some(pause)).await?;
+             return Ok(AccountSessionsSwitchResponse::BrowserLogin { login_id, auth_url });
+         }
++        }
+         let _pause = admission.pause().await?;
+         threads.unload_for_workspace_switch().await?;
+         let switched = self
 diff --git a/codex-rs/app-server/tests/suite/auth.rs b/codex-rs/app-server/tests/suite/auth.rs
 index 4f8118ec2b8053041f1c75bbb04011fb57b4886d..2fa0b8145e6ddb7550ff0ae8b8cb506bf5e5cbd5 100644
 --- a/codex-rs/app-server/tests/suite/auth.rs
@@ -4423,7 +6166,7 @@ index 47274c8b8f4867092bd5f9d626075cdaf43f533e..2ee12100f22ce0af5fe7b4e926e49844
  pub use crate::chatgpt_hosts::is_allowed_chatgpt_host;
  pub use crate::chatgpt_routing_affinity::ChatGptRoutingAffinity;
 diff --git a/codex-rs/http-client/src/outbound_proxy.rs b/codex-rs/http-client/src/outbound_proxy.rs
-index 81e2b1fea289daca1665cc0aa9810a4bf6871ab7..756612d1323837cbb7aafd47c2f566f492f0c982 100644
+index 81e2b1fea289daca1665cc0aa9810a4bf6871ab7..c4c36694ee8df7a62f900f5738f9bb3a9ee0109f 100644
 --- a/codex-rs/http-client/src/outbound_proxy.rs
 +++ b/codex-rs/http-client/src/outbound_proxy.rs
 @@ -168,6 +168,7 @@ pub struct HttpClientFactory {
@@ -4442,16 +6185,15 @@ index 81e2b1fea289daca1665cc0aa9810a4bf6871ab7..756612d1323837cbb7aafd47c2f566f4
              && self.network_policy == other.network_policy
              && self
                  .chatgpt_cookie_store
-@@ -209,7 +211,7 @@ impl HttpClientFactory {
+@@ -209,6 +211,7 @@ impl HttpClientFactory {
              outbound_proxy_policy,
              system_proxy_fallback: false,
              protect_sensitive_headers: false,
--            chatgpt_cookie_store: None,
 +            reject_redirects: false,
+             chatgpt_cookie_store: None,
              network_policy: NetworkPolicy::unmanaged(),
          }
-     }
-@@ -226,6 +228,15 @@ impl HttpClientFactory {
+@@ -226,6 +229,15 @@ impl HttpClientFactory {
          self.protect_sensitive_headers
      }
  
@@ -4781,10 +6523,26 @@ index 03ee83418d17a428195d529c0caffbbb6b01d092..6f20f250891d0fe4e1b47d45c4539dc6
  
  [dev-dependencies]
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..e24df6cfe0a044c882c81f70f31ee5749a88a52a 100644
+index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..64b6288522457ea1b1cf1791bed3b0bcf3366199 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
-@@ -2277,6 +2277,7 @@ async fn build_config(
+@@ -1383,6 +1383,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
+         step: UnauthorizedRecoveryStep::Reload,
+         expected_account_id: None,
+         mode: UnauthorizedRecoveryMode::Managed,
++        cc_lb_http_authorized: false,
+     };
+     assert_eq!(managed.mode_name(), "managed");
+     assert_eq!(managed.step_name(), "reload");
+@@ -1392,6 +1393,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
+         step: UnauthorizedRecoveryStep::ExternalRefresh,
+         expected_account_id: None,
+         mode: UnauthorizedRecoveryMode::External,
++        cc_lb_http_authorized: false,
+     };
+     assert_eq!(external.mode_name(), "external");
+     assert_eq!(external.step_name(), "external_refresh");
+@@ -2277,6 +2279,7 @@ async fn build_config(
  ) -> AuthConfig {
      AuthConfig {
          codex_home: codex_home.to_path_buf(),
@@ -4792,7 +6550,7 @@ index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..e24df6cfe0a044c882c81f70f31ee574
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::Direct,
          forced_login_method,
-@@ -2372,6 +2373,7 @@ impl AuthManagerConfig for TestAuthManagerConfig {
+@@ -2372,6 +2375,7 @@ impl AuthManagerConfig for TestAuthManagerConfig {
  fn test_auth_manager_config(codex_home: &Path) -> TestAuthManagerConfig {
      TestAuthManagerConfig(AuthConfig {
          codex_home: codex_home.to_path_buf(),
@@ -4800,7 +6558,7 @@ index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..e24df6cfe0a044c882c81f70f31ee574
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::Direct,
          forced_login_method: Some(ForcedLoginMethod::Chatgpt),
-@@ -2955,6 +2957,7 @@ async fn enforce_login_restrictions_logs_out_for_personal_access_token_workspace
+@@ -2955,6 +2959,7 @@ async fn enforce_login_restrictions_logs_out_for_personal_access_token_workspace
  
      let config = AuthConfig {
          codex_home: codex_home.path().to_path_buf(),
@@ -4808,7 +6566,7 @@ index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..e24df6cfe0a044c882c81f70f31ee574
          auth_credentials_store_mode: AuthCredentialsStoreMode::File,
          keyring_backend_kind: AuthKeyringBackendKind::default(),
          forced_login_method: None,
-@@ -3081,6 +3084,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
+@@ -3081,6 +3086,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
  
      let config = AuthConfig {
          codex_home: codex_home.path().to_path_buf(),
@@ -4818,10 +6576,10 @@ index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..e24df6cfe0a044c882c81f70f31ee574
          forced_login_method: None,
 diff --git a/codex-rs/login/src/auth/cc_lb.rs b/codex-rs/login/src/auth/cc_lb.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4aa4f612e0256c8d7e5ef7b65379175448d8fe87
+index 0000000000000000000000000000000000000000..c6d5a8208c48b1e9ff6c5e4869f73a30b3f0df59
 --- /dev/null
 +++ b/codex-rs/login/src/auth/cc_lb.rs
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,626 @@
 +//! Explicit, origin-scoped cc-lb credentials. These are local sessions, not OpenAI identities.
 +
 +use super::manager::ChatgptAuth;
@@ -5269,13 +7027,141 @@ index 0000000000000000000000000000000000000000..4aa4f612e0256c8d7e5ef7b653791754
 +    access_token: String,
 +    workspace_generation: u64,
 +}
++#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
++pub struct LocalWorkspaceAlias {
++    pub workspace_id: String,
++}
 +
-+pub(super) async fn switch_workspace(home: &Path, profile: &CcLbConfig, route: &AuthRouteConfig, expected_access: &str, workspace: &str) -> io::Result<()> {
++#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
++pub struct LocalWorkspaceDiscovery {
++    pub session_id: String,
++    pub workspace_generation: u64,
++    pub selected_workspace_id: String,
++    pub workspaces: Vec<LocalWorkspaceAlias>,
++}
++
++fn response_is_no_store(headers: &http::HeaderMap) -> bool {
++    headers
++        .get_all(http::header::CACHE_CONTROL)
++        .iter()
++        .filter_map(|value| value.to_str().ok())
++        .any(has_no_store_directive)
++}
++
++fn has_no_store_directive(value: &str) -> bool {
++    let mut start = 0;
++    let mut quoted = false;
++    let mut escaped = false;
++    for (offset, character) in value.char_indices() {
++        if escaped {
++            escaped = false;
++        } else if quoted && character == '\\' {
++            escaped = true;
++        } else if character == '"' {
++            quoted = !quoted;
++        } else if character == ',' && !quoted {
++            if value[start..offset].trim().eq_ignore_ascii_case("no-store") {
++                return true;
++            }
++            start = offset + 1;
++        }
++    }
++    !quoted && value[start..].trim().eq_ignore_ascii_case("no-store")
++}
++
++fn validate_workspace_discovery(
++    discovery: &LocalWorkspaceDiscovery,
++    session: &LocalSession,
++) -> io::Result<()> {
++    if discovery.session_id != session.session_id
++        || discovery.workspace_generation != session.workspace_generation
++        || discovery.selected_workspace_id != session.account_id
++    {
++        return Err(invalid_session());
++    }
++    let mut selected_count = 0;
++    let mut seen = std::collections::HashSet::new();
++    for workspace in &discovery.workspaces {
++        if workspace.workspace_id.is_empty()
++            || !seen.insert(&workspace.workspace_id)
++        {
++            return Err(invalid_session());
++        }
++        if workspace.workspace_id == session.account_id {
++            selected_count += 1;
++        }
++    }
++    if selected_count != 1 {
++        return Err(invalid_session());
++    }
++    Ok(())
++}
++
++async fn discover_workspaces(
++    store: &LocalSessionStore,
++    route: &AuthRouteConfig,
++    session: &LocalSession,
++) -> io::Result<LocalWorkspaceDiscovery> {
++    let endpoint = format!("{}/backend-api/cc-lb/workspaces", store.profile.origin);
++    let response = client(route.authentication_factory(&endpoint))
++        .get(&endpoint)
++        .header(
++            http::header::AUTHORIZATION,
++            format!("Bearer {}", session.access_token),
++        )
++        .timeout(Duration::from_secs(30))
++        .send()
++        .await
++        .map_err(|_| io::Error::other("cc-lb-local workspace discovery transport failed"))?;
++    if response.status() != http::StatusCode::OK
++        || response.url().as_str() != endpoint
++        || !response_is_no_store(response.headers())
++    {
++        return Err(io::Error::other("cc-lb-local workspace discovery was rejected"));
++    }
++    let discovery: LocalWorkspaceDiscovery = read_response(response).await?;
++    validate_workspace_discovery(&discovery, session)?;
++    if store.read()?.as_ref() != Some(session) {
++        return Err(io::Error::new(
++            io::ErrorKind::Interrupted,
++            "cc-lb-local session changed during workspace discovery",
++        ));
++    }
++    Ok(discovery)
++}
++
++pub async fn list_workspaces(
++    home: &Path,
++    profile: &CcLbConfig,
++    route: &AuthRouteConfig,
++    expected_access: &str,
++) -> io::Result<LocalWorkspaceDiscovery> {
++    let store = LocalSessionStore::new(home, profile)?;
++    let _operation = store.operation_guard().await?;
++    let session = store.read()?.ok_or_else(invalid_session)?;
++    if session.access_token != expected_access {
++        return Err(io::Error::new(
++            io::ErrorKind::Interrupted,
++            "cc-lb-local session changed before workspace discovery",
++        ));
++    }
++    discover_workspaces(&store, route, &session).await
++}
++
++
++pub(super) async fn switch_workspace(home: &Path, profile: &CcLbConfig, route: &AuthRouteConfig, expected_access: &str, workspace: &str) -> io::Result<AuthDotJson> {
 +    let store = LocalSessionStore::new(home, profile)?;
 +    let _operation = store.operation_guard().await?;
 +    let previous = store.read()?.ok_or_else(invalid_session)?;
 +    if previous.access_token != expected_access {
 +        return Err(io::Error::new(io::ErrorKind::Interrupted, "cc-lb-local session changed before workspace exchange"));
++    }
++    let discovery = discover_workspaces(&store, route, &previous).await?;
++    if !discovery.workspaces.iter().any(|candidate| candidate.workspace_id == workspace) {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "cc-lb-local workspace target is not available",
++        ));
 +    }
 +    let response = client(route.http_client_factory().clone())
 +        .post(format!("{}/backend-api/accounts/switch-workspace-token", store.profile.origin))
@@ -5286,18 +7172,35 @@ index 0000000000000000000000000000000000000000..4aa4f612e0256c8d7e5ef7b653791754
 +        return Err(io::Error::other(format!("cc-lb-local workspace exchange rejected (HTTP {})", response.status())));
 +    }
 +    let updated: WorkspaceResponse = read_response(response).await?;
-+    let metadata = parse_chatgpt_jwt_claims(&updated.access_token).map_err(|_| invalid_session())?;
-+    let expiration = crate::token_data::parse_jwt_expiration(&updated.access_token)
-+        .map_err(|_| invalid_session())?.ok_or_else(invalid_session)?.timestamp();
-+    if updated.workspace_generation <= previous.workspace_generation
-+        || metadata.chatgpt_account_id.as_deref() != Some(workspace)
-+        || metadata.chatgpt_user_id.as_deref() != Some(previous.user_id.as_str())
++    let updated = selected_workspace_session(&store.profile, &previous, &discovery, updated, workspace)?;
++    store.compare_and_write(&previous, &updated)?;
++    updated.auth_json()
++}
++
++fn selected_workspace_session(
++    profile: &CcLbConfig,
++    previous: &LocalSession,
++    discovery: &LocalWorkspaceDiscovery,
++    response: WorkspaceResponse,
++    workspace: &str,
++) -> io::Result<LocalSession> {
++    validate_workspace_discovery(discovery, previous)?;
++    if !discovery.workspaces.iter().any(|candidate| candidate.workspace_id == workspace)
++        || response.workspace_generation <= discovery.workspace_generation
 +    {
 +        return Err(invalid_session());
 +    }
-+    let updated = LocalSession { access_token: updated.access_token, expires_at: expiration,
-+        account_id: workspace.to_owned(), workspace_generation: updated.workspace_generation, ..previous.clone() };
-+    store.compare_and_write(&previous, &updated)
++    let expiration = crate::token_data::parse_jwt_expiration(&response.access_token)
++        .map_err(|_| invalid_session())?.ok_or_else(invalid_session)?.timestamp();
++    let updated = LocalSession {
++        access_token: response.access_token,
++        expires_at: expiration,
++        account_id: workspace.to_owned(),
++        workspace_generation: response.workspace_generation,
++        ..previous.clone()
++    };
++    updated.validate(profile)?;
++    Ok(updated)
 +}
 +
 +#[cfg(test)]
@@ -5305,10 +7208,10 @@ index 0000000000000000000000000000000000000000..4aa4f612e0256c8d7e5ef7b653791754
 +mod tests;
 diff --git a/codex-rs/login/src/auth/cc_lb_tests.rs b/codex-rs/login/src/auth/cc_lb_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..02463367e6aff5c5166f2698cffa06238859cc1a
+index 0000000000000000000000000000000000000000..e818922e6f65a8387e60b018e41f845247423dce
 --- /dev/null
 +++ b/codex-rs/login/src/auth/cc_lb_tests.rs
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,361 @@
 +use super::*;
 +
 +fn profile(origin: &str, name: &str) -> CcLbConfig {
@@ -5483,8 +7386,6 @@ index 0000000000000000000000000000000000000000..02463367e6aff5c5166f2698cffa0623
 +    assert!(manager.agent_identity_auth(crate::AgentIdentityAuthPolicy::ChatGptAuth, codex_protocol::protocol::SessionSource::Cli).await.is_err());
 +    manager.reload().await;
 +    assert_eq!(manager.auth_cached().unwrap().get_token().unwrap(), session.access_token);
-+    let unchanged = manager.switch_workspace(&session.session_id, &session.account_id).await.unwrap();
-+    manager.rollback_workspace_switch(unchanged).await.unwrap();
 +    assert_eq!(LocalSessionStore::new(home.path(), &config).unwrap().read().unwrap(), Some(session.clone()));
 +    let mut recovery = manager.unauthorized_recovery();
 +    assert!(recovery.next().await.is_err());
@@ -5497,6 +7398,31 @@ index 0000000000000000000000000000000000000000..02463367e6aff5c5166f2698cffa0623
 +    assert!(!recovery.authorize_cc_lb_http(None, http::StatusCode::UNAUTHORIZED, &headers));
 +    assert!(!recovery.authorize_cc_lb_http(Some("https://other.example/backend-api/responses"), http::StatusCode::UNAUTHORIZED, &headers));
 +    assert_eq!(manager.auth_cached().unwrap().get_token().unwrap(), session.access_token);
++}
++
++#[tokio::test]
++async fn ordinary_storage_still_requires_refresh_metadata_for_token_access() {
++    let home = tempfile::tempdir().unwrap();
++    let session = fixture("workspace", 1);
++    let mut document = session.auth_json().unwrap();
++    let route = crate::test_support::transport_default_auth_route_config();
++    for has_refresh in [false, true] {
++        document.last_refresh = has_refresh.then(chrono::Utc::now);
++        std::fs::write(home.path().join("auth.json"), serde_json::to_vec(&document).unwrap()).unwrap();
++        let auth = CodexAuth::from_auth_storage(
++            home.path(),
++            codex_config::types::AuthCredentialsStoreMode::File,
++            None,
++            Default::default(),
++            &route,
++        ).await.unwrap().unwrap();
++        assert!(!auth.is_cc_lb_local());
++        if has_refresh {
++            assert_eq!(auth.get_token().unwrap(), session.access_token);
++        } else {
++            assert!(auth.get_token().is_err());
++        }
++    }
 +}
 +
 +#[test]
@@ -5519,6 +7445,133 @@ index 0000000000000000000000000000000000000000..02463367e6aff5c5166f2698cffa0623
 +        })), crate::RefreshTokenError::Transient(_)));
 +    }
 +    assert!(matches!(classify_refresh_error(io::Error::other("401 revoked")), crate::RefreshTokenError::Transient(_)), "messages are never authentication authority");
++}
++
++#[test]
++fn discovery_requires_selected_alias_once_and_accepts_semantic_no_store() {
++    let session = fixture("workspace-a", 3);
++    let valid = LocalWorkspaceDiscovery {
++        session_id: session.session_id.clone(),
++        workspace_generation: session.workspace_generation,
++        selected_workspace_id: session.account_id.clone(),
++        workspaces: vec![
++            LocalWorkspaceAlias { workspace_id: "workspace-a".to_owned() },
++            LocalWorkspaceAlias { workspace_id: "workspace-b".to_owned() },
++        ],
++    };
++    assert!(validate_workspace_discovery(&valid, &session).is_ok());
++    let mut duplicate = valid.clone();
++    duplicate.workspaces.push(LocalWorkspaceAlias { workspace_id: "workspace-a".to_owned() });
++    assert!(validate_workspace_discovery(&duplicate, &session).is_err());
++    let mut headers = http::HeaderMap::new();
++    headers.insert(http::header::CACHE_CONTROL, http::HeaderValue::from_static("private, no-store"));
++    assert!(response_is_no_store(&headers));
++}
++
++fn discovery_for(session: &LocalSession) -> LocalWorkspaceDiscovery {
++    LocalWorkspaceDiscovery {
++        session_id: session.session_id.clone(),
++        workspace_generation: session.workspace_generation,
++        selected_workspace_id: session.account_id.clone(),
++        workspaces: vec![
++            LocalWorkspaceAlias { workspace_id: "workspace-a".to_owned() },
++            LocalWorkspaceAlias { workspace_id: "workspace-b".to_owned() },
++        ],
++    }
++}
++
++#[test]
++fn local_workspace_aliases_are_opaque_and_future_metadata_is_compatible() {
++    let session = fixture("workspace-a", 3);
++    let mut discovery = discovery_for(&session);
++    discovery.workspaces.push(LocalWorkspaceAlias { workspace_id: "opaque / alias".to_owned() });
++    assert!(validate_workspace_discovery(&discovery, &session).is_ok());
++    discovery.workspaces.push(LocalWorkspaceAlias { workspace_id: String::new() });
++    assert!(validate_workspace_discovery(&discovery, &session).is_err());
++    let future = br#"{
++        "session_id":"local-family","workspace_generation":3,
++        "selected_workspace_id":"workspace-a",
++        "workspaces":[{"workspace_id":"workspace-a","future":true}],
++        "future":{"metadata":"ignored"}
++    }"#;
++    let decoded: LocalWorkspaceDiscovery = serde_json::from_slice(future).unwrap();
++    assert!(validate_workspace_discovery(&decoded, &session).is_ok());
++    let duplicate = br#"{"session_id":"x","session_id":"local-family","workspace_generation":3,"selected_workspace_id":"workspace-a","workspaces":[{"workspace_id":"workspace-a"}]}"#;
++    assert!(serde_json::from_slice::<LocalWorkspaceDiscovery>(duplicate).is_err());
++}
++
++#[test]
++fn discovery_rejects_family_generation_current_alias_mismatch_and_missing_selected() {
++    let session = fixture("workspace-a", 3);
++    let valid = discovery_for(&session);
++    let mut wrong_family = valid.clone();
++    wrong_family.session_id = "different-family".to_owned();
++    let mut wrong_generation = valid.clone();
++    wrong_generation.workspace_generation = 1;
++    let mut wrong_alias = valid.clone();
++    wrong_alias.selected_workspace_id = "workspace-b".to_owned();
++    let mut missing = valid.clone();
++    missing.workspaces.remove(0);
++    for invalid in [wrong_family, wrong_generation, wrong_alias, missing] {
++        assert!(validate_workspace_discovery(&invalid, &session).is_err());
++    }
++}
++
++#[test]
++fn workspace_a_b_a_uses_fresh_reverse_response_and_rejects_delayed_snapshots() {
++    let config = profile("https://proxy.example", "default");
++    let original_a = fixture("workspace-a", 1);
++    let issued_b = fixture("workspace-b", 2);
++    let selected_b = selected_workspace_session(
++        &config, &original_a, &discovery_for(&original_a),
++        WorkspaceResponse { access_token: issued_b.access_token, workspace_generation: 2 },
++        "workspace-b",
++    ).unwrap();
++    let fresh_a = fixture("workspace-a", 3);
++    let reversed_a = selected_workspace_session(
++        &config, &selected_b, &discovery_for(&selected_b),
++        WorkspaceResponse { access_token: fresh_a.access_token, workspace_generation: 3 },
++        "workspace-a",
++    ).unwrap();
++    assert_ne!(reversed_a.access_token, original_a.access_token);
++    let tokens = reversed_a.auth_json().unwrap().tokens.unwrap();
++    assert_eq!(tokens.id_token.raw_jwt, reversed_a.access_token);
++    assert!(validate_workspace_discovery(&discovery_for(&original_a), &reversed_a).is_err());
++    let home = tempfile::tempdir().unwrap();
++    import_session(home.path(), &config, serde_json::to_vec(&original_a).unwrap().as_slice()).unwrap();
++    let store = LocalSessionStore::new(home.path(), &config).unwrap();
++    store.compare_and_write(&original_a, &selected_b).unwrap();
++    store.compare_and_write(&selected_b, &reversed_a).unwrap();
++    assert!(store.compare_and_write(&original_a, &original_a).is_err());
++    assert_eq!(store.read().unwrap(), Some(reversed_a));
++}
++
++#[test]
++fn switch_requires_a_listed_target_and_new_generation() {
++    let config = profile("https://proxy.example", "default");
++    let previous = fixture("workspace-a", 3);
++    for (workspace, generation) in [("unlisted-target", 4), ("workspace-b", 3), ("workspace-b", 2)] {
++        let next = fixture(workspace, generation);
++        assert!(selected_workspace_session(
++            &config, &previous, &discovery_for(&previous),
++            WorkspaceResponse { access_token: next.access_token, workspace_generation: generation },
++            workspace,
++        ).is_err());
++    }
++}
++
++#[test]
++fn cache_control_no_store_is_a_directive_not_quoted_extension_text() {
++    for value in ["no-store", "private, No-Store, max-age=0", r#"extension="a,b", no-store"#] {
++        assert!(has_no_store_directive(value));
++    }
++    for value in [r#"extension="a,no-store,b""#, "no-store=false", "private", r#"extension="no-store"#] {
++        assert!(!has_no_store_directive(value));
++    }
++    let mut headers = http::HeaderMap::new();
++    headers.append(http::header::CACHE_CONTROL, http::HeaderValue::from_static("private"));
++    headers.append(http::header::CACHE_CONTROL, http::HeaderValue::from_static("no-store, max-age=0"));
++    assert!(response_is_no_store(&headers));
 +}
 diff --git a/codex-rs/login/src/auth/default_client.rs b/codex-rs/login/src/auth/default_client.rs
 index 9d8af7f09a8650f4135e3367661dd9a11446d0ae..b18a1c4cbd86884d061270f4926e6dc910ff09be 100644
@@ -5548,7 +7601,7 @@ index 9d8af7f09a8650f4135e3367661dd9a11446d0ae..b18a1c4cbd86884d061270f4926e6dc9
      http_client_factory: HttpClientFactory,
      request_url: String,
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e32710475fa13 100644
+index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..dcf6d4562bae1995dab8874025c2043692a32763 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -214,8 +214,8 @@ impl Debug for ApiKeyAuth {
@@ -5591,7 +7644,21 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      #[allow(clippy::too_many_arguments)]
      async fn from_auth_dot_json(
          codex_home: &Path,
-@@ -1284,6 +1293,7 @@ pub fn load_auth_dot_json(
+@@ -659,9 +668,11 @@ impl CodexAuth {
+         match auth_dot_json {
+             Some(AuthDotJson {
+                 tokens: Some(tokens),
+-                last_refresh: Some(_),
++                last_refresh,
+                 ..
+-            }) => Ok(workspace_switching::selected_workspace_tokens(tokens)),
++            }) if last_refresh.is_some() || self.is_cc_lb_local() => {
++                Ok(workspace_switching::selected_workspace_tokens(tokens))
++            }
+             _ => Err(std::io::Error::other("Token data is not available.")),
+         }
+     }
+@@ -1284,6 +1295,7 @@ pub fn load_auth_dot_json(
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub struct AuthConfig {
      pub codex_home: PathBuf,
@@ -5599,7 +7666,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      pub auth_credentials_store_mode: AuthCredentialsStoreMode,
      pub keyring_backend_kind: AuthKeyringBackendKind,
      pub forced_login_method: Option<ForcedLoginMethod>,
-@@ -1308,6 +1318,12 @@ impl AuthConfig {
+@@ -1308,6 +1320,12 @@ impl AuthConfig {
      }
  
      pub fn validate(&self) -> std::io::Result<()> {
@@ -5612,7 +7679,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          if self.is_login_method_allowed(ForcedLoginMethod::Api)
              || self.is_login_method_allowed(ForcedLoginMethod::Chatgpt)
          {
-@@ -1340,6 +1356,11 @@ impl AuthConfig {
+@@ -1340,6 +1358,11 @@ impl AuthConfig {
          enable_codex_api_key_env: bool,
          allowed_auth_modes: Option<&[AuthMode]>,
      ) -> std::io::Result<Option<CodexAuth>> {
@@ -5624,7 +7691,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let allowed_login_methods = self.allowed_login_methods();
          let workspaces = self.effective_chatgpt_workspaces();
          let agent_identity_authapi_base_url =
-@@ -1427,6 +1448,11 @@ fn validate_auth_restrictions(
+@@ -1427,6 +1450,11 @@ fn validate_auth_restrictions(
  
  /// Enforces configured login restrictions using auth-owned HTTP settings.
  pub async fn enforce_login_restrictions(config: &AuthConfig) -> std::io::Result<()> {
@@ -5636,7 +7703,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      let agent_identity_authapi_base_url =
          agent_identity_authapi_base_url(config.chatgpt_base_url.as_deref()).ok();
      enforce_login_restrictions_with_agent_identity_authapi_base_url(
-@@ -2052,6 +2078,7 @@ pub struct UnauthorizedRecovery {
+@@ -2052,6 +2080,7 @@ pub struct UnauthorizedRecovery {
      step: UnauthorizedRecoveryStep,
      expected_account_id: Option<String>,
      mode: UnauthorizedRecoveryMode,
@@ -5644,7 +7711,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
  }
  
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-@@ -2083,9 +2110,28 @@ impl UnauthorizedRecovery {
+@@ -2083,9 +2112,28 @@ impl UnauthorizedRecovery {
              step,
              expected_account_id,
              mode,
@@ -5673,7 +7740,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      pub fn has_next(&self) -> bool {
          if self.manager.has_refreshable_external_auth() {
              return !matches!(self.step, UnauthorizedRecoveryStep::Done);
-@@ -2162,6 +2208,9 @@ impl UnauthorizedRecovery {
+@@ -2162,6 +2210,9 @@ impl UnauthorizedRecovery {
      }
  
      pub async fn next(&mut self) -> Result<UnauthorizedRecoveryStepResult, RefreshTokenError> {
@@ -5683,7 +7750,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          if !self.has_next() {
              return Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                  RefreshTokenFailedReason::Other,
-@@ -2233,6 +2282,7 @@ impl UnauthorizedRecovery {
+@@ -2233,6 +2284,7 @@ impl UnauthorizedRecovery {
  /// different parts of the program seeing inconsistent auth data mid‑run.
  pub struct AuthManager {
      codex_home: PathBuf,
@@ -5691,7 +7758,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      inner: RwLock<CachedAuth>,
      auth_change_tx: watch::Sender<u64>,
      auth_change_state_tx: watch::Sender<AuthChangeState>,
-@@ -2268,6 +2318,9 @@ pub trait AuthManagerConfig {
+@@ -2268,6 +2320,9 @@ pub trait AuthManagerConfig {
      /// Returns the Codex home directory used for auth storage.
      fn codex_home(&self) -> PathBuf;
  
@@ -5701,7 +7768,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      /// Returns the CLI auth credential storage mode for auth loading.
      fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode;
  
-@@ -2330,6 +2383,10 @@ fn default_agent_identity_authapi_base_url() -> Option<String> {
+@@ -2330,6 +2385,10 @@ fn default_agent_identity_authapi_base_url() -> Option<String> {
  }
  
  impl AuthManager {
@@ -5712,7 +7779,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      /// Returns the application policy associated with this account owner.
      pub fn application_network_policy(&self) -> codex_http_client::NetworkPolicy {
          self.auth_route_config.application_network_policy().clone()
-@@ -2337,10 +2394,11 @@ impl AuthManager {
+@@ -2337,10 +2396,11 @@ impl AuthManager {
  
      /// Creates content clients bound to the account currently owned by this manager.
      pub fn http_client_factory(&self) -> HttpClientFactory {
@@ -5726,7 +7793,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
      }
      /// Create a new manager loading the initial auth using the provided
      /// preferred auth method. Errors loading auth are swallowed; `auth()` will
-@@ -2358,6 +2416,7 @@ impl AuthManager {
+@@ -2358,6 +2418,7 @@ impl AuthManager {
          Self::new_from_auth_config(
              AuthConfig {
                  codex_home,
@@ -5734,7 +7801,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
                  auth_credentials_store_mode,
                  keyring_backend_kind,
                  forced_login_method: None,
-@@ -2373,10 +2432,13 @@ impl AuthManager {
+@@ -2373,10 +2434,13 @@ impl AuthManager {
      }
  
      async fn new_from_auth_config(
@@ -5749,7 +7816,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let managed_auth = auth_config
              .load_auth_with_modes(enable_codex_api_key_env, allowed_auth_modes.as_deref())
              .await
-@@ -2384,6 +2446,7 @@ impl AuthManager {
+@@ -2384,6 +2448,7 @@ impl AuthManager {
              .flatten();
          let AuthConfig {
              codex_home,
@@ -5757,7 +7824,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              auth_credentials_store_mode,
              keyring_backend_kind,
              forced_login_method,
-@@ -2397,6 +2460,7 @@ impl AuthManager {
+@@ -2397,6 +2462,7 @@ impl AuthManager {
          let (auth_change_tx, _auth_change_rx) = watch::channel(0);
          Self {
              codex_home,
@@ -5765,7 +7832,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              inner: RwLock::new(CachedAuth {
                  auth: managed_auth,
                  permanent_refresh_failure: None,
-@@ -2480,6 +2544,7 @@ impl AuthManager {
+@@ -2480,6 +2546,7 @@ impl AuthManager {
  
          Arc::new(Self {
              codex_home: runtime.codex_home,
@@ -5773,7 +7840,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              inner: RwLock::new(cached),
              auth_change_tx,
              auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
-@@ -2517,6 +2582,7 @@ impl AuthManager {
+@@ -2517,6 +2584,7 @@ impl AuthManager {
          let (auth_change_tx, _auth_change_rx) = watch::channel(0);
          Arc::new(Self {
              codex_home,
@@ -5781,7 +7848,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              inner: RwLock::new(cached),
              auth_change_tx,
              auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
-@@ -2554,6 +2620,7 @@ impl AuthManager {
+@@ -2554,6 +2622,7 @@ impl AuthManager {
          let (auth_change_tx, _auth_change_rx) = watch::channel(0);
          Arc::new(Self {
              codex_home: PathBuf::from("non-existent"),
@@ -5789,7 +7856,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              inner: RwLock::new(cached),
              auth_change_tx,
              auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
-@@ -2595,6 +2662,7 @@ impl AuthManager {
+@@ -2595,6 +2664,7 @@ impl AuthManager {
          let (auth_change_tx, _auth_change_rx) = watch::channel(0);
          Arc::new(Self {
              codex_home: PathBuf::from("non-existent"),
@@ -5797,7 +7864,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
              inner: RwLock::new(CachedAuth {
                  auth: None,
                  permanent_refresh_failure: None,
-@@ -2727,6 +2795,9 @@ impl AuthManager {
+@@ -2727,6 +2797,9 @@ impl AuthManager {
          policy: AgentIdentityAuthPolicy,
          session_source: SessionSource,
      ) -> std::io::Result<Option<AgentIdentityAuth>> {
@@ -5807,7 +7874,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let Some(auth) = self.auth().await else {
              return Ok(None);
          };
-@@ -2805,6 +2876,10 @@ impl AuthManager {
+@@ -2805,6 +2878,10 @@ impl AuthManager {
      pub async fn account_oauth_grant(
          self: &Arc<Self>,
      ) -> std::io::Result<Option<AccountOAuthGrant>> {
@@ -5818,7 +7885,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let login_generation = self.auth_change_state_tx.borrow().login_generation;
          let Some(tokens) = self.read_account_grant_tokens().await? else {
              return Ok(None);
-@@ -2857,6 +2932,12 @@ impl AuthManager {
+@@ -2857,6 +2934,12 @@ impl AuthManager {
      }
  
      async fn read_persisted_account_tokens(&self) -> std::io::Result<Option<TokenData>> {
@@ -5831,7 +7898,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let home = self.codex_home.clone();
          let mode = self.auth_credentials_store_mode;
          let backend = self.keyring_backend_kind;
-@@ -3120,6 +3201,14 @@ impl AuthManager {
+@@ -3120,6 +3203,14 @@ impl AuthManager {
          &self,
          cached_auth: Option<&CodexAuth>,
      ) -> std::io::Result<Option<CodexAuth>> {
@@ -5846,7 +7913,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let allowed_auth_modes = self
              .allowed_auth_modes
              .read()
-@@ -3238,6 +3327,9 @@ impl AuthManager {
+@@ -3238,6 +3329,9 @@ impl AuthManager {
          &self,
          external_auth: Arc<dyn ExternalAuth>,
      ) -> Result<(), RefreshTokenError> {
@@ -5856,7 +7923,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let auth = self.resolve_external_auth(external_auth.as_ref()).await?;
          let mut external_auth_slot = self.external_auth.write().map_err(|_| {
              RefreshTokenError::Transient(std::io::Error::other("external auth lock is poisoned"))
-@@ -3403,11 +3495,22 @@ impl AuthManager {
+@@ -3403,11 +3497,22 @@ impl AuthManager {
      }
  
      async fn shared_from_auth_config_with_modes(
@@ -5881,7 +7948,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let mut manager =
              Self::new_from_auth_config(auth_config, enable_codex_api_key_env, allowed_auth_modes)
                  .await;
-@@ -3597,6 +3700,14 @@ impl AuthManager {
+@@ -3597,6 +3702,14 @@ impl AuthManager {
      /// callers immediately observe the unauthenticated state.
      pub async fn logout(&self) -> std::io::Result<bool> {
          self.ensure_logout_allowed()?;
@@ -5896,7 +7963,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let removed = logout_all_stores(
              &self.codex_home,
              self.auth_credentials_store_mode,
-@@ -3611,6 +3722,14 @@ impl AuthManager {
+@@ -3611,6 +3724,14 @@ impl AuthManager {
  
      pub async fn logout_with_revoke(&self) -> std::io::Result<bool> {
          self.ensure_logout_allowed()?;
@@ -5911,7 +7978,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let auth_dot_json = self
              .auth_cached()
              .and_then(|auth| auth.get_current_auth_json());
-@@ -3745,6 +3864,12 @@ impl AuthManager {
+@@ -3745,6 +3866,12 @@ impl AuthManager {
          tokens: TokenData,
          reason: RefreshReason,
      ) -> Result<(), RefreshTokenError> {
@@ -5924,7 +7991,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..2207c48fd9c460a682e14ba21a6e3271
          let endpoint = refresh_token_endpoint(tokens.oauth_provenance.as_ref());
          let client_id = tokens
              .oauth_provenance
-@@ -3818,6 +3943,7 @@ impl AuthManager {
+@@ -3818,6 +3945,7 @@ impl AuthManager {
  fn auth_config_from(config: &impl AuthManagerConfig) -> AuthConfig {
      AuthConfig {
          codex_home: config.codex_home(),
@@ -5950,23 +8017,58 @@ index 08682a7506e3cb9f9d5cfdb7f131789af825523a..0d86d8ed415e729aa1d8203e3e06b115
          // client setup rebuilds routing and credentials after that revision change.
          if auth_changes.borrow().owner_generation != owner_generation
 diff --git a/codex-rs/login/src/auth/manager/workspace_switching.rs b/codex-rs/login/src/auth/manager/workspace_switching.rs
-index bec42f3b1203493244459db696430955f439884e..c95d4c56e95d781357312f4333e866baea53bf38 100644
+index bec42f3b1203493244459db696430955f439884e..71966d3ecc7591a5697d38bf23ce2d6f05c11269 100644
 --- a/codex-rs/login/src/auth/manager/workspace_switching.rs
 +++ b/codex-rs/login/src/auth/manager/workspace_switching.rs
-@@ -195,6 +195,12 @@ impl AuthManager {
-                 selected: snapshot,
-             });
+@@ -114,7 +114,9 @@ impl AuthManager {
+         session_id: &str,
+         workspace_id: &str,
+     ) -> io::Result<()> {
+-        if workspace_id.trim().is_empty() {
++        if workspace_id.is_empty()
++            || (self.cc_lb_config().is_none() && workspace_id.trim().is_empty())
++        {
+             return Err(io::Error::new(
+                 io::ErrorKind::InvalidInput,
+                 "accountId must not be empty",
+@@ -188,6 +190,36 @@ impl AuthManager {
+                 "Only the active managed account session can be switched",
+             ));
          }
 +        if let Some(profile) = self.cc_lb_config() {
-+            crate::cc_lb::switch_workspace(&self.codex_home, profile, &self.auth_route_config, &tokens.access_token, workspace_id).await?;
-+            let selected = auth.storage().load()?.ok_or_else(|| io::Error::other("cc-lb-local session disappeared after workspace exchange"))?;
++            if tokens.account_id.as_deref() == Some(workspace_id) {
++                crate::cc_lb::list_workspaces(
++                    &self.codex_home,
++                    profile,
++                    &self.auth_route_config,
++                    &tokens.access_token,
++                )
++                .await?;
++                return Ok(WorkspaceSwitch {
++                    storage: auth.storage().clone(),
++                    previous: snapshot.clone(),
++                    selected: snapshot,
++                });
++            }
++            let selected = crate::cc_lb::switch_workspace(
++                &self.codex_home,
++                profile,
++                &self.auth_route_config,
++                &tokens.access_token,
++                workspace_id,
++            )
++            .await?;
 +            self.reload().await;
-+            return Ok(WorkspaceSwitch { storage: auth.storage().clone(), previous: snapshot, selected });
++            return Ok(WorkspaceSwitch {
++                storage: auth.storage().clone(),
++                previous: snapshot,
++                selected,
++            });
 +        }
-         let access_token = self
-             .exchange_workspace_token(&tokens.access_token, workspace_id, user_id)
-             .await?;
-@@ -241,6 +247,9 @@ impl AuthManager {
+         if tokens.account_id.as_deref() == Some(workspace_id) {
+             return Ok(WorkspaceSwitch {
+                 storage: auth.storage().clone(),
+@@ -241,6 +273,9 @@ impl AuthManager {
                  "Account credentials changed",
              ));
          }
@@ -5976,7 +8078,7 @@ index bec42f3b1203493244459db696430955f439884e..c95d4c56e95d781357312f4333e866ba
          let selected = switched
              .selected
              .tokens
-@@ -257,6 +266,12 @@ impl AuthManager {
+@@ -257,6 +292,12 @@ impl AuthManager {
              .chatgpt_user_id
              .as_deref()
              .ok_or_else(|| io::Error::other("Missing selected user"))?;
@@ -5984,7 +8086,7 @@ index bec42f3b1203493244459db696430955f439884e..c95d4c56e95d781357312f4333e866ba
 +            // A reverse exchange mints fresh access; never restore invalidated pre-switch bytes.
 +            let result = crate::cc_lb::switch_workspace(&self.codex_home, profile, &self.auth_route_config, &selected.access_token, previous_workspace).await;
 +            self.reload().await;
-+            return result;
++            return result.map(|_| ());
 +        }
          // The exchange also selects the workspace used by the server on the next refresh.
          self.exchange_workspace_token(&selected.access_token, previous_workspace, user)
