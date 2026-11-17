@@ -219,6 +219,7 @@ async fn remote_runtime_preserves_provider_401_without_local_auth_recovery() {
     assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
     assert_eq!(response.headers()["cc-lb-error-origin"],"upstream");
     assert!(!response.headers().contains_key("cc-lb-auth-reason"));
+    assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(response.into_body().collect().await.unwrap().to_bytes(),"unaltered provider refusal");
     assert_eq!(fixture.dispatch.requests.lock().unwrap().len(),2);
 }

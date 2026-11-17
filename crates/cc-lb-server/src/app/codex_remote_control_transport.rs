@@ -23,6 +23,17 @@ use super::super::ProxyState;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+// Provider authentication material belongs to the selected upstream, never to
+// the client. Preserve response status, body, quota and retry metadata.
+fn strip_provider_credentials(headers: &mut HeaderMap) {
+    for name in [
+        "set-cookie", "set-cookie2", "cookie", "authorization",
+        "proxy-authorization", "x-api-key", "api-key", "x-goog-api-key",
+    ] {
+        headers.remove(name);
+    }
+}
+
 pub(super) async fn dispatch(
     state: &ProxyState,
     auth: &Authenticated,
@@ -240,12 +251,14 @@ async fn dispatch_checked(
             return Err(Error::Transport);
         }
         cc_lb_engine::codex_sessions::mark_upstream_response(&mut response_parts.headers);
+        strip_provider_credentials(&mut response_parts.headers);
         response_parts.headers.insert(http::header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return Ok(Response::from_parts(response_parts, Body::from(response_body.to_vec())));
     }
     if !response.status().is_success() || !matches!(operation, Operation::Enroll | Operation::Refresh) {
         let (mut response_parts, response_body) = response.into_parts();
         cc_lb_engine::codex_sessions::mark_upstream_response(&mut response_parts.headers);
+        strip_provider_credentials(&mut response_parts.headers);
         response_parts.headers.insert(http::header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return Ok(Response::from_parts(response_parts, response_body));
     }
@@ -418,6 +431,7 @@ async fn websocket(state: &ProxyState, auth: &Authenticated, parts: &mut Parts,
         super::handshake::Outcome::Accepted(provider, _) => provider,
         super::handshake::Outcome::Rejected(mut response) => {
             cc_lb_engine::codex_sessions::mark_upstream_response(response.headers_mut());
+            strip_provider_credentials(response.headers_mut());
             response.headers_mut().insert(http::header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             return Ok(response);
         }
