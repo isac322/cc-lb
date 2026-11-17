@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 #[path = "upstream_affinity/codex_compaction.rs"]
 mod codex_compaction;
 
