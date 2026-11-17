@@ -49,6 +49,11 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
     Health,
+    #[command(name = "account-owner-bindings")]
+    OwnerBindings {
+        #[command(subcommand)]
+        command: AdminOwnerBindingsCommand,
+    },
     Upstreams {
         #[command(subcommand)]
         command: AdminUpstreamsCommand,
@@ -56,10 +61,23 @@ pub enum AdminCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum AdminOwnerBindingsCommand {
+    Create(AdminOwnerBindingCreateArgs),
+    Get { binding_id: String },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum AdminUpstreamsCommand {
     List,
     #[command(visible_alias = "import")]
     Credential(AdminCredentialArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AdminOwnerBindingCreateArgs {
+    /// JSON file containing the owner binding body, or `-` for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub input: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -141,6 +159,52 @@ mod tests {
                 },
                 ..
             })
+        ));
+    }
+    #[test]
+    fn admin_owner_binding_create_command_parses_from_stdin() {
+        let cli = Cli::try_parse_from([
+            "cc-lb",
+            "admin",
+            "--base-url",
+            "http://127.0.0.1:9090",
+            "account-owner-bindings",
+            "create",
+            "--input",
+            "-",
+        ])
+        .expect("owner binding create command should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Admin {
+                command: AdminCommand::OwnerBindings {
+                    command: AdminOwnerBindingsCommand::Create(_),
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn admin_owner_binding_get_command_parses_with_id() {
+        let cli = Cli::try_parse_from([
+            "cc-lb",
+            "admin",
+            "--base-url",
+            "http://127.0.0.1:9090",
+            "account-owner-bindings",
+            "get",
+            "binding-1",
+        ])
+        .expect("owner binding get command should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Admin {
+                command: AdminCommand::OwnerBindings {
+                    command: AdminOwnerBindingsCommand::Get { binding_id },
+                },
+                ..
+            }) if binding_id == "binding-1"
         ));
     }
 }
