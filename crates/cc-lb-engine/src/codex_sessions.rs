@@ -78,6 +78,35 @@ pub fn authorize_registered_purpose(
         ("GET", "/backend-api/cc-lb/workspaces") => Some(CredentialPurpose::SessionAccess),
         (
             "GET",
+            "/backend-api/wham/accounts/check"
+            | "/backend-api/wham/usage"
+            | "/backend-api/wham/rate-limit-reset-credits"
+            | "/backend-api/wham/profiles/me"
+            | "/backend-api/wham/config/bundle"
+            | "/backend-api/wham/settings/user"
+            | "/backend-api/wham/workspace-messages"
+            | "/backend-api/wham/security-setup"
+            | "/backend-api/wham/usage/plan_limit_history"
+            | "/backend-api/wham/usage/daily-token-usage-breakdown"
+            | "/backend-api/wham/usage/credit-usage-events"
+            | "/backend-api/wham/usage/daily-workspace-user-token-usage-breakdown"
+            | "/backend-api/wham/usage/daily-workspace-user-credit-usage"
+            | "/backend-api/wham/analytics/daily-workspace-usage-counts"
+            | "/backend-api/wham/analytics/daily-plugin-usage-metrics"
+            | "/backend-api/wham/analytics/daily-skill-usage-metrics"
+            | "/backend-api/accounts/verified_access",
+        ) => Some(CredentialPurpose::SessionAccess),
+        (
+            "POST",
+            "/backend-api/wham/rate-limit-reset-credits/consume"
+            | "/backend-api/wham/accounts/send_add_credits_nudge_email"
+            | "/backend-api/wham/usage/thread-estimates/query"
+            | "/backend-api/wham/usage/thread_usage/query"
+            | "/backend-api/wham/usage/thread_usage/query_v2"
+            | "/backend-api/accounts/switch-workspace-token",
+        ) => Some(CredentialPurpose::SessionAccess),
+        (
+            "GET",
             "/backend-api/wham/tasks/list"
             | "/backend-api/wham/tasks/{task_id}"
             | "/backend-api/wham/tasks/{task_id}/turns/{turn_id}/sibling_turns"

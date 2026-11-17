@@ -1782,6 +1782,9 @@ async fn build_app_with_storage_inner(
             clock.clone(),
         )),
         lifecycle: lifecycle.clone(),
+        account_dispatcher: Arc::new(codex_account::AccountDispatcher::new(Duration::from_secs(
+            config.timeouts.upstream_total_secs.max(1),
+        ))),
         body_caps,
         server_state: server_state.clone(),
         start_time,
@@ -2293,6 +2296,7 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
 struct ProxyState {
     codex_sessions: Arc<cc_lb_engine::codex_sessions::CodexSessionService>,
     lifecycle: Arc<Lifecycle>,
+    account_dispatcher: Arc<dyn UpstreamDispatch>,
     body_caps: RequestBodyCaps,
     server_state: Arc<ServerStateHandle>,
     start_time: std::time::Instant,
@@ -2682,6 +2686,95 @@ fn scoped_proxy_routes(
                 "/backend-api/cc-lb/workspaces",
                 get(codex_account::workspace_discovery_handler),
             )
+            .route(
+                "/backend-api/wham/accounts/check",
+                get(account_lifecycle_handler),
+            )
+            .route("/backend-api/wham/usage", get(account_lifecycle_handler))
+            .route(
+                "/backend-api/wham/rate-limit-reset-credits",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/rate-limit-reset-credits/consume",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/profiles/me",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/accounts/send_add_credits_nudge_email",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/config/bundle",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/settings/user",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/workspace-messages",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/security-setup",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/thread-estimates/query",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/thread_usage/query",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/thread_usage/query_v2",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/plan_limit_history",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/daily-token-usage-breakdown",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/credit-usage-events",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/daily-workspace-user-token-usage-breakdown",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/usage/daily-workspace-user-credit-usage",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/analytics/daily-workspace-usage-counts",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/analytics/daily-plugin-usage-metrics",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/wham/analytics/daily-skill-usage-metrics",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/accounts/verified_access",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/backend-api/accounts/switch-workspace-token",
+                post(account_lifecycle_handler),
+            )
             .route("/oauth/token", post(lifecycle_handler))
             .route("/oauth/revoke", post(lifecycle_handler))
             .route(
@@ -2959,6 +3052,7 @@ mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
 mod codex_account;
+mod codex_sessions;
 mod codex_auxiliary;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
@@ -3829,6 +3923,12 @@ where
     }
 }
 
+async fn account_lifecycle_handler(
+    State(state): State<ProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    codex_account::account_handler(State(state), request).await
+}
 async fn lifecycle_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
@@ -3875,9 +3975,7 @@ async fn lifecycle_handler(
     }
     if let Err(error) = codex_auxiliary::authorize(&auth, parts.uri.path()) {
         return cc_lb_engine::reject_unauthenticated_for_route(
-            &error,
-            &parts.method,
-            parts.uri.path(),
+            &error, &parts.method, parts.uri.path(),
             parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
             observer.as_ref(),
         );
@@ -4449,6 +4547,12 @@ mod tests {
     }
     mod websocket_handshake_tests {
         include!("app_websocket_handshake_tests.rs");
+    }
+    mod workspace_discovery_tests {
+        include!("app_workspace_discovery_tests.rs");
+    }
+    mod account_relay_tests {
+        include!("app_account_relay_tests.rs");
     }
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
@@ -5765,6 +5869,7 @@ mod tests {
                 clock.clone(),
             )),
             lifecycle,
+            account_dispatcher: Arc::new(PendingDispatch),
             body_caps: RequestBodyCaps {
                 messages: 1024,
                 files: 1024,
@@ -6233,6 +6338,9 @@ mod tests {
                 clock.clone(),
             )),
             lifecycle,
+            account_dispatcher: Arc::new(codex_account::AccountDispatcher::new(
+                Duration::from_secs(30),
+            )),
             body_caps: RequestBodyCaps {
                 messages: 1024 * 1024,
                 files: 1024 * 1024,

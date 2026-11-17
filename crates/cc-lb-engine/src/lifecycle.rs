@@ -1,3 +1,5 @@
+mod codex_account_dispatch;
+
 mod gemini_native;
 
 #[path = "realtime_websocket_lifecycle.rs"]

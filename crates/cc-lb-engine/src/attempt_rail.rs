@@ -107,6 +107,21 @@ impl<'reservation> Scoped<'reservation> {
             _reserved: PhantomData,
         })
     }
+
+    /// Signs control traffic for the workspace captured by the authenticated owner fence.
+    pub(crate) async fn sign_for_workspace(
+        self,
+        signer: &dyn Signer,
+        shaped_request: ShapedRequest,
+        workspace: http::HeaderValue,
+    ) -> Result<Signed<'reservation>, SignerError> {
+        let signed_request =
+            cc_lb_upstream::sign_request_for_workspace(signer, shaped_request, workspace).await?;
+        Ok(Signed {
+            signed_request,
+            _reserved: PhantomData,
+        })
+    }
 }
 
 impl Scoped<'static> {

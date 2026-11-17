@@ -16,7 +16,7 @@ pub use context::DialectShapeContext;
 pub use error::{DialectError, ResponseTransformError, SignerError, UpstreamError};
 pub use request::{
     ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, shape_request,
-    sign_request,
+    sign_request, sign_request_for_workspace,
 };
 pub use retry::RetryDecision;
 pub use scrub::scrub_secret;

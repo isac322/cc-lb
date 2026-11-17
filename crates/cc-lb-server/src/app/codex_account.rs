@@ -1,8 +1,8 @@
-use super::ProxyState;
+use super::{ProxyState, RequestBodyReadError, read_request_body};
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, HeaderValue, Response, header::CACHE_CONTROL};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::CACHE_CONTROL};
 use cc_lb_engine::LifecycleContext;
 use cc_lb_engine::codex_sessions::{self, SessionError};
 
@@ -11,6 +11,164 @@ fn no_store(mut response: Response<Body>) -> Response<Body> {
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// A separate control transport: one send, bounded for the entire response,
+/// and no redirect, automatic decompression, or transport-level retry.
+pub(super) struct AccountDispatcher(reqwest::Client);
+
+impl AccountDispatcher {
+    pub(super) fn new(timeout: std::time::Duration) -> Self {
+        Self(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .no_zstd()
+                .retry(reqwest::retry::never())
+                .timeout(timeout)
+                .build()
+                .expect("account control HTTP client configuration is valid"),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl cc_lb_engine::UpstreamDispatch for AccountDispatcher {
+    async fn dispatch(
+        &self,
+        request: cc_lb_upstream::SignedRequest,
+    ) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
+        let (url, method, headers, body) = request.into_parts();
+        let mut upstream = self
+            .0
+            .request(method, url)
+            .headers(headers)
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| cc_lb_engine::DispatchError::Transport {
+                source: Box::new(source),
+            })?;
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = upstream.status();
+        *response.headers_mut() = upstream.headers().clone();
+        *response.version_mut() = upstream.version();
+        *response.body_mut() = Body::from_stream(async_stream::stream! {
+            loop {
+                match upstream.chunk().await {
+                    Ok(Some(chunk)) => yield Ok::<_, reqwest::Error>(chunk),
+                    Ok(None) => break,
+                    Err(error) => {
+                        yield Err(error);
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(response)
+    }
+}
+
+pub(super) async fn account_handler(
+    State(state): State<ProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    no_store(account_response(&state, request).await)
+}
+
+async fn account_response(state: &ProxyState, request: Request<Body>) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let observer = parts.extensions.get::<LifecycleContext>().cloned();
+    if let Some(observer) = observer.as_ref() {
+        observer.mark_authn_reached();
+    }
+    let auth = match state.lifecycle.authenticate(&parts.headers).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return cc_lb_engine::reject_unauthenticated_for_route(
+                &error,
+                &parts.method,
+                parts.uri.path(),
+                None,
+                observer.as_ref(),
+            );
+        }
+    };
+    // GET registration also admits HEAD. Never let the generic purpose fallback
+    // make a principal key eligible for this owner-control path.
+    if auth.purpose() != cc_lb_storage_api::codex_sessions::CredentialPurpose::SessionAccess {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &cc_lb_control::api_keys::builtin_authn::BuiltinAuthError::InvalidFormat,
+            &parts.method,
+            parts.uri.path(),
+            None,
+            observer.as_ref(),
+        );
+    }
+    if let Some(observer) = observer.as_ref() {
+        state
+            .lifecycle
+            .record_local_authenticated_request(&auth, observer);
+    }
+    let owner = match state.codex_sessions.session_owner_constraint(&auth).await {
+        Ok(owner) => owner,
+        Err(error) => return codex_sessions::session_error_response(error, observer.as_ref()),
+    };
+    let cap = state.body_caps.for_path(parts.uri.path());
+    let body_read_started = std::time::Instant::now();
+    let body_result = read_request_body(&parts.headers, body, cap, observer.clone(), &auth).await;
+    if let Some(observer) = observer.as_ref() {
+        let body_read_ms = body_read_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let body_bytes = body_result.as_ref().ok().map(|body| body.len() as u64);
+        observer.set_request_body_timing(body_read_ms, body_bytes);
+    }
+    let body = match body_result {
+        Ok(body) => body,
+        Err(RequestBodyReadError::TooLarge) => {
+            if let Some(observer) = observer.as_ref() {
+                observer.terminate_body_too_large(cap as u64);
+            }
+            return super::body_too_large_response();
+        }
+        Err(RequestBodyReadError::Read(source)) => {
+            let mut response = Response::new(Body::from(format!("body read failed: {source}")));
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            response
+                .extensions_mut()
+                .insert(cc_lb_engine::InternalFailure::body_read_failed(
+                    cc_lb_domain::InternalError {
+                        stage: cc_lb_domain::InternalErrorStage::Ingress,
+                        kind: cc_lb_domain::InternalErrorKind::InvalidInput,
+                        message: Some(source.to_string()),
+                    },
+                ));
+            return response;
+        }
+    };
+    if parts.method == http::Method::POST
+        && parts.uri.path() == "/backend-api/accounts/switch-workspace-token"
+    {
+        return workspace_switch_response(&state.codex_sessions, &auth, &body, observer.as_ref())
+            .await;
+    }
+    match state
+        .lifecycle
+        .dispatch_codex_account(
+            &auth,
+            &owner,
+            Request::from_parts(parts, body),
+            state.account_dispatcher.as_ref(),
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => codex_sessions::session_error_response(error, observer.as_ref()),
+    }
 }
 
 pub(super) const WORKSPACE_DISCOVERY_PATH: &str = "/backend-api/cc-lb/workspaces";
@@ -78,6 +236,54 @@ pub(super) async fn workspace_discovery_handler(
         &discovery.selected_workspace_id,
         &discovery.workspaces,
     );
+    let classification = cc_lb_engine::TerminalClassification::local(response.status());
+    response.extensions_mut().insert(classification);
+    if let Some(observer) = observer {
+        observer.terminate_local(classification);
+    }
+    response
+}
+pub(super) async fn workspace_switch_response(
+    sessions: &cc_lb_engine::codex_sessions::CodexSessionService,
+    auth: &cc_lb_engine::authn_rail::Authenticated,
+    body: &[u8],
+    observer: Option<&LifecycleContext>,
+) -> Response<Body> {
+    let result = match cc_lb_engine::codex_account::workspace_switch_target(auth, body) {
+        Ok(target) => sessions
+            .switch_session_workspace(auth, &target)
+            .await
+            .map(|grant| {
+                let payload = serde_json::json!({
+                    "session_id": grant.session_id,
+                    "access_token": grant.access_token.expose(),
+                    "token_type": "Bearer",
+                    "expires_at": grant.expires_at,
+                    "session_expires_at": grant.session_expires_at,
+                    "origin": grant.origin,
+                    "account_id": grant.account_id,
+                    "user_id": grant.user_id,
+                    "workspace_generation": grant.workspace_generation,
+                });
+                let mut response = Response::new(Body::from(
+                    serde_json::to_vec(&payload).expect("session response serializes"),
+                ));
+                *response.status_mut() = http::StatusCode::OK;
+                response.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                response
+            }),
+        Err(_) => Err(SessionError::InvalidRequest),
+    };
+    let mut response = match result {
+        Ok(response) => response,
+        Err(error) => codex_sessions::session_error_response(error, observer),
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     let classification = cc_lb_engine::TerminalClassification::local(response.status());
     response.extensions_mut().insert(classification);
     if let Some(observer) = observer {
