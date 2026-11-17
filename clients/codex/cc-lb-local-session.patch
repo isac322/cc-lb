@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index d719a520b78e32c58f4ccc5581a527044a368d6f..37209fbe496217b8ca8e5e12d78b3a0b3f893f46 100644
+index d719a520b7..37209fbe49 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -287,7 +287,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
@@ -1561,7 +1561,7 @@ index d719a520b78e32c58f4ccc5581a527044a368d6f..37209fbe496217b8ca8e5e12d78b3a0b
   "anyhow",
   "assert_cmd",
 diff --git a/codex-rs/app-server-client/src/cloud_backend/auth.rs b/codex-rs/app-server-client/src/cloud_backend/auth.rs
-index bd0f293d040388a750d2bc7bbb5700f5a5485398..84f13411000868a8c1f449ef5827d1404a23ea08 100644
+index bd0f293d04..84f1341100 100644
 --- a/codex-rs/app-server-client/src/cloud_backend/auth.rs
 +++ b/codex-rs/app-server-client/src/cloud_backend/auth.rs
 @@ -14,6 +14,9 @@ use color_eyre::eyre::eyre;
@@ -1584,7 +1584,7 @@ index bd0f293d040388a750d2bc7bbb5700f5a5485398..84f13411000868a8c1f449ef5827d140
              requires_openai_auth: true,
              workspace_routing: None,
 diff --git a/codex-rs/app-server-client/src/lib.rs b/codex-rs/app-server-client/src/lib.rs
-index 3d25037697def7d62c85a8da9ef9a4db3c7cf683..721772b2ede404b76394eb2092a21cb3603019f6 100644
+index 3d25037697..721772b2ed 100644
 --- a/codex-rs/app-server-client/src/lib.rs
 +++ b/codex-rs/app-server-client/src/lib.rs
 @@ -953,6 +953,34 @@ mod tests {
@@ -1623,7 +1623,7 @@ index 3d25037697def7d62c85a8da9ef9a4db3c7cf683..721772b2ede404b76394eb2092a21cb3
          _codex_home: TempDir,
          client: InProcessAppServerClient,
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 0e44ea9dea6200e5dec207ce511b4200f9b2601b..1b412a3449fa44e357ac48747ba15ba43ccb01c7 100644
+index 0e44ea9dea..1b412a3449 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -6910,6 +6910,17 @@
@@ -1658,7 +1658,7 @@ index 0e44ea9dea6200e5dec207ce511b4200f9b2601b..1b412a3449fa44e357ac48747ba15ba4
          "$schema": "http://json-schema.org/draft-07/schema#",
          "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 89b9537f0b22cb1301533668ca3c43f50e29b385..309e1f7cd7d591af710bfabf4a93404ad92eaffe 100644
+index 89b9537f0b..309e1f7cd7 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -25,6 +25,17 @@
@@ -1693,7 +1693,7 @@ index 89b9537f0b22cb1301533668ca3c43f50e29b385..309e1f7cd7d591af710bfabf4a93404a
        "$schema": "http://json-schema.org/draft-07/schema#",
        "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/GetAccountResponse.json b/codex-rs/app-server-protocol/schema/json/v2/GetAccountResponse.json
-index fe91f91b706efd2007f21736167dfa4040156ce4..bbbddc2e06c4d72e37663cb717a8992f2784f16f 100644
+index fe91f91b70..bbbddc2e06 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/GetAccountResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/GetAccountResponse.json
 @@ -21,6 +21,17 @@
@@ -1728,7 +1728,7 @@ index fe91f91b706efd2007f21736167dfa4040156ce4..bbbddc2e06c4d72e37663cb717a8992f
        "description": "Backend routing policy. Wire values match the accounts/check contract.",
        "enum": [
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/Account.ts b/codex-rs/app-server-protocol/schema/typescript/v2/Account.ts
-index 6b6982479d4944be085f836cf911118173e7f2f8..25372d7d55a99f27e359b3e65b1fe29a763a6266 100644
+index 6b6982479d..25372d7d55 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/Account.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/Account.ts
 @@ -2,9 +2,14 @@
@@ -1749,7 +1749,7 @@ index 6b6982479d4944be085f836cf911118173e7f2f8..25372d7d55a99f27e359b3e65b1fe29a
 +authSource?: AccountAuthSource, } | { "type": "amazonBedrock", usesCodexManagedCredentials: boolean, } | { "type": "gcp", };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountAuthSource.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountAuthSource.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d227996599a04287e32e93832864cf3bfdb67216
+index 0000000000..d227996599
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountAuthSource.ts
 @@ -0,0 +1,5 @@
@@ -1759,7 +1759,7 @@ index 0000000000000000000000000000000000000000..d227996599a04287e32e93832864cf3b
 +
 +export type AccountAuthSource = "cc-lb-local";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index 7e6c48880637561bf23de1dd357d581ab2de19bf..46ca05896fe66130c8846b854ca82946255c2d19 100644
+index 7e6c488806..46ca05896f 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -1,6 +1,7 @@
@@ -1771,7 +1771,7 @@ index 7e6c48880637561bf23de1dd357d581ab2de19bf..46ca05896fe66130c8846b854ca82946
  export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
  export type { AccountRoutingOverride } from "./AccountRoutingOverride";
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 52ed76c60687defce3f3405148ff15b44769d433..2feb342dfa45c6a7012cc263d1e1c51bf2eca7d6 100644
+index 52ed76c606..2feb342dfa 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -3740,6 +3740,7 @@ mod tests {
@@ -1818,7 +1818,7 @@ index 52ed76c60687defce3f3405148ff15b44769d433..2feb342dfa45c6a7012cc263d1e1c51b
              uses_codex_managed_credentials: true,
          };
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/account.rs b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
-index da570d48e2002d480bdc9fc971125463e4d6b2b9..044190959fdb2bf1f42908973b7a815b559dc89a 100644
+index da570d48e2..044190959f 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 @@ -15,6 +15,14 @@ use serde::Serialize;
@@ -1856,7 +1856,7 @@ index da570d48e2002d480bdc9fc971125463e4d6b2b9..044190959fdb2bf1f42908973b7a815b
              ProviderAccount::AmazonBedrock {
                  uses_codex_managed_credentials,
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/auth.rs b/codex-rs/app-server-transport/src/transport/remote_control/auth.rs
-index 2d50bca37a3227688859d0139eb88f89d8ce81be..c30dbd3de78bc21a857b61c6efd4c2f80f755481 100644
+index 2d50bca37a..c30dbd3de7 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/auth.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/auth.rs
 @@ -29,7 +29,26 @@ pub(super) struct RemoteControlRecovery {
@@ -1995,7 +1995,7 @@ index 2d50bca37a3227688859d0139eb88f89d8ce81be..c30dbd3de78bc21a857b61c6efd4c2f8
      struct TestAuthProvider {
          account_ids: Vec<&'static str>,
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/clients.rs b/codex-rs/app-server-transport/src/transport/remote_control/clients.rs
-index 4e62d71231c153782f5b70f04cf4f0e18efc6ba8..5102d2e36fd5cfbc181881cc6b071ebeb9980112 100644
+index 4e62d71231..5102d2e36f 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/clients.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/clients.rs
 @@ -4,7 +4,7 @@ use super::auth::load_remote_control_auth;
@@ -2089,7 +2089,7 @@ index 4e62d71231c153782f5b70f04cf4f0e18efc6ba8..5102d2e36fd5cfbc181881cc6b071ebe
          .map_err(io::Error::other)?;
      url.path_segments_mut()
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/controller.rs b/codex-rs/app-server-transport/src/transport/remote_control/controller.rs
-index fcf5b479bfed1c7fb732138b4f6ae66ec28c6c18..727a012520041b7255adfb91594ebcb626f3923f 100644
+index fcf5b479bf..727a012520 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/controller.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/controller.rs
 @@ -280,7 +280,9 @@ pub async fn start_remote_control(
@@ -2104,7 +2104,7 @@ index fcf5b479bfed1c7fb732138b4f6ae66ec28c6c18..727a012520041b7255adfb91594ebcb6
                          persistence_preference: None,
                      }
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/desired_state.rs b/codex-rs/app-server-transport/src/transport/remote_control/desired_state.rs
-index 86c41aa4d0b54d4198e02aa849d16184b66e25f2..7a0d0e5ed46d87ff98c3c003039bc5c025c337e7 100644
+index 86c41aa4d0..7a0d0e5ed4 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/desired_state.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/desired_state.rs
 @@ -1,7 +1,7 @@
@@ -2139,7 +2139,7 @@ index 86c41aa4d0b54d4198e02aa849d16184b66e25f2..7a0d0e5ed46d87ff98c3c003039bc5c0
          let app_server_client_name = app_server_client_name.as_deref();
          let status = self.status();
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/enroll.rs b/codex-rs/app-server-transport/src/transport/remote_control/enroll.rs
-index f13a6190fa78095f50819e97603afeaad7ede953..60ec131ffbb551030eabd4d9a6a4d4e8accd8c24 100644
+index f13a6190fa..60ec131ffb 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/enroll.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/enroll.rs
 @@ -64,7 +64,7 @@ impl RemoteControlEnrollment {
@@ -2216,7 +2216,7 @@ index f13a6190fa78095f50819e97603afeaad7ede953..60ec131ffbb551030eabd4d9a6a4d4e8
          }
  
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/mod.rs b/codex-rs/app-server-transport/src/transport/remote_control/mod.rs
-index 0c2c209d6454afa01abb317f20c50cc083f9f4b7..4868cd036233c5e753986ad6b3d0ed369323e2f0 100644
+index 0c2c209d64..4868cd0362 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/mod.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/mod.rs
 @@ -29,7 +29,7 @@ pub use self::protocol::ClientId;
@@ -2288,7 +2288,7 @@ index 0c2c209d6454afa01abb317f20c50cc083f9f4b7..4868cd036233c5e753986ad6b3d0ed36
              match load_remote_control_auth(auth_manager).await {
                  Ok(recovered_auth) if recovered_auth.account_id == enrollment.account_id => {
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/protocol.rs b/codex-rs/app-server-transport/src/transport/remote_control/protocol.rs
-index 7cf1144b66413a714a91f3d831f6d11ed812fd46..8a8b8837c4ce889f53238854bdf90e11d93d008f 100644
+index 7cf1144b66..8a8b8837c4 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/protocol.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/protocol.rs
 @@ -16,6 +16,7 @@ pub(super) struct RemoteControlTarget {
@@ -2433,7 +2433,7 @@ index 7cf1144b66413a714a91f3d831f6d11ed812fd46..8a8b8837c4ce889f53238854bdf90e11
                      .to_string(),
                  enroll_url: "https://localhost:8443/backend-api/wham/remote/control/server/enroll"
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/server_api.rs b/codex-rs/app-server-transport/src/transport/remote_control/server_api.rs
-index 1d32b0c0b3b93abab930e8cf753db4daae3dfa3b..d8c612b70d249184f7f9a75371f763077d403ba5 100644
+index 1d32b0c0b3..d8c612b70d 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/server_api.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/server_api.rs
 @@ -33,9 +33,31 @@ pub(super) struct RemoteControlServerRequestError {
@@ -2525,7 +2525,7 @@ index 1d32b0c0b3b93abab930e8cf753db4daae3dfa3b..d8c612b70d249184f7f9a75371f76307
  
      serde_json::from_slice::<Response>(&body).map_err(|err| {
 diff --git a/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs b/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
-index d5451c664569c4c009f39a6d4788c42230fc8457..a14549c076799f7d9f91cf63ce520c669e1dd80c 100644
+index d5451c6645..a14549c076 100644
 --- a/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
 +++ b/codex-rs/app-server-transport/src/transport/remote_control/websocket.rs
 @@ -599,8 +599,8 @@ impl RemoteControlWebsocket {
@@ -2604,7 +2604,7 @@ index d5451c664569c4c009f39a6d4788c42230fc8457..a14549c076799f7d9f91cf63ce520c66
                      auth_context.recovery.auth_recovery,
                      auth_context.recovery.auth_change_rx,
 diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
-index 92fb15278783b98c8d1237d0fde25bd8e620f127..1fac9a712d8841c7a3a17168456a8a103eb4995c 100644
+index 92fb152787..1fac9a712d 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor.rs
 @@ -360,6 +360,9 @@ impl AccountRequestProcessor {
@@ -2645,7 +2645,7 @@ index 92fb15278783b98c8d1237d0fde25bd8e620f127..1fac9a712d8841c7a3a17168456a8a10
              assert_eq!(workspace_messages_feature_disabled(&err), expected);
          }
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs b/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
-index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..ea978537f9043df479da9bdf00ce9bec45e75927 100644
+index 8f381bc5fa..ea978537f9 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor/workspace_routing.rs
 @@ -52,6 +52,7 @@ pub(super) struct AccountRead {
@@ -2738,7 +2738,7 @@ index 8f381bc5fa8687f596c3a4a8b1464eeaa733c6e0..ea978537f9043df479da9bdf00ce9bec
          });
          let result = tokio::select! {
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs b/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
-index accb05129832b12d02695b1b950bd8d2359c22df..5fb29c3f5dbac1306c694cc499b1e2deacddcf17 100644
+index accb051298..5fb29c3f5d 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor/workspace_switching.rs
 @@ -15,7 +15,7 @@ impl AccountRequestProcessor {
@@ -2883,7 +2883,7 @@ index accb05129832b12d02695b1b950bd8d2359c22df..5fb29c3f5dbac1306c694cc499b1e2de
          threads.unload_for_workspace_switch().await?;
          let switched = self
 diff --git a/codex-rs/app-server/tests/suite/auth.rs b/codex-rs/app-server/tests/suite/auth.rs
-index 4f8118ec2b8053041f1c75bbb04011fb57b4886d..2fa0b8145e6ddb7550ff0ae8b8cb506bf5e5cbd5 100644
+index 4f8118ec2b..2fa0b8145e 100644
 --- a/codex-rs/app-server/tests/suite/auth.rs
 +++ b/codex-rs/app-server/tests/suite/auth.rs
 @@ -231,6 +231,7 @@ async fn personal_access_token_without_email_supports_auth_status_and_account_re
@@ -2895,7 +2895,7 @@ index 4f8118ec2b8053041f1c75bbb04011fb57b4886d..2fa0b8145e6ddb7550ff0ae8b8cb506b
              requires_openai_auth: true,
          }
 diff --git a/codex-rs/app-server/tests/suite/v2/account.rs b/codex-rs/app-server/tests/suite/v2/account.rs
-index c8bb9eccbe9ff1654f9521ed53b2eb65a7c6fb4b..1804fcda114212df83e1e2a2afd058e28c65be0f 100644
+index c8bb9eccbe..1804fcda11 100644
 --- a/codex-rs/app-server/tests/suite/v2/account.rs
 +++ b/codex-rs/app-server/tests/suite/v2/account.rs
 @@ -634,6 +634,7 @@ async fn set_auth_token_updates_account_and_notifies() -> Result<()> {
@@ -2955,7 +2955,7 @@ index c8bb9eccbe9ff1654f9521ed53b2eb65a7c6fb4b..1804fcda114212df83e1e2a2afd058e2
          requires_openai_auth: true,
      };
 diff --git a/codex-rs/app-server/tests/suite/v2/account_workspace_switching.rs b/codex-rs/app-server/tests/suite/v2/account_workspace_switching.rs
-index 78d9a562303f3e283ef77fede15c53101b4e0001..27a2f490698e9a9ec0095604d981a04e0bfb6846 100644
+index 78d9a56230..27a2f49069 100644
 --- a/codex-rs/app-server/tests/suite/v2/account_workspace_switching.rs
 +++ b/codex-rs/app-server/tests/suite/v2/account_workspace_switching.rs
 @@ -392,6 +392,7 @@ async fn workspace_switch_validates_and_preserves_managed_login(
@@ -2975,7 +2975,7 @@ index 78d9a562303f3e283ef77fede15c53101b4e0001..27a2f490698e9a9ec0095604d981a04e
          })
      );
 diff --git a/codex-rs/backend-client/src/analytics_session.rs b/codex-rs/backend-client/src/analytics_session.rs
-index 3445a1a796d7f51264ef3258f630d3833a80abbf..31d30a97d63af71bca0443bd84e98f9d7d24a951 100644
+index 3445a1a796..31d30a97d6 100644
 --- a/codex-rs/backend-client/src/analytics_session.rs
 +++ b/codex-rs/backend-client/src/analytics_session.rs
 @@ -163,7 +163,7 @@ impl AnalyticsSession {
@@ -2988,7 +2988,7 @@ index 3445a1a796d7f51264ef3258f630d3833a80abbf..31d30a97d63af71bca0443bd84e98f9d
                  && recovery.next().await.is_ok()
              {
 diff --git a/codex-rs/backend-client/src/client.rs b/codex-rs/backend-client/src/client.rs
-index 6dafe2e1af78251f21f09867615418a30fdb9ca0..f0f67695ebecb6253449bc72174d6f6741f60fbf 100644
+index 6dafe2e1af..f0f67695eb 100644
 --- a/codex-rs/backend-client/src/client.rs
 +++ b/codex-rs/backend-client/src/client.rs
 @@ -63,10 +63,17 @@ pub enum RequestError {
@@ -3196,7 +3196,7 @@ index 6dafe2e1af78251f21f09867615418a30fdb9ca0..f0f67695ebecb6253449bc72174d6f67
          }
          Ok((body, content_type))
 diff --git a/codex-rs/backend-client/src/client_request_tests.rs b/codex-rs/backend-client/src/client_request_tests.rs
-index 9583b62f7e14d1885963a61ddb2269015acd152e..a6df4e8363176396eba97cf44daf2273dbed0405 100644
+index 9583b62f7e..a6df4e8363 100644
 --- a/codex-rs/backend-client/src/client_request_tests.rs
 +++ b/codex-rs/backend-client/src/client_request_tests.rs
 @@ -472,3 +472,92 @@ async fn identity_header_errors_preserve_credential_recovery() {
@@ -3293,7 +3293,7 @@ index 9583b62f7e14d1885963a61ddb2269015acd152e..a6df4e8363176396eba97cf44daf2273
 +    server.verify().await;
 +}
 diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
-index ab43884ac83d15f6313822c0624bff15dc1d088e..fe1461cb775562a3e443d202718e8b123982550a 100644
+index ab43884ac8..fe1461cb77 100644
 --- a/codex-rs/cli/src/doctor.rs
 +++ b/codex-rs/cli/src/doctor.rs
 @@ -2493,7 +2493,9 @@ fn websocket_error_detail(err: &ApiError) -> String {
@@ -3316,7 +3316,7 @@ index ab43884ac83d15f6313822c0624bff15dc1d088e..fe1461cb775562a3e443d202718e8b12
                  url: Some(format!("https://example.com/?token={secret}")),
                  headers: Some(HeaderMap::from_iter([(
 diff --git a/codex-rs/cli/src/lib.rs b/codex-rs/cli/src/lib.rs
-index dbfd0bc0e76467f3b39e942558111ac1bc5adebe..25dd4ddf925c7413f302c7e6be55491abbd2687e 100644
+index dbfd0bc0e7..25dd4ddf92 100644
 --- a/codex-rs/cli/src/lib.rs
 +++ b/codex-rs/cli/src/lib.rs
 @@ -19,6 +19,8 @@ pub use git_credential::run_git_credential;
@@ -3329,7 +3329,7 @@ index dbfd0bc0e76467f3b39e942558111ac1bc5adebe..25dd4ddf925c7413f302c7e6be55491a
  pub use login::run_login_with_api_key;
  pub use login::run_login_with_browser;
 diff --git a/codex-rs/cli/src/login.rs b/codex-rs/cli/src/login.rs
-index a471e8cd60df3bbbba91ebb23cf92da30b99de34..a3f01c3588742f81ccefd9602d56365c0aac85a8 100644
+index a471e8cd60..a3f01c3588 100644
 --- a/codex-rs/cli/src/login.rs
 +++ b/codex-rs/cli/src/login.rs
 @@ -214,6 +214,7 @@ where
@@ -3426,7 +3426,7 @@ index a471e8cd60df3bbbba91ebb23cf92da30b99de34..a3f01c3588742f81ccefd9602d56365c
          .config_layer_stack
          .requirements_toml()
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index 5108253a5eaf31c344c033d8f03d3f3de91017b0..70b4d49d0d127195ff9f8806ff28bc871d32d271 100644
+index 5108253a5e..70b4d49d0d 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -529,6 +529,10 @@ struct LoginCommand {
@@ -3472,7 +3472,7 @@ index 5108253a5eaf31c344c033d8f03d3f3de91017b0..70b4d49d0d127195ff9f8806ff28bc87
                          run_login_with_access_token(login_cli.config_overrides, access_token).await;
                      } else {
 diff --git a/codex-rs/cloud-config/src/backend.rs b/codex-rs/cloud-config/src/backend.rs
-index 68f337d56fe6ca52e71f03af16df409e8d8ac2c3..7606fe3d75b4344e3b0bac19872bcec2599208b9 100644
+index 68f337d56f..7606fe3d75 100644
 --- a/codex-rs/cloud-config/src/backend.rs
 +++ b/codex-rs/cloud-config/src/backend.rs
 @@ -35,6 +35,7 @@ pub(crate) enum BundleRequestError {
@@ -3500,7 +3500,7 @@ index 68f337d56fe6ca52e71f03af16df409e8d8ac2c3..7606fe3d75b4344e3b0bac19872bcec2
          }
      } else {
 diff --git a/codex-rs/cloud-config/src/chatgpt.rs b/codex-rs/cloud-config/src/chatgpt.rs
-index 47a3b2cf24f4a3c5ced5844d3db54a503a11b09e..94a177457709917ac6f7e7f578164e824bbad341 100644
+index 47a3b2cf24..94a1774577 100644
 --- a/codex-rs/cloud-config/src/chatgpt.rs
 +++ b/codex-rs/cloud-config/src/chatgpt.rs
 @@ -55,9 +55,15 @@ impl<C: BundleClient> BundleSource for ChatGptSource<C> {
@@ -3522,7 +3522,7 @@ index 47a3b2cf24f4a3c5ced5844d3db54a503a11b09e..94a177457709917ac6f7e7f578164e82
  
      async fn recover_auth(
 diff --git a/codex-rs/cloud-config/src/service.rs b/codex-rs/cloud-config/src/service.rs
-index 00c67c3613b0ccc468d495a122f8c9b803704bf0..54ec878c529f6cd91efcdd8617923bfae16da994 100644
+index 00c67c3613..54ec878c52 100644
 --- a/codex-rs/cloud-config/src/service.rs
 +++ b/codex-rs/cloud-config/src/service.rs
 @@ -293,6 +293,7 @@ impl<S: BundleSource + 'static> CloudConfigBundleService<S> {
@@ -3534,7 +3534,7 @@ index 00c67c3613b0ccc468d495a122f8c9b803704bf0..54ec878c529f6cd91efcdd8617923bfa
                      emit_fetch_final_metric(
                          trigger,
 diff --git a/codex-rs/cloud-config/src/service_tests.rs b/codex-rs/cloud-config/src/service_tests.rs
-index 70fd0a02ea49e618794cd3abf5a76fa94ace27a7..ce737cab95041da74e27126e5cea32b2b6755223 100644
+index 70fd0a02ea..ce737cab95 100644
 --- a/codex-rs/cloud-config/src/service_tests.rs
 +++ b/codex-rs/cloud-config/src/service_tests.rs
 @@ -454,6 +454,7 @@ impl BundleClient for TokenBundleClient {
@@ -3568,7 +3568,7 @@ index 70fd0a02ea49e618794cd3abf5a76fa94ace27a7..ce737cab95041da74e27126e5cea32b2
          Ok(test_bundle()),
      ]));
 diff --git a/codex-rs/cloud-tasks-client/src/api.rs b/codex-rs/cloud-tasks-client/src/api.rs
-index a9c75dedc67e8e47f6af67df82a49f06f8a82354..11ab4bcca6385351d4afb27743302f569cb318eb 100644
+index a9c75dedc6..11ab4bcca6 100644
 --- a/codex-rs/cloud-tasks-client/src/api.rs
 +++ b/codex-rs/cloud-tasks-client/src/api.rs
 @@ -14,12 +14,53 @@ pub enum CloudTaskError {
@@ -3626,7 +3626,7 @@ index a9c75dedc67e8e47f6af67df82a49f06f8a82354..11ab4bcca6385351d4afb27743302f56
  #[serde(transparent)]
  pub struct TaskId(pub String);
 diff --git a/codex-rs/cloud-tasks-client/src/http.rs b/codex-rs/cloud-tasks-client/src/http.rs
-index b6ea46bbf9076703cd1f06e405fb4a755d80e9b3..ca17a48c73e6fe276d4fe747fe38fd90880a73cd 100644
+index b6ea46bbf9..ca17a48c73 100644
 --- a/codex-rs/cloud-tasks-client/src/http.rs
 +++ b/codex-rs/cloud-tasks-client/src/http.rs
 @@ -55,6 +55,14 @@ impl HttpClient {
@@ -3708,7 +3708,7 @@ index b6ea46bbf9076703cd1f06e405fb4a755d80e9b3..ca17a48c73e6fe276d4fe747fe38fd90
              let mut attempts: Vec<TurnAttempt> = resp
                  .sibling_turns
 diff --git a/codex-rs/cloud-tasks/Cargo.toml b/codex-rs/cloud-tasks/Cargo.toml
-index 26564894e865a253c5aff0bf8f5f7ad50b08495a..aeb1d85e7c0fcabb019be172c73b2a2fbe765ad7 100644
+index 26564894e8..aeb1d85e7c 100644
 --- a/codex-rs/cloud-tasks/Cargo.toml
 +++ b/codex-rs/cloud-tasks/Cargo.toml
 @@ -21,6 +21,7 @@ codex-http-client = { workspace = true }
@@ -3720,7 +3720,7 @@ index 26564894e865a253c5aff0bf8f5f7ad50b08495a..aeb1d85e7c0fcabb019be172c73b2a2f
  codex-features = { workspace = true }
  codex-git-utils = { workspace = true }
 diff --git a/codex-rs/cloud-tasks/src/lib.rs b/codex-rs/cloud-tasks/src/lib.rs
-index 864e9e067c2578d08c5f2b01c405b4b060e4f386..217756db6bdabecfef27079f82e8e24784073d66 100644
+index 864e9e067c..217756db6b 100644
 --- a/codex-rs/cloud-tasks/src/lib.rs
 +++ b/codex-rs/cloud-tasks/src/lib.rs
 @@ -58,15 +58,18 @@ async fn init_backend(
@@ -3769,7 +3769,7 @@ index 864e9e067c2578d08c5f2b01c405b4b060e4f386..217756db6bdabecfef27079f82e8e247
          append_error_log(format!("auth: set ChatGPT-Account-Id header: {acc}"));
      }
 diff --git a/codex-rs/cloud-tasks/src/util.rs b/codex-rs/cloud-tasks/src/util.rs
-index da1a4b64c50de944409602b0489a622850eb73fc..22e33e9fd2b4123d627e5b52a10b112f2d6becdc 100644
+index da1a4b64c5..22e33e9fd2 100644
 --- a/codex-rs/cloud-tasks/src/util.rs
 +++ b/codex-rs/cloud-tasks/src/util.rs
 @@ -78,25 +78,45 @@ pub(crate) fn validate_chatgpt_base_url(input: &str) -> anyhow::Result<String> {
@@ -3858,7 +3858,7 @@ index da1a4b64c50de944409602b0489a622850eb73fc..22e33e9fd2b4123d627e5b52a10b112f
      fn normalize_base_url_normalizes_urls() {
          for (input, expected) in [
 diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
-index 07958edff94f0458191bd8dfbf386ac9cd340aac..b4e69af6cb8a2c047e8c55f961209bd0980247d0 100644
+index 07958edff9..b4e69af6cb 100644
 --- a/codex-rs/codex-api/src/api_bridge.rs
 +++ b/codex-rs/codex-api/src/api_bridge.rs
 @@ -21,12 +21,42 @@ use serde::Deserialize;
@@ -3938,7 +3938,7 @@ index 07958edff94f0458191bd8dfbf386ac9cd340aac..b4e69af6cb8a2c047e8c55f961209bd0
                  let body_text = body.unwrap_or_default();
                  let parsed_body = serde_json::from_str::<Value>(&body_text).ok();
 diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
-index 99bd0bc148828987b4e309a2adbae334fe4f1dfe..c7318e72133785c1f42f004abe34516550bb6fe5 100644
+index 99bd0bc148..c7318e7213 100644
 --- a/codex-rs/codex-api/src/api_bridge_tests.rs
 +++ b/codex-rs/codex-api/src/api_bridge_tests.rs
 @@ -23,6 +23,7 @@ async fn http_policy_capacity_preserves_retry_advice_and_terminal_behavior() {
@@ -4159,7 +4159,7 @@ index 99bd0bc148828987b4e309a2adbae334fe4f1dfe..c7318e72133785c1f42f004abe345165
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/auth.rs b/codex-rs/codex-api/src/auth.rs
-index c72dc2d7e6a8c2410cec42140c6821587a5b1beb..981937bc021b56243296b7eed9387ad2c1155ee7 100644
+index c72dc2d7e6..981937bc02 100644
 --- a/codex-rs/codex-api/src/auth.rs
 +++ b/codex-rs/codex-api/src/auth.rs
 @@ -67,6 +67,31 @@ pub trait AuthProvider: Send + Sync {
@@ -4257,7 +4257,7 @@ index c72dc2d7e6a8c2410cec42140c6821587a5b1beb..981937bc021b56243296b7eed9387ad2
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
-index 5366bd75c6012cd8f25a11d5642223557e4b98d0..ffbe22daadc55f470977ec4a1aaf36292e901848 100644
+index 5366bd75c6..ffbe22daad 100644
 --- a/codex-rs/codex-api/src/endpoint/images.rs
 +++ b/codex-rs/codex-api/src/endpoint/images.rs
 @@ -30,7 +30,11 @@ pub struct ImageRequestError {
@@ -4320,7 +4320,7 @@ index 5366bd75c6012cd8f25a11d5642223557e4b98d0..ffbe22daadc55f470977ec4a1aaf3629
      struct DummyAuth;
  
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 015c8a7ce8e67a6ad8735d04e16c981f8b5f70eb..0adfcd985029a2d4aa865d7b0f1e852e34a3703e 100644
+index 015c8a7ce8..0adfcd9850 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -238,6 +238,8 @@ pub struct ResponsesWebsocketConnection {
@@ -4582,7 +4582,7 @@ index 015c8a7ce8e67a6ad8735d04e16c981f8b5f70eb..0adfcd985029a2d4aa865d7b0f1e852e
          assert_eq!(status, StatusCode::BAD_REQUEST);
          let body = body.expect("expected body");
 diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
-index 4c31832ea05572d92c0bb0ee31e880f53ae5c6de..f890dfd43754558725a32356814ae377e7fa8e89 100644
+index 4c31832ea0..f890dfd437 100644
 --- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
 +++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
 @@ -33,6 +33,7 @@ fn audio_validation_codes_map_to_non_retryable_audio_input_errors_on_all_transpo
@@ -4594,7 +4594,7 @@ index 4c31832ea05572d92c0bb0ee31e880f53ae5c6de..f890dfd43754558725a32356814ae377
              },
          ));
 diff --git a/codex-rs/codex-api/src/telemetry.rs b/codex-rs/codex-api/src/telemetry.rs
-index f7589d725676393a5106292e25032fe7b0e28566..8727aaf93e6e13750f7eff801049cbf84de6ade1 100644
+index f7589d7256..8727aaf93e 100644
 --- a/codex-rs/codex-api/src/telemetry.rs
 +++ b/codex-rs/codex-api/src/telemetry.rs
 @@ -48,7 +48,9 @@ pub(crate) trait WithStatus {
@@ -4653,7 +4653,7 @@ index f7589d725676393a5106292e25032fe7b0e28566..8727aaf93e6e13750f7eff801049cbf8
 +    }
 +}
 diff --git a/codex-rs/codex-api/tests/responses_websocket_probe.rs b/codex-rs/codex-api/tests/responses_websocket_probe.rs
-index 278f7ac995ea48c63fdd0e054392363a332c19f4..b17c537fe47ef6147077291f9205c4c8bbb01c78 100644
+index 278f7ac995..b17c537fe4 100644
 --- a/codex-rs/codex-api/tests/responses_websocket_probe.rs
 +++ b/codex-rs/codex-api/tests/responses_websocket_probe.rs
 @@ -238,7 +238,7 @@ async fn probe_preserves_evidence_and_redacts_wire_secrets() {
@@ -4666,7 +4666,7 @@ index 278f7ac995ea48c63fdd0e054392363a332c19f4..b17c537fe47ef6147077291f9205c4c8
                          headers,
                          body,
 diff --git a/codex-rs/codex-client/src/retry.rs b/codex-rs/codex-client/src/retry.rs
-index b10fa50794de347b73a76c83d0b6b36e055a7842..22914e309b6644f6b846d06b296b61e555aa1944 100644
+index b10fa50794..22914e309b 100644
 --- a/codex-rs/codex-client/src/retry.rs
 +++ b/codex-rs/codex-client/src/retry.rs
 @@ -25,7 +25,9 @@ impl RetryOn {
@@ -4739,7 +4739,7 @@ index b10fa50794de347b73a76c83d0b6b36e055a7842..22914e309b6644f6b846d06b296b61e5
 +    }
 +}
 diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
-index 493320a1542bb55b29d78d14f29e2fef7bba91d7..974f98e16d56c0f79275f0f32ba0029c25c9a35f 100644
+index 493320a154..974f98e16d 100644
 --- a/codex-rs/codex-mcp/src/connection_manager.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager.rs
 @@ -484,7 +484,15 @@ impl McpConnectionSet {
@@ -4760,7 +4760,7 @@ index 493320a1542bb55b29d78d14f29e2fef7bba91d7..974f98e16d56c0f79275f0f32ba0029c
                  &configured_config.transport,
                  McpServerTransportConfig::StreamableHttp { .. }
 diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
-index 492d72a0653ab6d1863745b51e7ca41889b0b33e..568511d126e3586fae9c2c6477e0f5cbe790d167 100644
+index 492d72a065..568511d126 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod.rs
 @@ -603,7 +603,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
@@ -4775,7 +4775,7 @@ index 492d72a0653ab6d1863745b51e7ca41889b0b33e..568511d126e3586fae9c2c6477e0f5cb
              elicitation_lifecycle: None,
          },
 diff --git a/codex-rs/config/Cargo.toml b/codex-rs/config/Cargo.toml
-index 9db5c0711e3e177c7217e93ac7c8aea94fdb59cb..17dbcd557683d9146eecacc3898b669bacf6fb8e 100644
+index 9db5c0711e..17dbcd5576 100644
 --- a/codex-rs/config/Cargo.toml
 +++ b/codex-rs/config/Cargo.toml
 @@ -47,6 +47,7 @@ toml_edit = { workspace = true }
@@ -4788,7 +4788,7 @@ index 9db5c0711e3e177c7217e93ac7c8aea94fdb59cb..17dbcd557683d9146eecacc3898b669b
  [target.'cfg(unix)'.dependencies]
 diff --git a/codex-rs/config/src/cc_lb.rs b/codex-rs/config/src/cc_lb.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..41636a65a0234b76ad517d7ffb255b45e47ff04d
+index 0000000000..41636a65a0
 --- /dev/null
 +++ b/codex-rs/config/src/cc_lb.rs
 @@ -0,0 +1,202 @@
@@ -4995,7 +4995,7 @@ index 0000000000000000000000000000000000000000..41636a65a0234b76ad517d7ffb255b45
 +    }
 +}
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 340861ba5380de30c134cf6b16e3188ddb626085..f6d58ef2162f68d43cd877d531c652f05cd74af2 100644
+index 340861ba53..f6d58ef216 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -165,6 +165,9 @@ pub struct FeatureToggleToml {
@@ -5009,7 +5009,7 @@ index 340861ba5380de30c134cf6b16e3188ddb626085..f6d58ef2162f68d43cd877d531c652f0
      pub model: Option<String>,
      /// Default Daybreak preference for new threads and non-interactive turns.
 diff --git a/codex-rs/config/src/lib.rs b/codex-rs/config/src/lib.rs
-index 4a10ce687290c53c4b456eef7389cf603af5ac29..90adc9f5b7405e4363eec49aede0cafc7be08a52 100644
+index 4a10ce6872..90adc9f5b7 100644
 --- a/codex-rs/config/src/lib.rs
 +++ b/codex-rs/config/src/lib.rs
 @@ -3,6 +3,7 @@ mod application_storage_requirements;
@@ -5029,7 +5029,7 @@ index 4a10ce687290c53c4b456eef7389cf603af5ac29..90adc9f5b7405e4363eec49aede0cafc
  pub use browser_computer_use_requirements::BrowserUseExtensionRequirementsToml;
  pub use browser_computer_use_requirements::BrowserUseOriginPolicyToml;
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 425967e392a77fd939f3d9c023ff1f0602cef0c5..b801c8050a7224e5f621f4aadfbd70e8d6537f44 100644
+index 425967e392..b801c8050a 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1501,7 +1501,14 @@ impl ModelClient {
@@ -5100,7 +5100,7 @@ index 425967e392a77fd939f3d9c023ff1f0602cef0c5..b801c8050a7224e5f621f4aadfbd70e8
      }
  }
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 4bf90c42274e58b99331e8dd27925e54045f7047..8d30b201e3678305cbbdaadd2367ea22eab2bd06 100644
+index 4bf90c4227..8d30b201e3 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -1856,6 +1856,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
@@ -5120,7 +5120,7 @@ index 4bf90c42274e58b99331e8dd27925e54045f7047..8d30b201e3678305cbbdaadd2367ea22
              status: http::StatusCode::UNAUTHORIZED,
              url: Some("https://example.com/v1/responses".to_string()),
 diff --git a/codex-rs/core/src/config/auth_keyring.rs b/codex-rs/core/src/config/auth_keyring.rs
-index e3445010d8e4476997666091fd618d4b0e0b5c2f..9cd95bc3960d71c757f44d49d188336792371601 100644
+index e3445010d8..9cd95bc396 100644
 --- a/codex-rs/core/src/config/auth_keyring.rs
 +++ b/codex-rs/core/src/config/auth_keyring.rs
 @@ -24,6 +24,7 @@ impl Config {
@@ -5187,7 +5187,7 @@ index e3445010d8e4476997666091fd618d4b0e0b5c2f..9cd95bc3960d71c757f44d49d1883367
      Ok(auth_config)
  }
 diff --git a/codex-rs/core/src/config/auth_keyring_tests.rs b/codex-rs/core/src/config/auth_keyring_tests.rs
-index 1c93c2f213bd12c17cc307c2e3f38b3738eb2420..1f3f2410b8c531968fea16a2bffb16396f4da101 100644
+index 1c93c2f213..1f3f2410b8 100644
 --- a/codex-rs/core/src/config/auth_keyring_tests.rs
 +++ b/codex-rs/core/src/config/auth_keyring_tests.rs
 @@ -181,3 +181,80 @@ fn config_toml_load_result(
@@ -5272,7 +5272,7 @@ index 1c93c2f213bd12c17cc307c2e3f38b3738eb2420..1f3f2410b8c531968fea16a2bffb1639
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 1be838e1dd560c8efca5ef65ef64f47df675b7ad..38e61dea4b1e73672d573f16d466bcce517e696e 100644
+index 1be838e1dd..38e61dea4b 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -116,6 +116,7 @@ use core_test_support::TempDirExt;
@@ -5357,7 +5357,7 @@ index 1be838e1dd560c8efca5ef65ef64f47df675b7ad..38e61dea4b1e73672d573f16d466bcce
      stdio_mcp_with_args(command, &[])
  }
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index baf6aa664702908981d0a9ea8fcaa9c9c34f0e0b..127d9f498af870cf272a1467a2c16a7eada1e685 100644
+index baf6aa6647..127d9f498a 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -1104,6 +1104,9 @@ pub struct Config {
@@ -5476,7 +5476,7 @@ index baf6aa664702908981d0a9ea8fcaa9c9c34f0e0b..127d9f498af870cf272a1467a2c16a7e
                  .chatgpt_base_url
                  .unwrap_or_else(|| DEFAULT_CHATGPT_BASE_URL.to_string()),
 diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suite/retry_after.rs
-index c2b1d6c9b874dd7c5abce890678740c5725acc7a..fae503e0a27ababbeda9d57bb8dea62f7d74cf27 100644
+index c2b1d6c9b8..fae503e0a2 100644
 --- a/codex-rs/core/tests/suite/retry_after.rs
 +++ b/codex-rs/core/tests/suite/retry_after.rs
 @@ -421,6 +421,7 @@ async fn http_retry_backoff_exhausts_attempts() {
@@ -5496,7 +5496,7 @@ index c2b1d6c9b874dd7c5abce890678740c5725acc7a..fae503e0a27ababbeda9d57bb8dea62f
                  url: None,
                  headers: None,
 diff --git a/codex-rs/exec-server/src/client/http_response_body_stream.rs b/codex-rs/exec-server/src/client/http_response_body_stream.rs
-index 36f22176e1a4256e0c2c642bc7f3e55dcdb00970..0fa95460c5c02c3e2a11ebc337b4c6363dff21fd 100644
+index 36f22176e1..0fa95460c5 100644
 --- a/codex-rs/exec-server/src/client/http_response_body_stream.rs
 +++ b/codex-rs/exec-server/src/client/http_response_body_stream.rs
 @@ -77,6 +77,9 @@ enum HttpResponseBodyStreamInner {
@@ -5552,7 +5552,7 @@ index 36f22176e1a4256e0c2c642bc7f3e55dcdb00970..0fa95460c5c02c3e2a11ebc337b4c636
      pub fn cancel_on(mut self, cancellation: CancellationToken) -> Self {
          self.cancellation = Some(cancellation);
 diff --git a/codex-rs/ext/git-attribution/src/policy.rs b/codex-rs/ext/git-attribution/src/policy.rs
-index df7568203a74d57bac04e9121e75322b3cf78166..a78c061f937c72b51d3fcca54122baaa08e28e2a 100644
+index df7568203a..a78c061f93 100644
 --- a/codex-rs/ext/git-attribution/src/policy.rs
 +++ b/codex-rs/ext/git-attribution/src/policy.rs
 @@ -93,7 +93,7 @@ pub(super) async fn resolve_attribution_policy(
@@ -5565,7 +5565,7 @@ index df7568203a74d57bac04e9121e75322b3cf78166..a78c061f937c72b51d3fcca54122baaa
                                  recovery_generation = auth_generation(auth_manager);
                                  continue;
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/decisions_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/decisions_tests.rs
-index 7c6a52fab7fcbb7b7460c826dc553ab91f7dad50..1a1a8814a955bea8226b4ef056a5995d91a625d1 100644
+index 7c6a52fab7..1a1a8814a9 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/decisions_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/decisions_tests.rs
 @@ -653,6 +653,7 @@ async fn decisions_preserves_platform_wif_credentials() -> anyhow::Result<()> {
@@ -5577,7 +5577,7 @@ index 7c6a52fab7fcbb7b7460c826dc553ab91f7dad50..1a1a8814a955bea8226b4ef056a5995d
                  keyring_backend_kind: Default::default(),
                  forced_login_method: None,
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
-index a92217b1b028d0e8ca262d7cbfcf7b8c9d42c587..08980604817ac3bb7d3939c6324e83fa30e95bb1 100644
+index a92217b1b0..0898060481 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
 @@ -30,6 +30,8 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
@@ -5590,7 +5590,7 @@ index a92217b1b028d0e8ca262d7cbfcf7b8c9d42c587..08980604817ac3bb7d3939c6324e83fa
                  401 => "http_401",
                  403 => "http_403",
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
-index bd77e49b5a9204d6b884acd75893df7827f95a72..3dd1619982e67904f62125a98a190fc439035348 100644
+index bd77e49b5a..3dd1619982 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 @@ -503,13 +503,29 @@ impl ConnectionPool {
@@ -5631,7 +5631,7 @@ index bd77e49b5a9204d6b884acd75893df7827f95a72..3dd1619982e67904f62125a98a190fc4
              // Unsupported upgrades and connection failures can still use HTTP.
              Err(_) => Ok(None),
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
-index c764ab3fe1df2514e6d856e50990e31d125ef000..0cc196107b17097ada50e5a4c2b08b145c33d927 100644
+index c764ab3fe1..0cc196107b 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 @@ -813,10 +813,12 @@ async fn runtime_transports_authenticate_each_classification() -> Result<()> {
@@ -5652,7 +5652,7 @@ index c764ab3fe1df2514e6d856e50990e31d125ef000..0cc196107b17097ada50e5a4c2b08b14
                      "{error:?}"
                  );
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
-index b6bcd4d4a4d741e62c0a77ef6ef5efd4595cc27c..cf6df72d68817ba6aa1e61706a648012bbb953fd 100644
+index b6bcd4d4a4..cf6df72d68 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
 @@ -126,11 +126,29 @@ impl SamplingExecution {
@@ -5687,7 +5687,7 @@ index b6bcd4d4a4d741e62c0a77ef6ef5efd4595cc27c..cf6df72d68817ba6aa1e61706a648012
                      }
 diff --git a/codex-rs/http-client/src/cc_lb.rs b/codex-rs/http-client/src/cc_lb.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..eb7a3cd4ca9967b4099475152df17d8ca89d3675
+index 0000000000..eb7a3cd4ca
 --- /dev/null
 +++ b/codex-rs/http-client/src/cc_lb.rs
 @@ -0,0 +1,329 @@
@@ -6021,7 +6021,7 @@ index 0000000000000000000000000000000000000000..eb7a3cd4ca9967b4099475152df17d8c
 +    }
 +}
 diff --git a/codex-rs/http-client/src/client_builder.rs b/codex-rs/http-client/src/client_builder.rs
-index cdcc0bb58f96516ef195f07202399fdf92d02af9..0fdbb139266a55e812fb1cd0e40ce2caea70e30b 100644
+index cdcc0bb58f..0fdbb13926 100644
 --- a/codex-rs/http-client/src/client_builder.rs
 +++ b/codex-rs/http-client/src/client_builder.rs
 @@ -96,6 +96,9 @@ impl HttpClientBuilder {
@@ -6045,7 +6045,7 @@ index cdcc0bb58f96516ef195f07202399fdf92d02af9..0fdbb139266a55e812fb1cd0e40ce2ca
              || http_client_factory.protects_sensitive_headers()
          {
 diff --git a/codex-rs/http-client/src/error.rs b/codex-rs/http-client/src/error.rs
-index 181a213b144a064c59e3ad7708cfbfd10d81d032..1d1cd2960259aab6a59eabc0ca89ba9818fe5709 100644
+index 181a213b14..1d1cd29602 100644
 --- a/codex-rs/http-client/src/error.rs
 +++ b/codex-rs/http-client/src/error.rs
 @@ -16,6 +16,30 @@ pub enum TransportError {
@@ -6136,7 +6136,7 @@ index 181a213b144a064c59e3ad7708cfbfd10d81d032..1d1cd2960259aab6a59eabc0ca89ba98
              | Self::RetryLimit
              | Self::Timeout
 diff --git a/codex-rs/http-client/src/lib.rs b/codex-rs/http-client/src/lib.rs
-index 47274c8b8f4867092bd5f9d626075cdaf43f533e..2ee12100f22ce0af5fe7b4e926e49844a3250eaf 100644
+index 47274c8b8f..2ee12100f2 100644
 --- a/codex-rs/http-client/src/lib.rs
 +++ b/codex-rs/http-client/src/lib.rs
 @@ -1,6 +1,9 @@
@@ -6166,7 +6166,7 @@ index 47274c8b8f4867092bd5f9d626075cdaf43f533e..2ee12100f22ce0af5fe7b4e926e49844
  pub use crate::chatgpt_hosts::is_allowed_chatgpt_host;
  pub use crate::chatgpt_routing_affinity::ChatGptRoutingAffinity;
 diff --git a/codex-rs/http-client/src/outbound_proxy.rs b/codex-rs/http-client/src/outbound_proxy.rs
-index 81e2b1fea289daca1665cc0aa9810a4bf6871ab7..c4c36694ee8df7a62f900f5738f9bb3a9ee0109f 100644
+index 81e2b1fea2..c4c36694ee 100644
 --- a/codex-rs/http-client/src/outbound_proxy.rs
 +++ b/codex-rs/http-client/src/outbound_proxy.rs
 @@ -168,6 +168,7 @@ pub struct HttpClientFactory {
@@ -6210,7 +6210,7 @@ index 81e2b1fea289daca1665cc0aa9810a4bf6871ab7..c4c36694ee8df7a62f900f5738f9bb3a
      pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
          self.network_policy = policy;
 diff --git a/codex-rs/http-client/src/response.rs b/codex-rs/http-client/src/response.rs
-index ccb64a794b3949aef663700d9b76b48ec99aa7b1..4e4af4d47a9c5f01d1c99289d62afb51b96230e1 100644
+index ccb64a794b..4e4af4d47a 100644
 --- a/codex-rs/http-client/src/response.rs
 +++ b/codex-rs/http-client/src/response.rs
 @@ -48,6 +48,16 @@ impl HttpResponse {
@@ -6231,7 +6231,7 @@ index ccb64a794b3949aef663700d9b76b48ec99aa7b1..4e4af4d47a9c5f01d1c99289d62afb51
          Ok(Box::pin(self.permit.run(self.inner.json())).await??)
      }
 diff --git a/codex-rs/http-client/src/route_aware_client_pool.rs b/codex-rs/http-client/src/route_aware_client_pool.rs
-index 796a4a2659884ad629ac7a0a6e40d9c58632d003..a8b8f32e954c56f7d2ef9a99c488a8ee1923dd2d 100644
+index 796a4a2659..a8b8f32e95 100644
 --- a/codex-rs/http-client/src/route_aware_client_pool.rs
 +++ b/codex-rs/http-client/src/route_aware_client_pool.rs
 @@ -222,6 +222,22 @@ impl RouteAwareClientPool {
@@ -6268,7 +6268,7 @@ index 796a4a2659884ad629ac7a0a6e40d9c58632d003..a8b8f32e954c56f7d2ef9a99c488a8ee
          Self {
              http_client_factory,
 diff --git a/codex-rs/http-client/src/transport.rs b/codex-rs/http-client/src/transport.rs
-index 6eb86a3ca7e944405236f967abf515d99a0b2e35..6f0ade68881f8e1472aaf0193c105c416338178b 100644
+index 6eb86a3ca7..6f0ade6888 100644
 --- a/codex-rs/http-client/src/transport.rs
 +++ b/codex-rs/http-client/src/transport.rs
 @@ -175,9 +175,9 @@ impl HttpTransport for ReqwestTransport {
@@ -6360,7 +6360,7 @@ index 6eb86a3ca7e944405236f967abf515d99a0b2e35..6f0ade68881f8e1472aaf0193c105c41
              });
          }
 diff --git a/codex-rs/http-client/src/transport_tests.rs b/codex-rs/http-client/src/transport_tests.rs
-index f8240ba2457fe5fa29a952d807affcf6e58d002d..6565b35a33a6655d189624a2769390cbb189a55b 100644
+index f8240ba245..6565b35a33 100644
 --- a/codex-rs/http-client/src/transport_tests.rs
 +++ b/codex-rs/http-client/src/transport_tests.rs
 @@ -126,3 +126,146 @@ impl Write for TestLogWriter {
@@ -6511,7 +6511,7 @@ index f8240ba2457fe5fa29a952d807affcf6e58d002d..6565b35a33a6655d189624a2769390cb
 +    }
 +}
 diff --git a/codex-rs/login/Cargo.toml b/codex-rs/login/Cargo.toml
-index 03ee83418d17a428195d529c0caffbbb6b01d092..6f20f250891d0fe4e1b47d45c4539dc6ae4331c2 100644
+index 03ee83418d..6f20f25089 100644
 --- a/codex-rs/login/Cargo.toml
 +++ b/codex-rs/login/Cargo.toml
 @@ -48,6 +48,7 @@ urlencoding = { workspace = true }
@@ -6523,7 +6523,7 @@ index 03ee83418d17a428195d529c0caffbbb6b01d092..6f20f250891d0fe4e1b47d45c4539dc6
  
  [dev-dependencies]
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..64b6288522457ea1b1cf1791bed3b0bcf3366199 100644
+index 9a3df938f4..64b6288522 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
 @@ -1383,6 +1383,7 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
@@ -6576,7 +6576,7 @@ index 9a3df938f4a8d3145fac7efbf2776677ad4f02a9..64b6288522457ea1b1cf1791bed3b0bc
          forced_login_method: None,
 diff --git a/codex-rs/login/src/auth/cc_lb.rs b/codex-rs/login/src/auth/cc_lb.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6d5a8208c48b1e9ff6c5e4869f73a30b3f0df59
+index 0000000000..c6d5a8208c
 --- /dev/null
 +++ b/codex-rs/login/src/auth/cc_lb.rs
 @@ -0,0 +1,626 @@
@@ -7208,7 +7208,7 @@ index 0000000000000000000000000000000000000000..c6d5a8208c48b1e9ff6c5e4869f73a30
 +mod tests;
 diff --git a/codex-rs/login/src/auth/cc_lb_tests.rs b/codex-rs/login/src/auth/cc_lb_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e818922e6f65a8387e60b018e41f845247423dce
+index 0000000000..e818922e6f
 --- /dev/null
 +++ b/codex-rs/login/src/auth/cc_lb_tests.rs
 @@ -0,0 +1,361 @@
@@ -7574,7 +7574,7 @@ index 0000000000000000000000000000000000000000..e818922e6f65a8387e60b018e41f8452
 +    assert!(response_is_no_store(&headers));
 +}
 diff --git a/codex-rs/login/src/auth/default_client.rs b/codex-rs/login/src/auth/default_client.rs
-index 9d8af7f09a8650f4135e3367661dd9a11446d0ae..b18a1c4cbd86884d061270f4926e6dc910ff09be 100644
+index 9d8af7f09a..b18a1c4cbd 100644
 --- a/codex-rs/login/src/auth/default_client.rs
 +++ b/codex-rs/login/src/auth/default_client.rs
 @@ -371,6 +371,22 @@ pub async fn create_client_for_route_without_request_logging_async(
@@ -7601,7 +7601,7 @@ index 9d8af7f09a8650f4135e3367661dd9a11446d0ae..b18a1c4cbd86884d061270f4926e6dc9
      http_client_factory: HttpClientFactory,
      request_url: String,
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..dcf6d4562bae1995dab8874025c2043692a32763 100644
+index 7a3a2e68aa..dcf6d4562b 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -214,8 +214,8 @@ impl Debug for ApiKeyAuth {
@@ -8000,7 +8000,7 @@ index 7a3a2e68aa1f0745ae0b60135150be03ffde10e8..dcf6d4562bae1995dab8874025c20436
          keyring_backend_kind: config.auth_keyring_backend_kind(),
          forced_login_method: config.forced_login_method(),
 diff --git a/codex-rs/login/src/auth/manager/workspace_routing.rs b/codex-rs/login/src/auth/manager/workspace_routing.rs
-index 08682a7506e3cb9f9d5cfdb7f131789af825523a..0d86d8ed415e729aa1d8203e3e06b1156aad124d 100644
+index 08682a7506..0d86d8ed41 100644
 --- a/codex-rs/login/src/auth/manager/workspace_routing.rs
 +++ b/codex-rs/login/src/auth/manager/workspace_routing.rs
 @@ -75,6 +75,12 @@ impl AuthManager {
@@ -8017,7 +8017,7 @@ index 08682a7506e3cb9f9d5cfdb7f131789af825523a..0d86d8ed415e729aa1d8203e3e06b115
          // client setup rebuilds routing and credentials after that revision change.
          if auth_changes.borrow().owner_generation != owner_generation
 diff --git a/codex-rs/login/src/auth/manager/workspace_switching.rs b/codex-rs/login/src/auth/manager/workspace_switching.rs
-index bec42f3b1203493244459db696430955f439884e..71966d3ecc7591a5697d38bf23ce2d6f05c11269 100644
+index bec42f3b12..71966d3ecc 100644
 --- a/codex-rs/login/src/auth/manager/workspace_switching.rs
 +++ b/codex-rs/login/src/auth/manager/workspace_switching.rs
 @@ -114,7 +114,9 @@ impl AuthManager {
@@ -8092,7 +8092,7 @@ index bec42f3b1203493244459db696430955f439884e..71966d3ecc7591a5697d38bf23ce2d6f
          self.exchange_workspace_token(&selected.access_token, previous_workspace, user)
              .await?;
 diff --git a/codex-rs/login/src/auth/manager/workspace_switching_tests.rs b/codex-rs/login/src/auth/manager/workspace_switching_tests.rs
-index f2298a59cfd781e02221a7b7b7491ab396643ca0..d488e8e7600441462d78bd8217ee08c7d8cd04c9 100644
+index f2298a59cf..d488e8e760 100644
 --- a/codex-rs/login/src/auth/manager/workspace_switching_tests.rs
 +++ b/codex-rs/login/src/auth/manager/workspace_switching_tests.rs
 @@ -92,6 +92,7 @@ async fn workspace_switch_preserves_login_and_survives_reload() -> anyhow::Resul
@@ -8104,7 +8104,7 @@ index f2298a59cfd781e02221a7b7b7491ab396643ca0..d488e8e7600441462d78bd8217ee08c7
          keyring_backend_kind: AuthKeyringBackendKind::default(),
          forced_login_method: None,
 diff --git a/codex-rs/login/src/auth/mod.rs b/codex-rs/login/src/auth/mod.rs
-index 7ea499ff3c6434e25699f377854a92012c91a4ba..46f0a20228b0b6acc935f7d319da0ead38abb80d 100644
+index 7ea499ff3c..46f0a20228 100644
 --- a/codex-rs/login/src/auth/mod.rs
 +++ b/codex-rs/login/src/auth/mod.rs
 @@ -5,6 +5,7 @@ mod auth_headers;
@@ -8116,7 +8116,7 @@ index 7ea499ff3c6434e25699f377854a92012c91a4ba..46f0a20228b0b6acc935f7d319da0ead
  pub mod error;
  mod personal_access_token;
 diff --git a/codex-rs/login/src/auth/storage.rs b/codex-rs/login/src/auth/storage.rs
-index 5c1a8fc61e6acc2ce7391e152de1518f9dff9669..6dc116d60ba51620637b732521351cc8f73a88dd 100644
+index 5c1a8fc61e..6dc116d60b 100644
 --- a/codex-rs/login/src/auth/storage.rs
 +++ b/codex-rs/login/src/auth/storage.rs
 @@ -177,6 +177,11 @@ pub(super) fn delete_file_if_exists(codex_home: &Path) -> std::io::Result<bool>
@@ -8143,7 +8143,7 @@ index 5c1a8fc61e6acc2ce7391e152de1518f9dff9669..6dc116d60ba51620637b732521351cc8
          None
      }
 diff --git a/codex-rs/login/src/auth/workload_identity_tests.rs b/codex-rs/login/src/auth/workload_identity_tests.rs
-index fe635dd589e10a2c4c995186ee39ad8f41fcc85a..59d51b4d646e2894738a34bc15fe6fe34cf0b9b4 100644
+index fe635dd589..59d51b4d64 100644
 --- a/codex-rs/login/src/auth/workload_identity_tests.rs
 +++ b/codex-rs/login/src/auth/workload_identity_tests.rs
 @@ -610,6 +610,7 @@ async fn resolved_product_obeys_login_and_workspace_restrictions() {
@@ -8155,7 +8155,7 @@ index fe635dd589e10a2c4c995186ee39ad8f41fcc85a..59d51b4d646e2894738a34bc15fe6fe3
                  keyring_backend_kind: Default::default(),
                  forced_login_method: Some(login_method),
 diff --git a/codex-rs/login/src/lib.rs b/codex-rs/login/src/lib.rs
-index ab98e892df6a13160d4dfe6512076064d7d57480..e44163bb3a38f6961dae6353afb4790d29e493da 100644
+index ab98e892df..e44163bb3a 100644
 --- a/codex-rs/login/src/lib.rs
 +++ b/codex-rs/login/src/lib.rs
 @@ -2,6 +2,7 @@ pub mod auth;
@@ -8167,7 +8167,7 @@ index ab98e892df6a13160d4dfe6512076064d7d57480..e44163bb3a38f6961dae6353afb4790d
  pub use auth::WorkspaceRoutingRequest;
  pub use auth::WorkspaceRoutingResolver;
 diff --git a/codex-rs/login/src/outbound_proxy.rs b/codex-rs/login/src/outbound_proxy.rs
-index be183a52e9822015af71a25b4a35c1ab5b10d8f9..324b0b1a2e40f7095458bb8456a8e87c8ccb95a7 100644
+index be183a52e9..324b0b1a2e 100644
 --- a/codex-rs/login/src/outbound_proxy.rs
 +++ b/codex-rs/login/src/outbound_proxy.rs
 @@ -36,6 +36,14 @@ impl AuthRouteConfig {
@@ -8210,7 +8210,7 @@ index be183a52e9822015af71a25b4a35c1ab5b10d8f9..324b0b1a2e40f7095458bb8456a8e87c
 +    }
 +}
 diff --git a/codex-rs/login/src/token_data.rs b/codex-rs/login/src/token_data.rs
-index 203700a379f47512f291720b605872f34bfadf23..e363aaac536d4a6b010c430b27ac34c873cc6fc9 100644
+index 203700a379..e363aaac53 100644
 --- a/codex-rs/login/src/token_data.rs
 +++ b/codex-rs/login/src/token_data.rs
 @@ -7,7 +7,7 @@ use serde::Serialize;
@@ -8266,7 +8266,7 @@ index 203700a379f47512f291720b605872f34bfadf23..e363aaac536d4a6b010c430b27ac34c8
      pub fn get_chatgpt_plan_type(&self) -> Option<String> {
          self.chatgpt_plan_type.as_ref().map(|t| match t {
 diff --git a/codex-rs/model-provider/src/amazon_bedrock/error.rs b/codex-rs/model-provider/src/amazon_bedrock/error.rs
-index a69bd6524e276423bc6f176efcd9329f23944df7..0b75a88d921e12ff0afa9bf897da629dcbbe56ec 100644
+index a69bd6524e..0b75a88d92 100644
 --- a/codex-rs/model-provider/src/amazon_bedrock/error.rs
 +++ b/codex-rs/model-provider/src/amazon_bedrock/error.rs
 @@ -40,11 +40,27 @@ pub(super) fn is_refreshable_auth_error(error: &TransportError) -> bool {
@@ -8299,7 +8299,7 @@ index a69bd6524e276423bc6f176efcd9329f23944df7..0b75a88d921e12ff0afa9bf897da629d
              let body = body.to_ascii_lowercase();
              [
 diff --git a/codex-rs/model-provider/src/amazon_bedrock/error_tests.rs b/codex-rs/model-provider/src/amazon_bedrock/error_tests.rs
-index c53f0b71b623b89196075239e5f4cdc57bfdb215..f0d92f05c92d1e4f1518b8cab32889a95822836f 100644
+index c53f0b71b6..f0d92f05c9 100644
 --- a/codex-rs/model-provider/src/amazon_bedrock/error_tests.rs
 +++ b/codex-rs/model-provider/src/amazon_bedrock/error_tests.rs
 @@ -26,6 +26,7 @@ fn http_error(status: StatusCode, body: &str) -> ApiError {
@@ -8415,7 +8415,7 @@ index c53f0b71b623b89196075239e5f4cdc57bfdb215..f0d92f05c92d1e4f1518b8cab32889a9
 +    }
 +}
 diff --git a/codex-rs/model-provider/src/amazon_bedrock/mod.rs b/codex-rs/model-provider/src/amazon_bedrock/mod.rs
-index a441d2704af9e45df797f22dec2a996ec52fddb6..a947c0ef937684abbc5c4c3a709938a165cf44ad 100644
+index a441d2704a..a947c0ef93 100644
 --- a/codex-rs/model-provider/src/amazon_bedrock/mod.rs
 +++ b/codex-rs/model-provider/src/amazon_bedrock/mod.rs
 @@ -324,7 +324,10 @@ impl ModelProvider for AmazonBedrockModelProvider {
@@ -8431,7 +8431,7 @@ index a441d2704af9e45df797f22dec2a996ec52fddb6..a947c0ef937684abbc5c4c3a709938a1
      }
  
 diff --git a/codex-rs/model-provider/src/auth.rs b/codex-rs/model-provider/src/auth.rs
-index 78c24979070c3e4a118ba1345cf2540d367efff5..449ef04ccef151c3e1ac99db7c393dad666c9f2d 100644
+index 78c2497907..449ef04cce 100644
 --- a/codex-rs/model-provider/src/auth.rs
 +++ b/codex-rs/model-provider/src/auth.rs
 @@ -217,6 +217,7 @@ impl AuthManagerAuthProvider {
@@ -8546,7 +8546,7 @@ index 78c24979070c3e4a118ba1345cf2540d367efff5..449ef04ccef151c3e1ac99db7c393dad
  // providers and custom test providers with `requires_openai_auth = false`.
  #[derive(Clone, Debug)]
 diff --git a/codex-rs/model-provider/src/models_endpoint.rs b/codex-rs/model-provider/src/models_endpoint.rs
-index 2900c337e9023f945416341729a4625acf237f84..ed512d1b413a4ee718f438b5d839b0c903815ae2 100644
+index 2900c337e9..ed512d1b41 100644
 --- a/codex-rs/model-provider/src/models_endpoint.rs
 +++ b/codex-rs/model-provider/src/models_endpoint.rs
 @@ -251,17 +251,35 @@ impl OpenAiModelsEndpoint {
@@ -8592,7 +8592,7 @@ index 2900c337e9023f945416341729a4625acf237f84..ed512d1b413a4ee718f438b5d839b0c9
                      map_api_error(error)
                  })
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index e0c73083b7a78a72453b7b8fbe92310db9d81913..3a3179f2af11dc0087bd28c2c8a81d8da1225899 100644
+index e0c73083b7..3a3179f2af 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
 @@ -192,7 +192,10 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
@@ -8630,7 +8630,7 @@ index e0c73083b7a78a72453b7b8fbe92310db9d81913..3a3179f2af11dc0087bd28c2c8a81d8d
              && (self.runtime_auth.is_none()
                  || !codex_protocol::error::is_runtime_auth_denial(
 diff --git a/codex-rs/model-provider/src/provider_tests.rs b/codex-rs/model-provider/src/provider_tests.rs
-index 97c8680bfae1c83f4c5a2d6b2688d5439d73015b..cccd7d3c43e08172f47260cefbb690246e4ffce9 100644
+index 97c8680bfa..cccd7d3c43 100644
 --- a/codex-rs/model-provider/src/provider_tests.rs
 +++ b/codex-rs/model-provider/src/provider_tests.rs
 @@ -471,6 +471,7 @@ async fn shared_bedrock_auth_refresh_is_reused_only_for_matching_configuration()
@@ -8642,7 +8642,7 @@ index 97c8680bfae1c83f4c5a2d6b2688d5439d73015b..cccd7d3c43e08172f47260cefbb69024
                  status,
                  url: None,
 diff --git a/codex-rs/model-provider/src/runtime_auth_tests.rs b/codex-rs/model-provider/src/runtime_auth_tests.rs
-index 0a322a19c1aceedbfaeed8f197a42ccba9ff0878..f3df993593380f119962bd37f3d792762194b302 100644
+index 0a322a19c1..f3df993593 100644
 --- a/codex-rs/model-provider/src/runtime_auth_tests.rs
 +++ b/codex-rs/model-provider/src/runtime_auth_tests.rs
 @@ -267,6 +267,7 @@ async fn runtime_denial_recovery_is_scoped_to_openai() {
@@ -8654,7 +8654,7 @@ index 0a322a19c1aceedbfaeed8f197a42ccba9ff0878..f3df993593380f119962bd37f3d79276
              assert_eq!(
                  provider.is_recoverable_auth_error(&error),
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index ec0292b959d2b880cfbf999020d4e4f0080c1315..53edd1d575510ea3788ccdfc146051478f2f3335 100644
+index ec0292b959..53edd1d575 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
 @@ -79,6 +79,33 @@ pub struct CodexErr {
@@ -8724,7 +8724,7 @@ index ec0292b959d2b880cfbf999020d4e4f0080c1315..53edd1d575510ea3788ccdfc14605147
      ///
      /// The first retry is attempt one. Retryable errors use server advice when available and
 diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
-index f80feb40a5cb2ab191ff812c91eceef72c969bcd..86044dc44a86d28e05d8efbae5541fc6a368899b 100644
+index f80feb40a5..86044dc44a 100644
 --- a/codex-rs/response-debug-context/src/lib.rs
 +++ b/codex-rs/response-debug-context/src/lib.rs
 @@ -21,6 +21,14 @@ pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDeb
@@ -8772,7 +8772,7 @@ index f80feb40a5cb2ab191ff812c91eceef72c969bcd..86044dc44a86d28e05d8efbae5541fc6
              status: StatusCode::UNAUTHORIZED,
              url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
 diff --git a/codex-rs/rmcp-client/src/http_client_adapter.rs b/codex-rs/rmcp-client/src/http_client_adapter.rs
-index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78b20d3b7a 100644
+index bb9c848038..2e97eed765 100644
 --- a/codex-rs/rmcp-client/src/http_client_adapter.rs
 +++ b/codex-rs/rmcp-client/src/http_client_adapter.rs
 @@ -171,7 +171,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
@@ -8899,7 +8899,7 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
  
          if response.status == StatusCode::METHOD_NOT_ALLOWED.as_u16() {
              return Err(StreamableHttpError::ServerDoesNotSupportSse);
-@@ -623,21 +624,167 @@ impl StreamableHttpClientAdapter {
+@@ -623,7 +624,7 @@ impl StreamableHttpClientAdapter {
      async fn add_auth_headers(
          &self,
          headers: &mut HeaderMap,
@@ -8908,11 +8908,7 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
          if let Some(resolver) = &self.auth_provider {
              let provider = resolver
                  .resolve(headers)
-                 .await
-                 .map_err(StreamableHttpClientAdapterError::from)
-                 .map_err(StreamableHttpError::Client)?;
-             *headers = provider
-                 .apply_auth_headers(std::mem::take(headers))
+@@ -635,9 +636,155 @@ impl StreamableHttpClientAdapter {
                  .await
                  .map_err(StreamableHttpClientAdapterError::from)
                  .map_err(StreamableHttpError::Client)?;
@@ -9070,7 +9066,7 @@ index bb9c848038d68e8282e35a6f60fd47b0271cb441..2e97eed765a712f156b5f23527e98a78
  
  fn body_preview(body: impl Into<String>) -> String {
 diff --git a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
-index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d86baf795 100644
+index 01b24851fb..597ff02f5b 100644
 --- a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
 +++ b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
 @@ -609,3 +609,117 @@ async fn automatic_event_stream_reconnect_refreshes_request_auth() -> anyhow::Re
@@ -9114,8 +9110,8 @@ index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d
 +        "https://proxy.example", Some("https://proxy.example/backend-api/ps/mcp"),
 +        http::StatusCode::UNAUTHORIZED, &headers,
 +    ).is_none());
-+
 +}
++
 +
 +#[tokio::test]
 +async fn local_apps_mcp_post_applies_managed_session_bearer() -> anyhow::Result<()> {
@@ -9192,7 +9188,7 @@ index 01b24851fb21b9f2d8b2829274294a6ad94bcdce..1131b5403becb1fb13bc788b2f16cf5d
 +    Ok(())
 +}
 diff --git a/codex-rs/runtime-agent-instance/src/binding.rs b/codex-rs/runtime-agent-instance/src/binding.rs
-index 7302f8c38a2757844fd0a4c3e28699ed38fa0fde..4ae2eabd0aa0e7329cc777612c52ffb92d602fb4 100644
+index 7302f8c38a..4ae2eabd0a 100644
 --- a/codex-rs/runtime-agent-instance/src/binding.rs
 +++ b/codex-rs/runtime-agent-instance/src/binding.rs
 @@ -351,6 +351,10 @@ fn actor_authorization(
@@ -9207,7 +9203,7 @@ index 7302f8c38a2757844fd0a4c3e28699ed38fa0fde..4ae2eabd0aa0e7329cc777612c52ffb9
          return Err(RuntimeAuthError::UnsupportedResourceSelection);
      }
 diff --git a/codex-rs/tui/src/app/account_status.rs b/codex-rs/tui/src/app/account_status.rs
-index 4895b230df81291ccb0d9b8bea660347462a719d..ef73df4de226c818195e5368d5b0be72e69c17f2 100644
+index 4895b230df..ef73df4de2 100644
 --- a/codex-rs/tui/src/app/account_status.rs
 +++ b/codex-rs/tui/src/app/account_status.rs
 @@ -34,12 +34,14 @@ impl App {
@@ -9226,7 +9222,7 @@ index 4895b230df81291ccb0d9b8bea660347462a719d..ef73df4de226c818195e5368d5b0be72
                                  workspace_name,
                                  response.workspace_routing,
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 881d272ed1e22f6bda5b7509064c24f31975ef0e..cb9cc899ec0f754688d3762a841544e2063c38ab 100644
+index 881d272ed1..cb9cc899ec 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -1566,10 +1566,10 @@ impl App {
@@ -9243,7 +9239,7 @@ index 881d272ed1e22f6bda5b7509064c24f31975ef0e..cb9cc899ec0f754688d3762a841544e2
              }
              AppEvent::SecuritySetupLoaded { request_id, identity, notice } => {
 diff --git a/codex-rs/tui/src/app/tests/security_setup_tests.rs b/codex-rs/tui/src/app/tests/security_setup_tests.rs
-index 1e2f9be51898d4e7786f282ad8fa2414d3e210dd..64a6616864d7698d494c377244a16d486c1a15fe 100644
+index 1e2f9be518..64a6616864 100644
 --- a/codex-rs/tui/src/app/tests/security_setup_tests.rs
 +++ b/codex-rs/tui/src/app/tests/security_setup_tests.rs
 @@ -173,6 +173,7 @@ async fn security_setup_fetch_with_default_features_uses_authenticated_codex_end
@@ -9263,7 +9259,7 @@ index 1e2f9be51898d4e7786f282ad8fa2414d3e210dd..64a6616864d7698d494c377244a16d48
          );
          app.handle_event(&mut tui, &mut server, event).await?;
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index c858e8196fdd286c4fabb683e0c4e398be82b776..651932597e3ae1eee850105d26b5cdc572fdf5c3 100644
+index c858e8196f..651932597e 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
 @@ -356,6 +356,7 @@ pub(crate) enum AppEvent {
@@ -9275,7 +9271,7 @@ index c858e8196fdd286c4fabb683e0c4e398be82b776..651932597e3ae1eee850105d26b5cdc5
      SecuritySetupLoaded {
          request_id: uuid::Uuid,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 7a026d04c51d6a46283bf1e00abfa94bea04f12d..57e403a59b66127ff2dd4ed432762cfbfc75fb1e 100644
+index 7a026d04c5..57e403a59b 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -2369,6 +2369,7 @@ pub(crate) fn status_account_display_from_auth_mode(
@@ -9303,7 +9299,7 @@ index 7a026d04c51d6a46283bf1e00abfa94bea04f12d..57e403a59b66127ff2dd4ed432762cfb
              requires_openai_auth: true,
              workspace_routing: None,
 diff --git a/codex-rs/tui/src/app_server_session/account.rs b/codex-rs/tui/src/app_server_session/account.rs
-index 0077a117b5dc2cfb7b01a5f51a9b6c9735ba3f3e..c2ee97851a0a8ed819c3a7b3bb028a1e6254bccb 100644
+index 0077a117b5..c2ee97851a 100644
 --- a/codex-rs/tui/src/app_server_session/account.rs
 +++ b/codex-rs/tui/src/app_server_session/account.rs
 @@ -24,12 +24,14 @@ impl From<GetAccountResponse> for SessionAccount {
@@ -9353,7 +9349,7 @@ index 0077a117b5dc2cfb7b01a5f51a9b6c9735ba3f3e..c2ee97851a0a8ed819c3a7b3bb028a1e
 +    }
 +}
 diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
-index bc61ae5d159b67da0f7728006a2f4e1abe532657..4da877d5f61ddd1a5eeec2f2509d2efee6dda263 100644
+index bc61ae5d15..4da877d5f6 100644
 --- a/codex-rs/tui/src/chatwidget/settings.rs
 +++ b/codex-rs/tui/src/chatwidget/settings.rs
 @@ -223,13 +223,15 @@ impl ChatWidget {
@@ -9374,7 +9370,7 @@ index bc61ae5d159b67da0f7728006a2f4e1abe532657..4da877d5f61ddd1a5eeec2f2509d2efe
      }
  
 diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/chatwidget/tests/app_server.rs
-index f617e1032dcd7b228c5258aa3e6b4063a9aeb38e..d3c9b96fce9100d1da24fced5e83035e22d0e808 100644
+index f617e1032d..d3c9b96fce 100644
 --- a/codex-rs/tui/src/chatwidget/tests/app_server.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/app_server.rs
 @@ -139,6 +139,7 @@ async fn session_and_settings_sync_server_provider_id() {
@@ -9386,7 +9382,7 @@ index f617e1032dcd7b228c5258aa3e6b4063a9aeb38e..d3c9b96fce9100d1da24fced5e83035e
      let mut provider = chat.config.model_provider.clone();
      provider.env_key = Some("CUSTOM_API_KEY".to_string());
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 3491d386b4b0ac653a5af35a15417fa9d9538b9b..e33c7ca8e4d97aaddc10c4b64433412edbc616cd 100644
+index 3491d386b4..e33c7ca8e4 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 @@ -4065,6 +4065,34 @@ async fn workspace_headline_fetch_allows_backend_auth_without_chatgpt_account()
@@ -9441,7 +9437,7 @@ index 3491d386b4b0ac653a5af35a15417fa9d9538b9b..e33c7ca8e4d97aaddc10c4b64433412e
          /*plan_type*/ None,
          /*has_chatgpt_account*/ true,
 diff --git a/codex-rs/tui/src/status/account.rs b/codex-rs/tui/src/status/account.rs
-index 733a6bfabedf9a69bf65be4a115d18ec21115a8e..8722c4b318051db87100e4fee423714a7f3203c2 100644
+index 733a6bfabe..8722c4b318 100644
 --- a/codex-rs/tui/src/status/account.rs
 +++ b/codex-rs/tui/src/status/account.rs
 @@ -4,6 +4,7 @@ pub(crate) enum StatusAccountDisplay {
@@ -9453,7 +9449,7 @@ index 733a6bfabedf9a69bf65be4a115d18ec21115a8e..8722c4b318051db87100e4fee423714a
      ApiKey,
  }
 diff --git a/codex-rs/tui/src/status/card.rs b/codex-rs/tui/src/status/card.rs
-index 8145011fd13b386e5a1a455935f2d3f423382318..0548cc972f430e18050dfe826ca3a4b524e571ee 100644
+index 8145011fd1..0548cc972f 100644
 --- a/codex-rs/tui/src/status/card.rs
 +++ b/codex-rs/tui/src/status/card.rs
 @@ -135,6 +135,7 @@ struct StatusHistoryCell {
@@ -9533,7 +9529,7 @@ index 8145011fd13b386e5a1a455935f2d3f423382318..0548cc972f430e18050dfe826ca3a4b5
          }
  
 diff --git a/codex-rs/tui/src/status/tests.rs b/codex-rs/tui/src/status/tests.rs
-index c51f429dfa62c6b669be4634b24e731fbeb52bb9..da307c57ca05f86c9cd4ac154feccda0575d4733 100644
+index c51f429dfa..da307c57ca 100644
 --- a/codex-rs/tui/src/status/tests.rs
 +++ b/codex-rs/tui/src/status/tests.rs
 @@ -423,6 +423,7 @@ async fn status_snapshot_shows_chatgpt_plan_without_email() {
@@ -9600,7 +9596,7 @@ index c51f429dfa62c6b669be4634b24e731fbeb52bb9..da307c57ca05f86c9cd4ac154feccda0
      let usage = TokenUsage {
          input_tokens: 1_500,
 diff --git a/codex-rs/uds/src/lib.rs b/codex-rs/uds/src/lib.rs
-index 5fecf770be88848ed51514f2bfec0f354ae3318e..5cd8a9a460eefe58106da5b9e8531e6df067f473 100644
+index 5fecf770be..5cd8a9a460 100644
 --- a/codex-rs/uds/src/lib.rs
 +++ b/codex-rs/uds/src/lib.rs
 @@ -365,6 +365,8 @@ mod lib_tests;
@@ -9613,7 +9609,7 @@ index 5fecf770be88848ed51514f2bfec0f354ae3318e..5cd8a9a460eefe58106da5b9e8531e6d
  #[cfg(windows)]
  mod windows_socket_validation;
 diff --git a/codex-rs/uds/src/windows_security.rs b/codex-rs/uds/src/windows_security.rs
-index 90dc6f3a6a9978bf9aa34082c605275d335d792b..ae9e2dabbe61c234a08ebae0c168ea73281d70b4 100644
+index 90dc6f3a6a..ae9e2dabbe 100644
 --- a/codex-rs/uds/src/windows_security.rs
 +++ b/codex-rs/uds/src/windows_security.rs
 @@ -21,7 +21,7 @@ use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
