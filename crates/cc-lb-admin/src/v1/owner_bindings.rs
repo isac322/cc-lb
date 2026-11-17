@@ -67,7 +67,10 @@ async fn create_owner_binding(
     if let Err(error) = ensure_live_upstream(storage, upstream_id).await {
         return match error {
             UpstreamPreflightError::Unavailable => upstream_unavailable(),
-            UpstreamPreflightError::Storage(error) => storage_error(*error),
+            UpstreamPreflightError::Storage(error) => match *error {
+                StorageError::UpstreamUnavailable { .. } => upstream_unavailable(),
+                error => storage_error(error),
+            },
         };
     }
     let binding = AccountOwnerBinding {
@@ -212,6 +215,7 @@ fn storage_error(error: StorageError) -> Response {
             Json(json!({ "error": "storage_conflict", "message": message })),
         )
             .into_response(),
+        StorageError::UpstreamUnavailable { .. } => upstream_unavailable(),
         StorageError::Unavailable { .. }
         | StorageError::Transient {
             retryable: true, ..

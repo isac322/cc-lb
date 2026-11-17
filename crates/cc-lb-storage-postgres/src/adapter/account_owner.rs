@@ -24,7 +24,7 @@ fn conflict(message: impl Into<String>) -> StorageError {
 }
 
 fn unavailable(message: impl Into<String>) -> StorageError {
-    StorageError::Unavailable {
+    StorageError::UpstreamUnavailable {
         message: message.into(),
     }
 }
@@ -772,11 +772,14 @@ mod tests {
         .expect("reader never blocked on the writer's upstream lock")?;
         writer.commit().await?;
         let (_, result) = tokio::time::timeout(Duration::from_secs(5), reader).await???;
-        assert!(matches!(result, Err(StorageError::Unavailable { .. })));
+        assert!(matches!(
+            result,
+            Err(StorageError::UpstreamUnavailable { .. })
+        ));
         let mut post_update_tx = pool.begin().await?;
         assert!(matches!(
             validate_owner_binding_in_tx(&mut post_update_tx, &expected).await,
-            Err(StorageError::Unavailable { .. })
+            Err(StorageError::UpstreamUnavailable { .. })
         ));
         post_update_tx.rollback().await?;
         pool.close().await;

@@ -28,6 +28,8 @@ pub enum StorageError {
     },
     #[error("conflict: {message}")]
     Conflict { message: String },
+    #[error("upstream unavailable: {message}")]
+    UpstreamUnavailable { message: String },
     #[error("unavailable: {message}")]
     Unavailable { message: String },
     #[error("corrupted: {message}")]
