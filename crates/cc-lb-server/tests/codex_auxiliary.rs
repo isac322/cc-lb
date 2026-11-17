@@ -166,6 +166,8 @@ async fn two_issued_sessions_keep_distinct_owner_credentials() {
             "alternate-owner",
         ),
     ] {
+        let provider_before = provider_records.lock().unwrap().len();
+        let unused_before = unused_records.lock().unwrap().len();
         let request = Request::builder()
             .method("POST")
             .uri("/backend-api/codex/alpha/notes/v2/append_to_file")
@@ -191,7 +193,13 @@ async fn two_issued_sessions_keep_distinct_owner_credentials() {
             body.as_ref(),
             format!(r#"{{"path":"{workspace}.txt","content":"owner-fenced"}}"#).as_bytes()
         );
-        assert!(unused_records.lock().unwrap().is_empty(), "{workspace} must not fail over");
+        let record_count = records.len();
+        assert_eq!(record_count, provider_before + 1);
+        assert_eq!(
+            unused_records.lock().unwrap().len(),
+            unused_before,
+            "{workspace} must not fail over"
+        );
     }
     assert_eq!(selected.records.lock().unwrap().len(), 1);
     assert_eq!(alternate.records.lock().unwrap().len(), 1);

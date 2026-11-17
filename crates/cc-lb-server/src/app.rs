@@ -3052,7 +3052,6 @@ mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
 mod codex_account;
-mod codex_sessions;
 mod codex_auxiliary;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
