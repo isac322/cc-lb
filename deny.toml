@@ -13,7 +13,6 @@ yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
     { id = "RUSTSEC-2025-0141", reason = "cc-lb-engine still uses bincode 2.x `serde` integration for persisted internal records; replacing it requires a storage-format migration." },
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but required by tikv-jemalloc-ctl for memory bound testing." },
     { id = "RUSTSEC-2026-0459", reason = "SQLx 0.9.0 caps libsqlite3-sys below 0.38, while the patched SQLite binding requires >=0.39.0; the official SQLx upper-bound fix is not released yet. The bundled SQLite remains exposed to the advisory's local crafted database/WAL condition until that upstream patch is released and the lockfile can move." },
     { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is the latest stable release but is itself covered by this advisory. It is used directly across cc-lb for DateTime<Utc>, Duration, RFC3339 parsing, serde, and SQLx mappings; replacing it requires a broad timestamp and storage-format compatibility migration." },
     { id = "RUSTSEC-2026-0555", reason = "chrono-tz 0.10.4 is the latest stable release but is itself covered by this advisory. It is pulled by apalis-cron 1.0.0's default cron feature; apalis-cron 1.1.0 still uses chrono/chrono-tz for that feature, while its jiff feature requires a scheduler API migration and does not remove cc-lb's direct chrono usage." },
