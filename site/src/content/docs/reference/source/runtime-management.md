@@ -22,6 +22,16 @@ In multi-replica deployments, replicas synchronize their local views using Postg
 
 ## Admin v1 REST API
 
+### Codex subscription sessions
+
+The admin API issues the short-lived session credentials used by native Codex subscription routes. The route is protected by the admin write-auth layer:
+
+`POST /admin/v1/principals/{id}/codex-sessions`
+
+The JSON body requires `parent_key_id`, `owner_binding_id`, `workspace_id`, `origin`, `access_ttl_seconds`, and `session_ttl_seconds`. The owner binding must belong to the principal, remain active, and allow the requested workspace. The transaction records the owner generation and binding revision in the session family, then returns the access and renewal credentials with `Cache-Control: no-store`. The credentials must be passed to the maintained Codex client through its local-session login flow; do not put them in command arguments or persistent logs.
+
+The session is bound to one provider owner. Requests using it fail with `400` when the binding is revoked or conflicts, return `503` when the bound upstream is unavailable, and never fail over to another owner.
+
 Administrative operations use the providers configured in `admin.auth.providers`. A static-token provider accepts its environment-backed Bearer token in the `Authorization` header.
 
 The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the examples below. Proxy traffic uses a separate listener on port 8080 (`http://localhost:8080/v1/messages`).
@@ -92,7 +102,11 @@ Not yet supported: files, message batches, skills, agents, and sessions.
 | POST | `/openai/v1/images/variations` | API key |
 | GET | `/openai/v1/models`, `/openai/v1/models/{id}` | API key, OAuth |
 | POST | `/openai/v1/alpha/search`, `/openai/v1/memories/trace_summarize` | OAuth only |
-| GET WebSocket | `/openai/v1/realtime?model={model}` | API key |
+| GET | `/openai/v1/models` and native `/backend-api/codex/models` | OAuth session |
+| POST | `/openai/v1/alpha/search` and native `/backend-api/codex/alpha/search` | OAuth session |
+| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` and native Codex image routes | OAuth session |
+| POST | `/openai/v1/memories/trace_summarize` and native Codex memories route | OAuth session |
+| POST | `/openai/v1/alpha/notes/v2/{operation}` and native `/backend-api/codex/alpha/notes/v2/{operation}` for `list_files_by_prefix`, `read_file`, `search_contents`, `append_to_file`, `write_file`, and `thread_hint` | OAuth session |
 
 OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
 
