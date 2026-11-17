@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -10,7 +10,12 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::AdminState;
+use crate::{
+    AdminState,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::AdminIdentity,
+    v1::post_commit::{PostCommitAborted, complete_after_commit},
+};
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -41,6 +46,7 @@ struct CreateOwnerBindingBody {
 
 async fn create_owner_binding(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<CreateOwnerBindingBody>,
 ) -> Response {
     let Some(storage) = state.storage.as_deref() else {
@@ -76,21 +82,61 @@ async fn create_owner_binding(
 
     match AccountOwnerStore::create_owner_binding(storage, binding.clone()).await {
         Ok(()) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::LOCATION,
-                header_value(&format!(
-                    "/admin/v1/account-owner-bindings/{}",
-                    binding.binding_id
-                )),
-            );
-            headers.insert(
-                header::ETAG,
-                header_value(&format!("W/\"{}\"", binding.revision)),
-            );
-            (StatusCode::CREATED, headers, Json(binding)).into_response()
+            let action = "owner_binding_create".to_owned();
+            let route = "/admin/v1/account-owner-bindings".to_owned();
+            let principal_id = binding.principal_id.clone();
+            let upstream_id = binding.upstream_id.to_string();
+            let payload = json!({
+                "binding_id": binding.binding_id,
+                "provider": binding.provider,
+                "provider_workspace_id": binding.provider_workspace_id,
+                "allowed_workspace_count": binding.allowed_workspaces.len(),
+                "owner_generation": binding.owner_generation,
+                "revision": binding.revision,
+            });
+            let continuation = async move {
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&principal_id),
+                        target_upstream: Some(&upstream_id),
+                        api_key_id: None,
+                        status: StatusCode::CREATED.as_u16(),
+                        payload: Some(payload),
+                    },
+                )
+                .await
+                {
+                    tracing::error!(error = %error, action = %action, "admin audit write failed");
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+                }
+
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::LOCATION,
+                    header_value(&format!(
+                        "/admin/v1/account-owner-bindings/{}",
+                        binding.binding_id
+                    )),
+                );
+                headers.insert(
+                    header::ETAG,
+                    header_value(&format!("W/\"{}\"", binding.revision)),
+                );
+                (StatusCode::CREATED, headers, Json(binding)).into_response()
+            };
+            match complete_after_commit(continuation).await {
+                Ok(response) => response,
+                Err(PostCommitAborted) => {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+                }
+            }
         }
-        Err(error) => storage_error(error, true),
+        Err(error) => storage_error(error),
     }
 }
 
@@ -112,7 +158,7 @@ async fn get_owner_binding(State(state): State<AdminState>, Path(id): Path<Strin
             (headers, Json(binding)).into_response()
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_owner_binding"),
-        Err(error) => storage_error(error, false),
+        Err(error) => storage_error(error),
     }
 }
 
@@ -134,26 +180,15 @@ fn header_value(value: &str) -> HeaderValue {
     HeaderValue::from_str(value).expect("owner binding response header is valid")
 }
 
-fn storage_error(error: StorageError, upstream_context: bool) -> Response {
+fn storage_error(error: StorageError) -> Response {
     match error {
         StorageError::Conflict { message } => (
             StatusCode::CONFLICT,
             Json(json!({ "error": "storage_conflict", "message": message })),
         )
             .into_response(),
-        StorageError::Unavailable { .. } => {
-            let error = if upstream_context {
-                "upstream_unavailable"
-            } else {
-                "storage_unavailable"
-            };
-            let mut response = error_response(StatusCode::SERVICE_UNAVAILABLE, error);
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-            response
-        }
-        StorageError::Transient {
+        StorageError::Unavailable { .. }
+        | StorageError::Transient {
             retryable: true, ..
         } => {
             let mut response =
@@ -163,9 +198,6 @@ fn storage_error(error: StorageError, upstream_context: bool) -> Response {
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
             response
         }
-        StorageError::Transient {
-            retryable: false, ..
-        } => error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         StorageError::InvalidInput { .. } => {
             error_response(StatusCode::BAD_REQUEST, "invalid_input")
         }
