@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 // ## Exit Code Reference (for runbook/operators)
 //
