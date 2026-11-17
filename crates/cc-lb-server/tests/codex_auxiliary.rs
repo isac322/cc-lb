@@ -9,7 +9,7 @@ use axum::routing::any;
 use tower::ServiceExt;
 
 use crate::codex_control_support::{
-    ALTERNATE_PROVIDER_TOKEN, PROVIDER_TOKEN, BUNDLE_ACCOUNT, build_oauth_session_app,
+    ALTERNATE_PROVIDER_TOKEN, BUNDLE_ACCOUNT, PROVIDER_TOKEN, build_oauth_session_app,
 };
 
 type Records = Arc<Mutex<Vec<(Uri, HeaderMap, Bytes)>>>;
@@ -141,14 +141,7 @@ async fn two_issued_sessions_keep_distinct_owner_credentials() {
     let alternate = Provider::start().await;
     let support =
         build_oauth_session_app(selected.url.clone(), alternate.url.clone(), vec![]).await;
-    for (
-        access,
-        expected_token,
-        expected_account,
-        provider_records,
-        unused_records,
-        workspace,
-    ) in [
+    for (access, expected_token, expected_account, provider_records, unused_records, workspace) in [
         (
             &support.access,
             PROVIDER_TOKEN,
@@ -187,7 +180,10 @@ async fn two_issued_sessions_keep_distinct_owner_credentials() {
         assert_eq!(response.status(), StatusCode::OK);
         let records = provider_records.lock().unwrap();
         let (_, headers, body) = records.last().expect("selected owner receives request");
-        assert_eq!(headers[header::AUTHORIZATION], format!("Bearer {expected_token}"));
+        assert_eq!(
+            headers[header::AUTHORIZATION],
+            format!("Bearer {expected_token}")
+        );
         assert_eq!(headers["chatgpt-account-id"], expected_account);
         assert_eq!(
             body.as_ref(),

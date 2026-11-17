@@ -3046,13 +3046,13 @@ async fn proxy_timeout_middleware(
     }
 }
 
+mod codex_account;
+mod codex_auxiliary;
 mod codex_sessions;
 #[path = "app_realtime_websocket.rs"]
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
-mod codex_account;
-mod codex_auxiliary;
 use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
@@ -3974,7 +3974,9 @@ async fn lifecycle_handler(
     }
     if let Err(error) = codex_auxiliary::authorize(&auth, parts.uri.path()) {
         return cc_lb_engine::reject_unauthenticated_for_route(
-            &error, &parts.method, parts.uri.path(),
+            &error,
+            &parts.method,
+            parts.uri.path(),
             parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
             observer.as_ref(),
         );

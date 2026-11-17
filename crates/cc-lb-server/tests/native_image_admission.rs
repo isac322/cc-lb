@@ -579,7 +579,10 @@ async fn native_image_routes_authenticate_before_reading_a_body() {
                 ("POST", "/backend-api/codex/images/generations"),
                 ("POST", "/backend-api/codex/images/edits"),
                 ("POST", "/backend-api/codex/memories/trace_summarize"),
-                ("POST", "/backend-api/codex/alpha/notes/v2/list_files_by_prefix"),
+                (
+                    "POST",
+                    "/backend-api/codex/alpha/notes/v2/list_files_by_prefix",
+                ),
                 ("POST", "/backend-api/codex/alpha/notes/v2/read_file"),
                 ("POST", "/backend-api/codex/alpha/notes/v2/search_contents"),
                 ("POST", "/backend-api/codex/alpha/notes/v2/append_to_file"),
@@ -605,12 +608,17 @@ async fn native_image_routes_authenticate_before_reading_a_body() {
                 ("GET", "/gemini/v1/models"),
             ]);
         }
-        let principal = harness.key("native-session-purpose-control", INPUT_CAP).await;
+        let principal = harness
+            .key("native-session-purpose-control", INPUT_CAP)
+            .await;
         harness
             .send(&principal, &provider.text_request("hello"), 200)
             .await;
         let healthy_dispatches = harness.state.request_count();
-        assert_eq!(healthy_dispatches, 1, "principal works on the existing model route");
+        assert_eq!(
+            healthy_dispatches, 1,
+            "principal works on the existing model route"
+        );
         let principal_header = format!("Authorization: Bearer {}\r\n", principal.plaintext);
         for (method, path) in routes {
             let mut auth_headers = vec!["", "Authorization: Bearer invalid-principal\r\n"];

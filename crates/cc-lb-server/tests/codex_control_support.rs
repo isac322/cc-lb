@@ -305,7 +305,9 @@ async fn issue_session(
 ) -> Value {
     let request = Request::builder()
         .method("POST")
-        .uri(format!("/admin/v1/principals/{principal_id}/codex-sessions"))
+        .uri(format!(
+            "/admin/v1/principals/{principal_id}/codex-sessions"
+        ))
         .header(
             header::AUTHORIZATION,
             format!("Bearer {}", env!("CARGO_PKG_NAME")),

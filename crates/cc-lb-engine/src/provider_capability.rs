@@ -168,13 +168,13 @@ pub(crate) fn classify(
             (
                 &Method::POST,
                 "/v1/alpha/search"
-                    | "/v1/memories/trace_summarize"
-                    | "/v1/alpha/notes/v2/list_files_by_prefix"
-                    | "/v1/alpha/notes/v2/read_file"
-                    | "/v1/alpha/notes/v2/search_contents"
-                    | "/v1/alpha/notes/v2/append_to_file"
-                    | "/v1/alpha/notes/v2/write_file"
-                    | "/v1/alpha/notes/v2/thread_hint",
+                | "/v1/memories/trace_summarize"
+                | "/v1/alpha/notes/v2/list_files_by_prefix"
+                | "/v1/alpha/notes/v2/read_file"
+                | "/v1/alpha/notes/v2/search_contents"
+                | "/v1/alpha/notes/v2/append_to_file"
+                | "/v1/alpha/notes/v2/write_file"
+                | "/v1/alpha/notes/v2/thread_hint",
             ) => Some(C::OpenaiCodexAuxiliary),
             _ => None,
         },
