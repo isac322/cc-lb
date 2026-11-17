@@ -269,7 +269,7 @@ async fn unhealthy_upstream_blocks_grants_but_not_permission_withdrawal_or_revoc
         storage
             .resolve_owner_binding(&expectation(&initial, "workspace-1"))
             .await,
-        Err(StorageError::Unavailable { .. })
+        Err(StorageError::UpstreamUnavailable { .. })
     ));
     let mut wrong = expectation(&initial, "workspace-1");
     wrong.principal_id = Uuid::new_v4().to_string();
@@ -282,7 +282,7 @@ async fn unhealthy_upstream_blocks_grants_but_not_permission_withdrawal_or_revoc
     grant.allowed_workspaces.push("workspace-3".to_owned());
     assert!(matches!(
         storage.compare_and_replace_owner_binding(grant, 1).await,
-        Err(StorageError::Unavailable { .. })
+        Err(StorageError::UpstreamUnavailable { .. })
     ));
     sqlx::query("UPDATE upstream_spec_v1 SET enabled = TRUE WHERE id = $1")
         .bind(upstream_id)
@@ -294,7 +294,7 @@ async fn unhealthy_upstream_blocks_grants_but_not_permission_withdrawal_or_revoc
         storage
             .resolve_owner_binding(&expectation(&initial, "workspace-1"))
             .await,
-        Err(StorageError::Unavailable { .. })
+        Err(StorageError::UpstreamUnavailable { .. })
     ));
     sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = NOW() WHERE id = $1")
         .bind(upstream_id)
@@ -304,7 +304,7 @@ async fn unhealthy_upstream_blocks_grants_but_not_permission_withdrawal_or_revoc
         storage
             .resolve_owner_binding(&expectation(&initial, "workspace-1"))
             .await,
-        Err(StorageError::Unavailable { .. })
+        Err(StorageError::UpstreamUnavailable { .. })
     ));
     let mut withdraw = initial.clone();
     withdraw.revision = 2;
