@@ -126,7 +126,10 @@ struct RequestBodyCaps {
 
 impl RequestBodyCaps {
     fn for_path(self, path: &str) -> usize {
-        if path.starts_with("/v1/files") || cc_lb_engine::lifecycle::is_multipart_operation(path) {
+        if path == "/backend-api/codex/images/edits"
+            || path.starts_with("/v1/files")
+            || cc_lb_engine::lifecycle::is_multipart_operation(path)
+        {
             self.files
         } else {
             self.messages
@@ -4543,6 +4546,16 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_codex_image_edits_use_file_body_cap() {
+        let caps = super::RequestBodyCaps {
+            messages: 32,
+            files: 100,
+        };
+        assert_eq!(caps.for_path("/backend-api/codex/images/edits"), 100);
+        assert_eq!(caps.for_path("/v1/images/edits"), 100);
+        assert_eq!(caps.for_path("/v1/responses"), 32);
+    }
     mod realtime_websocket_tests {
         include!("app_realtime_websocket_tests.rs");
     }
