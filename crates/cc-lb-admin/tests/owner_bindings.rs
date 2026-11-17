@@ -2,8 +2,7 @@ mod admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use cc_lb_storage_api::{
-    AccountOwnerStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind,
-    UpstreamStore,
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -75,6 +74,7 @@ async fn owner_binding_create_get_and_auth_boundary() {
     let duplicate = server
         .client
         .json(
+            "POST",
             "/admin/v1/account-owner-bindings",
             Some(json!({
                 "binding_id": binding_id,
