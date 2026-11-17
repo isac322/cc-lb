@@ -36,6 +36,8 @@ mod half_open_concurrent_only_one_probe;
 mod half_open_failure_reopens;
 #[path = "half_open_success_closes.rs"]
 mod half_open_success_closes;
+#[path = "key_store_smoke.rs"]
+mod key_store_smoke;
 #[path = "latency_stages_emit.rs"]
 mod latency_stages_emit;
 #[path = "lifecycle_401_refresh_fail.rs"]
