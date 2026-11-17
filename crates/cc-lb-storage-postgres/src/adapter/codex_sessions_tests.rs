@@ -255,7 +255,7 @@ async fn point_auth_lookup_does_not_discover_owner_and_live_fences_preserve_type
         assert!(fixture.storage.lookup_session_credential(&[1; 32]).await?.is_some());
         assert_eq!(fixture.storage.get_session_family("authority").await?, Some(family.clone()));
         assert!(matches!(fixture.storage.fence_session_dispatch(&fixture.principal_id, &access, 105).await,
-            Err(SessionStoreError::Storage(StorageError::Unavailable { .. }))));
+            Err(SessionStoreError::Storage(StorageError::UpstreamUnavailable { .. }))));
         sqlx::query("UPDATE upstream_spec_v1 SET enabled = TRUE WHERE id = $1")
             .bind(fixture.upstream_id).execute(&fixture.storage.pool).await?;
         sqlx::query("UPDATE account_owner_bindings_v1 SET revision = revision + 1 WHERE binding_id = 'binding'")
