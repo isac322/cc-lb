@@ -7,14 +7,14 @@ mod api_key_support;
 #[path = "audit_actor.rs"]
 mod audit_actor;
 
-#[path = "owner_bindings.rs"]
-mod owner_bindings;
 #[path = "audit_pagination.rs"]
 mod audit_pagination;
 #[path = "auth_required.rs"]
 mod auth_required;
 #[path = "cloudflare_access_auth.rs"]
 mod cloudflare_access_auth;
+#[path = "owner_bindings.rs"]
+mod owner_bindings;
 
 #[path = "cache_keepalive_contracts.rs"]
 mod cache_keepalive_contracts;
