@@ -791,7 +791,6 @@ The JSON body contains `binding_id`, canonical `principal_id`, `provider`,
 Bearer token only in the `Authorization` header. The API returns the stored
 binding, including its revision and owner generation.
 
-
 #### OpenAI OAuth
 
 Use `kind: "openai_oauth"`:
