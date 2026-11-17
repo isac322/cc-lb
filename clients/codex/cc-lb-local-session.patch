@@ -4760,10 +4760,35 @@ index 493320a154..974f98e16d 100644
                  &configured_config.transport,
                  McpServerTransportConfig::StreamableHttp { .. }
 diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
-index 492d72a065..568511d126 100644
+index 492d72a065..973dd2d178 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod.rs
-@@ -603,7 +603,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
+@@ -443,7 +443,23 @@ pub fn effective_mcp_servers_from_configured(
+                 .expect("materialized MCP server must have a catalog registration");
+             match server.auth.clone() {
+                 McpServerAuth::ChatGpt => {
+-                    if !is_trusted_chatgpt_mcp_server(&server.transport, &config.chatgpt_base_url) {
++                    let local_apps = registration.source().is_host_owned_apps(&name, &server)
++                        && auth.and_then(CodexAuth::cc_lb_origin).is_some_and(|origin| {
++                            let McpServerTransportConfig::StreamableHttp { url, .. } = &server.transport else {
++                                return false;
++                            };
++                            let (Ok(destination), Ok(expected)) = (url::Url::parse(url), url::Url::parse(origin)) else {
++                                return false;
++                            };
++                            destination.scheme() == "https"
++                                && destination.origin() == expected.origin()
++                                && destination.username().is_empty()
++                                && destination.password().is_none()
++                                && destination.path() == "/backend-api/ps/mcp"
++                                && destination.query().is_none()
++                                && destination.fragment().is_none()
++                        });
++                    if !local_apps && !is_trusted_chatgpt_mcp_server(&server.transport, &config.chatgpt_base_url) {
+                         server.auth = McpServerAuth::OAuth;
+                     }
+                 }
+@@ -603,7 +619,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
              codex_apps_tools_cache_key: connector_runtime_context_key(auth),
              client_mcp_extensions: ClientMcpExtensions::default(),
              auth: auth.cloned(),
@@ -4774,6 +4799,71 @@ index 492d72a065..568511d126 100644
              elicitation_reviewer: None,
              elicitation_lifecycle: None,
          },
+diff --git a/codex-rs/codex-mcp/src/mcp/mod_tests.rs b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
+index 8367b530c0..48673df72c 100644
+--- a/codex-rs/codex-mcp/src/mcp/mod_tests.rs
++++ b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
+@@ -730,6 +730,60 @@ fn effective_mcp_servers_require_catalog_registration() {
+     );
+ }
+ 
++#[tokio::test]
++async fn local_session_host_apps_preserve_auth_without_trusting_other_servers() {
++    use base64::Engine;
++    let home = tempfile::tempdir().unwrap();
++    let origin = "https://localhost:28470";
++    let profile = codex_config::CcLbConfig { origin: origin.into(), profile: "capture".into() };
++    let encode = |value: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap());
++    let header = encode(serde_json::json!({"typ":"cc-lb-session-v1","alg":"CCLB-STATEFUL"}));
++    let payload = encode(serde_json::json!({
++        "iss":origin, "aud":"cc-lb-session-v1", "sub":"local-user", "sid":"local-family",
++        "iat":1, "exp":3_000_000_000_i64,
++        "https://api.openai.com/auth":{"chatgpt_user_id":"local-user","chatgpt_account_id":"local-workspace"}
++    }));
++    let session = codex_login::cc_lb::LocalSession {
++        session_id:"local-family".into(),
++        access_token:format!("{header}.{payload}.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([17;32])),
++        renewal_token:format!("cclb-renew-v1.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([29;32])),
++        token_type:"Bearer".into(), expires_at:3_000_000_000, session_expires_at:4_000_000_000,
++        origin:origin.into(), account_id:"local-workspace".into(), user_id:"local-user".into(), workspace_generation:1,
++    };
++    codex_login::cc_lb::import_session(home.path(), &profile, serde_json::to_vec(&session).unwrap().as_slice()).unwrap();
++    let manager = codex_login::AuthManager::shared_from_auth_config(codex_login::AuthConfig {
++        codex_home:home.path().to_path_buf(), cc_lb:Some(profile.clone()),
++        auth_credentials_store_mode:codex_config::types::AuthCredentialsStoreMode::File,
++        keyring_backend_kind:Default::default(), forced_login_method:None,
++        chatgpt_base_url:Some(profile.backend_base()), forced_chatgpt_workspace_id:None,
++        managed_auth_policy:Default::default(),
++        auth_route_config:codex_login::test_support::transport_default_auth_route_config(),
++    }, false).await.unwrap();
++    let auth = manager.auth_cached().unwrap();
++    for (base, host_owned, expected) in [
++        ("https://localhost:28470/backend-api", true, McpServerAuth::ChatGpt),
++        ("https://localhost:28471/backend-api", true, McpServerAuth::OAuth),
++        ("http://localhost:28470/backend-api", true, McpServerAuth::OAuth),
++        ("https://other.example/backend-api", true, McpServerAuth::OAuth),
++        ("https://localhost:28470/backend-api", false, McpServerAuth::OAuth),
++    ] {
++        let mut config = test_mcp_config(home.path().to_path_buf());
++        config.apps_enabled = true;
++        config.chatgpt_base_url = profile.backend_base();
++        let server = codex_apps_mcp_server_config(base, None, None);
++        let mut catalog = ResolvedMcpCatalog::builder();
++        let name = CODEX_APPS_MCP_SERVER_NAME.to_string();
++        catalog.register(if host_owned {
++            McpServerRegistration::from_compatibility(name.clone(), "capture", server)
++        } else {
++            McpServerRegistration::from_config(name.clone(), server)
++        });
++        config.mcp_server_catalog = catalog.build();
++        let effective = effective_mcp_servers(&config, Some(&auth));
++        assert_eq!(effective[&name].config().auth, expected, "{base}, host_owned={host_owned}");
++    }
++}
++
+ #[test]
+ fn effective_mcp_servers_preserve_chatgpt_auth_for_trusted_origins() {
+     for (base_url, server_url) in [
 diff --git a/codex-rs/config/Cargo.toml b/codex-rs/config/Cargo.toml
 index 9db5c0711e..17dbcd5576 100644
 --- a/codex-rs/config/Cargo.toml
