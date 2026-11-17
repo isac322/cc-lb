@@ -125,6 +125,7 @@ pub fn authorize_registered_purpose(
 pub struct SessionOwnerConstraint {
     upstream_id: uuid::Uuid,
     provider_workspace_id: String,
+    outbound_region: Option<String>,
     principal_id: String,
     snapshot: cc_lb_storage_api::codex_sessions::SessionSnapshot,
     store: Arc<dyn CodexSessionStore>,
@@ -139,6 +140,11 @@ impl SessionOwnerConstraint {
     /// Provider workspace from the same fenced binding as the selected upstream.
     pub fn provider_workspace_id(&self) -> &str {
         &self.provider_workspace_id
+    }
+
+    /// Outbound region from the same fenced binding as the selected upstream.
+    pub fn outbound_region(&self) -> Option<&str> {
+        self.outbound_region.as_deref()
     }
 
     pub async fn validate(&self, auth: &Authenticated) -> Result<(), SessionError> {
@@ -226,6 +232,7 @@ impl CodexSessionService {
         Ok(SessionOwnerConstraint {
             upstream_id: binding.upstream_id,
             provider_workspace_id: binding.provider_workspace_id,
+            outbound_region: binding.outbound_region,
             principal_id: auth.principal_id().to_owned(),
             snapshot: auth.session().ok_or(SessionError::InvalidRequest)?.clone(),
             store: self.store.clone(),
