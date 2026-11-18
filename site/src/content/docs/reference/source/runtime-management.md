@@ -44,8 +44,10 @@ The retained sanitized A14 execution record is [`a14-clean-master-record.json`](
 | Cloud internal ThreadService and preview models | Codex internal HTTP/2 ThreadService and `/v2/models` preview access require their own service contracts and entitlements; REST Cloud tasks and generation results do not establish either. |
 | Identity and JWKS | Default-off identity paths require explicit enablement and separate validation. |
 | Configured remote environment, Noise, messageboard, and MCP | Require the configured remote service and real session execution; local or recorded traffic does not establish remote acceptance. |
-| Authenticated plugins and remote-control | Codex plugins are enabled by default; authenticated plugin and remote-control acceptance remains pending with the respective feature owners. |
-| Workspace-switch-token | Authentication and account-management feature owners own the account-switching contract and evidence; this is separate from vendor issuer OAuth flows. |
+| Authenticated plugins and remote-control | Not supported. Codex plugins are enabled by default, but authenticated plugin and remote-control traffic belongs to one ChatGPT account and is not proxied. |
+| Workspace-switch-token | Not supported. Account switching belongs to one ChatGPT account and is separate from vendor issuer OAuth flows. |
+
+cc-lb does not proxy account-bound subscription surfaces: Codex account and workspace management, Apps and hosted MCP, `/backend-api` files, Cloud tasks, remote control, and agy remote-agent, remote-control, and subscription voice services. Each of these belongs to one vendor account, while cc-lb pools upstream accounts, so they are outside its routing model.
 
 Raw Code Assist traffic, remote sessions, and voice each require separate acceptance evidence. The existing Code Assist envelope used for supported Gemini OAuth generation, background admin operations, and quota polling do not establish an inbound raw Code Assist client contract. Shipped API-key Realtime and Live tunnels retain their contracts; they do not establish subscription voice acceptance. Local microphone access is a client/device boundary; an audio HTTP request or WebSocket upgrade does not establish a working microphone or voice session. Missing usage or quota evidence remains unknown, never an invented success or zero.
 
