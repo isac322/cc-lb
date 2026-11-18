@@ -1551,13 +1551,10 @@ mod tests {
     #[tokio::test]
     async fn empty_workspace_override_is_rejected_before_signing() {
         let signer = WorkspaceIgnoringSigner::default();
-        let error = sign_request_for_workspace(
-            &signer,
-            shaped_request(),
-            HeaderValue::from_static(""),
-        )
-        .await
-        .expect_err("empty workspace must fail closed");
+        let error =
+            sign_request_for_workspace(&signer, shaped_request(), HeaderValue::from_static(""))
+                .await
+                .expect_err("empty workspace must fail closed");
 
         assert!(matches!(error, SignerError::SigningFailed { .. }));
         assert!(!signer.invoked.load(Ordering::SeqCst));
@@ -1645,7 +1642,10 @@ mod tests {
             signed.headers().get(AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer openai-access-token"))
         );
-        assert_eq!(header_values(&signed, "chatgpt-account-id"), ["account-123"]);
+        assert_eq!(
+            header_values(&signed, "chatgpt-account-id"),
+            ["account-123"]
+        );
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
