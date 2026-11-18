@@ -77,6 +77,23 @@ Admin preflight is separate from client proxy routing: `GET /v1/models` and `POS
 
 Not yet supported: files, message batches, skills, agents, and sessions.
 
+#### Codex account endpoint reference
+
+The account-bound Codex routes use the authenticated local session and the selected upstream owner. The same account contract is available under the `/backend-api/wham` origin and the `/api/codex` aliases. The aliases preserve the raw query and canonicalize to the owner relay before body limits, signing, and dispatch.
+
+| Method | Client path | Purpose |
+|---|---|---|
+| GET | `/backend-api/wham/accounts/check` | Account projection |
+| GET | `/backend-api/wham/usage` and `/backend-api/wham/usage/*` | Usage, limits, and estimates |
+| GET | `/backend-api/wham/profiles/me`, `/backend-api/wham/settings/user`, `/backend-api/wham/config/bundle` | Profile and account configuration |
+| GET | `/backend-api/wham/workspace-messages`, `/backend-api/wham/security-setup` | Workspace and security guidance |
+| GET | `/backend-api/wham/analytics/*` | Account usage analytics |
+| GET | `/backend-api/accounts/verified_access` | Verified access |
+| POST | `/backend-api/wham/rate-limit-reset-credits/consume`, `/backend-api/wham/accounts/send_add_credits_nudge_email` | Account actions |
+| POST | `/backend-api/wham/usage/*`, `/backend-api/accounts/switch-workspace-token` | Usage queries and workspace switching |
+
+The `/api/codex` aliases cover the same registered operation family. Provider-bound account requests remain owner-scoped and fail closed when the owner is unavailable. Pinned-client acceptance remains pending.
+
 #### OpenAI endpoint reference
 
 | Method | Client path | Credentials |

@@ -19,10 +19,10 @@ The current public upstream contract supports six upstream kinds across bounded 
 
 - `anthropic_api_key`: an operator-configured Anthropic API-key upstream. Standard Console keys (workspace keys `sk-ant-api03-…` and personal or service-account keys `sk-ant-usr-…`) are checked before they are saved; Admin keys, Enterprise management keys, and OAuth tokens are rejected. Per-key usage is Anthropic's reported figures when the key's access allows it and cc-lb's estimates otherwise. Costs are list-price estimates, and the credit balance is not available through Anthropic's API.
 - `anthropic_oauth`: an Anthropic OAuth upstream managed through the admin surface.
-- `openai_api_key` and `openai_oauth`: OpenAI API-key and OAuth upstreams for `/v1/responses` HTTP and WebSocket routing.
+- `openai_api_key` and `openai_oauth`: OpenAI API-key and OAuth upstreams for `/v1/responses` HTTP and WebSocket routing. Codex subscription accounts also use owner-bound account, usage, settings, workspace, and analytics routes.
 - `gemini_api_key` and `gemini_oauth`: Gemini API-key and OAuth upstreams for `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`. New Gemini subscription sign-ins use the Antigravity OAuth client with browser sign-in and localhost callback-URL paste; existing Gemini CLI enterprise grants keep their profile. Google retired Gemini CLI consumer login on [June 18, 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity/).
 
-Bedrock, Vertex, and account-bound provider management APIs (files, uploads, model/account catalogs, stored-response or conversation management) are not part of the supported proxy scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
+Bedrock, Vertex, and account-bound provider management APIs outside the registered Codex account routes are not part of the supported proxy scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 
 Shipped provider route support and credential eligibility do not establish full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients; that acceptance remains unverified. See the [current-mode client boundary](./docs/runtime-management.md#current-mode-client-acceptance) and [client capability ledger](https://github.com/isac322/cc-lb/blob/master/docs/client-capabilities.json) for per-feature evidence and limits.
 
