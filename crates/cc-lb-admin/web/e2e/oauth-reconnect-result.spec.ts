@@ -107,6 +107,8 @@ async function installFixtures(page: Page, current: CurrentCase) {
     }
     if (pathname === '/admin/v1/upstreams' && method === 'GET')
       return json(200, { upstreams: [upstream(current.provider)] });
+    if (pathname === '/admin/v1/principals' && method === 'GET')
+      return json(200, { principals: [] });
     if (pathname === '/admin/v1/plugins/registry' && method === 'GET')
       return json(200, { entries: [] });
     if (pathname === `/admin/v1/upstreams/${UPSTREAM_ID}` && method === 'GET')
@@ -134,6 +136,8 @@ async function installFixtures(page: Page, current: CurrentCase) {
       return json(200, metadataFor(current));
     if (pathname === `/admin/v1/upstreams/${UPSTREAM_ID}/warmup`)
       return json(200, { upstream_id: UPSTREAM_ID, dialect_plugin: null, lanes: [{ lane: 'primary', eligible: true, ineligible_reason: null, target_windows: ['5h', '7d'], next_scheduled_at_unix_secs: null, last_attempt: null, recent_attempts: [] }] });
+    if (pathname === '/admin/v1/upstreams/limit-resets')
+      return json(200, { upstreams: [] });
     if (pathname === `/admin/v1/upstreams/${UPSTREAM_ID}/limit-resets`)
       return json(200, { upstream_id: UPSTREAM_ID, windows: [] });
     if (pathname === '/admin/v1/status')
@@ -142,8 +146,45 @@ async function installFixtures(page: Page, current: CurrentCase) {
       return json(200, { range: '24h', step: 'hour', group_by: 'model', window_start_unix_secs: 0, window_end_unix_secs: 0, observed: true, series: [] });
     if (pathname === '/admin/v1/events/recent')
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
+    if (pathname === '/admin/v1/events/stream')
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: ': connected\n\n',
+      });
     if (pathname === '/admin/v1/subscription-quotas/latest')
       return json(200, { now_unix_secs: Math.floor(Date.now() / 1000), max_staleness_secs: 300, upstreams: [{ upstream_id: UPSTREAM_ID, windows: [] }] });
+    if (pathname === '/admin/v1/subscription-quotas/aggregate') {
+      const now = Math.floor(Date.now() / 1000);
+      return json(200, {
+        now_unix_secs: now,
+        window_anchor_unix_secs: now - 86400,
+        max_staleness_secs: 300,
+        upstream_count: 1,
+        windows: [],
+        caveats: [],
+      });
+    }
+    if (pathname === '/admin/v1/subscription-quotas/credit-history') {
+      const now = Math.floor(Date.now() / 1000);
+      return json(200, {
+        now_unix_secs: now,
+        since_unix_secs: now - 7200,
+        until_unix_secs: now,
+        max_staleness_secs: 300,
+        upstreams: [],
+        pool: {
+          latest: {
+            at_unix_millis: now * 1000,
+            balance: null,
+            observed_at_unix_millis: null,
+            contributing_upstreams: 0,
+            eligible_upstreams: 0,
+          },
+          series: [],
+        },
+      });
+    }
     if (pathname === '/admin/v1/subscription-quotas/series')
       return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
     if (pathname === `/admin/v1/upstreams/${UPSTREAM_ID}/oauth/start` && method === 'POST')
@@ -208,6 +249,7 @@ async function assertGeometry(page: Page, dialog: Locator) {
 }
 
 test('OAuth reconnect results stay readable at supported widths', async ({ page }) => {
+  test.slow();
   const current: CurrentCase = { provider: 'anthropic', scenario: 'same', completed: false };
   await installFixtures(page, current);
 
@@ -271,6 +313,37 @@ test('OAuth reconnect results stay readable at supported widths', async ({ page 
         await assertGeometry(page, dialog);
         await dialog.getByRole('button', { name: 'Done' }).click();
       }
+    }
+  }
+});
+
+test('OAuth upstream cards open reconnect directly for Anthropic, OpenAI, and Gemini', async ({
+  page,
+}) => {
+  const current: CurrentCase = {
+    provider: 'anthropic',
+    scenario: 'same',
+    completed: false,
+  };
+  await installFixtures(page, current);
+
+  for (const width of [390, 1440] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const provider of ['anthropic', 'openai', 'gemini'] as const) {
+      current.provider = provider;
+      current.completed = false;
+      await page.goto(`/upstreams?selectedId=${UPSTREAM_ID}`);
+      await expect(page.getByRole('alert')).toHaveCount(0);
+      const reconnect = page.getByRole('button', { name: 'Reconnect', exact: true });
+      await expect(reconnect).toBeVisible();
+      await reconnect.click();
+
+      const dialog = page.getByRole('dialog', {
+        name: `Reconnect ${provider} reconnect QA`,
+      });
+      await expect(dialog).toBeVisible();
+      await assertGeometry(page, dialog);
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
     }
   }
 });

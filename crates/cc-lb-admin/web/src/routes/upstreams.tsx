@@ -1235,7 +1235,6 @@ export function DetailView({
 }) {
   const { action } = Route.useSearch();
   const capabilities = capabilitiesOf(upstream.kind);
-  const canBrowserConnect = capabilities.oauthBrowserConnect;
   const isSubscription = upstream.kind.endsWith('_oauth');
   const isApiKey = upstream.kind.endsWith('_api_key');
   const navigate = useNavigate({ from: Route.fullPath });
@@ -2345,9 +2344,7 @@ export function DetailView({
                       oauthStatusPending ? (
                         <>
                           <Skeleton className="h-5 w-24" />
-                          {canBrowserConnect ? (
-                            <Skeleton className="h-7 w-24" />
-                          ) : null}
+                          <Skeleton className="h-7 w-24" />
                         </>
                       ) : (
                         <>
@@ -2357,15 +2354,13 @@ export function DetailView({
                               label={oauthStatusBadge.label}
                             />
                           </span>
-                          {canBrowserConnect ? (
-                            <Button
-                              size="sm"
-                              iconLeft={<KeyRound />}
-                              onClick={onConnect}
-                            >
-                              {hasBoundToken ? 'Reconnect' : 'Connect'}
-                            </Button>
-                          ) : null}
+                          <Button
+                            size="sm"
+                            iconLeft={<KeyRound />}
+                            onClick={onConnect}
+                          >
+                            {hasBoundToken ? 'Reconnect' : 'Connect'}
+                          </Button>
                         </>
                       )
                     }
@@ -2399,9 +2394,8 @@ export function DetailView({
                         </p>
                       ) : !hasBoundToken ? (
                         <p className="text-body-sm text-text-muted">
-                          {canBrowserConnect
-                            ? 'Use Connect to authorize this upstream with a Claude account.'
-                            : `No ${PROVIDER_LABELS[providerOf(upstream.kind)]} subscription credential is bound.`}
+                          Use Connect to authorize this upstream with a Claude
+                          account.
                         </p>
                       ) : principalEntry ? (
                         <div
@@ -2568,7 +2562,23 @@ export function DetailView({
                 </>
               ) : (
                 <>
-                  <DetailSection title="Connection" span="full">
+                  <DetailSection
+                    title="Connection"
+                    span="full"
+                    action={
+                      oauthStatusPending ? (
+                        <Skeleton className="h-7 w-24" />
+                      ) : (
+                        <Button
+                          size="sm"
+                          iconLeft={<KeyRound />}
+                          onClick={onConnect}
+                        >
+                          {hasBoundToken ? 'Reconnect' : 'Connect'}
+                        </Button>
+                      )
+                    }
+                  >
                     <div
                       data-testid="provider-oauth-connection"
                       className="space-y-3"

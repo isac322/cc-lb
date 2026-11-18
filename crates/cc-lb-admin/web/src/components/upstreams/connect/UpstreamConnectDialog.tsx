@@ -346,7 +346,9 @@ function ConnectDialogBody({
             ? 'Nothing is saved until you confirm the account.'
             : firstConnect
               ? `Sign in with the ${PROVIDER_LABELS[provider]} account this upstream should use.`
-              : 'The current connection keeps working until you paste the new code.';
+              : provider === 'openai' && session.flow !== 'paste_code'
+                ? 'The current connection keeps working until you finish signing in.'
+                : 'The current connection keeps working until you paste the new code.';
 
   // Back and Cancel are sibling actions: same variant and size.
   const backButton = (to: StepId) => (

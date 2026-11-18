@@ -348,23 +348,21 @@ describe('classifyOAuthReconnect — provider-specific renewal', () => {
     'refresh_token_reused',
     'refresh_token_invalidated',
     'invalid_grant',
-  ])('recognizes an OpenAI terminal renewal rejection: %s', (error) => {
-    const nudge = classifyOAuthReconnect(
-      oauthStatus({
-        kind: 'openai_oauth',
-        refresh_token_expires_at_unix_secs: null,
-      }),
-      error,
-      NOW,
-    );
-    expect(nudge).toMatchObject({
-      reason: 'renewal_rejected',
-      tone: 'danger',
-      actionLabel: 'Reconnect',
-      expiresAt: null,
-    });
-    expect(nudge?.description).not.toMatch(/30 days|365-day|long-lived/i);
-  });
+  ])(
+    'does not treat unpersisted OpenAI provider strings as terminal markers: %s',
+    (error) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind: 'openai_oauth',
+            refresh_token_expires_at_unix_secs: null,
+          }),
+          error,
+          NOW,
+        ),
+      ).toBeNull();
+    },
+  );
   it.each(['openai_oauth', 'gemini_oauth'] as const)(
     'keeps terminal reconnect markers visible for %s',
     (kind) => {
