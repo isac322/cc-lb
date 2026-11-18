@@ -248,10 +248,10 @@ impl HttpBody for ObservedBody {
                     self.bytes = self.bytes.saturating_add(data.len() as u64);
                     self.chunks = self.chunks.saturating_add(1);
                 }
-                if self.body.is_end_stream() {
-                    if let Some(mut observation) = self.observation.take() {
-                        observation.finish_upstream(Some(self.bytes), Some(self.chunks));
-                    }
+                if self.body.is_end_stream()
+                    && let Some(mut observation) = self.observation.take()
+                {
+                    observation.finish_upstream(Some(self.bytes), Some(self.chunks));
                 }
                 Poll::Ready(Some(Ok(frame)))
             }

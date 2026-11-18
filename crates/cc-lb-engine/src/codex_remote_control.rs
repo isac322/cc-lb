@@ -103,14 +103,13 @@ fn prepare_response(
     }
     let server_id = required_string(&response, "server_id")?;
     let environment_id = required_string(&response, "environment_id")?;
-    if let Some(previous) = request.previous {
-        if previous.installation_id != installation_id
+    if let Some(previous) = request.previous
+        && (previous.installation_id != installation_id
             || previous.server_id != server_id
             || previous.environment_id != environment_id
-            || required_string(request.body, "server_id")? != previous.server_id
-        {
-            return Err(EnrollmentWireError::IdentityMismatch);
-        }
+            || required_string(request.body, "server_id")? != previous.server_id)
+    {
+        return Err(EnrollmentWireError::IdentityMismatch);
     }
     let identity = EnrollmentIdentity {
         server_id: server_id.to_owned(),
