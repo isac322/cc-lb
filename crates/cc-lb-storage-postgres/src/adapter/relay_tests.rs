@@ -149,7 +149,7 @@ async fn refresh_is_atomic_cas_and_unexpired_locals_share_current_ciphertext() -
         ));
         assert_eq!(
             dispatch(&s, &old.snapshot, 102).await?,
-            RelayDispatch::Authorized(initial.clone())
+            RelayDispatch::Authorized(Box::new(initial.clone()))
         );
         assert!(s.lookup_relay_credential(&[11; 32]).await?.is_none());
 
@@ -187,7 +187,7 @@ async fn refresh_is_atomic_cas_and_unexpired_locals_share_current_ciphertext() -
         for snapshot in [&old.snapshot, &winner.snapshot] {
             assert_eq!(
                 dispatch(&s, snapshot, 104).await?,
-                RelayDispatch::Authorized(current.clone())
+                RelayDispatch::Authorized(Box::new(current.clone()))
             );
         }
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM codex_relay_credentials_v1")
@@ -265,7 +265,7 @@ async fn invalid_access_or_new_credential_never_mutates_enrollment() -> TestResu
     assert!(matches!(s.refresh_relay_enrollment(RefreshRelayEnrollment {
         grant: invalid, expected_generation: 1,
     }, 102).await, Err(SessionStoreError::CredentialRejected)));
-    assert_eq!(dispatch(&s, &old.snapshot, 103).await?, RelayDispatch::Authorized(initial));
+    assert_eq!(dispatch(&s, &old.snapshot, 103).await?, RelayDispatch::Authorized(Box::new(initial)));
     assert!(s.lookup_relay_credential(&[11; 32]).await?.is_none());
     for purpose in [CredentialPurpose::SessionAccess, CredentialPurpose::SessionRenewal] {
         let mut wrong = old.snapshot.clone(); wrong.purpose = purpose;
@@ -678,7 +678,10 @@ async fn access_lookup_and_fence_enforce_authenticated_selectors_and_expiry() ->
             Err(SessionStoreError::CredentialRejected)
         ));
         let relay = s.lookup_relay_credential(&[10; 32]).await?.unwrap();
-        assert_eq!(dispatch(s, &relay.snapshot, 102).await?, RelayDispatch::Authorized(initial));
+        assert_eq!(
+            dispatch(s, &relay.snapshot, 102).await?,
+            RelayDispatch::Authorized(Box::new(initial))
+        );
         sqlx::query("UPDATE codex_relay_enrollments_v1 SET provider_expires_at_unix_secs=102")
             .execute(&s.pool).await?;
         assert!(matches!(dispatch(s, &relay.snapshot, 102).await?, RelayDispatch::ProviderExpired));

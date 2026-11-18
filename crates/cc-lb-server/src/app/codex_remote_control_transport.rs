@@ -296,7 +296,7 @@ pub(super) async fn fenced_relay(state: &ProxyState, auth: &Authenticated, now: 
                 || target.environment_id != enrollment.identity.environment_id || target.installation_id != enrollment.identity.installation_id {
                 return Err(Error::Invalid);
             }
-            Ok(enrollment)
+            Ok(*enrollment)
         }
     }
 }

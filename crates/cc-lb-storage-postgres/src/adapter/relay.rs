@@ -251,7 +251,7 @@ impl RelayEnrollmentStore for PostgresStorage {
         let result = if now >= enrollment.provider_expires_at_unix_secs {
             RelayDispatch::ProviderExpired
         } else {
-            RelayDispatch::Authorized(enrollment)
+            RelayDispatch::Authorized(Box::new(enrollment))
         };
         tx.commit().await.map_err(map_error)?;
         Ok(result)

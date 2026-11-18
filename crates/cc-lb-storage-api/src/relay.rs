@@ -228,7 +228,7 @@ pub struct RelayAuthRecord {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RelayDispatch {
-    Authorized(RelayEnrollment),
+    Authorized(Box<RelayEnrollment>),
     /// Local expiry knowledge is not a received provider HTTP response. No
     /// ciphertext is released, and callers must not retry or renew local auth.
     ProviderExpired,

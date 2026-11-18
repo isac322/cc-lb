@@ -160,7 +160,7 @@ async fn refresh_is_atomic_cas_and_unexpired_locals_share_current_ciphertext() -
     ));
     assert_eq!(
         dispatch(&s, &old.snapshot, 102).await?,
-        RelayDispatch::Authorized(initial.clone())
+        RelayDispatch::Authorized(Box::new(initial.clone()))
     );
     assert!(s.lookup_relay_credential(&[11; 32]).await?.is_none());
 
@@ -198,7 +198,7 @@ async fn refresh_is_atomic_cas_and_unexpired_locals_share_current_ciphertext() -
     for snapshot in [&old.snapshot, &winner.snapshot] {
         assert_eq!(
             dispatch(&s, snapshot, 104).await?,
-            RelayDispatch::Authorized(current.clone())
+            RelayDispatch::Authorized(Box::new(current.clone()))
         );
     }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM codex_relay_credentials_v1")
@@ -340,7 +340,7 @@ async fn invalid_access_or_new_credential_never_mutates_enrollment() -> TestResu
     ));
     assert_eq!(
         dispatch(&s, &old.snapshot, 103).await?,
-        RelayDispatch::Authorized(initial)
+        RelayDispatch::Authorized(Box::new(initial))
     );
     assert!(s.lookup_relay_credential(&[11; 32]).await?.is_none());
     for purpose in [
@@ -785,7 +785,7 @@ async fn dispatch_derives_nondefault_identity_and_never_returns_expired_or_revok
     let record = s.lookup_relay_credential(&[10; 32]).await?.unwrap();
     assert_eq!(
         dispatch(&s, &record.snapshot, 102).await?,
-        RelayDispatch::Authorized(initial)
+        RelayDispatch::Authorized(Box::new(initial))
     );
     assert!(dispatch(&s, &access(&family(), 1), 102).await.is_err());
     assert!(s.fence_relay_dispatch("other-principal", &record.snapshot, 102).await.is_err());
