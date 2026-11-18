@@ -21,6 +21,16 @@ The admin API manages:
 - Status and export views.
 
 Use `If-Match` or the current revision for updates and deletes. A `stale_revision` response means another writer changed the resource; fetch the resource again before retrying.
+## Codex subscription sessions
+
+The admin API issues short-lived session credentials for native Codex subscription routes:
+
+`POST /admin/v1/principals/{id}/codex-sessions`
+
+The JSON body requires `parent_key_id`, `owner_binding_id`, `workspace_id`, `origin`, `access_ttl_seconds`, and `session_ttl_seconds`. The owner binding must belong to the principal, remain active, and allow the requested workspace. The server stores the owner generation and binding revision with the session family and returns access and renewal credentials with `Cache-Control: no-store`.
+
+Each session stays pinned to its provider owner. Revoked or conflicting bindings return `400`; an unavailable bound upstream returns `503`; requests do not fail over to another owner.
+
 
 ## Local proxy key files
 

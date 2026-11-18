@@ -21,6 +21,15 @@ The runtime architecture relies on a lock-free `DynamicView` snapshot managed vi
 In multi-replica deployments, replicas synchronize their local views using Postgres `LISTEN/NOTIFY` channels for sub-second updates. If a notification is missed, a background reconciler polls the database every 60 seconds as a fallback. The system uses a single rebind primitive to safely commit staged plugin slots and rebuild the routing table.
 
 ## Admin v1 REST API
+### Codex subscription sessions
+
+The admin API issues the short-lived session credentials used by native Codex subscription routes. The route is protected by the admin write-auth layer:
+
+`POST /admin/v1/principals/{id}/codex-sessions`
+
+The JSON body requires `parent_key_id`, `owner_binding_id`, `workspace_id`, `origin`, `access_ttl_seconds`, and `session_ttl_seconds`. The owner binding must belong to the principal, remain active, and allow the requested workspace. The transaction records the owner generation and binding revision in the session family, then returns the access and renewal credentials with `Cache-Control: no-store`. The credentials must be passed to the maintained Codex client through its local-session login flow; do not put them in command arguments or persistent logs.
+
+The session is bound to one provider owner. Requests using it fail with `400` when the binding is revoked or conflicts, return `503` when the bound upstream is unavailable, and never fail over to another owner.
 
 Administrative operations use the providers configured in `admin.auth.providers`. A static-token provider accepts its environment-backed Bearer token in the `Authorization` header.
 
