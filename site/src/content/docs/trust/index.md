@@ -10,7 +10,7 @@ cc-lb is an independent open-source project. Its public scope is intentionally n
 - Bounded native generation and token-count routes: Anthropic `POST /v1/messages` and `POST /v1/messages/count_tokens`; OpenAI `POST /v1/responses` and `GET /v1/responses` WebSocket; Gemini `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`.
 - Self-hosted operation with explicit operator-managed secrets and runtime state.
 - Wasmtime filter and shape hooks through the published crate contract.
-- Unsupported scope includes Bedrock, Vertex, SigV4/ADC credential paths, cross-provider translation, and account-bound provider-management APIs.
+- Unsupported scope includes Bedrock, Vertex, SigV4/ADC credential paths, cross-provider translation, and account-bound provider-management APIs outside the registered Codex account routes.
 
 The owner reports internal use with 10 connected accounts. That note describes one bounded deployment; it is not a customer count, SLA, enterprise certification, or global-scale claim.
 

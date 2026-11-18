@@ -84,13 +84,16 @@ The account-bound Codex routes use the authenticated local session and the selec
 | Method | Client path | Purpose |
 |---|---|---|
 | GET | `/backend-api/wham/accounts/check` | Account projection |
-| GET | `/backend-api/wham/usage` and `/backend-api/wham/usage/*` | Usage, limits, and estimates |
+| GET | `/backend-api/wham/usage`, `/backend-api/wham/rate-limit-reset-credits` | Usage and reset-credit inventory |
 | GET | `/backend-api/wham/profiles/me`, `/backend-api/wham/settings/user`, `/backend-api/wham/config/bundle` | Profile and account configuration |
 | GET | `/backend-api/wham/workspace-messages`, `/backend-api/wham/security-setup` | Workspace and security guidance |
-| GET | `/backend-api/wham/analytics/*` | Account usage analytics |
+| GET | `/backend-api/wham/usage/plan_limit_history`, `/backend-api/wham/usage/daily-token-usage-breakdown`, `/backend-api/wham/usage/credit-usage-events` | Usage history and credit events |
+| GET | `/backend-api/wham/usage/daily-workspace-user-token-usage-breakdown`, `/backend-api/wham/usage/daily-workspace-user-credit-usage` | Workspace usage breakdowns |
+| GET | `/backend-api/wham/analytics/daily-workspace-usage-counts`, `/backend-api/wham/analytics/daily-plugin-usage-metrics`, `/backend-api/wham/analytics/daily-skill-usage-metrics` | Account usage analytics |
 | GET | `/backend-api/accounts/verified_access` | Verified access |
 | POST | `/backend-api/wham/rate-limit-reset-credits/consume`, `/backend-api/wham/accounts/send_add_credits_nudge_email` | Account actions |
-| POST | `/backend-api/wham/usage/*`, `/backend-api/accounts/switch-workspace-token` | Usage queries and workspace switching |
+| POST | `/backend-api/wham/usage/thread-estimates/query`, `/backend-api/wham/usage/thread_usage/query`, `/backend-api/wham/usage/thread_usage/query_v2` | Usage queries |
+| POST | `/backend-api/accounts/switch-workspace-token` | Workspace switching |
 
 The `/api/codex` aliases cover the same registered operation family. Provider-bound account requests remain owner-scoped and fail closed when the owner is unavailable. Pinned-client acceptance remains pending.
 

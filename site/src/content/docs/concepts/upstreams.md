@@ -27,7 +27,7 @@ The pool can contain all six kinds. The request path selects only enabled candid
 
 Provider-prefixed routes use `/anthropic/v1/...`, `/openai/v1/...`, or `/gemini/v1beta/...` (plus Gemini model catalogs under `/gemini/v1/...`). The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists supported operations and credential restrictions.
 
-cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope. Supported model catalog routes are limited to those in the endpoint reference.
+cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs outside the registered Codex account routes are outside the supported proxy scope. Supported model catalog routes are limited to those in the endpoint reference.
 
 ## Anthropic HTTP fallback between upstreams
 

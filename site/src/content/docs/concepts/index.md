@@ -26,6 +26,6 @@ The proxy key identifies a principal. The principal's allowed models, limits, ca
 
 Shared native routes cover Anthropic `POST /v1/messages` and `POST /v1/messages/count_tokens`, OpenAI `POST /v1/responses` and `GET /v1/responses` WebSocket, and Gemini `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`. The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists additional provider-prefixed operations and their eligible credentials.
 
-cc-lb preserves provider-native protocols; it does not translate between providers or act as a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside this scope.
+cc-lb preserves provider-native protocols; it does not translate between providers or act as a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs outside the registered Codex account routes are outside this scope.
 
 The keepalive scheduler is best effort. It can reduce avoidable cache eviction during active sessions, but it does not guarantee a cache hit.

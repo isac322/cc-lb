@@ -29,7 +29,7 @@ Shared routes preserve each provider's native request and response format:
 
 Provider-prefixed routes select a provider explicitly. See the [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) for supported operations and eligible credentials.
 
-cc-lb does not translate requests between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credential paths, and account-bound provider-management APIs such as files, uploads, and stored-response or conversation management are outside the supported proxy scope. Only the model catalog operations listed in the runtime endpoint reference are supported; account catalogs are excluded.
+cc-lb does not translate requests between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credential paths, and account-bound provider-management APIs outside the registered Codex account routes, including files, uploads, and stored-response or conversation management, are outside the supported proxy scope. Only the model catalog operations listed in the runtime endpoint reference are supported; account catalogs are excluded.
 
 cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 
