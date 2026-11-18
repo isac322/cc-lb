@@ -88,7 +88,6 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 |---|---|---|---|
 | `POST /admin/v1/account-owner-bindings` | Committed | After state | Not rebuilt |
 | `POST /admin/v1/principals`; `PUT`, `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
-| `POST /admin/v1/principals/{id}/codex-sessions` | Session family, access credential, renewal credential, owner generation and binding revision committed before `201`; failed audit attempts revoke the new family when compensation succeeds | Synchronous `codex_session_issue` audit; audit failure returns `500` and attempts revocation | Not rebuilt |
 | `POST /admin/v1/principals/{id}/keys` | Committed | After state; on failure, revocation of the key is attempted but can fail | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys/{key_id}/revoke` | Committed | After state | Rebuilt |
 | `POST /admin/v1/upstreams`; `PUT`, `PATCH`, `DELETE /admin/v1/upstreams/{id}`; `POST /admin/v1/upstreams/{id}/enable`, `/disable`; `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin` | Committed (an update that turns warmup on for an OAuth upstream also enqueues one warmup job per lane the credential supports) | After state | Rebuilt |

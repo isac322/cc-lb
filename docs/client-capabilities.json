@@ -136,8 +136,8 @@
     {
       "id": "codex-account-workspace",
       "client": "codex",
-      "caller": "admin-issued Codex session owner, account, settings, usage, verified access and workspace switching",
-      "reachability": "admin session issuance is documented and owner-bound; exact client acceptance remains pending",
+      "caller": "account, settings, usage, verified access and workspace switching",
+      "reachability": "workspace-switch-token depends on C-AUTH and C-ACCOUNT contracts",
       "authBase": "approved owner-bound account origin",
       "clientMode": "account-bound subscription",
       "upstreamCredential": "openai_oauth",
