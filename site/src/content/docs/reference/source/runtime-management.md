@@ -116,7 +116,9 @@ The `/api/codex` aliases cover the same registered operation family. Provider-bo
 
 OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
 
-Not yet supported: files, uploads, batches, vector stores, conversations, containers, stored chat completion retrieve/update/delete, response retrieve/delete/cancel/input_items, Realtime calls control and client secrets, videos, and audio voices.
+Codex Files lifecycle requests use the authenticated owner-bound subscription session routes `POST /backend-api/files` and `POST /backend-api/files/{file_id}/uploaded`. Authentication and owner validation happen before the request body is read or sent upstream. The proxy records the file resource under the selected owner and returns provider responses, including signed storage URLs, without fetching or proxying the storage URL. The client performs the raw upload directly to that signed URL. These routes are separate from `/openai/v1/files`, which remains unsupported.
+
+Not yet supported: OpenAI-compatible files and uploads, batches, vector stores, conversations, containers, stored chat completion retrieve/update/delete, response retrieve/delete/cancel/input_items, Realtime calls control and client secrets, videos, and audio voices.
 
 #### Gemini endpoint reference
 
