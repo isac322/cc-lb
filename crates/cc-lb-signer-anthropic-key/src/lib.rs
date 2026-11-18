@@ -393,7 +393,7 @@ impl Signer for OpenaiSubscriptionSigner {
         let headers = shaped.headers_mut();
         strip_provider_credential_headers(headers);
         headers.insert(AUTHORIZATION, self.authorization_header.clone());
-        match &self.account_header {
+        match capability.workspace().or(self.account_header.as_ref()) {
             Some(account) => {
                 headers.insert("ChatGPT-Account-ID", account.clone());
             }
@@ -962,10 +962,12 @@ impl Signer for GeminiSubscriptionSigner {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use bytes::Bytes;
     use cc_lb_upstream::{
         DialectError, DialectShapeContext, ShapedRequestBuilder, UpstreamDialect, shape_request,
-        sign_request,
+        sign_request, sign_request_for_workspace,
     };
     use http::header::AUTHORIZATION;
     use http::{HeaderMap, HeaderValue, Method};
@@ -1443,6 +1445,155 @@ mod tests {
         }
     }
 
+    struct ForwardingWorkspaceSigner(OpenaiSubscriptionSigner);
+
+    #[async_trait]
+    impl Signer for ForwardingWorkspaceSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            assert_eq!(
+                capability.workspace(),
+                Some(&HeaderValue::from_static("selected-workspace"))
+            );
+            let signed = self.0.sign(shaped, capability).await?;
+            assert_eq!(
+                capability.workspace(),
+                Some(&HeaderValue::from_static("selected-workspace"))
+            );
+            Ok(signed)
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_workspace_overrides_bundle_and_all_inbound_accounts_through_wrapper() {
+        for bundle_account in [Some("bundle-workspace"), None] {
+            let signer = ForwardingWorkspaceSigner(
+                OpenaiSubscriptionSigner::new(
+                    "openai-access-token",
+                    bundle_account,
+                    None,
+                    Arc::new(cc_lb_clock::SystemClock),
+                )
+                .expect("signer"),
+            );
+            let mut shaped = hostile_shaped_request();
+            shaped.set_url(
+                "https://chatgpt.com/backend-api/wham/usage"
+                    .parse()
+                    .expect("URL"),
+            );
+            shaped.headers_mut().append(
+                "ChatGPT-Account-ID",
+                HeaderValue::from_static("inbound-workspace"),
+            );
+            shaped.headers_mut().append(
+                "chatgpt-account-id",
+                HeaderValue::from_static("other-inbound-workspace"),
+            );
+            shaped
+                .headers_mut()
+                .insert("x-request-id", HeaderValue::from_static("request"));
+            let url = shaped.url().clone();
+            let method = shaped.method().clone();
+            let body = shaped.body().clone();
+            let signed = sign_request_for_workspace(
+                &signer,
+                shaped,
+                HeaderValue::from_static("selected-workspace"),
+            )
+            .await
+            .expect("workspace-bound signing");
+
+            assert_eq!(
+                header_values(&signed, "chatgpt-account-id"),
+                ["selected-workspace"]
+            );
+            assert_eq!(
+                signed.headers().get(AUTHORIZATION),
+                Some(&HeaderValue::from_static("Bearer openai-access-token"))
+            );
+            assert_eq!(header_values(&signed, "x-request-id"), ["request"]);
+            assert!(!signed.headers().contains_key("x-api-key"));
+            assert_eq!(signed.url(), &url);
+            assert_eq!(signed.method(), &method);
+            assert_eq!(signed.body(), &body);
+        }
+    }
+
+    #[derive(Default)]
+    struct WorkspaceIgnoringSigner {
+        invoked: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Signer for WorkspaceIgnoringSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            self.invoked.store(true, Ordering::SeqCst);
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_workspace_override_is_rejected_before_signing() {
+        let signer = WorkspaceIgnoringSigner::default();
+        let error = sign_request_for_workspace(
+            &signer,
+            shaped_request(),
+            HeaderValue::from_static(""),
+        )
+        .await
+        .expect_err("empty workspace must fail closed");
+
+        assert!(matches!(error, SignerError::SigningFailed { .. }));
+        assert!(!signer.invoked.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn workspace_signing_rejects_missing_wrong_or_duplicate_sealed_accounts() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["other-workspace"],
+            &["selected-workspace", "selected-workspace"],
+            &["selected-workspace", "other-workspace"],
+            &["other-workspace", "selected-workspace"],
+        ];
+        for accounts in cases {
+            let signer = WorkspaceIgnoringSigner::default();
+            let mut shaped = shaped_request();
+            for account in *accounts {
+                shaped.headers_mut().append(
+                    "chatgpt-account-id",
+                    HeaderValue::from_str(account).expect("account header"),
+                );
+            }
+            let error = sign_request_for_workspace(
+                &signer,
+                shaped,
+                HeaderValue::from_static("selected-workspace"),
+            )
+            .await
+            .expect_err("mismatched sealed account must fail closed");
+
+            assert!(matches!(error, SignerError::SigningFailed { .. }));
+            assert!(signer.invoked.load(Ordering::SeqCst));
+        }
+    }
+
     #[tokio::test]
 
     async fn openai_subscription_signer_sets_bearer_optional_account_and_preserves_body() {
@@ -1462,7 +1613,22 @@ mod tests {
         shaped
             .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
+        shaped.headers_mut().append(
+            "ChatGPT-Account-ID",
+            HeaderValue::from_static("inbound-workspace"),
+        );
+        shaped.headers_mut().append(
+            "chatgpt-account-id",
+            HeaderValue::from_static("other-inbound-workspace"),
+        );
+        shaped.set_url(
+            "https://chatgpt.com/backend-api/codex/responses"
+                .parse()
+                .expect("URL"),
+        );
+        shaped.set_body(Bytes::from_static(br#"{"model":"gpt-5","input":"hello"}"#));
         let body = shaped.body().clone();
+        let url = shaped.url().clone();
 
         let signer = OpenaiSubscriptionSigner::new(
             "openai-access-token",
@@ -1474,14 +1640,12 @@ mod tests {
         let signed = sign_request(&signer, shaped).await.expect("sign request");
 
         assert_eq!(signed.body(), &body);
+        assert_eq!(signed.url(), &url);
         assert_eq!(
             signed.headers().get(AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer openai-access-token"))
         );
-        assert_eq!(
-            signed.headers().get("ChatGPT-Account-ID"),
-            Some(&HeaderValue::from_static("account-123"))
-        );
+        assert_eq!(header_values(&signed, "chatgpt-account-id"), ["account-123"]);
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
@@ -1497,7 +1661,16 @@ mod tests {
             Arc::new(cc_lb_clock::SystemClock),
         )
         .expect("signer without account id");
-        let signed = sign_request(&signer, shaped_request())
+        let mut shaped = shaped_request();
+        shaped.headers_mut().append(
+            "ChatGPT-Account-ID",
+            HeaderValue::from_static("inbound-workspace"),
+        );
+        shaped.headers_mut().append(
+            "chatgpt-account-id",
+            HeaderValue::from_static("other-inbound-workspace"),
+        );
+        let signed = sign_request(&signer, shaped)
             .await
             .expect("sign request without account id");
         assert_eq!(

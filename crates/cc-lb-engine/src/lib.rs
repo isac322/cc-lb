@@ -17,6 +17,8 @@ pub mod cache_keepalive;
 #[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]
+pub mod codex_account;
+#[cfg(not(loom))]
 mod codex_quota_observation;
 #[cfg(not(loom))]
 pub mod codex_sessions;

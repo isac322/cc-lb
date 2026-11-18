@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
-use http::{HeaderMap, Method};
+use http::{HeaderMap, HeaderValue, Method};
 use url::Url;
 
 use crate::{
@@ -164,7 +164,15 @@ impl SignedRequest {
 /// Signer-facing capability used to seal shaped requests.
 #[derive(Debug)]
 pub struct SigningCapability {
+    workspace: Option<HeaderValue>,
     _seal: crate::private::Seal,
+}
+
+impl SigningCapability {
+    /// Returns the trusted workspace override, if this request has one.
+    pub fn workspace(&self) -> Option<&HeaderValue> {
+        self.workspace.as_ref()
+    }
 }
 
 /// Invokes a signer with a temporary signing capability.
@@ -173,9 +181,39 @@ pub async fn sign_request(
     shaped: ShapedRequest,
 ) -> Result<SignedRequest, SignerError> {
     let mut capability = SigningCapability {
+        workspace: None,
         _seal: crate::private::Seal,
     };
     signer.sign(shaped, &mut capability).await
+}
+
+/// Signs for a trusted workspace and verifies its single `ChatGPT-Account-ID` header.
+///
+/// Empty workspaces are rejected before invoking the signer. A signer that does
+/// not seal exactly the selected workspace fails closed; signed requests are
+/// never modified after sealing.
+pub async fn sign_request_for_workspace(
+    signer: &dyn Signer,
+    shaped: ShapedRequest,
+    workspace: HeaderValue,
+) -> Result<SignedRequest, SignerError> {
+    if workspace.is_empty() {
+        return Err(SignerError::SigningFailed {
+            reason: "workspace override must not be empty".to_owned(),
+        });
+    }
+    let mut capability = SigningCapability {
+        workspace: Some(workspace),
+        _seal: crate::private::Seal,
+    };
+    let signed = signer.sign(shaped, &mut capability).await?;
+    let mut accounts = signed.headers().get_all("chatgpt-account-id").iter();
+    if accounts.next() != capability.workspace() || accounts.next().is_some() {
+        return Err(SignerError::SigningFailed {
+            reason: "signed request does not match the selected workspace".to_owned(),
+        });
+    }
+    Ok(signed)
 }
 
 #[cfg(test)]
@@ -267,8 +305,10 @@ mod tests {
             Bytes::from_static(b"{}"),
         );
         let mut capability = SigningCapability {
+            workspace: None,
             _seal: crate::private::Seal,
         };
+        assert!(capability.workspace().is_none());
 
         // When
         let signed = SignedRequest::from_shaped(shaped, &mut capability);

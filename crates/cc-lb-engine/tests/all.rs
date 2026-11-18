@@ -4,6 +4,8 @@ mod gemini_oauth_catalog;
 mod prompt_cache_routing_support;
 mod router_lifecycle_support;
 
+#[path = "codex_account.rs"]
+mod codex_account;
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;
 #[path = "attempt_rail_trybuild.rs"]
