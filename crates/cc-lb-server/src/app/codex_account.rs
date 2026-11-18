@@ -2,9 +2,77 @@ use super::{ProxyState, RequestBodyReadError, read_request_body};
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::CACHE_CONTROL};
+use axum::http::{
+    HeaderMap, HeaderValue, Request, Response, StatusCode, Uri, header::CACHE_CONTROL,
+};
 use cc_lb_engine::LifecycleContext;
 use cc_lb_engine::codex_sessions::{self, SessionError};
+
+fn canonical_account_path(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "/api/codex/accounts/check" => "/backend-api/wham/accounts/check",
+        "/api/codex/usage" => "/backend-api/wham/usage",
+        "/api/codex/rate-limit-reset-credits" => "/backend-api/wham/rate-limit-reset-credits",
+        "/api/codex/rate-limit-reset-credits/consume" => {
+            "/backend-api/wham/rate-limit-reset-credits/consume"
+        }
+        "/api/codex/profiles/me" => "/backend-api/wham/profiles/me",
+        "/api/codex/accounts/send_add_credits_nudge_email" => {
+            "/backend-api/wham/accounts/send_add_credits_nudge_email"
+        }
+        "/api/codex/config/bundle" => "/backend-api/wham/config/bundle",
+        "/api/codex/settings/user" => "/backend-api/wham/settings/user",
+        "/api/codex/workspace-messages" => "/backend-api/wham/workspace-messages",
+        "/api/codex/security-setup" => "/backend-api/wham/security-setup",
+        "/api/codex/usage/thread-estimates/query" => {
+            "/backend-api/wham/usage/thread-estimates/query"
+        }
+        "/api/codex/usage/thread_usage/query" => "/backend-api/wham/usage/thread_usage/query",
+        "/api/codex/usage/thread_usage/query_v2" => "/backend-api/wham/usage/thread_usage/query_v2",
+        "/api/codex/usage/plan_limit_history" => "/backend-api/wham/usage/plan_limit_history",
+        "/api/codex/usage/daily-token-usage-breakdown" => {
+            "/backend-api/wham/usage/daily-token-usage-breakdown"
+        }
+        "/api/codex/usage/credit-usage-events" => "/backend-api/wham/usage/credit-usage-events",
+        "/api/codex/usage/daily-workspace-user-token-usage-breakdown" => {
+            "/backend-api/wham/usage/daily-workspace-user-token-usage-breakdown"
+        }
+        "/api/codex/usage/daily-workspace-user-credit-usage" => {
+            "/backend-api/wham/usage/daily-workspace-user-credit-usage"
+        }
+        "/api/codex/analytics/daily-workspace-usage-counts" => {
+            "/backend-api/wham/analytics/daily-workspace-usage-counts"
+        }
+        "/api/codex/analytics/daily-plugin-usage-metrics" => {
+            "/backend-api/wham/analytics/daily-plugin-usage-metrics"
+        }
+        "/api/codex/analytics/daily-skill-usage-metrics" => {
+            "/backend-api/wham/analytics/daily-skill-usage-metrics"
+        }
+        "/api/codex/accounts/verified_access" => "/backend-api/accounts/verified_access",
+        "/api/codex/accounts/switch-workspace-token" => {
+            "/backend-api/accounts/switch-workspace-token"
+        }
+        _ => return None,
+    })
+}
+
+fn canonicalize_account_uri(uri: &mut Uri) {
+    let Some(path) = canonical_account_path(uri.path()) else {
+        return;
+    };
+    let path_and_query = match uri.query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(
+        path_and_query
+            .parse()
+            .expect("canonical account route is a valid path"),
+    );
+    *uri = Uri::from_parts(parts).expect("canonical account URI is valid");
+}
 
 fn no_store(mut response: Response<Body>) -> Response<Body> {
     response
@@ -79,7 +147,7 @@ pub(super) async fn account_handler(
 }
 
 async fn account_response(state: &ProxyState, request: Request<Body>) -> Response<Body> {
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let observer = parts.extensions.get::<LifecycleContext>().cloned();
     if let Some(observer) = observer.as_ref() {
         observer.mark_authn_reached();
@@ -107,6 +175,7 @@ async fn account_response(state: &ProxyState, request: Request<Body>) -> Respons
             observer.as_ref(),
         );
     }
+    canonicalize_account_uri(&mut parts.uri);
     if let Some(observer) = observer.as_ref() {
         state
             .lifecycle

@@ -2774,6 +2774,80 @@ fn scoped_proxy_routes(
                 "/backend-api/accounts/switch-workspace-token",
                 post(account_lifecycle_handler),
             )
+            .route("/api/codex/accounts/check", get(account_lifecycle_handler))
+            .route("/api/codex/usage", get(account_lifecycle_handler))
+            .route(
+                "/api/codex/rate-limit-reset-credits",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/rate-limit-reset-credits/consume",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/accounts/send_add_credits_nudge_email",
+                post(account_lifecycle_handler),
+            )
+            .route("/api/codex/profiles/me", get(account_lifecycle_handler))
+            .route("/api/codex/config/bundle", get(account_lifecycle_handler))
+            .route("/api/codex/settings/user", get(account_lifecycle_handler))
+            .route(
+                "/api/codex/workspace-messages",
+                get(account_lifecycle_handler),
+            )
+            .route("/api/codex/security-setup", get(account_lifecycle_handler))
+            .route(
+                "/api/codex/usage/thread-estimates/query",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/thread_usage/query",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/thread_usage/query_v2",
+                post(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/plan_limit_history",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/daily-token-usage-breakdown",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/credit-usage-events",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/daily-workspace-user-token-usage-breakdown",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/usage/daily-workspace-user-credit-usage",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/analytics/daily-workspace-usage-counts",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/analytics/daily-plugin-usage-metrics",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/analytics/daily-skill-usage-metrics",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/accounts/verified_access",
+                get(account_lifecycle_handler),
+            )
+            .route(
+                "/api/codex/accounts/switch-workspace-token",
+                post(account_lifecycle_handler),
+            )
             .route("/oauth/token", post(lifecycle_handler))
             .route("/oauth/revoke", post(lifecycle_handler))
             .route(

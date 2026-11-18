@@ -515,6 +515,39 @@ async fn saturated_account_owner_does_not_block_another_owner() {
 }
 
 #[tokio::test]
+async fn codex_api_account_alias_reaches_canonical_owner_relay() {
+    let fixture = RelayFixture::new(
+        "a",
+        StatusCode::OK,
+        Bytes::from_static(
+            br#"{"accounts":[{"id":"provider-workspace-a","can_access_with_session":true}]}"#,
+        ),
+        false,
+        false,
+        None,
+    )
+    .await;
+    let response = fixture
+        .request(
+            http::Method::GET,
+            "/api/codex/accounts/check?cursor=a+b",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("local-a"));
+    let sent = fixture.dispatch.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].url().as_str(),
+        "https://chatgpt.com/backend-api/wham/accounts/check?cursor=a+b"
+    );
+}
+
+#[tokio::test]
 async fn selected_owner_a_and_b_each_dispatch_once_with_raw_control_request() {
     for (selected, expected_id) in [("a", OWNER_A), ("b", OWNER_B)] {
         let mut fixture = RelayFixture::new(
