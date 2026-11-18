@@ -18,7 +18,7 @@ use cc_lb_quota::plan_capacity::{
 };
 use cc_lb_routing::FilterPlugin;
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -1296,7 +1296,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                                         access_token: secrecy::SecretString::new(
                                             tokens.access_token.clone().into_boxed_str(),
                                         ),
-                                        historical_access_tokens: VecDeque::new(),
+                                        historical_access_tokens: Vec::new(),
                                         expires_at_unix_secs: tokens.expires_at_unix_secs,
                                         forced_refresh_generation: None,
                                     }))
@@ -1538,12 +1538,14 @@ impl Signer for PersistedAccessOnlySubscriptionSigner {
 }
 
 /// Persists `status_401` if a subscription credential obtained via a forced
-/// refresh is still rejected with 401 on the single retry attempt.
+/// refresh is still rejected with 401 on the single retry attempt, while
+/// retaining access to the shared token history for error redaction.
 struct PersistedRefreshedSubscriptionSigner {
     signer: Arc<dyn Signer>,
+    state: Arc<RwLock<SubscriptionSignerState>>,
     store: Arc<dyn UpstreamStore>,
     upstream_id: Uuid,
-    oauth_token_generation: u64,
+    oauth_token_generation: Option<u64>,
 }
 
 #[async_trait]
@@ -1561,26 +1563,27 @@ impl Signer for PersistedRefreshedSubscriptionSigner {
     }
 
     async fn on_retry_unauthorized(&self, _error: &UpstreamError) {
-        persist_subscription_unauthorized(
-            self.store.as_ref(),
-            self.upstream_id,
-            self.oauth_token_generation,
-            "post_refresh_retry",
-        )
-        .await;
+        if let Some(oauth_token_generation) = self.oauth_token_generation {
+            persist_subscription_unauthorized(
+                self.store.as_ref(),
+                self.upstream_id,
+                oauth_token_generation,
+                "post_refresh_retry",
+            )
+            .await;
+        }
     }
 
     fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
-        self.signer.scrub_secrets(text)
+        let state = self.state.read();
+        scrub_subscription_secrets(&state, self.signer.as_ref(), None, text)
     }
 }
-
-const MAX_HISTORICAL_ACCESS_TOKENS: usize = 8;
 
 struct SubscriptionSignerState {
     signer: Arc<dyn Signer>,
     access_token: secrecy::SecretString,
-    historical_access_tokens: VecDeque<secrecy::SecretString>,
+    historical_access_tokens: Vec<secrecy::SecretString>,
     expires_at_unix_secs: u64,
     forced_refresh_generation: Option<u64>,
 }
@@ -1590,6 +1593,36 @@ fn scrub_secret_owned(secret: &str, text: &str) -> Option<String> {
         std::borrow::Cow::Borrowed(_) => None,
         std::borrow::Cow::Owned(value) => Some(value),
     }
+}
+
+fn scrub_subscription_secrets<'a>(
+    state: &SubscriptionSignerState,
+    signer: &dyn Signer,
+    extra_secret: Option<&str>,
+    text: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    let mut owned = match signer.scrub_secrets(text) {
+        std::borrow::Cow::Borrowed(_) => None,
+        std::borrow::Cow::Owned(value) => Some(value),
+    };
+    for secret in extra_secret
+        .into_iter()
+        .chain(std::iter::once(state.access_token.expose_secret()))
+        .chain(
+            state
+                .historical_access_tokens
+                .iter()
+                .map(ExposeSecret::expose_secret),
+        )
+    {
+        let input = owned.as_deref().unwrap_or(text);
+        if let Some(value) = scrub_secret_owned(secret, input) {
+            owned = Some(value);
+        }
+    }
+    owned
+        .map(std::borrow::Cow::Owned)
+        .unwrap_or(std::borrow::Cow::Borrowed(text))
 }
 
 struct RefreshingSubscriptionSigner {
@@ -1663,12 +1696,14 @@ impl RefreshingSubscriptionSigner {
             &mut state.access_token,
             secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
         );
-        if state.historical_access_tokens.len() >= MAX_HISTORICAL_ACCESS_TOKENS {
-            state.historical_access_tokens.pop_front();
+        if previous_access_token.expose_secret() != tokens.access_token.as_str()
+            && !state
+                .historical_access_tokens
+                .iter()
+                .any(|existing| existing.expose_secret() == previous_access_token.expose_secret())
+        {
+            state.historical_access_tokens.push(previous_access_token);
         }
-        state
-            .historical_access_tokens
-            .push_back(previous_access_token);
         state.expires_at_unix_secs = tokens.expires_at_unix_secs;
         state.forced_refresh_generation = forced_refresh_generation;
         signer
@@ -1786,37 +1821,32 @@ impl Signer for RefreshingSubscriptionSigner {
 
     async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         match self.refresh(true).await {
-            Ok((signer, Some(oauth_token_generation))) => RetryDecision::Refresh {
+            Ok((signer, oauth_token_generation)) => RetryDecision::Refresh {
                 new_signer: Arc::new(PersistedRefreshedSubscriptionSigner {
                     signer,
+                    state: self.state.clone(),
                     store: self.store.clone(),
                     upstream_id: self.record.id,
                     oauth_token_generation,
                 }),
             },
-            Ok((signer, None)) => RetryDecision::Refresh { new_signer: signer },
             Err(_) => RetryDecision::Fail,
         }
     }
 
     fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        let attempted = self
+            .attempted_access_token
+            .read()
+            .expose_secret()
+            .to_owned();
         let state = self.state.read();
-        let signer_scrubbed = state.signer.scrub_secrets(text);
-        let mut owned = match signer_scrubbed {
-            std::borrow::Cow::Borrowed(_) => None,
-            std::borrow::Cow::Owned(value) => Some(value),
-        };
-        for access_token in
-            std::iter::once(&state.access_token).chain(state.historical_access_tokens.iter())
-        {
-            let input = owned.as_deref().unwrap_or(text);
-            if let Some(value) = scrub_secret_owned(access_token.expose_secret(), input) {
-                owned = Some(value);
-            }
-        }
-        owned
-            .map(std::borrow::Cow::Owned)
-            .unwrap_or(std::borrow::Cow::Borrowed(text))
+        scrub_subscription_secrets(
+            &state,
+            state.signer.as_ref(),
+            Some(attempted.as_str()),
+            text,
+        )
     }
 }
 
@@ -5227,5 +5257,138 @@ mod tests {
             .expect("upstream fetch")
             .expect("upstream exists");
         assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_scrub_secrets_retains_in_flight_tokens_across_many_rotations() {
+        struct RotatingRefreshHandle {
+            storage: Arc<Storage>,
+            aead: Arc<AeadService>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl cc_lb_signer_anthropic_oauth::LazyRefreshHandle for RotatingRefreshHandle {
+            async fn refresh_one(
+                &self,
+                upstream_id: Uuid,
+            ) -> Result<(), cc_lb_signer_anthropic_oauth::LazyRefreshError> {
+                let next = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let record = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+                    .await
+                    .map_err(
+                        |error| cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed {
+                            reason: error.to_string(),
+                        },
+                    )?
+                    .expect("refresh upstream");
+                let encrypted = record
+                    .oauth_credentials
+                    .as_ref()
+                    .expect("oauth credentials");
+                let mut tokens = encrypted
+                    .decrypt(&self.aead, record.id.as_bytes())
+                    .expect("decrypt oauth credentials");
+                tokens.access_token = format!("tok{next:02}abcdefg{next:02}");
+                tokens.expires_at_unix_secs = 1_900_000_000;
+                let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                    &self.aead,
+                    &tokens,
+                    record.id.as_bytes(),
+                )
+                .expect("encrypt refreshed oauth credentials");
+                UpstreamStore::store_oauth_tokens(
+                    self.storage.as_ref(),
+                    record.id,
+                    record.revision,
+                    encrypted,
+                    false,
+                )
+                .await
+                .map_err(|error| {
+                    cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed {
+                        reason: error.to_string(),
+                    }
+                })?;
+                Ok(())
+            }
+        }
+
+        let (_dir, storage) = storage_fixture(50).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.access_token = "tok00abcdefg00".to_owned();
+        tokens.expires_at_unix_secs = 1_900_000_000;
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "scrub-retention",
+            UpstreamKind::OpenaiOauth,
+            tokens,
+            None,
+        )
+        .await;
+        let handle = Arc::new(RotatingRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let factory = refreshing_factory(
+            record,
+            storage,
+            aead,
+            handle.clone(),
+            clock,
+            &cc_lb_config::Config::default(),
+        );
+        let upstream = Upstream::OpenaiDirect { base_url: None };
+        let initial_signer = factory.build(&upstream).await.expect("initial signer");
+        let signed_initial =
+            cc_lb_upstream::sign_request(initial_signer.as_ref(), shaped_request())
+                .await
+                .expect("initial sign");
+        assert_eq!(
+            signed_initial.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer tok00abcdefg00"))
+        );
+
+        let mut first_retry_signer: Option<Arc<dyn cc_lb_upstream::Signer>> = None;
+        let mut latest_retry_signer: Option<Arc<dyn cc_lb_upstream::Signer>> = None;
+        for rotation in 1..=12 {
+            let current_signer = factory.build(&upstream).await.expect("signer before 401");
+            let RetryDecision::Refresh { new_signer } = current_signer
+                .on_unauthorized(&UpstreamError::Unauthorized {
+                    status: http::StatusCode::UNAUTHORIZED,
+                    body: None,
+                })
+                .await
+            else {
+                panic!("rotation {rotation} must yield retry signer");
+            };
+            if rotation == 1 {
+                first_retry_signer = Some(new_signer.clone());
+            }
+            latest_retry_signer = Some(new_signer);
+        }
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 12);
+
+        let leaked =
+            "echo tok00abcdefg00 tok01abcdefg01 tok08abcdefg08 tok11abcdefg11 tok12abcdefg12";
+        for candidate in [
+            initial_signer,
+            first_retry_signer.expect("first retry signer"),
+            latest_retry_signer.expect("latest retry signer"),
+        ] {
+            let scrubbed = candidate.scrub_secrets(leaked);
+            assert_eq!(
+                scrubbed.as_ref(),
+                "echo [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]"
+            );
+            assert!(matches!(
+                candidate.scrub_secrets("clean upstream error"),
+                std::borrow::Cow::Borrowed("clean upstream error")
+            ));
+        }
     }
 }
