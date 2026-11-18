@@ -94,8 +94,8 @@ Not yet supported: files, message batches, skills, agents, and sessions.
 | POST | `/openai/v1/alpha/search`, `/openai/v1/memories/trace_summarize` | OAuth only |
 | GET | `/openai/v1/models` and native `/backend-api/codex/models` | OAuth session |
 | POST | `/openai/v1/alpha/search` and native `/backend-api/codex/alpha/search` | OAuth session |
-| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` and native Codex image routes | OAuth session |
-| POST | `/openai/v1/memories/trace_summarize` and native Codex memories route | OAuth session |
+| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` and native `/backend-api/codex/images/generations`, `/backend-api/codex/images/edits` | OAuth session |
+| POST | `/openai/v1/memories/trace_summarize` and native `/backend-api/codex/memories/trace_summarize` | OAuth session |
 | POST | `/openai/v1/alpha/notes/v2/{operation}` and native `/backend-api/codex/alpha/notes/v2/{operation}` for `list_files_by_prefix`, `read_file`, `search_contents`, `append_to_file`, `write_file`, and `thread_hint` | OAuth session |
 
 OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
