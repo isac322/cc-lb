@@ -66,6 +66,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- OpenAI and Gemini OAuth upstream cards now always show a **Connect** or **Reconnect** button on the **Connection** section header, matching Anthropic OAuth. Removed unused error strings (`refresh_token_reused`, `refresh_token_invalidated`, `invalid_grant`) from the web reconnect classifier that the server never persists.
+- Live proxy requests and periodic usage polls now persist `status_401` (with `expected_oauth_token_generation` fencing) when a refreshable OpenAI, Gemini, or Anthropic OAuth credential still receives HTTP 401 after a successful forced token refresh, excluding the upstream from routing and scheduled polling until reconnected. Forced OAuth refreshes also expedite any matching unstarted `Pending` scheduled refresh job to run immediately instead of waiting behind its pre-expiry `run_at` schedule.
+
 - Preserve Gemini generation request-event diagnostics after immediate response-body drop for JSON/SSE header mismatches and incomplete SSE events detected by the final framing check after upstream reading. Earlier SSE inspection-limit failures are outside this change. ([#1308](https://github.com/isac322/cc-lb/issues/1308))
 - Reject successful JSON responses from Gemini API-key upstreams when a native `streamGenerateContent` request explicitly selects `alt=sse`. Emit the existing SSE error and record the framing failure without reading the upstream JSON body; OAuth and non-SSE response handling remain unchanged. ([#1308](https://github.com/isac322/cc-lb/issues/1308))
 - Cost metrics now retain request attribution until asynchronous pricing arrives, so completed requests contribute their known cost once. Unknown prices no longer create zero-cost series; pending prices remain bounded by the metrics subscriber's capacity and TTL. ([#1299](https://github.com/isac322/cc-lb/issues/1299))

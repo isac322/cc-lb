@@ -885,8 +885,9 @@ unknown plan identifiers remain readable. Claude Max 20x is shown as
 and Max 5x as
 [Claude Max](https://support.claude.com/en/articles/11049741-what-is-the-max-plan).
 Account identity appears in the detail header and remaining account facts,
-while Connection contains endpoint information. Provider metadata collection
-adds no provider calls to the proxy request path.
+while Connection contains the effective endpoint and the provider's Connect or
+Reconnect action. Provider metadata collection adds no provider calls to the
+proxy request path.
 
 #### Access-only OAuth
 
@@ -1024,7 +1025,7 @@ The system runs a background sweeper every 60 seconds to refresh tokens that exp
 
 If the background refresh fails or a token expires before the sweeper runs, the proxy uses a lazy refresh fallback. When a request is signed, the signer checks whether the token is expired or within the 30-second skew window. If so, it triggers an on-demand refresh, updates the database, and retries the request once.
 
-A terminal refresh result (`400 invalid_grant`, `401`, or a known expired refresh token) records a reconnect-required state that scheduled, watchdog, and lazy refresh paths honor until the credential is replaced or the account is reconnected. Routing also stops selecting a reconnect-required OAuth upstream; the periodic reconciler picks up the state change on the next successful reconcile or rebuild on every replica. Other `400` responses, network failures, and `5xx` responses remain transient and retry.
+A terminal refresh result (`400 invalid_grant`, `401`, or a known expired refresh token), as well as an HTTP `401` that persists after a forced refresh succeeds on a live request or usage poll, records a reconnect-required state that scheduled, watchdog, and lazy refresh paths honor until the credential is replaced or the account is reconnected. Routing also stops selecting a reconnect-required OAuth upstream; the periodic reconciler picks up the state change on the next successful reconcile or rebuild on every replica. Other `400` responses, network failures, and `5xx` responses remain transient and retry.
 
 Both refresh paths are disabled end to end for `long_lived_365d` credentials: the sweeper never schedules them and the signer never attempts a lazy refresh.
 
@@ -1136,7 +1137,7 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: OAuth tokens are not refreshed, and requests fail with expired token errors.
 - **Diagnosis**: Check the `/metrics` endpoint for `cclb_oauth_refresh_total{outcome="..."}` to see the error categorization.
-- **Workaround**: Verify that the network can reach the OAuth provider and that the client credentials in `cc-lb.toml` are correct. Transient network, `5xx`, and non-terminal `400` refresh failures retry. For `400 invalid_grant`, `401`, or a known expired refresh token, rerun connect/reconnect to replace the credential; scheduled, watchdog, and lazy refresh paths do not retry while reconnect is required.
+- **Workaround**: Verify that the network can reach the OAuth provider and that the client credentials in `cc-lb.toml` are correct. Transient network, `5xx`, and non-terminal `400` refresh failures retry. For `400 invalid_grant`, `401`, or a known expired refresh token (including an HTTP `401` that persists after a forced refresh succeeds on a live request or usage poll), rerun connect/reconnect to replace the credential; scheduled, watchdog, and lazy refresh paths do not retry while reconnect is required.
 
 ### Long-lived OAuth credential returns 401
 

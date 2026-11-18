@@ -882,8 +882,9 @@ unknown plan identifiers remain readable. Claude Max 20x is shown as
 and Max 5x as
 [Claude Max](https://support.claude.com/en/articles/11049741-what-is-the-max-plan).
 Account identity appears in the detail header and remaining account facts,
-while Connection contains endpoint information. Provider metadata collection
-adds no provider calls to the proxy request path.
+while Connection contains the effective endpoint and the provider's Connect or
+Reconnect action. Provider metadata collection adds no provider calls to the
+proxy request path.
 
 #### Access-only OAuth
 
