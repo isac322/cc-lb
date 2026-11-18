@@ -46,6 +46,11 @@
       "reference": "https://github.com/isac322/cc-lb/issues/1325",
       "scope": "Exact-client feature matrix, healthy entitlement, owner affinity and provider evidence requirements."
     },
+    "codexRemoteControl": {
+      "kind": "runtime-documentation",
+      "reference": "docs/runtime-management.md#codex-session-and-remote-control-endpoints",
+      "scope": "Registered Codex session and remote-control route contracts; not pinned-client acceptance."
+    },
     "voice": {
       "kind": "pinned-source",
       "reference": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/core/src/realtime_conversation.rs#L2146-L2169",
@@ -265,7 +270,7 @@
       "id": "codex-remote-enrollment",
       "client": "codex",
       "caller": "remote enrollment, pairing, refresh, clients, revoke and WS",
-      "reachability": "ordinary feature call sites remain in acceptance; not configured remote execution",
+      "reachability": "registered local session and remote-control routes cover enrollment, refresh, pairing, client listing/revocation and relay execution; exact pinned-client execution remains pending",
       "authBase": "principal-bound translated enrollment and vendor WS origin",
       "clientMode": "ordinary remote-control feature",
       "upstreamCredential": "openai_oauth",
@@ -275,15 +280,16 @@
         "https://github.com/isac322/cc-lb/issues/1325"
       ],
       "sourceEvidence": [
-        "parity",
+        "runtime",
+        "codexRemoteControl",
         "accept"
       ],
       "status": {
-        "route": "not-claimed",
+        "route": "partial",
         "boundary": "feature",
         "clientAcceptance": "pending"
       },
-      "deferReason": "ordinary feature call sites remain in acceptance; not configured remote execution. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "deferReason": "The local route and credential-purpose contracts are implemented and documented, but exact pinned-client execution, canonical Q-HARNESS coverage and Q-ACCEPT evidence remain pending.",
       "acceptanceEvidence": null
     },
     {
