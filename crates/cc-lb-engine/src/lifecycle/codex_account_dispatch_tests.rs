@@ -63,6 +63,7 @@ async fn usage_shaped_control_body_is_observed_without_usage_or_pricing() {
     let mut events = bus.subscribe_lifecycle();
     let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
     let observer = LifecycleContext::new("account-usage-test".to_owned(), bus, &clock);
+    observer.mark_authn_reached();
     let body = Body::new(AccountResponseBody {
         inner: Body::from(r#"{"usage":{"input_tokens":100,"output_tokens":200}}"#),
         observer: Some(observer),
