@@ -137,7 +137,7 @@
       "id": "codex-account-workspace",
       "client": "codex",
       "caller": "account, settings, usage, verified access and workspace switching",
-      "reachability": "workspace-switch-token depends on C-AUTH and C-ACCOUNT contracts",
+      "reachability": "owner-bound account routes are registered; workspace switching uses the C-AUTH session contract",
       "authBase": "approved owner-bound account origin",
       "clientMode": "account-bound subscription",
       "upstreamCredential": "openai_oauth",
@@ -149,15 +149,16 @@
         "https://github.com/isac322/cc-lb/issues/1312"
       ],
       "sourceEvidence": [
+        "runtime",
         "parity",
         "accept"
       ],
       "status": {
-        "route": "not-claimed",
+        "route": "shipped",
         "boundary": "feature",
         "clientAcceptance": "pending"
       },
-      "deferReason": "workspace-switch-token depends on C-AUTH and C-ACCOUNT contracts. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
+      "deferReason": "The owner-bound account and workspace-switch route contracts are implemented. Exact pinned-client acceptance and canonical Q-HARNESS reconciliation remain pending.",
       "acceptanceEvidence": null
     },
     {
