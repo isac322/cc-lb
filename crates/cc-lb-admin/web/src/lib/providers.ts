@@ -97,7 +97,6 @@ export interface ProviderCapabilities {
   warmup: boolean;
   cacheKeepalive: boolean;
   apiKeyUsageReport: boolean;
-  oauthBrowserConnect: boolean;
   credits: boolean;
 }
 const NONE: ProviderCapabilities = {
@@ -107,7 +106,6 @@ const NONE: ProviderCapabilities = {
   warmup: false,
   cacheKeepalive: false,
   apiKeyUsageReport: false,
-  oauthBrowserConnect: false,
   credits: false,
 };
 /** UI-exposed backend capabilities. Subscription quota is available for
@@ -125,7 +123,6 @@ export const PROVIDER_CAPABILITIES: Record<
     limitReset: true,
     warmup: true,
     cacheKeepalive: true,
-    oauthBrowserConnect: true,
     credits: true,
   },
   anthropic_api_key: { ...NONE, cacheKeepalive: true, apiKeyUsageReport: true },

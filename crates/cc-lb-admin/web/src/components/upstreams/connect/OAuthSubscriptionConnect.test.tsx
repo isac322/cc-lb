@@ -606,6 +606,11 @@ describe('provider subscription OAuth flows', () => {
     expect(
       await within(dialog).findByText('Sign in with ChatGPT'),
     ).toBeDefined();
+    expect(
+      within(dialog).getByText(
+        'The current connection keeps working until you finish signing in.',
+      ),
+    ).toBeDefined();
     fireEvent.click(
       within(dialog).getByRole('button', {
         name: 'Device sign-in turned off by your workspace? Use browser sign-in',
@@ -615,6 +620,11 @@ describe('provider subscription OAuth flows', () => {
       await within(dialog).findByRole('link', {
         name: 'Sign in with ChatGPT',
       }),
+    ).toBeDefined();
+    expect(
+      within(dialog).getByText(
+        'The current connection keeps working until you paste the new code.',
+      ),
     ).toBeDefined();
     const callbackUrl =
       'http://localhost:1455/auth/callback?code=ac_reconnect_123&state=openai-state';

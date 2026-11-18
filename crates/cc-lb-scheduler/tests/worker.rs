@@ -222,6 +222,126 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
 }
 
 #[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_backend_sqlite_push_or_expedite_accelerates_pending_and_preserves_constraints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
+    let now_secs = cc_lb_clock::unix_secs(cc_lb_clock::Clock::now(&SystemClock));
+
+    // Case 1: unstarted future Pending task (attempts = 0) is expedited to MIN(run_at) and dispatched immediately.
+    let expedited_id = Uuid::new_v4();
+    let expedited_key = OAuthRefreshJob::new(expedited_id).idempotency_key(now_secs + 3_600);
+    backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(expedited_id)),
+            idempotency_key: Some(expedited_key.clone()),
+            run_at_unix_secs: Some(now_secs + 3_300),
+            max_attempts: Some(5),
+        })
+        .await?;
+    backend
+        .push_or_expedite_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(expedited_id)),
+            idempotency_key: Some(expedited_key.clone()),
+            run_at_unix_secs: Some(now_secs),
+            max_attempts: Some(5),
+        })
+        .await?;
+
+    let (row_count, updated_run_at): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MAX(run_at), 0) FROM Jobs WHERE idempotency_key = ?",
+    )
+    .bind(&expedited_key)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row_count, 1);
+    assert_eq!(updated_run_at, i64::try_from(now_secs)?);
+
+    // Case 2: already earlier run_at is preserved (MIN semantics).
+    let earlier_id = Uuid::new_v4();
+    let earlier_key = OAuthRefreshJob::new(earlier_id).idempotency_key(now_secs + 3_700);
+    let earlier_run_at = now_secs + 120;
+    backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(earlier_id)),
+            idempotency_key: Some(earlier_key.clone()),
+            run_at_unix_secs: Some(earlier_run_at),
+            max_attempts: Some(5),
+        })
+        .await?;
+    backend
+        .push_or_expedite_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(earlier_id)),
+            idempotency_key: Some(earlier_key.clone()),
+            run_at_unix_secs: Some(now_secs + 600),
+            max_attempts: Some(5),
+        })
+        .await?;
+    let preserved_run_at: i64 =
+        sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?")
+            .bind(&earlier_key)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(preserved_run_at, i64::try_from(earlier_run_at)?);
+
+    // Case 3: Pending task in retry backoff (attempts > 0) keeps its backoff run_at untouched.
+    let retried_id = Uuid::new_v4();
+    let retried_key = OAuthRefreshJob::new(retried_id).idempotency_key(now_secs + 3_800);
+    let backoff_run_at = now_secs + 600;
+    backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(retried_id)),
+            idempotency_key: Some(retried_key.clone()),
+            run_at_unix_secs: Some(backoff_run_at),
+            max_attempts: Some(5),
+        })
+        .await?;
+    sqlx::query("UPDATE Jobs SET attempts = 1 WHERE idempotency_key = ?")
+        .bind(&retried_key)
+        .execute(&pool)
+        .await?;
+    backend
+        .push_or_expedite_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(retried_id)),
+            idempotency_key: Some(retried_key.clone()),
+            run_at_unix_secs: Some(now_secs),
+            max_attempts: Some(5),
+        })
+        .await?;
+    let retried_run_at: i64 =
+        sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?")
+            .bind(&retried_key)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retried_run_at, i64::try_from(backoff_run_at)?);
+
+    // Verify a live adaptive worker immediately dispatches the expedited task.
+    let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<&'static str>(4);
+    let worker = build_adaptive_worker(&backend, dispatching_scheduler_ctx(dispatch_tx))?;
+    let cancel = CancellationToken::new();
+    let handle: JoinHandle<Result<(), WorkerError>> =
+        tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+    let kind = timeout(Duration::from_secs(3), dispatch_rx.recv())
+        .await
+        .map_err(|_| "timed out waiting for expedited job dispatch")?
+        .ok_or("dispatch channel closed before expedited job ran")?;
+    assert_eq!(kind, "oauth_refresh");
+    assert!(
+        dispatch_rx.try_recv().is_err(),
+        "only the expedited task should be due now"
+    );
+    cancel.cancel();
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 struct SqliteTestDb {
     pool: sqlx::SqlitePool,
     _dir: TempDir,

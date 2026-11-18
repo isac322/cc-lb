@@ -172,7 +172,11 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
             run_at_unix_secs: Some(now_unix_secs),
             max_attempts: None,
         };
-        match self.scheduler_backend.push_adaptive_task(task).await {
+        match self
+            .scheduler_backend
+            .push_or_expedite_adaptive_task(task)
+            .await
+        {
             Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {
                 Ok(LazyRefreshClaim::Enqueued { idempotency_key })
             }

@@ -660,6 +660,7 @@ scenario!(
     provider_generic_terminal_latch_dominates_late_status,
     |store| async move {
         for (kind, kind_name) in [
+            (UpstreamKind::AnthropicOauth, "anthropic"),
             (UpstreamKind::OpenaiOauth, "openai"),
             (UpstreamKind::GeminiOauth, "gemini"),
         ] {
@@ -736,6 +737,7 @@ scenario!(
     provider_generic_stale_status_cannot_poison_replacement,
     |store| async move {
         for (kind, kind_name) in [
+            (UpstreamKind::AnthropicOauth, "anthropic"),
             (UpstreamKind::OpenaiOauth, "openai"),
             (UpstreamKind::GeminiOauth, "gemini"),
         ] {
@@ -776,22 +778,24 @@ scenario!(
                 "{kind_name}: credential replacement must clear the latch"
             );
 
-            let stale = store
-                .set_status(
-                    record.id,
-                    UpstreamStatusUpdate {
-                        last_apply_error: Some(Some("status_500".to_owned())),
-                        last_apply_at_unix_secs: Some(Some(3333)),
-                        last_warmup_at_unix_secs: Some(Some(4444)),
-                        expected_oauth_token_generation: Some(connected.oauth_token_generation),
-                    },
-                )
-                .await
-                .expect_err("stale status must conflict");
-            ensure!(
-                matches!(stale, StorageError::Conflict { .. }),
-                "{kind_name}: stale status must return a conflict"
-            );
+            for stale_error in ["status_401", "status_500"] {
+                let stale = store
+                    .set_status(
+                        record.id,
+                        UpstreamStatusUpdate {
+                            last_apply_error: Some(Some(stale_error.to_owned())),
+                            last_apply_at_unix_secs: Some(Some(3333)),
+                            last_warmup_at_unix_secs: Some(Some(4444)),
+                            expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                        },
+                    )
+                    .await
+                    .expect_err("stale status must conflict");
+                ensure!(
+                    matches!(stale, StorageError::Conflict { .. }),
+                    "{kind_name}: stale {stale_error} status must return a conflict"
+                );
+            }
             ensure!(
                 store.get_by_id(record.id).await?.expect("record") == reconnected,
                 "{kind_name}: stale status must not poison replacement"

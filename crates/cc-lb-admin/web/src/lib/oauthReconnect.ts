@@ -176,14 +176,7 @@ export function classifyOAuthReconnect(
     };
   }
 
-  if (
-    lastApplyError === 'status_400' ||
-    lastApplyError === 'status_401' ||
-    (status.kind === 'openai_oauth' &&
-      (lastApplyError === 'refresh_token_reused' ||
-        lastApplyError === 'refresh_token_invalidated' ||
-        lastApplyError === 'invalid_grant'))
-  ) {
+  if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
     return {
       reason: 'renewal_rejected',
       tone: 'danger',

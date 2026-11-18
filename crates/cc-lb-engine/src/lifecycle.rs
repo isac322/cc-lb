@@ -6233,6 +6233,16 @@ impl Lifecycle {
                 // Everything the refreshed attempt returns is scrubbed with
                 // the signer that produced it.
                 signer = new_signer;
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    let retry_err = UpstreamError::Unauthorized {
+                        status: StatusCode::UNAUTHORIZED,
+                        body: None,
+                    };
+                    signer
+                        .on_retry_unauthorized(&retry_err)
+                        .instrument(tracing::info_span!("proxy.record_retry_unauthorized"))
+                        .await;
+                }
                 if response.status() == StatusCode::UNAUTHORIZED
                     && let Some(next) = failover.next(self, &routed, FailoverReason::Unauthorized)
                 {

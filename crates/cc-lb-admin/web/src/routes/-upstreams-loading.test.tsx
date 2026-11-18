@@ -2670,7 +2670,9 @@ describe('/upstreams essential provider connection facts', () => {
       expect(screen.queryByText('Sign-in incomplete')).toBeNull();
       expect(screen.queryByText('Renewal unavailable')).toBeNull();
       expect(screen.queryByTestId('oauth-current-status')).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
+      expect(screen.getAllByRole('button', { name: 'Reconnect' })).toHaveLength(
+        1,
+      );
       expect(screen.queryByRole('alert')).toBeNull();
     },
   );
@@ -2769,7 +2771,7 @@ describe('/upstreams essential provider connection facts', () => {
         name: 'Reconnect',
       });
       expect(screen.getAllByRole('button', { name: 'Reconnect' })).toHaveLength(
-        1,
+        2,
       );
       fireEvent.click(reconnect);
       expect(screen.getByRole('dialog')).toBeDefined();
@@ -2790,6 +2792,56 @@ describe('/upstreams essential provider connection facts', () => {
       ).toBeDefined();
       expect(screen.queryByText('Connected')).toBeNull();
       expect(screen.queryByText('Account not connected')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s renders Reconnect on a healthy bound card and opens the dialog',
+    (kind) => {
+      mockProviderCredential(kind);
+      renderRoute();
+
+      expect(screen.queryByRole('alert')).toBeNull();
+      const reconnect = screen.getByRole('button', { name: 'Reconnect' });
+      fireEvent.click(reconnect);
+
+      const dialog = screen.getByRole('dialog');
+      expect(
+        within(dialog).getByRole('heading', {
+          name: `Reconnect ${upstream.name}`,
+        }),
+      ).toBeDefined();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s renders Connect when no credential is bound and opens the dialog',
+    (kind) => {
+      mockProviderCredential(kind, {
+        status: 'missing',
+        has_credentials: false,
+        expires_at_unix_secs: null,
+        refresh_token_present: false,
+        refresh_token_expires_at_unix_secs: null,
+      });
+      renderRoute();
+
+      expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(
+        2,
+      );
+      const connectionSection = screen
+        .getByRole('heading', { name: 'Connection' })
+        .closest('section') as HTMLElement;
+      fireEvent.click(
+        within(connectionSection).getByRole('button', { name: 'Connect' }),
+      );
+
+      const dialog = screen.getByRole('dialog');
+      expect(
+        within(dialog).getByRole('heading', {
+          name: `Connect ${upstream.name}`,
+        }),
+      ).toBeDefined();
     },
   );
 

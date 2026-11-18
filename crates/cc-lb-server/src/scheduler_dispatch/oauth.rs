@@ -284,7 +284,13 @@ impl SchedulerDispatch {
                     .fetch_usage_with_current_token(&upstream, &user_agent)
                     .await
                 {
-                    FetchOutcome::Response(retry_response) => retry_response,
+                    FetchOutcome::Response(retry_response) => {
+                        if retry_response.status == http::StatusCode::UNAUTHORIZED {
+                            self.record_reconnect_required(&upstream, "status_401")
+                                .await?;
+                        }
+                        retry_response
+                    }
                     FetchOutcome::Network => {
                         return Ok(OAuthUsagePollObservation::NetworkFailure {
                             observed_at_unix_secs,
