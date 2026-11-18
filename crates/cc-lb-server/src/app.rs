@@ -4661,6 +4661,7 @@ mod tests {
     }
     mod account_relay_tests {
         include!("app_account_relay_tests.rs");
+    }
     mod remote_control_tests {
         include!("app/codex_remote_control_tests.rs");
     }
