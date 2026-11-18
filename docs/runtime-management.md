@@ -123,8 +123,6 @@ These routes are local session and relay contracts for the maintained Codex subs
 
 | Method | Client path | Purpose |
 |---|---|---|
-| GET | `/backend-api/cc-lb/workspaces` | Session access, owner-bound workspace discovery |
-| POST | `/backend-api/accounts/switch-workspace-token` | Session access, owner-bound workspace exchange |
 | POST | `/backend-api/wham/remote/control/server/enroll` | Session access, owner-bound relay enrollment |
 | POST | `/backend-api/wham/remote/control/server/refresh` | Session access, owner-bound relay refresh |
 | GET | `/backend-api/wham/remote/control/environments/{environment_id}/clients` | Session access, client listing |
