@@ -91,6 +91,7 @@ Not yet supported: files, message batches, skills, agents, and sessions.
 | POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` | API key, OAuth |
 | POST | `/openai/v1/images/variations` | API key |
 | GET | `/openai/v1/models`, `/openai/v1/models/{id}` | API key, OAuth |
+| GET WebSocket | `/openai/v1/realtime?model={model}` | API key |
 | POST | `/openai/v1/alpha/search`, `/openai/v1/memories/trace_summarize` | OAuth only |
 | GET | `/openai/v1/models` and native `/backend-api/codex/models` | OAuth session |
 | POST | `/openai/v1/alpha/search` and native `/backend-api/codex/alpha/search` | OAuth session |
