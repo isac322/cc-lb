@@ -7,7 +7,6 @@ pub(crate) mod api_key;
 pub mod keys;
 pub(crate) mod limit_resets;
 pub mod oauth;
-pub mod owner_bindings;
 pub mod plugins;
 pub mod plugins_wasm;
 pub(crate) mod post_commit;

@@ -93,8 +93,8 @@ fn assert_conflict<T: std::fmt::Debug>(result: Result<T, StorageError>) {
 
 fn assert_unavailable<T: std::fmt::Debug>(result: Result<T, StorageError>) {
     assert!(
-        matches!(result, Err(StorageError::UpstreamUnavailable { .. })),
-        "expected upstream unavailable, got {result:?}"
+        matches!(result, Err(StorageError::Unavailable { .. })),
+        "expected unavailable, got {result:?}"
     );
 }
 

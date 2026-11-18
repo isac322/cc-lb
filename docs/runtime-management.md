@@ -772,27 +772,6 @@ Omit `--id` to create an upstream (`POST /admin/v1/upstreams`). To replace
 credentials on an existing upstream, pass `--id <UPSTREAM_ID>` and
 `--revision <SPEC_REVISION>`; the CLI sends `PUT
 /admin/v1/upstreams/<UPSTREAM_ID>` with `If-Match`.
-### CLI/API account-owner binding provisioning
-
-The authenticated Admin v1 API can provision the durable owner binding used by
-session-backed provider features. The create endpoint stores an initial binding
-with `revision: 1` and `owner_generation: 1`; the storage layer validates the
-principal, provider, upstream, and workspace namespace before committing it.
-
-```bash
-# Supply CC_LB_ADMIN_TOKEN through a secret manager or process environment.
-cc-lb admin --base-url http://[::1]:9090 \
-  account-owner-bindings create --input ./owner-binding.json
-cc-lb admin --base-url http://[::1]:9090 \
-  account-owner-bindings get <BINDING_ID>
-```
-
-The JSON body contains `binding_id`, canonical `principal_id`, `provider`,
-`owner_id`, `upstream_id`, `local_user_id`, `allowed_workspaces`,
-`provider_workspace_id`, and optional `outbound_region`. The CLI sends the
-Bearer token only in the `Authorization` header. The API returns the stored
-binding, including its revision and owner generation.
-
 
 #### OpenAI OAuth
 

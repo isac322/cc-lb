@@ -2,16 +2,15 @@ use async_trait::async_trait;
 
 use crate::{
     ApiKeyMutation, AuditEntry, AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionReadStore, ConfigDraftState, HistoryEntry, IssueParams,
-    OverviewExcludedErrorBucket, PriceCatalogSnapshotFetch, RequestEvent, RequestEventExportPage,
-    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventListItem, RequestEventListQuery,
-    RequestEventProjections, RequestEventStreamFilters, RuntimeChangeNotifier, StorageError,
-    StorageResult, StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun,
-    UsageTokenInterval, UsageTokenIntervalSum,
-    account_owner::AccountOwnerStore,
+    ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
+    PriceCatalogSnapshotFetch, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
+    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections,
+    RequestEventStreamFilters, RuntimeChangeNotifier, StorageError, StorageResult,
+    StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun, UsageTokenInterval,
+    UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
-    cache_keepalive_sessions::CacheKeepaliveSessionStore,
+    cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
@@ -473,9 +472,8 @@ pub trait PriceCatalogCache: Send + Sync {
 
 #[async_trait]
 pub trait Storage:
-    AccountOwnerStore
+    AuditStore
     + crate::plugin_registry::PluginRegistryStore
-    + AuditStore
     + crate::plan_tiers::PlanTierStore
     + crate::pool_quota_history::PoolQuotaHistoryStore
     + crate::principal::PrincipalStore
@@ -510,9 +508,8 @@ pub trait Storage:
 }
 
 impl<T> Storage for T where
-    T: AccountOwnerStore
+    T: AuditStore
         + crate::plugin_registry::PluginRegistryStore
-        + AuditStore
         + crate::plan_tiers::PlanTierStore
         + crate::pool_quota_history::PoolQuotaHistoryStore
         + crate::principal::PrincipalStore
