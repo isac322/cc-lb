@@ -53,12 +53,35 @@ impl SchedulerBackend {
         &self,
         task: SchedulerPushTask<AdaptiveJob>,
     ) -> Result<(), SchedulerError> {
+        self.push_task_with_mode(ADAPTIVE_QUEUE, task, false).await
+    }
+
+    /// Pushes an adaptive task or expedites a matching unstarted `Pending`
+    /// task (`attempts = 0`) to run at `min(existing.run_at, new.run_at)`.
+    pub async fn push_or_expedite_adaptive_task(
+        &self,
+        task: SchedulerPushTask<AdaptiveJob>,
+    ) -> Result<(), SchedulerError> {
+        self.push_task_with_mode(ADAPTIVE_QUEUE, task, true).await
+    }
+
+    async fn push_task_with_mode<Args>(
+        &self,
+        queue: &str,
+        task: SchedulerPushTask<Args>,
+        expedite_pending: bool,
+    ) -> Result<(), SchedulerError>
+    where
+        Args: DeserializeOwned + serde::Serialize,
+    {
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => insert_sqlite_task(sqlite.pool(), ADAPTIVE_QUEUE, task).await,
+            Self::Sqlite(sqlite) => {
+                insert_sqlite_task_with_mode(sqlite.pool(), queue, task, expedite_pending).await
+            }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(postgres.pool(), ADAPTIVE_QUEUE, task).await
+                insert_postgres_task_with_mode(postgres.pool(), queue, task, expedite_pending).await
             }
         }
     }
@@ -67,30 +90,15 @@ impl SchedulerBackend {
         &self,
         task: SchedulerPushTask<AdaptiveJob>,
     ) -> Result<(), SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => {
-                insert_sqlite_task(sqlite.pool(), CACHE_KEEPALIVE_QUEUE, task).await
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                insert_postgres_task(postgres.pool(), CACHE_KEEPALIVE_QUEUE, task).await
-            }
-        }
+        self.push_task_with_mode(CACHE_KEEPALIVE_QUEUE, task, false)
+            .await
     }
 
     pub async fn push_cron_task(
         &self,
         task: SchedulerPushTask<CronJob>,
     ) -> Result<(), SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => insert_sqlite_task(sqlite.pool(), CRON_QUEUE, task).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                insert_postgres_task(postgres.pool(), CRON_QUEUE, task).await
-            }
-        }
+        self.push_task_with_mode(CRON_QUEUE, task, false).await
     }
 
     pub async fn list_adaptive_tasks(
@@ -177,11 +185,24 @@ fn build_apalis_task<Args>(task: SchedulerPushTask<Args>) -> apalis_core::task::
     builder.build()
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(all(test, feature = "sqlite"))]
 async fn insert_sqlite_task<Args>(
     pool: &sqlx::SqlitePool,
     queue: &str,
     task: SchedulerPushTask<Args>,
+) -> Result<(), SchedulerError>
+where
+    Args: DeserializeOwned + serde::Serialize,
+{
+    insert_sqlite_task_with_mode(pool, queue, task, false).await
+}
+
+#[cfg(feature = "sqlite")]
+async fn insert_sqlite_task_with_mode<Args>(
+    pool: &sqlx::SqlitePool,
+    queue: &str,
+    task: SchedulerPushTask<Args>,
+    expedite_pending: bool,
 ) -> Result<(), SchedulerError>
 where
     Args: DeserializeOwned + serde::Serialize,
@@ -205,29 +226,37 @@ where
         .unwrap_or(0);
     let metadata = serde_json::to_string(task.metadata())
         .map_err(|error| SchedulerError::Job(format!("encode task metadata: {error}")))?;
-    sqlx::query(
+    let query = if expedite_pending {
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
-         VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8)",
-    )
-    .bind(payload)
-    .bind(ulid::Ulid::generate().to_string())
-    .bind(queue)
-    .bind(max_attempts)
-    .bind(run_at)
-    .bind(priority)
-    .bind(metadata)
-    .bind(task.idempotency_key().map(ToOwned::to_owned))
-    .execute(pool)
-    .await
-    .map_err(SchedulerError::from_task_push_sqlx_error)?;
+         VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8) \
+         ON CONFLICT(job_type, idempotency_key) DO UPDATE \
+         SET run_at = MIN(Jobs.run_at, excluded.run_at) \
+         WHERE Jobs.status = 'Pending' AND Jobs.attempts = 0"
+    } else {
+        "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
+         VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8)"
+    };
+    sqlx::query(query)
+        .bind(payload)
+        .bind(ulid::Ulid::generate().to_string())
+        .bind(queue)
+        .bind(max_attempts)
+        .bind(run_at)
+        .bind(priority)
+        .bind(metadata)
+        .bind(task.idempotency_key().map(ToOwned::to_owned))
+        .execute(pool)
+        .await
+        .map_err(SchedulerError::from_task_push_sqlx_error)?;
     Ok(())
 }
 
 #[cfg(feature = "postgres")]
-async fn insert_postgres_task<Args>(
+async fn insert_postgres_task_with_mode<Args>(
     pool: &sqlx::PgPool,
     queue: &str,
     task: SchedulerPushTask<Args>,
+    expedite_pending: bool,
 ) -> Result<(), SchedulerError>
 where
     Args: DeserializeOwned + serde::Serialize,
@@ -251,20 +280,27 @@ where
         .priority()
         .and_then(|v| i32::try_from(v).ok())
         .unwrap_or(0);
-    sqlx::query(
+    let query = if expedite_pending {
         "INSERT INTO apalis.jobs (id, job_type, job, status, attempts, max_attempts, run_at, priority, metadata, idempotency_key) \
-         VALUES ($1, $2, $3, 'Pending', 0, $4, $5, $6, ''::hstore, $7)",
-    )
-    .bind(ulid::Ulid::generate().to_string())
-    .bind(queue)
-    .bind(payload)
-    .bind(max_attempts)
-    .bind(run_at)
-    .bind(priority)
-    .bind(task.idempotency_key().map(ToOwned::to_owned))
-    .execute(pool)
-    .await
-    .map_err(SchedulerError::from_task_push_sqlx_error)?;
+         VALUES ($1, $2, $3, 'Pending', 0, $4, $5, $6, ''::hstore, $7) \
+         ON CONFLICT (job_type, idempotency_key) DO UPDATE \
+         SET run_at = LEAST(apalis.jobs.run_at, EXCLUDED.run_at) \
+         WHERE apalis.jobs.status = 'Pending' AND apalis.jobs.attempts = 0"
+    } else {
+        "INSERT INTO apalis.jobs (id, job_type, job, status, attempts, max_attempts, run_at, priority, metadata, idempotency_key) \
+         VALUES ($1, $2, $3, 'Pending', 0, $4, $5, $6, ''::hstore, $7)"
+    };
+    sqlx::query(query)
+        .bind(ulid::Ulid::generate().to_string())
+        .bind(queue)
+        .bind(payload)
+        .bind(max_attempts)
+        .bind(run_at)
+        .bind(priority)
+        .bind(task.idempotency_key().map(ToOwned::to_owned))
+        .execute(pool)
+        .await
+        .map_err(SchedulerError::from_task_push_sqlx_error)?;
     Ok(())
 }
 

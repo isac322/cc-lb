@@ -185,6 +185,130 @@ async fn postgres_notify_wakes_due_now_job_before_slow_poll_interval() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_push_or_expedite_accelerates_pending_and_preserves_retried_rows() -> Result<()> {
+    with_isolated_database(|pool| async move {
+        let backend = postgres_backend(&pool);
+        let (adaptive_tx, mut adaptive_rx) = mpsc::channel(4);
+        let ctx = scheduler_ctx(adaptive_tx, mpsc::channel(1).0);
+        let (cancel, worker) = start_worker(&backend, ctx)?;
+        wait_for_adaptive_worker(&pool).await?;
+
+        let now_secs = unix_secs(SystemClock.now());
+
+        // Case 1: unstarted future Pending task (attempts = 0) is expedited via LEAST and dispatched promptly.
+        let expedited_id = Uuid::new_v4();
+        let expedited_key = OAuthRefreshJob::new(expedited_id).idempotency_key(now_secs + 3_600);
+        backend
+            .push_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(expedited_id)),
+                idempotency_key: Some(expedited_key.clone()),
+                run_at_unix_secs: Some(now_secs + 3_300),
+                max_attempts: Some(5),
+            })
+            .await?;
+        backend
+            .push_or_expedite_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(expedited_id)),
+                idempotency_key: Some(expedited_key.clone()),
+                run_at_unix_secs: Some(now_secs),
+                max_attempts: Some(5),
+            })
+            .await?;
+
+        let (row_count, updated_run_at): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(MAX(EXTRACT(EPOCH FROM run_at)::BIGINT), 0)
+             FROM apalis.jobs
+             WHERE idempotency_key = $1",
+        )
+        .bind(&expedited_key)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(row_count == 1, "expected 1 row, got {row_count}");
+        ensure!(
+            updated_run_at == i64::try_from(now_secs)?,
+            "expected run_at={now_secs}, got {updated_run_at}"
+        );
+
+        // Case 2: already earlier run_at is preserved (LEAST semantics).
+        let earlier_id = Uuid::new_v4();
+        let earlier_key = OAuthRefreshJob::new(earlier_id).idempotency_key(now_secs + 3_700);
+        let earlier_run_at = now_secs + 120;
+        backend
+            .push_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(earlier_id)),
+                idempotency_key: Some(earlier_key.clone()),
+                run_at_unix_secs: Some(earlier_run_at),
+                max_attempts: Some(5),
+            })
+            .await?;
+        backend
+            .push_or_expedite_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(earlier_id)),
+                idempotency_key: Some(earlier_key.clone()),
+                run_at_unix_secs: Some(now_secs + 600),
+                max_attempts: Some(5),
+            })
+            .await?;
+        let preserved_run_at: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM run_at)::BIGINT FROM apalis.jobs WHERE idempotency_key = $1",
+        )
+        .bind(&earlier_key)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(
+            preserved_run_at == i64::try_from(earlier_run_at)?,
+            "expected preserved run_at={earlier_run_at}, got {preserved_run_at}"
+        );
+
+        // Case 3: Pending task in retry backoff (attempts > 0) keeps its backoff run_at untouched.
+        let retried_id = Uuid::new_v4();
+        let retried_key = OAuthRefreshJob::new(retried_id).idempotency_key(now_secs + 3_800);
+        let backoff_run_at = now_secs + 600;
+        backend
+            .push_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(retried_id)),
+                idempotency_key: Some(retried_key.clone()),
+                run_at_unix_secs: Some(backoff_run_at),
+                max_attempts: Some(5),
+            })
+            .await?;
+        sqlx::query("UPDATE apalis.jobs SET attempts = 1 WHERE idempotency_key = $1")
+            .bind(&retried_key)
+            .execute(&pool)
+            .await?;
+        backend
+            .push_or_expedite_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(retried_id)),
+                idempotency_key: Some(retried_key.clone()),
+                run_at_unix_secs: Some(now_secs),
+                max_attempts: Some(5),
+            })
+            .await?;
+        let retried_run_at: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM run_at)::BIGINT FROM apalis.jobs WHERE idempotency_key = $1",
+        )
+        .bind(&retried_key)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(
+            retried_run_at == i64::try_from(backoff_run_at)?,
+            "expected preserved backoff run_at={backoff_run_at}, got {retried_run_at}"
+        );
+
+        let dispatched = wait_for_dispatch(&mut adaptive_rx, QA_TIMEOUT, |job| {
+            matches!(job, AdaptiveJob::OAuthRefresh(item) if item.upstream_id == expedited_id)
+        })
+        .await?;
+        ensure!(
+            matches!(dispatched, AdaptiveJob::OAuthRefresh(item) if item.upstream_id == expedited_id),
+            "expected expedited job to dispatch promptly"
+        );
+        cancel_and_join(cancel, worker).await
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_all_worker_queues_claim_future_run_at_after_idle() -> Result<()> {
     with_isolated_database(|pool| async move {
         let backend = postgres_backend(&pool);

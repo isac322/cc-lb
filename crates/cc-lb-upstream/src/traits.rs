@@ -49,6 +49,10 @@ pub trait Signer: Send + Sync {
     /// Handles an unauthorized upstream response, optionally refreshing credentials.
     async fn on_unauthorized(&self, error: &UpstreamError) -> RetryDecision;
 
+    /// Records a terminal unauthorized response when a refreshed credential
+    /// returned by [`Self::on_unauthorized`] is still rejected with 401.
+    async fn on_retry_unauthorized(&self, _error: &UpstreamError) {}
+
     /// Masks this signer's stored secret in `text` before it reaches a stored
     /// or logged sink. Called only on error paths. Signers without a static
     /// secret keep the default, which returns `text` unchanged.

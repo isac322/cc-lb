@@ -4,8 +4,13 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 pub type RefreshLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
+pub type ForcedRefreshGenerations = Arc<DashMap<uuid::Uuid, u64>>;
 
 pub fn new_refresh_locks() -> RefreshLocks {
+    Arc::new(DashMap::new())
+}
+
+pub fn new_forced_refresh_generations() -> ForcedRefreshGenerations {
     Arc::new(DashMap::new())
 }
 

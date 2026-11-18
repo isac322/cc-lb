@@ -1107,9 +1107,9 @@ async fn refresh_tokens(
         &OAuthTokenBundle {
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
-            account_id: None,
-            project_id: None,
-            oauth_profile: Default::default(),
+            account_id: previous.account_id,
+            project_id: previous.project_id,
+            oauth_profile: previous.oauth_profile,
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,
