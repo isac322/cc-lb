@@ -69,6 +69,34 @@ async fn oa_http_01_posts_responses_with_bearer_and_preserves_native_sse() {
     );
 }
 
+#[test]
+fn generic_openai_shape_preserves_accept_encoding() {
+    let mut downstream_headers = HeaderMap::new();
+    downstream_headers.insert("accept-encoding", "gzip, br".parse().expect("encoding header"));
+    let context = DialectShapeContext {
+        request_id: "generic-encoding-test".to_owned(),
+        downstream_headers,
+        method: Method::POST,
+        path: "/v1/responses".to_owned(),
+        query: None,
+        body_bytes: Bytes::from_static(REQUEST_BODY),
+    };
+    let principal = Principal {
+        id: "generic-encoding-test".to_owned(),
+        kind: PrincipalKind::ApiKey,
+    };
+    let shaped = shape_request(
+        &ProviderDialect {
+            base_url: Url::parse("http://127.0.0.1/").expect("test URL parses"),
+        },
+        &context,
+        &Upstream::OpenaiDirect { base_url: None },
+        &principal,
+    )
+    .expect("generic OpenAI request shapes");
+    assert_eq!(shaped.headers()["accept-encoding"], "gzip, br");
+}
+
 #[tokio::test]
 async fn gm_http_01_posts_generate_content_and_preserves_error_response() {
     let upstream = FakeUpstream::start(ResponseSpec {

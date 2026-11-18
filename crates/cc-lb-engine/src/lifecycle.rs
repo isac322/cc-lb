@@ -5270,7 +5270,7 @@ impl Lifecycle {
         for name in [
             "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
             "openai-api-key", "x-goog-api-key", "chatgpt-account-id",
-            "openai-organization", "openai-project",
+            "openai-organization", "openai-project", "accept-encoding",
         ] {
             headers.remove(name);
         }

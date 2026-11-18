@@ -794,6 +794,51 @@ async fn pdf_create_retry_status_body_and_headers_are_not_converted_to_success()
 }
 
 #[tokio::test]
+async fn files_dispatch_requests_identity_encoding() {
+    const CREATE: &[u8] = br#"{"file_id":"identity-file","upload_url":"https://signed.invalid/upload"}"#;
+    const FINALIZE: &[u8] = br#"{"status":"success","download_url":"https://signed.invalid/download"}"#;
+    let fixture = Fixture::new(
+        vec![
+            Reply::new(StatusCode::CREATED, CREATE).with_header("content-type", "application/json"),
+            Reply::new(StatusCode::OK, FINALIZE).with_header("content-type", "application/json"),
+        ],
+        vec![],
+    )
+    .await;
+    for (path, expected_status, expected_body, request_body) in [
+        (
+            "/backend-api/files",
+            StatusCode::CREATED,
+            CREATE,
+            br#"{"file_name":"qa.txt","mime_type":"text/plain"}"#.as_slice(),
+        ),
+        (
+            "/backend-api/files/identity-file/uploaded",
+            StatusCode::OK,
+            FINALIZE,
+            br#"{"bytes":7,"sha256":"identity"}"#.as_slice(),
+        ),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept-encoding", HeaderValue::from_static("gzip, br"));
+        let (status, _, body) = fixture
+            .request_with_headers(
+                Method::POST,
+                path,
+                Some(&fixture.session_a.access),
+                headers,
+                Body::from(request_body),
+            )
+            .await;
+        assert_eq!(status, expected_status);
+        assert_eq!(&body[..], expected_body);
+    }
+    let calls = fixture.recorder_a.requests();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.headers.get("accept-encoding").is_none()));
+}
+
+#[tokio::test]
 async fn unobserved_native_and_encoded_ids_reach_selected_owner_preserving_404() {
     const MISSING: &[u8] = br#"{"error":{"message":"native file missing","type":"not_found"}}"#;
     const SUCCESS: &[u8] = br#"{"status":"success","opaque":"same-id"}"#;
