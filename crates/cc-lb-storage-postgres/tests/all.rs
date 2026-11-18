@@ -1,5 +1,3 @@
-#[path = "account_owner.rs"]
-mod account_owner;
 #[path = "admin_mutation_commit_boundary.rs"]
 mod admin_mutation_commit_boundary;
 #[path = "api_key_usage.rs"]
