@@ -18,6 +18,36 @@ The [consistency contract](/docs/reference/source/consistency-contract/) lists w
 | Plugins | `GET /admin/v1/plugins/registry`, `POST /admin/v1/plugins/wasm` |
 | Status | `GET /admin/v1/status`, `GET /admin/v1/export` |
 
+## Account-owner bindings
+
+Create the durable provider-owner binding used by subscription sessions:
+
+`POST /admin/v1/account-owner-bindings`
+
+The endpoint requires admin write authorization. Its JSON body is:
+
+```json
+{
+  "binding_id": "codex-owner-1",
+  "principal_id": "<canonical principal id>",
+  "provider": "openai",
+  "owner_id": "<provider owner id>",
+  "upstream_id": "<canonical upstream uuid>",
+  "local_user_id": "<provider local user id>",
+  "allowed_workspaces": ["workspace-1"],
+  "provider_workspace_id": "workspace-1",
+  "outbound_region": "us-east4"
+}
+```
+
+The binding ID must be safe, the principal and upstream IDs must be canonical, and the upstream must be enabled and available. `allowed_workspaces` controls which workspace a session may request; `provider_workspace_id` is the provider-side workspace sent on the wire. `outbound_region` is optional. A successful creation returns `201` and records the owner generation and revision in the audit event. An unavailable upstream returns `503`; invalid identifiers return `400`.
+
+Read a binding with:
+
+`GET /admin/v1/account-owner-bindings/{id}`
+
+The route requires admin authentication and returns the stored binding state, including its owner generation, revision, workspace allowlist, provider workspace, and revocation state. Use the binding ID returned from the create request; never use a client-supplied workspace or owner header as authority.
+
 Every mutating request should use the current ETag or revision when the endpoint documents one. Handle `409` conflicts by reading the latest resource and presenting the new state to the operator.
 
 ## Codex subscription sessions
