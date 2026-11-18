@@ -6,8 +6,7 @@ use std::process::ExitCode;
 
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{
-    AdminCommand, AdminOwnerBindingsCommand, AdminUpstreamsCommand, Cli, Command, ConfigCommand,
-    DoctorCommand,
+    AdminCommand, AdminUpstreamsCommand, Cli, Command, ConfigCommand, DoctorCommand,
 };
 use cc_lb_server::doctor::{self, DoctorError};
 use cc_lb_server::{run_serve, validate};
@@ -40,7 +39,7 @@ enum AdminCliError {
     HttpStatus(StatusCode),
     #[error("failed to write admin response: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid admin JSON: {0}")]
+    #[error("invalid credential JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     InvalidInput(&'static str),
@@ -58,15 +57,6 @@ enum RunError {
 
 const ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 
-fn is_safe_owner_binding_id(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
 async fn run_admin(base_url: &str, command: AdminCommand) -> Result<(), AdminCliError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
@@ -81,42 +71,6 @@ async fn run_admin(base_url: &str, command: AdminCommand) -> Result<(), AdminCli
                 .await
                 .map_err(AdminCliError::Request)?;
             return write_admin_response(response).await;
-        }
-        AdminCommand::OwnerBindings {
-            command: AdminOwnerBindingsCommand::Create(args),
-        } => {
-            let input = if args.input.as_os_str() == "-" {
-                let mut input = String::new();
-                std::io::stdin().read_to_string(&mut input)?;
-                input
-            } else {
-                std::fs::read_to_string(Path::new(&args.input))?
-            };
-            if input.trim().is_empty() {
-                return Err(AdminCliError::InvalidInput("owner binding input is empty"));
-            }
-            let body: Value = serde_json::from_str(&input)?;
-            (
-                Method::POST,
-                "/admin/v1/account-owner-bindings".to_owned(),
-                Some(body),
-                None,
-                std::env::var(ADMIN_TOKEN_ENV).map_err(|_| AdminCliError::MissingToken)?,
-            )
-        }
-        AdminCommand::OwnerBindings {
-            command: AdminOwnerBindingsCommand::Get { binding_id },
-        } => {
-            if !is_safe_owner_binding_id(&binding_id) {
-                return Err(AdminCliError::InvalidInput("invalid owner binding id"));
-            }
-            (
-                Method::GET,
-                format!("/admin/v1/account-owner-bindings/{binding_id}"),
-                None,
-                None,
-                std::env::var(ADMIN_TOKEN_ENV).map_err(|_| AdminCliError::MissingToken)?,
-            )
         }
         AdminCommand::Upstreams {
             command: AdminUpstreamsCommand::List,

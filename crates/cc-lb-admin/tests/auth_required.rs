@@ -52,9 +52,8 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
 #[tokio::test]
 async fn test_auth_required() {
     let app = router(test_state());
+
     let endpoints = vec![
-        ("/admin/v1/account-owner-bindings", "POST"),
-        ("/admin/v1/account-owner-bindings/binding-1", "GET"),
         ("/admin/v1/principals/alice/keys", "GET"),
         ("/admin/v1/principals/alice/keys", "POST"),
         ("/admin/v1/principals/alice/keys/key-1/revoke", "POST"),

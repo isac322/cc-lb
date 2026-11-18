@@ -44,8 +44,10 @@ The retained sanitized A14 execution record is [`a14-clean-master-record.json`](
 | Cloud internal ThreadService and preview models | Codex internal HTTP/2 ThreadService and `/v2/models` preview access require their own service contracts and entitlements; REST Cloud tasks and generation results do not establish either. |
 | Identity and JWKS | Default-off identity paths require explicit enablement and separate validation. |
 | Configured remote environment, Noise, messageboard, and MCP | Require the configured remote service and real session execution; local or recorded traffic does not establish remote acceptance. |
-| Authenticated plugins and remote-control | Codex plugins are enabled by default; authenticated plugin and remote-control acceptance remains pending with the respective feature owners. |
-| Workspace-switch-token | Authentication and account-management feature owners own the account-switching contract and evidence; this is separate from vendor issuer OAuth flows. |
+| Authenticated plugins and remote-control | Not supported. Codex plugins are enabled by default, but authenticated plugin and remote-control traffic belongs to one ChatGPT account and is not proxied. |
+| Workspace-switch-token | Not supported. Account switching belongs to one ChatGPT account and is separate from vendor issuer OAuth flows. |
+
+cc-lb does not proxy account-bound subscription surfaces: Codex account and workspace management, Apps and hosted MCP, `/backend-api` files, Cloud tasks, remote control, and agy remote-agent, remote-control, and subscription voice services. Each of these belongs to one vendor account, while cc-lb pools upstream accounts, so they are outside its routing model.
 
 Raw Code Assist traffic, remote sessions, and voice each require separate acceptance evidence. The existing Code Assist envelope used for supported Gemini OAuth generation, background admin operations, and quota polling do not establish an inbound raw Code Assist client contract. Shipped API-key Realtime and Live tunnels retain their contracts; they do not establish subscription voice acceptance. Local microphone access is a client/device boundary; an audio HTTP request or WebSocket upgrade does not establish a working microphone or voice session. Missing usage or quota evidence remains unknown, never an invented success or zero.
 
@@ -770,26 +772,6 @@ Omit `--id` to create an upstream (`POST /admin/v1/upstreams`). To replace
 credentials on an existing upstream, pass `--id <UPSTREAM_ID>` and
 `--revision <SPEC_REVISION>`; the CLI sends `PUT
 /admin/v1/upstreams/<UPSTREAM_ID>` with `If-Match`.
-### CLI/API account-owner binding provisioning
-
-The authenticated Admin v1 API can provision the durable owner binding used by
-session-backed provider features. The create endpoint stores an initial binding
-with `revision: 1` and `owner_generation: 1`; the storage layer validates the
-principal, provider, upstream, and workspace namespace before committing it.
-
-```bash
-# Supply CC_LB_ADMIN_TOKEN through a secret manager or process environment.
-cc-lb admin --base-url http://[::1]:9090 \
-  account-owner-bindings create --input ./owner-binding.json
-cc-lb admin --base-url http://[::1]:9090 \
-  account-owner-bindings get <BINDING_ID>
-```
-
-The JSON body contains `binding_id`, canonical `principal_id`, `provider`,
-`owner_id`, `upstream_id`, `local_user_id`, `allowed_workspaces`,
-`provider_workspace_id`, and optional `outbound_region`. The CLI sends the
-Bearer token only in the `Authorization` header. The API returns the stored
-binding, including its revision and owner generation.
 
 #### OpenAI OAuth
 

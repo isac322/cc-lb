@@ -16,7 +16,7 @@ Each operation is described with one of three classes, or with a hybrid that nam
 
 | Subsystem | Operation(s) | Class | Durable at response | Converges later via |
 |---|---|---|---|---|
-| Admin mutations | 39 mutating admin routes | Strict sync for state and audit, written in two transactions (see below) | Domain state, then audit row | Not applicable |
+| Admin mutations | 38 mutating admin routes | Strict sync for state and audit, written in two transactions (see below) | Domain state, then audit row | Not applicable |
 | Dynamic routing view | Mutations that touch upstreams, principals, keys, or plugins | Strict sync on the serving replica, with rebuilds serialized per process; async on peers | The state behind the view | Postgres `LISTEN`/`NOTIFY` with a 250 ms debounce, then a later successful reconcile pass (60-70 s interval plus jitter, not a deadline) |
 | Configuration editor | Draft put, validate, save | Strict sync for storage and file | Draft row, validation report, or the written config file | Never at runtime: a saved file applies on process restart |
 | Scheduler | Admin actions that enqueue jobs; cron ticks | Async guaranteed | Job row in the scheduler queue | Worker poll; durable `Pending` retries within class limits; stale-lock recovery |
@@ -84,7 +84,6 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 
 | Routes | State | Audit | Dynamic view on serving replica |
 |---|---|---|---|
-| `POST /admin/v1/account-owner-bindings` | Committed | After state | Not rebuilt |
 | `POST /admin/v1/principals`; `PUT`, `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys` | Committed | After state; on failure, revocation of the key is attempted but can fail | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys/{key_id}/revoke` | Committed | After state | Rebuilt |
