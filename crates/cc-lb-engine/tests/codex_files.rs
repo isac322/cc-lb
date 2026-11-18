@@ -473,7 +473,7 @@ async fn unavailable_upstream_is_preserved_as_unavailable() {
     let unavailable = CodexFiles::new(&fixture.storage)
         .reference(&auth, &expected, "input_file", file_id)
         .await;
-    assert!(matches!(unavailable, Err(StorageError::Unavailable { .. })));
+    assert!(matches!(unavailable, Err(StorageError::UpstreamUnavailable { .. })));
 }
 
 #[test]
