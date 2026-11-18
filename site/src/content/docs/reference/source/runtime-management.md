@@ -44,7 +44,7 @@ The retained sanitized A14 execution record is [`a14-clean-master-record.json`](
 | Cloud internal ThreadService and preview models | Codex internal HTTP/2 ThreadService and `/v2/models` preview access require their own service contracts and entitlements; REST Cloud tasks and generation results do not establish either. |
 | Identity and JWKS | Default-off identity paths require explicit enablement and separate validation. |
 | Configured remote environment, Noise, messageboard, and MCP | Require the configured remote service and real session execution; local or recorded traffic does not establish remote acceptance. |
-| Authenticated plugins and remote-control | Codex plugins are enabled by default; authenticated plugin and remote-control acceptance remains pending with the respective feature owners. |
+| Authenticated plugins and remote-control | Codex plugins are enabled by default. Codex session and remote-control route contracts are registered below, while exact pinned-client acceptance remains pending with the feature owner. |
 | Workspace-switch-token | Authentication and account-management feature owners own the account-switching contract and evidence; this is separate from vendor issuer OAuth flows. |
 
 Raw Code Assist traffic, remote sessions, and voice each require separate acceptance evidence. The existing Code Assist envelope used for supported Gemini OAuth generation, background admin operations, and quota polling do not establish an inbound raw Code Assist client contract. Shipped API-key Realtime and Live tunnels retain their contracts; they do not establish subscription voice acceptance. Local microphone access is a client/device boundary; an audio HTTP request or WebSocket upgrade does not establish a working microphone or voice session. Missing usage or quota evidence remains unknown, never an invented success or zero.
@@ -117,6 +117,24 @@ The `/api/codex` aliases cover the same registered operation family. Provider-bo
 OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
 
 Not yet supported: files, uploads, batches, vector stores, conversations, containers, stored chat completion retrieve/update/delete, response retrieve/delete/cancel/input_items, Realtime calls control and client secrets, videos, and audio voices.
+
+#### Codex session and remote-control endpoints
+
+These routes are local session and relay contracts for the maintained Codex subscription client. They require the existing authenticated session proof or the purpose-specific relay proof selected by the route. Registration documents reachability and credential boundaries. It does not claim exact pinned-client execution, provider entitlement, or Q-HARNESS/Q-ACCEPT completion.
+
+| Method | Client path | Purpose |
+|---|---|---|
+| GET | `/backend-api/cc-lb/workspaces` | Session access, owner-bound workspace discovery |
+| POST | `/backend-api/accounts/switch-workspace-token` | Session access, owner-bound workspace exchange |
+| POST | `/backend-api/wham/remote/control/server/enroll` | Session access, owner-bound relay enrollment |
+| POST | `/backend-api/wham/remote/control/server/refresh` | Session access, owner-bound relay refresh |
+| GET | `/backend-api/wham/remote/control/environments/{environment_id}/clients` | Session access, client listing |
+| DELETE | `/backend-api/wham/remote/control/environments/{environment_id}/clients/{client_id}` | Session access, client revocation |
+| POST | `/backend-api/wham/remote/control/server/pair` | Relay credential, pairing |
+| POST | `/backend-api/wham/remote/control/server/pair/status` | Relay credential, pairing status |
+| GET | `/backend-api/wham/remote/control/server` | Relay credential, WebSocket server handshake |
+
+The route contract rejects unsupported methods and malformed or mismatched identity fields before provider dispatch. Remote-control traffic remains owner-pinned and does not enter the generic model pool or fail over across owners. Provider errors and response-body lifecycle observations retain their upstream status and body semantics where the route contract permits forwarding.
 
 #### Gemini endpoint reference
 
