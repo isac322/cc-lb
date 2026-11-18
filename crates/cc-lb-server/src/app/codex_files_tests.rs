@@ -411,6 +411,7 @@ impl Fixture {
                 clock.clone(),
             )),
             lifecycle,
+            account_dispatcher: make_default_dispatcher(50),
             body_caps: RequestBodyCaps {
                 messages: 4 * 1024 * 1024,
                 files: 4 * 1024 * 1024,
