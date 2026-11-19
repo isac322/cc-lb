@@ -1535,68 +1535,119 @@ async fn fire_now_upstream_warmup_inner(
     });
     let dialect_plugin_used = dialect_dispatch_bundle.is_some();
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
-    let dispatch_attempt = if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
-        match tokio::time::timeout(
-            Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatcher.dispatch_warmup_with_dialect(runtime, data_dir, &upstream, lane),
-        )
-        .await
-        {
-            Ok(Ok(outcome)) => fire_now_response_attempt(
-                outcome.status,
-                outcome.headers,
-                WarmupDispatchKind::DialectPlugin,
-                upstream.kind,
-            ),
-            Ok(Err(error)) => match error.kind {
-                WarmupDialectDispatchErrorKind::Transient => {
-                    FireNowDispatchAttempt::TransientFailure {
-                        reason: WarmupTransientFailureReason::DialectPluginTransient,
-                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
-                        status: StatusCode::SERVICE_UNAVAILABLE,
-                        error_detail: error.detail,
+    let mut dispatch_attempt =
+        if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
+            match tokio::time::timeout(
+                Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
+                dispatcher.dispatch_warmup_with_dialect(runtime, data_dir, &upstream, lane),
+            )
+            .await
+            {
+                Ok(Ok(outcome)) => fire_now_response_attempt(
+                    outcome.status,
+                    outcome.headers,
+                    WarmupDispatchKind::DialectPlugin,
+                    upstream.kind,
+                ),
+                Ok(Err(error)) => match error.kind {
+                    WarmupDialectDispatchErrorKind::Transient => {
+                        FireNowDispatchAttempt::TransientFailure {
+                            reason: WarmupTransientFailureReason::DialectPluginTransient,
+                            dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            error_detail: error.detail,
+                        }
                     }
-                }
-                WarmupDialectDispatchErrorKind::Permanent => {
-                    FireNowDispatchAttempt::PermanentFailure {
-                        reason: WarmupPermanentFailureReason::DialectPluginFailed,
-                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
-                        status: StatusCode::BAD_GATEWAY,
-                        error_detail: error.detail,
+                    WarmupDialectDispatchErrorKind::Permanent => {
+                        FireNowDispatchAttempt::PermanentFailure {
+                            reason: WarmupPermanentFailureReason::DialectPluginFailed,
+                            dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                            status: StatusCode::BAD_GATEWAY,
+                            error_detail: error.detail,
+                        }
                     }
-                }
-            },
-            Err(_) => FireNowDispatchAttempt::TransientFailure {
-                reason: WarmupTransientFailureReason::RequestTimeout,
-                dispatch_kind: WarmupDispatchKind::DialectPlugin,
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error_detail: "warmup dispatch timed out".to_owned(),
-            },
-        }
-    } else if let Some(dispatcher) = state.warmup_dialect_dispatcher.as_deref() {
-        match tokio::time::timeout(
-            Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatcher.dispatch_warmup_native(&upstream, lane),
+                },
+                Err(_) => FireNowDispatchAttempt::TransientFailure {
+                    reason: WarmupTransientFailureReason::RequestTimeout,
+                    dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_detail: "warmup dispatch timed out".to_owned(),
+                },
+            }
+        } else if let Some(dispatcher) = state.warmup_dialect_dispatcher.as_deref() {
+            match tokio::time::timeout(
+                Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
+                dispatcher.dispatch_warmup_native(&upstream, lane),
+            )
+            .await
+            {
+                Ok(Ok(outcome)) => fire_now_attempt_from_native_outcome(outcome),
+                Ok(Err(error)) => FireNowDispatchAttempt::PermanentFailure {
+                    reason: WarmupPermanentFailureReason::RequestBuildFailed,
+                    dispatch_kind: WarmupDispatchKind::NotDispatched,
+                    status: StatusCode::BAD_GATEWAY,
+                    error_detail: error.detail,
+                },
+                Err(_) => FireNowDispatchAttempt::TransientFailure {
+                    reason: WarmupTransientFailureReason::RequestTimeout,
+                    dispatch_kind: WarmupDispatchKind::Http,
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_detail: "warmup dispatch timed out".to_owned(),
+                },
+            }
+        } else {
+            return Err(UpstreamError::WarmupUnavailable);
+        };
+    if upstream.kind == UpstreamKind::GeminiOauth
+        && matches!(
+            &dispatch_attempt,
+            FireNowDispatchAttempt::Response { status, .. } if status.is_success()
         )
-        .await
+        && let Some(verifier) = state.warmup_window_verifier.as_ref()
+    {
+        let request_completed_at_unix_secs = unix_now_secs_i64(&*state.clock)?;
+        match verifier
+            .verify_warmup_window(&upstream, lane, request_completed_at_unix_secs)
+            .await
         {
-            Ok(Ok(outcome)) => fire_now_attempt_from_native_outcome(outcome),
-            Ok(Err(error)) => FireNowDispatchAttempt::PermanentFailure {
-                reason: WarmupPermanentFailureReason::RequestBuildFailed,
-                dispatch_kind: WarmupDispatchKind::NotDispatched,
-                status: StatusCode::BAD_GATEWAY,
-                error_detail: error.detail,
-            },
-            Err(_) => FireNowDispatchAttempt::TransientFailure {
-                reason: WarmupTransientFailureReason::RequestTimeout,
-                dispatch_kind: WarmupDispatchKind::Http,
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error_detail: "warmup dispatch timed out".to_owned(),
-            },
+            crate::WarmupWindowCheck::Started { observations } => {
+                if let FireNowDispatchAttempt::Response {
+                    observations: response_observations,
+                    verified_observations,
+                    ..
+                } = &mut dispatch_attempt
+                {
+                    *response_observations = observations;
+                    *verified_observations = true;
+                }
+            }
+            crate::WarmupWindowCheck::NotStarted { windows } => {
+                let detail = format!(
+                    "warm-up returned {} but {} did not start",
+                    fire_now_attempt_status(&dispatch_attempt).as_u16(),
+                    windows
+                        .iter()
+                        .map(|window| window.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if let FireNowDispatchAttempt::Response {
+                    status,
+                    dispatch_kind,
+                    ..
+                } = &dispatch_attempt
+                {
+                    dispatch_attempt = FireNowDispatchAttempt::PermanentFailure {
+                        reason: WarmupPermanentFailureReason::WindowNotStarted,
+                        dispatch_kind: *dispatch_kind,
+                        status: *status,
+                        error_detail: detail,
+                    };
+                }
+            }
+            crate::WarmupWindowCheck::Unknown => {}
         }
-    } else {
-        return Err(UpstreamError::WarmupUnavailable);
-    };
+    }
     let record = record_warmup_attempt(
         state,
         WarmupAttemptInput {
@@ -1638,13 +1689,14 @@ async fn finish_fire_now_attempt(
     if let FireNowDispatchAttempt::Response {
         headers,
         observations,
+        verified_observations,
         ..
     } = &dispatch_attempt
     {
-        if !headers.is_empty() {
+        if !verified_observations && !headers.is_empty() {
             record_fire_now_subscription_quota_observations(state, storage, upstream_id, headers)
                 .await?;
-        } else {
+        } else if !verified_observations {
             record_fire_now_unified_quota_observations(state, storage, upstream_id, observations)
                 .await?;
         }
@@ -1791,6 +1843,7 @@ enum FireNowDispatchAttempt {
         headers: HeaderMap,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
+        verified_observations: bool,
     },
     TransientFailure {
         reason: WarmupTransientFailureReason,
@@ -1821,6 +1874,7 @@ fn fire_now_attempt_from_native_outcome(
             headers: HeaderMap::new(),
             observations,
             error_detail,
+            verified_observations: false,
         },
         WarmupNativeDispatchOutcome::TransientFailure {
             dispatch_kind,
@@ -1864,6 +1918,7 @@ fn fire_now_response_attempt(
         headers,
         observations,
         error_detail: None,
+        verified_observations: false,
     }
 }
 
@@ -3373,6 +3428,174 @@ mod tests {
             })
         }
     }
+    type VerifierCalls = Arc<std::sync::Mutex<Vec<(Uuid, WarmupLane)>>>;
+
+    struct TestWarmupWindowVerifier {
+        check: crate::WarmupWindowCheck,
+        calls: VerifierCalls,
+    }
+
+    #[async_trait]
+    impl crate::WarmupWindowVerifier for TestWarmupWindowVerifier {
+        async fn verify_warmup_window(
+            &self,
+            upstream: &UpstreamRecord,
+            lane: WarmupLane,
+            _request_completed_at_unix_secs: i64,
+        ) -> crate::WarmupWindowCheck {
+            self.calls
+                .lock()
+                .expect("verifier calls lock")
+                .push((upstream.id, lane));
+            self.check.clone()
+        }
+    }
+
+    fn test_verifier(
+        check: crate::WarmupWindowCheck,
+    ) -> (Arc<TestWarmupWindowVerifier>, VerifierCalls) {
+        let calls: VerifierCalls = Arc::default();
+        (
+            Arc::new(TestWarmupWindowVerifier {
+                check,
+                calls: calls.clone(),
+            }),
+            calls,
+        )
+    }
+
+    async fn test_context_with_dispatcher_and_verifier(
+        status: StatusCode,
+        verifier: Arc<TestWarmupWindowVerifier>,
+    ) -> TestContext {
+        let mut context = test_context_with_dispatcher(status).await;
+        context.state.warmup_window_verifier = Some(verifier);
+        context
+    }
+
+    #[tokio::test]
+    async fn fire_now_gemini_started_records_cycle_advanced_with_observed_reset() {
+        let reset = 4_000_000_123;
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::Started {
+            observations: vec![UnifiedQuotaObservation {
+                window: SubscriptionQuotaWindow::GeminiFiveHour,
+                utilization: Some(0.01),
+                resets_at_unix_secs: Some(reset),
+                ..UnifiedQuotaObservation::default()
+            }],
+        });
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"]["status"], "success");
+        assert_eq!(body["outcome"]["reason"], "cycle_advanced");
+        assert_eq!(
+            context.recorded_attempts.lock().expect("lock")[0],
+            (
+                WarmupLane::Primary,
+                WarmupAttemptOutcome::Success(
+                    cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced
+                )
+            )
+        );
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![(upstream.id, WarmupLane::Primary)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_gemini_not_started_records_window_not_started() {
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::NotStarted {
+            windows: vec![SubscriptionQuotaWindow::GeminiFiveHour],
+        });
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["status"], "permanent_failure");
+        assert_eq!(body["reason"], "window_not_started");
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![(upstream.id, WarmupLane::Primary)]
+        );
+        assert_eq!(
+            context.recorded_attempts.lock().expect("lock")[0],
+            (
+                WarmupLane::Primary,
+                WarmupAttemptOutcome::PermanentFailure(
+                    WarmupPermanentFailureReason::WindowNotStarted
+                )
+            )
+        );
+        let stored = context
+            .storage
+            .get_by_id(upstream.id)
+            .await
+            .expect("get upstream");
+        assert_eq!(stored.expect("upstream").last_warmup_at_unix_secs, None);
+    }
+
+    #[tokio::test]
+    async fn fire_now_gemini_unknown_keeps_existing_classification() {
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::Unknown);
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"]["status"], "success");
+        assert_eq!(body["outcome"]["reason"], "cycle_advanced");
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![(upstream.id, WarmupLane::Primary)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_openai_never_calls_verifier() {
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::Unknown);
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let mut upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+        upstream.kind = UpstreamKind::OpenaiOauth;
+
+        let stage = fire_now_upstream_warmup_inner(
+            &context.state,
+            context.storage.clone(),
+            upstream.id,
+            upstream,
+            WarmupLane::Primary,
+        )
+        .await
+        .expect("openai dispatch");
+
+        assert!(matches!(stage, FireNowStage::Attempted(_)));
+        assert!(calls.lock().expect("lock").is_empty());
+    }
 
     #[tokio::test]
     async fn fire_now_native_dispatches_openai_oauth_through_bridge() {
@@ -3818,6 +4041,7 @@ mod tests {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
+            warmup_window_verifier: None,
             limit_reset_usage_refresh: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),

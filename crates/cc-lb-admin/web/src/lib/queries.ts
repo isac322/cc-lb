@@ -2060,7 +2060,8 @@ export type WarmupPermanentFailureReason =
   | 'forbidden'
   | 'bad_request'
   | 'not_found'
-  | 'dialect_plugin_failed';
+  | 'dialect_plugin_failed'
+  | 'window_not_started';
 
 export type WarmupDispatchKind = 'not_dispatched' | 'http' | 'dialect_plugin';
 

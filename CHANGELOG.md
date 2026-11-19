@@ -66,6 +66,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A Gemini OAuth warm-up that gets a 2xx response is no longer recorded as a success by default. Gemini sends no quota headers, so cc-lb now polls the account's quota right after the request. A started window records `success` with the real reset; a window that is still unused records `permanent_failure` with reason `window_not_started` and leaves `last_warmup_at` unchanged. If the poll fails, the attempt is recorded as before.
 - Gemini OAuth warm-up on Antigravity accounts now starts the Gemini models quota window. Previously, Antigravity used `gemini_model` (`gemini-2.5-flash-lite`), which that group does not meter, so warm-ups reported success while the window never started. Antigravity now uses the new `[warmup].gemini_antigravity_model` (default `gemini-3.8-flash-low`). `gemini_model` now applies only to Gemini CLI credentials, and its default is unchanged; if you set it for Antigravity accounts, move that value to `gemini_antigravity_model`.
 
 - OpenAI and Gemini OAuth upstream cards now always show a **Connect** or **Reconnect** button on the **Connection** section header, matching Anthropic OAuth. Removed unused error strings (`refresh_token_reused`, `refresh_token_invalidated`, `invalid_grant`) from the web reconnect classifier that the server never persists.

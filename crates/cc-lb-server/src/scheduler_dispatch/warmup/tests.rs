@@ -4,6 +4,7 @@ use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
+use super::quota::post_warmup_window_check;
 use super::scheduling::POST_RESET_GUARD_SECS;
 
 const NOW_UNIX_SECS: i64 = 1_782_000_000;
@@ -753,6 +754,261 @@ fn third_party_success_without_known_reset_falls_back_to_five_hours() {
             NOW_UNIX_SECS,
         ),
         NOW_UNIX_SECS + FIVE_HOURS
+    );
+}
+
+#[test]
+fn post_warmup_check_started_from_usage() {
+    let snapshots = [
+        active(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            NOW_UNIX_SECS + FIVE_HOURS,
+        ),
+        absent(SubscriptionQuotaWindow::GeminiSevenDay),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_started_from_fixed_reset_with_zero_usage() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.0),
+            Some(NOW_UNIX_SECS + 1_000),
+        ),
+        absent(SubscriptionQuotaWindow::GeminiSevenDay),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_not_started_for_fresh_unused_rolling_windows() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.0),
+            Some(NOW_UNIX_SECS + FIVE_HOURS),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.0),
+            Some(NOW_UNIX_SECS + SEVEN_DAYS),
+        ),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            NOW_UNIX_SECS - 12,
+        ),
+        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_rejects_pre_request_or_stale_samples() {
+    for state in [
+        SubscriptionQuotaDataState::Fresh,
+        SubscriptionQuotaDataState::Stale,
+    ] {
+        let mut snapshot = active(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            NOW_UNIX_SECS + 1_000,
+        );
+        snapshot.state = state;
+        snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS - 1_000);
+        let snapshots = [snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)];
+        assert_eq!(
+            post_warmup_window_check(
+                UpstreamKind::GeminiOauth,
+                WarmupLane::Primary,
+                &snapshots,
+                NOW_UNIX_SECS,
+            ),
+            cc_lb_admin::WarmupWindowCheck::Unknown
+        );
+    }
+}
+
+#[test]
+fn post_warmup_check_all_absent_is_unknown() {
+    let snapshots = [
+        absent(SubscriptionQuotaWindow::GeminiFiveHour),
+        absent(SubscriptionQuotaWindow::GeminiSevenDay),
+    ];
+    assert_eq!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Unknown
+    );
+}
+
+#[test]
+fn post_warmup_check_absent_plus_not_started_is_not_started() {
+    let snapshots = [
+        absent(SubscriptionQuotaWindow::GeminiFiveHour),
+        quota_snapshot(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.0),
+            Some(NOW_UNIX_SECS + SEVEN_DAYS),
+        ),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &snapshots,
+            NOW_UNIX_SECS - 12,
+        ),
+        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_uses_third_party_windows() {
+    let snapshots = [
+        active(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            NOW_UNIX_SECS + 1_000,
+        ),
+        absent(SubscriptionQuotaWindow::ThirdPartySevenDay),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &snapshots,
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { observations }
+            if observations.iter().any(|observation| {
+                observation.window == SubscriptionQuotaWindow::ThirdPartyFiveHour
+            })
+    ));
+}
+#[test]
+fn post_warmup_check_started_zero_usage_after_completion() {
+    let mut snapshot = quota_snapshot(
+        SubscriptionQuotaWindow::ThirdPartyFiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.0),
+        Some(NOW_UNIX_SECS + FIVE_HOURS),
+    );
+    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 12_000);
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::ThirdParty,
+            &[
+                snapshot,
+                absent(SubscriptionQuotaWindow::ThirdPartySevenDay)
+            ],
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_zero_usage_rolling_reset_is_not_started() {
+    let mut snapshot = quota_snapshot(
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.0),
+        Some(NOW_UNIX_SECS + 12 + FIVE_HOURS),
+    );
+    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 12_000);
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_zero_usage_before_gap_is_unknown() {
+    let mut snapshot = quota_snapshot(
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.0),
+        Some(NOW_UNIX_SECS + 2 + FIVE_HOURS),
+    );
+    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 2_000);
+    assert_eq!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Unknown
+    );
+}
+
+#[test]
+fn post_warmup_check_any_positive_utilization_is_started() {
+    let snapshot = quota_snapshot(
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.001),
+        None,
+    );
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { .. }
+    ));
+}
+
+#[test]
+fn post_warmup_check_observed_before_completion_is_unknown() {
+    let mut snapshot = active(
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        NOW_UNIX_SECS + FIVE_HOURS,
+    );
+    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS - 1_000);
+    assert_eq!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
+            NOW_UNIX_SECS,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Unknown
     );
 }
 

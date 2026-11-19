@@ -38,8 +38,8 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord, WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason,
-    WarmupTransientFailureReason,
+    Storage, SubscriptionQuotaWindow, UpstreamRecord, WarmupDispatchKind, WarmupLane,
+    WarmupPermanentFailureReason, WarmupTransientFailureReason,
 };
 
 use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
@@ -126,6 +126,33 @@ pub trait WarmupDialectDispatcher: Send + Sync {
         lane: WarmupLane,
     ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError>;
 }
+#[derive(Clone, Debug, PartialEq)]
+pub enum WarmupWindowCheck {
+    /// The request started at least one target window.
+    Started {
+        observations: Vec<UnifiedQuotaObservation>,
+    },
+    /// The request did not start any target window.
+    NotStarted {
+        windows: Vec<SubscriptionQuotaWindow>,
+    },
+    /// Samples were not observed after completion, or the started/not-started
+    /// cases are less than MIN_GAP - TOL apart.
+    Unknown,
+}
+
+#[async_trait]
+pub trait WarmupWindowVerifier: Send + Sync {
+    /// Verify using samples observed at or after the completed request. A
+    /// started versus not-started result is only decided when the cases are
+    /// at least MIN_GAP - TOL apart; otherwise the result is Unknown.
+    async fn verify_warmup_window(
+        &self,
+        upstream: &UpstreamRecord,
+        lane: WarmupLane,
+        request_completed_at_unix_secs: i64,
+    ) -> WarmupWindowCheck;
+}
 
 #[async_trait]
 pub trait DynamicViewRebinder: Send + Sync {
@@ -170,6 +197,7 @@ pub struct AdminState {
     pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
+    pub warmup_window_verifier: Option<Arc<dyn WarmupWindowVerifier>>,
     pub limit_reset_usage_refresh: Option<Arc<dyn LimitResetUsageRefreshPort>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<Config>,

@@ -61,6 +61,8 @@ export const COPY = {
     not_found: 'Warmup failed: upstream returned 404. Check the base URL.',
     dialect_plugin_failed:
       'Warmup failed: the dialect plugin raised an error. Check plugin logs.',
+    window_not_started:
+      'Warmup accepted: the quota window did not start. Check the warm-up model.',
     oauth_credentials_missing:
       'Warmup cannot fire: this upstream has no OAuth credentials yet. Complete the OAuth flow first.',
     seven_day_quota_exhausted:

@@ -506,6 +506,7 @@ fn admin_router(
         runtime: Some(fixture.dispatch.runtime.clone()),
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: Some(port),
         dynamic_view: fixture.dispatch.dynamic_view.clone(),
         config: fixture.dispatch.config.clone(),

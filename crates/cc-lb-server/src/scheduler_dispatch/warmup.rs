@@ -1,3 +1,10 @@
+use crate::scheduler_dispatch::http::decrypt_bundle;
+use crate::scheduler_dispatch::storage::storage_scheduler_error;
+use crate::scheduler_dispatch::time::now_unix_millis;
+use crate::warmup::execute::{
+    WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
+};
+use cc_lb_admin::WarmupWindowVerifier;
 use cc_lb_clock::unix_secs;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
@@ -8,16 +15,12 @@ use cc_lb_storage_api::{
     WarmupSkipReason,
 };
 
-use crate::scheduler_dispatch::http::decrypt_bundle;
-use crate::scheduler_dispatch::storage::storage_scheduler_error;
-use crate::scheduler_dispatch::time::now_unix_millis;
-use crate::warmup::execute::{WarmupAttemptExecution, execute_warmup_attempt};
-
 mod quota;
 mod record;
 mod request;
 mod scheduling;
 mod support;
+mod verify;
 
 /// Re-check delay for a lane whose quota group is reported absent.
 const QUOTA_GROUP_ABSENT_RECHECK_SECS: i64 = 5 * 60 * 60;
@@ -205,6 +208,58 @@ impl SchedulerDispatch {
             initial_attempt
         };
 
+        let request_completed_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
+        // The job has a 60 s timeout; the verification wait plus poll must fit.
+        let can_verify_window =
+            request_completed_at_unix_secs.saturating_sub(attempted_at_unix_secs) <= 20;
+        let window_check = if can_verify_window
+            && upstream.kind == cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth
+            && matches!(
+                &final_attempt.result,
+                WarmupDispatchResult::Response { status, .. } if status.is_success()
+            ) {
+            Some(
+                self.verify_warmup_window(upstream, job.lane, request_completed_at_unix_secs)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let verified_observations = match window_check.as_ref() {
+            Some(cc_lb_admin::WarmupWindowCheck::Started { observations }) => {
+                Some(observations.as_slice())
+            }
+            _ => None,
+        };
+        let not_started_error_detail = match window_check.as_ref() {
+            Some(cc_lb_admin::WarmupWindowCheck::NotStarted { windows }) => {
+                let windows = windows
+                    .iter()
+                    .map(|window| window.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let status = match &final_attempt.result {
+                    WarmupDispatchResult::Response { status, .. } => *status,
+                    _ => unreachable!("not-started verification requires a response"),
+                };
+                Some(format!(
+                    "warm-up returned {status} but {windows} did not start"
+                ))
+            }
+            _ => None,
+        };
+        let execution_result = if let Some(error_detail) = not_started_error_detail.as_deref() {
+            let WarmupDispatchResult::Response { status, .. } = &final_attempt.result else {
+                unreachable!("not-started verification requires a response");
+            };
+            WarmupAttemptExecutionResult::PermanentFailure {
+                reason: WarmupPermanentFailureReason::WindowNotStarted,
+                http_status: Some(*status),
+                error_detail: Some(error_detail),
+            }
+        } else {
+            execution_result_from_dispatch_attempt(&final_attempt, verified_observations)
+        };
         let completed_at_unix_secs = Some(now_unix_secs_i64(&*self.clock)?);
         let record = execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
@@ -218,7 +273,7 @@ impl SchedulerDispatch {
             attempted_at_unix_secs,
             completed_at_unix_secs,
             dispatch_kind: final_attempt.dispatch_kind,
-            result: execution_result_from_dispatch_attempt(&final_attempt),
+            result: execution_result,
         })
         .await;
 
@@ -233,9 +288,16 @@ impl SchedulerDispatch {
                     now_unix_millis(&*self.clock),
                     max_staleness_secs,
                 );
-                let observations = match &final_attempt.result {
-                    WarmupDispatchResult::Response { observations, .. } => observations.as_slice(),
-                    _ => &[],
+                let observations = match window_check.as_ref() {
+                    Some(cc_lb_admin::WarmupWindowCheck::Started { observations }) => {
+                        observations.as_slice()
+                    }
+                    _ => match &final_attempt.result {
+                        WarmupDispatchResult::Response { observations, .. } => {
+                            observations.as_slice()
+                        }
+                        _ => &[],
+                    },
                 };
                 let next_evaluation = next_warmup_evaluation_after_success(
                     upstream.kind,
@@ -246,7 +308,12 @@ impl SchedulerDispatch {
                 );
                 self.write_status_after_warmup_success(upstream.id, job.lane, next_evaluation)
                     .await?;
-                if let WarmupDispatchResult::Response { observations, .. } = final_attempt.result {
+                if !matches!(
+                    window_check.as_ref(),
+                    Some(cc_lb_admin::WarmupWindowCheck::Started { .. })
+                ) && let WarmupDispatchResult::Response { observations, .. } =
+                    final_attempt.result
+                {
                     self.record_warmup_observations(upstream.id, observations)?;
                 }
                 Ok(JobOutcome::Done)
@@ -255,6 +322,30 @@ impl SchedulerDispatch {
                 transient_attempt_error(&final_attempt, record.http_status),
             )),
             WarmupAttemptOutcome::PermanentFailure(reason) => {
+                if matches!(
+                    window_check.as_ref(),
+                    Some(cc_lb_admin::WarmupWindowCheck::NotStarted { .. })
+                ) {
+                    let now_unix_secs = now_unix_secs_i64(&*self.clock)?;
+                    let view = self.dynamic_view.load();
+                    let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+                    drop(view);
+                    let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+                        upstream.id,
+                        now_unix_millis(&*self.clock),
+                        max_staleness_secs,
+                    );
+                    let next_evaluation = next_warmup_evaluation_after_success(
+                        upstream.kind,
+                        job.lane,
+                        &snapshots,
+                        &[],
+                        now_unix_secs,
+                    );
+                    self.write_next_warmup_after_quota_skip(upstream.id, job.lane, next_evaluation)
+                        .await?;
+                    return Ok(JobOutcome::Done);
+                }
                 tracing::warn!(upstream_id = %upstream.id, ?reason, "warmup cycle abandoned");
                 Ok(JobOutcome::Done)
             }
