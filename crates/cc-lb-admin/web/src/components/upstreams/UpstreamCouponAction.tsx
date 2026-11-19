@@ -1,6 +1,7 @@
 import { Ticket } from 'lucide-react';
 import type { QuotaSnapshot } from '../../lib/api';
 import type { CouponInventory } from '../../lib/couponInventory';
+import { capabilitiesOf } from '../../lib/providers';
 import { type Upstream, useUpstreamOAuthStatus } from '../../lib/queries';
 import { cx, Skeleton } from '../ui/primitives';
 import { LimitResetAction } from './LimitResetAction';
@@ -50,7 +51,7 @@ export function UpstreamCouponTrigger({
   onClick: (trigger: HTMLButtonElement) => void;
   disabled?: boolean;
 }) {
-  if (upstream.kind !== 'anthropic_oauth' && upstream.kind !== 'openai_oauth') {
+  if (!capabilitiesOf(upstream.kind).limitReset) {
     return null;
   }
   const count = inventory?.total ?? null;

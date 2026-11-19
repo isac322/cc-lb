@@ -151,10 +151,24 @@ export function couponClaimMessage(response: LimitResetClaimResponse): string {
 }
 
 export function couponScopeLabel(
-  grant: Pick<LimitResetGrant, 'clears'>,
+  grant: Pick<LimitResetGrant, 'clears'> &
+    Partial<Pick<LimitResetGrant, 'type' | 'gives_back_weekly'>>,
 ): string {
-  return grant.clears.length > 0
-    ? [...new Set(grant.clears.map(couponWindowLabel))].join(', ')
+  const fable = grant.type === 'full' && grant.gives_back_weekly === true;
+  const parts = grant.clears.map(couponWindowLabel);
+  if (fable) {
+    const fiveIdx = parts.indexOf(WINDOW_LABELS['5h']!);
+    if (fiveIdx >= 0) {
+      parts.splice(fiveIdx + 1, 0, 'Weekly (Fable portion)');
+    } else {
+      parts.unshift('Weekly (Fable portion)');
+    }
+    if (!parts.includes(WINDOW_LABELS['7d_fable']!)) {
+      parts.push(WINDOW_LABELS['7d_fable']!);
+    }
+  }
+  return parts.length > 0
+    ? [...new Set(parts)].join(', ')
     : 'Scope not reported';
 }
 
@@ -264,60 +278,97 @@ function validPercent(value: number | undefined | null): value is number {
   return value != null && Number.isFinite(value) && value >= 0;
 }
 
+function readWindowUsage(
+  grant: LimitResetGrant,
+  byWindow: ReadonlyMap<string, CouponQuotaWindow>,
+  name: string,
+  { providerFresh }: CouponObservationOptions,
+): CouponWindowUsage {
+  const keys = relatedQuotaKeys(name);
+  const providerPercent = keys
+    .map((key) => grant.percent_used[key])
+    .find((value) => value !== undefined);
+  const quota = keys
+    .map((key) => byWindow.get(key))
+    .find((entry) => entry !== undefined);
+  const quotaPercent =
+    quota?.utilization == null ? null : quota.utilization * 100;
+  const base = { window: name, label: couponWindowLabel(name) };
+  // percent_used and clears share the provider's exact namespace, with a
+  // confirmed 1:1 equivalence between 7d_overage_included and 7d_fable. A
+  // valid zero is authoritative even when the key is absent from /quota/latest.
+  if (providerFresh && validPercent(providerPercent)) {
+    return {
+      ...base,
+      percentUsed: providerPercent,
+      state: 'fresh',
+      source: 'coupon',
+    };
+  }
+  if (quota?.state === 'fresh' && validPercent(quotaPercent)) {
+    return {
+      ...base,
+      percentUsed: quotaPercent,
+      state: 'fresh',
+      source: 'quota',
+    };
+  }
+  if (!providerFresh && validPercent(providerPercent)) {
+    return {
+      ...base,
+      percentUsed: providerPercent,
+      state: 'stale',
+      source: 'coupon',
+    };
+  }
+  if (quota?.state === 'stale' && validPercent(quotaPercent)) {
+    return {
+      ...base,
+      percentUsed: quotaPercent,
+      state: 'stale',
+      source: 'quota',
+    };
+  }
+  return { ...base, percentUsed: null, state: 'unknown', source: null };
+}
+
+export function fableCanRestoreFullFiveHour(
+  grant: LimitResetGrant,
+  windows: readonly CouponQuotaWindow[],
+  options: CouponObservationOptions,
+): boolean {
+  if (!isFableRebateGrant(grant)) return false;
+  const byWindow = new Map(windows.map((window) => [window.window, window]));
+  if (byWindow.get('5h')?.state === 'absent') return false;
+  return isFullCouponWindow(readWindowUsage(grant, byWindow, '5h', options));
+}
+
+export function fableCanRestoreFullWeekly(
+  grant: LimitResetGrant,
+  windows: readonly CouponQuotaWindow[],
+  options: CouponObservationOptions,
+): boolean {
+  if (!isFableRebateGrant(grant)) return false;
+  const byWindow = new Map(windows.map((window) => [window.window, window]));
+  if (byWindow.get('7d')?.state === 'absent') return false;
+  const weekly = readWindowUsage(grant, byWindow, '7d', options);
+  if (!isFullCouponWindow(weekly)) return false;
+  const fableBucket = readWindowUsage(grant, byWindow, '7d_fable', options);
+  return (
+    fableBucket.state === 'fresh' &&
+    fableBucket.percentUsed != null &&
+    fableBucket.percentUsed > 0
+  );
+}
+
 export function presentCoupon(
   grant: LimitResetGrant,
   windows: readonly CouponQuotaWindow[],
-  { providerFresh }: CouponObservationOptions,
+  options: CouponObservationOptions,
 ): CouponPresentation {
   const byWindow = new Map(windows.map((window) => [window.window, window]));
-  const usage = (name: string): CouponWindowUsage => {
-    const keys = relatedQuotaKeys(name);
-    const providerPercent = keys
-      .map((key) => grant.percent_used[key])
-      .find((value) => value !== undefined);
-    const quota = keys
-      .map((key) => byWindow.get(key))
-      .find((entry) => entry !== undefined);
-    const quotaPercent =
-      quota?.utilization == null ? null : quota.utilization * 100;
-    const base = { window: name, label: couponWindowLabel(name) };
-    // percent_used and clears share the provider's exact namespace, with a
-    // confirmed 1:1 equivalence between 7d_overage_included and 7d_fable. A
-    // valid zero is authoritative even when the key is absent from /quota/latest.
-    if (providerFresh && validPercent(providerPercent)) {
-      return {
-        ...base,
-        percentUsed: providerPercent,
-        state: 'fresh',
-        source: 'coupon',
-      };
-    }
-    if (quota?.state === 'fresh' && validPercent(quotaPercent)) {
-      return {
-        ...base,
-        percentUsed: quotaPercent,
-        state: 'fresh',
-        source: 'quota',
-      };
-    }
-    if (!providerFresh && validPercent(providerPercent)) {
-      return {
-        ...base,
-        percentUsed: providerPercent,
-        state: 'stale',
-        source: 'coupon',
-      };
-    }
-    if (quota?.state === 'stale' && validPercent(quotaPercent)) {
-      return {
-        ...base,
-        percentUsed: quotaPercent,
-        state: 'stale',
-        source: 'quota',
-      };
-    }
-    return { ...base, percentUsed: null, state: 'unknown', source: null };
-  };
+  const usage = (name: string): CouponWindowUsage =>
+    readWindowUsage(grant, byWindow, name, options);
   const targets = grant.clears.map(usage);
   const targetNames = new Set(
     grant.clears.flatMap((name) => [...relatedQuotaKeys(name)]),
@@ -356,24 +407,14 @@ export function couponUsageLabel(reading: CouponWindowUsage): string {
     : `${percent} · ${source}`;
 }
 
-export type CouponQuotaEffect =
-  | 'reset'
-  | 'unchanged'
-  | 'fable_weekly'
-  | 'fable_scoped'
-  | 'conditional_5h'
-  | 'unknown';
+export type CouponQuotaEffect = 'reset' | 'unchanged' | 'fable_weekly';
 
 export interface CouponEffectRow {
   window: string;
   label: string;
   current: CouponWindowUsage;
   effect: CouponQuotaEffect;
-  schedule:
-    | 'unchanged'
-    | 'confirmed_after_use'
-    | 'updated_after_use'
-    | 'unknown';
+  schedule: 'unchanged' | 'confirmed_after_use' | 'updated_after_use';
   resetsAtUnixSecs: number | null;
 }
 
@@ -382,8 +423,8 @@ export interface CouponEffects {
   otherLimitsUnchanged: boolean;
 }
 
-/** Expected future effects, not a prediction of a successful claim or a
- * numeric Fable rebate. Internal scope keys never become visible quota aliases. */
+/** Expected future effects for known coupon scopes, without inventing a
+ * numeric rebate for the shared Fable-weighted weekly pool. */
 export function presentCouponEffects(
   grant: LimitResetGrant,
   windows: readonly CouponQuotaWindow[],
@@ -427,25 +468,41 @@ export function presentCouponEffects(
   }
 
   const fable = isFableRebateGrant(grant);
+  if (
+    !fable &&
+    !grant.clears.some((name) => Object.hasOwn(WINDOW_LABELS, name))
+  ) {
+    return { rows: [], otherLimitsUnchanged: false };
+  }
+
   const byWindow = new Map(windows.map((window) => [window.window, window]));
   const clearsFable =
     grantClearsWindow(grant, '7d_fable') ||
     Object.hasOwn(grant.percent_used, '7d_overage_included');
   const names = new Set([
     ...windows
-      .filter((window) => window.state !== 'absent')
+      .filter(
+        (window) => window.state !== 'absent' && window.state !== 'unobserved',
+      )
       .map((window) => window.window),
     ...grant.clears,
     ...Object.keys(grant.percent_used),
     ...(clearsFable ? ['7d_fable'] : []),
-    ...(fable ? ['5h', '7d'] : []),
+    ...(fable ? ['7d', '7d_fable'] : []),
   ]);
-  const visibleNames = [...names].filter(
-    (name) =>
-      Object.hasOwn(WINDOW_LABELS, name) &&
-      name !== '7d_overage_included' &&
-      byWindow.get(name)?.state !== 'absent',
-  );
+  const visibleNames = [...names].filter((name) => {
+    if (!Object.hasOwn(WINDOW_LABELS, name) || name === '7d_overage_included') {
+      return false;
+    }
+    if (byWindow.get(name)?.state !== 'absent') return true;
+    return (
+      name === '7d_fable' &&
+      options.providerFresh &&
+      relatedQuotaKeys(name).some((key) =>
+        validPercent(grant.percent_used[key]),
+      )
+    );
+  });
   const order = ['5h', '7d', '7d_fable', '7d_sonnet', '7d_opus', 'overage'];
   visibleNames.sort((a, b) => {
     const aIndex = order.indexOf(a);
@@ -468,43 +525,24 @@ export function presentCouponEffects(
     otherLimitsUnchanged: false,
     rows: readings.map<CouponEffectRow>((current) => {
       const window = byWindow.get(current.window);
-      const known5h =
-        current.window === '5h' &&
-        ((window != null &&
-          window.state !== 'unobserved' &&
-          window.state !== 'absent') ||
-          (options.providerFresh && validPercent(grant.percent_used['5h'])));
       let effect: CouponQuotaEffect;
-      if (fable && current.window === '5h')
-        effect = known5h ? 'reset' : 'conditional_5h';
+      if (current.window === 'overage') effect = 'unchanged';
+      else if (fable && current.window === '5h') effect = 'reset';
       else if (fable && current.window === '7d') effect = 'fable_weekly';
-      else if (current.window === 'overage') effect = 'unchanged';
+      else if (fable && current.window === '7d_fable') effect = 'reset';
       else if (grantClearsWindow(grant, current.window)) effect = 'reset';
-      else if (fable && current.window === '7d_fable') effect = 'fable_scoped';
-      else if (current.window.startsWith('7d_')) effect = 'unknown';
-      else if (
-        fable ||
-        grant.type === 'weekly' ||
-        grant.type === 'full' ||
-        (grant.clears.length > 0 && grant.clears.every((name) => name === '5h'))
-      )
-        effect = 'unchanged';
-      else effect = 'unknown';
+      else effect = 'unchanged';
       const weekly = current.window.startsWith('7d');
       const reportedReset =
         window?.resets_at_unix_secs ?? (weekly ? weeklyFallback : null);
+      const schedule: CouponEffectRow['schedule'] =
+        weekly || effect === 'unchanged' ? 'unchanged' : 'confirmed_after_use';
       return {
         window: current.window,
         label: current.label,
         current,
         effect,
-        schedule:
-          weekly || effect === 'unchanged'
-            ? 'unchanged'
-            : current.window === '5h' &&
-                (effect === 'reset' || effect === 'conditional_5h')
-              ? 'confirmed_after_use'
-              : 'unknown',
+        schedule,
         resetsAtUnixSecs:
           reportedReset != null &&
           Number.isFinite(reportedReset) &&
@@ -517,8 +555,9 @@ export function presentCouponEffects(
 }
 
 /** Explicit choices never fall back to another grant, even if they disappear.
- * Only an untouched selection prefers a usable coupon clearing a full target,
- * then the earliest expiry; eligibility remains the caller's provider truth. */
+ * Only an untouched selection prefers a usable coupon clearing a full target
+ * (direct resets first, then Fable weekly rebates), then the earliest expiry;
+ * eligibility remains the caller's provider truth. */
 export function chooseCouponGrant(
   active: readonly LimitResetGrant[],
   usable: readonly LimitResetGrant[],
@@ -530,18 +569,25 @@ export function chooseCouponGrant(
     return active.find((grant) => grant.id === explicitId) ?? null;
   }
   let best: LimitResetGrant | null = null;
-  let bestFull = false;
+  let bestPriority = -1;
   let bestExpiry = Infinity;
   for (const grant of usable) {
-    const full = presentCoupon(grant, windows, options).hasFullTarget;
+    const directFull =
+      presentCoupon(grant, windows, options).hasFullTarget ||
+      fableCanRestoreFullFiveHour(grant, windows, options);
+    const priority = directFull
+      ? 2
+      : fableCanRestoreFullWeekly(grant, windows, options)
+        ? 1
+        : 0;
     const expiry = grant.ends_at == null ? Infinity : Date.parse(grant.ends_at);
     if (
       best == null ||
-      (full && !bestFull) ||
-      (full === bestFull && expiry < bestExpiry)
+      priority > bestPriority ||
+      (priority === bestPriority && expiry < bestExpiry)
     ) {
       best = grant;
-      bestFull = full;
+      bestPriority = priority;
       bestExpiry = expiry;
     }
   }

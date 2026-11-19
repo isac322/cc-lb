@@ -126,4 +126,58 @@ describe('deriveCouponNudge', () => {
     expect(nudge.usableCount).toBe(0);
     expect(nudge.kind).toBe('quiet');
   });
+
+  it('nudges limit for Fable grants when Weekly is full and Weekly (Fable) has usage', () => {
+    const fableGrant = grant({
+      id: 'fable',
+      type: 'full',
+      gives_back_weekly: true,
+      clears: ['7d_overage_included'],
+    });
+    const weeklyWindows = [
+      window({ window: '7d', utilization: 1 }),
+      window({ window: '7d_fable', utilization: 0.41 }),
+    ];
+    const limitNudge = deriveCouponNudge(
+      ember([fableGrant]),
+      weeklyWindows,
+      NOW,
+    );
+    expect(limitNudge.kind).toBe('limit');
+    expect(limitNudge.detail).toContain(
+      'Fable reset restores its Fable portion',
+    );
+
+    const zeroBucket = deriveCouponNudge(
+      ember([fableGrant]),
+      [
+        window({ window: '7d', utilization: 1 }),
+        window({ window: '7d_fable', utilization: 0 }),
+      ],
+      NOW,
+    );
+    expect(zeroBucket.kind).toBe('quiet');
+
+    const fiveHourFull = deriveCouponNudge(
+      ember([fableGrant]),
+      [window({ window: '5h', utilization: 1 })],
+      NOW,
+    );
+    expect(fiveHourFull.kind).toBe('limit');
+    expect(fiveHourFull.detail).toContain('5-hour');
+
+    // Direct weekly reset wording wins when both Fable and Weekly grants exist.
+    const weeklyGrant = grant({
+      id: 'weekly',
+      type: 'weekly',
+      clears: ['7d', '7d_overage_included'],
+    });
+    const bothNudge = deriveCouponNudge(
+      ember([fableGrant, weeklyGrant]),
+      weeklyWindows,
+      NOW,
+    );
+    expect(bothNudge.kind).toBe('limit');
+    expect(bothNudge.detail).toContain('a reset clears it now.');
+  });
 });

@@ -12,6 +12,8 @@ import { useSyncExternalStore } from 'react';
 import {
   type CouponQuotaWindow,
   couponWindowLabel,
+  fableCanRestoreFullFiveHour,
+  fableCanRestoreFullWeekly,
   isFullCouponWindow,
   presentCoupon,
 } from './couponPresentation';
@@ -144,6 +146,7 @@ export function deriveCouponNudge(
   const byWindow = new Map(windows.map((w) => [w.window, w]));
   let limitedWindow: string | null = null;
   let limitedWaitMs = -1;
+  let limitedIsFableWeekly = false;
   for (const g of usableGrants) {
     const presentation = presentCoupon(g, windows, { providerFresh: true });
     for (const reading of presentation.targets) {
@@ -155,9 +158,40 @@ export function deriveCouponNudge(
       if (w?.state !== 'fresh' || w.resets_at_unix_secs == null) continue;
       const wait = w.resets_at_unix_secs * 1000 - nowMs;
       // A natural reset inside the hour is left to happen on its own.
-      if (wait >= LIMIT_MIN_WAIT_MS && wait > limitedWaitMs) {
+      if (
+        wait >= LIMIT_MIN_WAIT_MS &&
+        (wait > limitedWaitMs ||
+          (wait === limitedWaitMs && limitedIsFableWeekly))
+      ) {
         limitedWaitMs = wait;
         limitedWindow = name;
+        limitedIsFableWeekly = false;
+      }
+    }
+    if (fableCanRestoreFullFiveHour(g, windows, { providerFresh: true })) {
+      const w = byWindow.get('5h');
+      if (w?.state === 'fresh' && w.resets_at_unix_secs != null) {
+        const wait = w.resets_at_unix_secs * 1000 - nowMs;
+        if (
+          wait >= LIMIT_MIN_WAIT_MS &&
+          (wait > limitedWaitMs ||
+            (wait === limitedWaitMs && limitedIsFableWeekly))
+        ) {
+          limitedWaitMs = wait;
+          limitedWindow = '5h';
+          limitedIsFableWeekly = false;
+        }
+      }
+    }
+    if (fableCanRestoreFullWeekly(g, windows, { providerFresh: true })) {
+      const w = byWindow.get('7d');
+      if (w?.state === 'fresh' && w.resets_at_unix_secs != null) {
+        const wait = w.resets_at_unix_secs * 1000 - nowMs;
+        if (wait >= LIMIT_MIN_WAIT_MS && wait > limitedWaitMs) {
+          limitedWaitMs = wait;
+          limitedWindow = '7d';
+          limitedIsFableWeekly = true;
+        }
       }
     }
   }
@@ -166,7 +200,9 @@ export function deriveCouponNudge(
       ...base,
       kind: 'limit',
       label: 'Quota window full',
-      detail: `${couponWindowLabel(limitedWindow)} window resets on its own ${formatWait(limitedWaitMs)} — a reset clears it now.`,
+      detail: limitedIsFableWeekly
+        ? `Weekly window resets on its own ${formatWait(limitedWaitMs)} — a Fable reset restores its Fable portion now.`
+        : `${couponWindowLabel(limitedWindow)} window resets on its own ${formatWait(limitedWaitMs)} — a reset clears it now.`,
     };
   }
 

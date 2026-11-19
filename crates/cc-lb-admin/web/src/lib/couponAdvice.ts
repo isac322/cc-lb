@@ -60,7 +60,7 @@ function resetSeconds(row: CouponEffectRow, nowSeconds: number): number | null {
 }
 
 /** Nonblocking guidance about this exact selected grant. This never chooses a
- * coupon, predicts exhaustion, changes eligibility, or estimates a Fable rebate. */
+ * coupon, predicts exhaustion, or changes provider eligibility. */
 export function deriveCouponAdvice({
   grant,
   effects,
@@ -70,6 +70,22 @@ export function deriveCouponAdvice({
   if (blocked) return null;
   const nowSeconds = nowMs / 1000;
   const rows = effects.rows;
+  const restored = rows.filter((row) => row.effect === 'reset');
+  const fableWeeklyRow =
+    rows.find((row) => row.effect === 'fable_weekly') ?? null;
+  const fableBucketRow = fableWeeklyRow
+    ? (rows.find(
+        (row) => row.window === '7d_fable' && row.effect === 'reset',
+      ) ?? null)
+    : null;
+  const fableWeeklyUsed = fableWeeklyRow ? freshUsage(fableWeeklyRow) : null;
+  const fableBucketUsed = fableBucketRow ? freshUsage(fableBucketRow) : null;
+  const fableNoBucket = fableWeeklyRow != null && fableBucketRow == null;
+  const fableZeroOnFullWeekly =
+    fableWeeklyRow != null &&
+    (fableWeeklyUsed ?? -1) >= 100 &&
+    fableBucketUsed === 0;
+
   const unaddressed = rows.filter(
     (row) =>
       (row.window === '5h' || row.window === '7d') &&
@@ -82,20 +98,18 @@ export function deriveCouponAdvice({
       message: `${unaddressed.map((row) => row.label).join(' and ')} is full and will not be restored by this coupon. Other limits may still prevent use.`,
     };
   }
+  if (fableZeroOnFullWeekly) {
+    return {
+      kind: 'scope',
+      message:
+        'Weekly is full, and Weekly (Fable) is at 0% used so this coupon has no Fable usage to restore.',
+    };
+  }
 
-  const restored = rows.filter((row) => row.effect === 'reset');
-  const uncertainEffects = rows.some(
-    (row) =>
-      row.effect === 'unknown' ||
-      row.effect === 'conditional_5h' ||
-      row.effect === 'fable_weekly' ||
-      row.effect === 'fable_scoped',
-  );
-  const allUsageKnown = restored.every((row) => freshUsage(row) != null);
   if (
     restored.length > 0 &&
-    !uncertainEffects &&
-    allUsageKnown &&
+    !fableNoBucket &&
+    (fableWeeklyRow == null || fableWeeklyUsed != null) &&
     restored.every((row) => freshUsage(row) === 0)
   ) {
     return {
@@ -104,18 +118,33 @@ export function deriveCouponAdvice({
     };
   }
 
+  const allUsageKnown =
+    restored.every((row) => freshUsage(row) != null) &&
+    (fableWeeklyRow == null || (fableWeeklyUsed != null && !fableNoBucket));
   const positive = restored.filter((row) => (freshUsage(row) ?? 0) > 0);
+  const timingRows = [
+    ...positive,
+    ...(fableWeeklyRow != null && (fableBucketUsed ?? 0) > 0
+      ? [fableWeeklyRow]
+      : []),
+  ];
   const expiry = grant.ends_at == null ? NaN : Date.parse(grant.ends_at) / 1000;
   const expiryKnown = Number.isFinite(expiry) && expiry > nowSeconds;
-  const hasFullTarget = restored.some((row) => (freshUsage(row) ?? -1) >= 100);
-  const resetTimes = positive.map((row) => resetSeconds(row, nowSeconds));
+  const hasDirectFullTarget = restored.some(
+    (row) => (freshUsage(row) ?? -1) >= 100,
+  );
+  const fableUnblocksWeekly =
+    fableWeeklyRow != null &&
+    (fableWeeklyUsed ?? -1) >= 100 &&
+    (fableBucketUsed ?? 0) > 0;
+  const hasFullTarget = hasDirectFullTarget || fableUnblocksWeekly;
+  const resetTimes = timingRows.map((row) => resetSeconds(row, nowSeconds));
   const allResetsKnown = resetTimes.every((reset) => reset != null);
   const lastsBeyondResets =
     expiryKnown &&
     allResetsKnown &&
     resetTimes.every((reset) => reset != null && expiry > reset);
-  const completeBenefit =
-    !uncertainEffects && allUsageKnown && positive.length > 0;
+  const completeBenefit = allUsageKnown && positive.length > 0;
 
   if (
     completeBenefit &&
@@ -138,7 +167,7 @@ export function deriveCouponAdvice({
     completeBenefit &&
     !hasFullTarget &&
     lastsBeyondResets &&
-    positive.every((row) => {
+    timingRows.every((row) => {
       const used = freshUsage(row);
       const reset = resetSeconds(row, nowSeconds);
       const duration = durationSeconds(grant, row);
@@ -157,17 +186,22 @@ export function deriveCouponAdvice({
   }
 
   if (hasFullTarget) {
+    const fullRows: CouponEffectRow[] = [
+      ...restored.filter((row) => (freshUsage(row) ?? -1) >= 100),
+      ...(fableUnblocksWeekly && fableWeeklyRow ? [fableWeeklyRow] : []),
+    ];
     const expiresBeforeReset =
       expiryKnown &&
-      restored.some((row) => {
+      fullRows.some((row) => {
         const reset = resetSeconds(row, nowSeconds);
-        return (
-          (freshUsage(row) ?? -1) >= 100 && reset != null && expiry <= reset
-        );
+        return reset != null && expiry <= reset;
       });
     return {
       kind: 'useful_now',
-      message: `This coupon can restore a full limit if you need to keep working.${expiresBeforeReset ? ' It expires by the time that limit resets naturally.' : ''}`,
+      message:
+        fableUnblocksWeekly && !hasDirectFullTarget
+          ? `This coupon resets Weekly (Fable) and restores the Fable portion of your full Weekly limit.${expiresBeforeReset ? ' It expires by the time that limit resets naturally.' : ''}`
+          : `This coupon can restore a full limit if you need to keep working.${expiresBeforeReset ? ' It expires by the time that limit resets naturally.' : ''}`,
     };
   }
 
@@ -188,28 +222,22 @@ export function deriveCouponAdvice({
 
   if (
     rows.length === 0 ||
-    uncertainEffects ||
     !allUsageKnown ||
     !expiryKnown ||
-    (positive.length > 0 &&
+    (timingRows.length > 0 &&
       (!allResetsKnown ||
-        positive.some((row) => durationSeconds(grant, row) == null)))
+        timingRows.some((row) => durationSeconds(grant, row) == null)))
   ) {
-    const fableUnknown = rows.some(
-      (row) => row.effect === 'fable_weekly' || row.effect === 'fable_scoped',
-    );
     const stale = rows.some(
       (row) => row.effect !== 'unchanged' && row.current.state === 'stale',
     );
     return {
       kind: 'unknown',
-      message: fableUnknown
-        ? 'The amount of weekly Fable usage this coupon returns is not reported, so its benefit cannot be estimated.'
-        : stale
-          ? 'Usage is stale. Refresh usage before deciding whether to keep this coupon.'
-          : !expiryKnown
-            ? 'The coupon expiry is not reported, so there is not enough information to recommend when to use it.'
-            : 'There is not enough current usage or reset information to recommend when to use this coupon.',
+      message: stale
+        ? 'Usage is stale. Refresh usage before deciding whether to keep this coupon.'
+        : !expiryKnown
+          ? 'The coupon expiry is not reported, so there is not enough information to recommend when to use it.'
+          : 'There is not enough current usage or reset information to recommend when to use this coupon.',
     };
   }
   return null;

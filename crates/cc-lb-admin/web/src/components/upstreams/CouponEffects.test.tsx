@@ -60,7 +60,7 @@ describe('expected quota changes', () => {
     expect(screen.getByText('0% used')).toBeDefined();
   });
 
-  it('renders all visible windows and retains qualitative Fable changes even when its current bar is zero', () => {
+  it('renders all visible windows deterministically with Weekly (Fable) reset and non-cleared models unchanged', () => {
     const rows = [
       row(),
       row({
@@ -72,7 +72,7 @@ describe('expected quota changes', () => {
       row({
         window: '7d_fable',
         label: 'Weekly (Fable)',
-        effect: 'fable_scoped',
+        effect: 'reset',
         schedule: 'unchanged',
         current: {
           window: '7d_fable',
@@ -98,13 +98,16 @@ describe('expected quota changes', () => {
     render(<CouponEffects effects={{ rows, otherLimitsUnchanged: false }} />);
     expect(screen.getAllByRole('term')).toHaveLength(5);
     expect(screen.getByText(/Fable portion restored/)).toBeDefined();
-    expect(screen.getByText(/Fable usage restored/)).toBeDefined();
+    expect(
+      screen.getAllByText((_, el) => el?.textContent === 'After use: 0% used'),
+    ).toHaveLength(2);
+    expect(screen.getAllByText('Unchanged')).toHaveLength(2);
     expect(
       screen.getByText(/Other-model weekly usage unchanged/),
     ).toBeDefined();
   });
 
-  it('renders Weekly (Fable) as 0% used for weekly coupons clearing 7d_overage_included instead of Effect not reported', async () => {
+  it('renders Weekly (Fable) as 0% used and non-cleared models as Unchanged for weekly coupons', async () => {
     const { presentCouponEffects } = await import(
       '../../lib/couponPresentation'
     );
@@ -145,19 +148,28 @@ describe('expected quota changes', () => {
           state: 'fresh',
           resets_at_unix_secs: null,
         },
+        {
+          window: '7d_sonnet',
+          utilization: 0.3,
+          state: 'fresh',
+          resets_at_unix_secs: null,
+        },
       ],
       { provider: 'anthropic', providerFresh: true },
     );
-    render(<CouponEffects effects={effects} />);
-    expect(screen.queryByText(/Effect not reported/)).toBeNull();
-    const defs = screen.getAllByRole('definition').map((el) => el.textContent);
-    expect(defs).toHaveLength(3);
-    expect(defs[0]).toContain('20% used');
-    expect(defs[0]).toContain('After use: Unchanged');
-    expect(defs[1]).toContain('100% used');
-    expect(defs[1]).toContain('After use: 0% used');
-    expect(defs[2]).toContain('80% used');
-    expect(defs[2]).toContain('After use: 0% used');
+    const defs = render(<CouponEffects effects={effects} />).container;
+    const rows = Array.from(defs.querySelectorAll('dd')).map(
+      (el) => el.textContent,
+    );
+    expect(rows).toHaveLength(4);
+    expect(rows[0]).toContain('20% used');
+    expect(rows[0]).toContain('After use: Unchanged');
+    expect(rows[1]).toContain('100% used');
+    expect(rows[1]).toContain('After use: 0% used');
+    expect(rows[2]).toContain('80% used');
+    expect(rows[2]).toContain('After use: 0% used');
+    expect(rows[3]).toContain('30% used');
+    expect(rows[3]).toContain('After use: Unchanged');
   });
 
   it('does not invent a precise future reset timestamp for a restarted window', () => {
