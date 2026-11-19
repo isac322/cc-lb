@@ -1503,6 +1503,8 @@ async fn fire_now_upstream_warmup_inner(
         .unwrap_or(now_unix_secs);
     // The reset each target window reported before the request, so the
     // post-request check can tell a new window from one already running.
+    // Unused rolling windows (zero usage, reset = observation + window) are
+    // left out: their reset is later than a chained start's reset.
     let previous_resets: Vec<(SubscriptionQuotaWindow, i64)> = lane
         .target_windows(upstream.kind)
         .iter()
@@ -1511,7 +1513,11 @@ async fn fire_now_upstream_warmup_inner(
             if latest.sample_kind == cc_lb_storage_api::SubscriptionQuotaSampleKind::Absent {
                 return None;
             }
-            Some((*window, cycle_key_from_latest_observation(latest)?))
+            let reset = cycle_key_from_latest_observation(latest)?;
+            let observed_at = i64::try_from(latest.observed_at_unix_millis / 1_000).ok()?;
+            let rolling =
+                latest.utilization == Some(0.0) && reset - observed_at >= window_secs(*window) - 60;
+            (!rolling).then_some((*window, reset))
         })
         .collect();
     if upstream.warmup_dialect_plugin.is_some()
@@ -1801,6 +1807,16 @@ fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaSample) -> Option
     latest
         .resets_at_unix_secs
         .and_then(|resets_at| i64::try_from(resets_at).ok())
+}
+
+/// Length of a quota window: five hours for the 5h windows, seven days otherwise.
+fn window_secs(window: SubscriptionQuotaWindow) -> i64 {
+    match window {
+        SubscriptionQuotaWindow::FiveHour
+        | SubscriptionQuotaWindow::GeminiFiveHour
+        | SubscriptionQuotaWindow::ThirdPartyFiveHour => 5 * 60 * 60,
+        _ => 7 * 24 * 60 * 60,
+    }
 }
 
 async fn record_fire_now_subscription_quota_observations(

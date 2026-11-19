@@ -127,8 +127,10 @@ pub(super) fn post_warmup_window_check(
 }
 
 /// The reset each of the lane's target windows reported before dispatch, for
-/// [`post_warmup_window_check`]. Absent windows and windows without a reset
-/// are left out.
+/// [`post_warmup_window_check`]. Absent windows, windows without a reset and
+/// unused rolling windows are left out: a rolling window's reset is just
+/// `poll + D`, which is later than the `previous reset + D` a chained start
+/// reports, so using it would hide a real start.
 pub(super) fn target_window_resets(
     kind: UpstreamKind,
     lane: WarmupLane,
@@ -142,6 +144,9 @@ pub(super) fn target_window_resets(
                 .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
                 .filter(|snapshot| snapshot.state != SubscriptionQuotaDataState::Absent)?;
             let reset = i64::try_from(snapshot.resets_at_unix_secs?).ok()?;
+            if quota_snapshot_is_unused_rolling_window(snapshot, *window, reset) {
+                return None;
+            }
             Some((*window, reset))
         })
         .collect()
