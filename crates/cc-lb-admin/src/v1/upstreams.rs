@@ -1535,6 +1535,8 @@ async fn fire_now_upstream_warmup_inner(
     });
     let dialect_plugin_used = dialect_dispatch_bundle.is_some();
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
+    // Window verification anchors resets to the provider request itself.
+    let dispatch_started_at_unix_secs = unix_now_secs_i64(&*state.clock)?;
     let mut dispatch_attempt =
         if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
             match tokio::time::timeout(
@@ -1619,7 +1621,7 @@ async fn fire_now_upstream_warmup_inner(
                 verifier.verify_warmup_window(
                     &upstream,
                     lane,
-                    now_unix_secs,
+                    dispatch_started_at_unix_secs,
                     request_completed_at_unix_secs,
                 ),
             )
