@@ -1501,6 +1501,19 @@ async fn fire_now_upstream_warmup_inner(
         .and_then(|window| latest_window_quota(&latest_quota, *window))
         .and_then(cycle_key_from_latest_observation)
         .unwrap_or(now_unix_secs);
+    // The reset each target window reported before the request, so the
+    // post-request check can tell a new window from one already running.
+    let previous_resets: Vec<(SubscriptionQuotaWindow, i64)> = lane
+        .target_windows(upstream.kind)
+        .iter()
+        .filter_map(|window| {
+            let latest = latest_window_quota(&latest_quota, *window)?;
+            if latest.sample_kind == cc_lb_storage_api::SubscriptionQuotaSampleKind::Absent {
+                return None;
+            }
+            Some((*window, cycle_key_from_latest_observation(latest)?))
+        })
+        .collect();
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()
             || state.data_dir.is_none()
@@ -1619,7 +1632,7 @@ async fn fire_now_upstream_warmup_inner(
                 verifier.verify_warmup_window(
                     &upstream,
                     lane,
-                    candidate_cycle_key,
+                    &previous_resets,
                     request_completed_at_unix_secs,
                 ),
             )
@@ -3461,7 +3474,7 @@ mod tests {
             &self,
             upstream: &UpstreamRecord,
             lane: WarmupLane,
-            _previous_cycle_key_unix_secs: i64,
+            _previous_resets: &[(SubscriptionQuotaWindow, i64)],
             _request_completed_at_unix_secs: i64,
         ) -> crate::WarmupWindowCheck {
             self.calls

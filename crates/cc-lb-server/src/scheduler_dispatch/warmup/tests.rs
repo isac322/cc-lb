@@ -1161,7 +1161,12 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
     let s = NOW_UNIX_SECS;
     let c = s + 1;
     let poll = c + 12;
-    let previous = s + 3_600;
+    let previous_five_hour = s + 3_600;
+    let previous_weekly = s + 3 * 86_400;
+    let previous = [
+        (GeminiFiveHour, previous_five_hour),
+        (GeminiSevenDay, previous_weekly),
+    ];
     let running_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
     let cases: Vec<(
         &str,
@@ -1304,9 +1309,16 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
             "a window already running before the request is not evidence",
             WarmupLane::Primary,
             vec![
-                reading(GeminiFiveHour, Fresh, Some(0.3), previous, poll),
+                reading(GeminiFiveHour, Fresh, Some(0.3), previous_five_hour, poll),
                 absent(GeminiSevenDay),
             ],
+            Expect::Unknown,
+        ),
+        (
+            // Weekly-only account: the running 7d window kept its known reset.
+            "a weekly window already running before the request is not evidence",
+            WarmupLane::Primary,
+            vec![absent(GeminiFiveHour), running_weekly()],
             Expect::Unknown,
         ),
     ];
@@ -1315,7 +1327,7 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
             UpstreamKind::GeminiOauth,
             lane,
             &snapshots,
-            previous,
+            &previous,
             c,
         ) {
             cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,

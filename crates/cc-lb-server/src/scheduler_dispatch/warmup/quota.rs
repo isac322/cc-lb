@@ -42,9 +42,9 @@ pub(super) enum WarmupQuotaPreflightDecision {
 /// window, `previous reset + D`. A window is therefore running when its reset
 /// is clearly earlier than `poll + D`, or when it shows usage. The two are only
 /// separable once the poll is `MIN_GAP - TOL` after the request.
-/// A running window whose reset is not later than `previous_cycle_key` (the
-/// reset the caller already knew before dispatch) was running before the
-/// request, so it is not evidence of a start.
+/// A running window whose reset does not reach past its own reset known before
+/// dispatch (`previous_resets`) was already running, so it is not evidence of
+/// a start. A window with no known previous reset counts once it is running.
 ///
 /// Any target that is still rolling makes the result `NotStarted`, so a busy
 /// weekly window cannot hide an unstarted five-hour window.
@@ -52,7 +52,7 @@ pub(super) fn post_warmup_window_check(
     kind: UpstreamKind,
     lane: WarmupLane,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
-    previous_cycle_key_unix_secs: i64,
+    previous_resets: &[(SubscriptionQuotaWindow, i64)],
     request_completed_at_unix_secs: i64,
 ) -> cc_lb_admin::WarmupWindowCheck {
     let mut observations = Vec::new();
@@ -102,7 +102,11 @@ pub(super) fn post_warmup_window_check(
             .is_some_and(|utilization| utilization > 0.0)
             || reset < rolling_reset - WARMUP_WINDOW_TOL_SECS
         {
-            if reset > previous_cycle_key_unix_secs + WARMUP_WINDOW_TOL_SECS {
+            let previous = previous_resets
+                .iter()
+                .find(|(previous_window, _)| previous_window == window)
+                .map(|(_, previous_reset)| *previous_reset);
+            if previous.is_none_or(|previous| reset > previous + WARMUP_WINDOW_TOL_SECS) {
                 advanced += 1;
             }
         } else if separable && snapshot.utilization == Some(0.0) {
@@ -120,6 +124,27 @@ pub(super) fn post_warmup_window_check(
     } else {
         cc_lb_admin::WarmupWindowCheck::Unknown
     }
+}
+
+/// The reset each of the lane's target windows reported before dispatch, for
+/// [`post_warmup_window_check`]. Absent windows and windows without a reset
+/// are left out.
+pub(super) fn target_window_resets(
+    kind: UpstreamKind,
+    lane: WarmupLane,
+    snapshots: &[SubscriptionQuotaCandidateSnapshot],
+) -> Vec<(SubscriptionQuotaWindow, i64)> {
+    lane.target_windows(kind)
+        .iter()
+        .filter_map(|window| {
+            let snapshot = snapshots
+                .iter()
+                .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
+                .filter(|snapshot| snapshot.state != SubscriptionQuotaDataState::Absent)?;
+            let reset = i64::try_from(snapshot.resets_at_unix_secs?).ok()?;
+            Some((*window, reset))
+        })
+        .collect()
 }
 
 pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<WarmupPreflightReject> {

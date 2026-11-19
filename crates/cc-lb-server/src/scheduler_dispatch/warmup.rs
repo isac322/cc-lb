@@ -27,7 +27,7 @@ const QUOTA_GROUP_ABSENT_RECHECK_SECS: i64 = 5 * 60 * 60;
 
 use quota::{
     WarmupPreflightReject, WarmupQuotaPreflightDecision, next_warmup_evaluation_after_success,
-    quota_preflight_decision_from_snapshots, warmup_preflight_reject,
+    quota_preflight_decision_from_snapshots, target_window_resets, warmup_preflight_reject,
 };
 use request::{WarmupDispatchAttempt, WarmupDispatchResult};
 use scheduling::next_warmup_task;
@@ -188,6 +188,19 @@ impl SchedulerDispatch {
             return Err(error);
         }
 
+        // The resets each target window reported before the request, so the
+        // post-request check can tell a new window from one already running.
+        let previous_resets = {
+            let view = self.dynamic_view.load();
+            let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+            drop(view);
+            let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+                upstream.id,
+                now_unix_millis(&*self.clock),
+                max_staleness_secs,
+            );
+            target_window_resets(upstream.kind, job.lane, &snapshots)
+        };
         let initial_attempt = self.dispatch_warmup_request(upstream, job.lane).await;
         let final_attempt = if response_is_auth_failed(&initial_attempt) {
             match self.force_refresh_oauth_token(upstream).await {
@@ -222,7 +235,7 @@ impl SchedulerDispatch {
                 self.verify_warmup_window(
                     upstream,
                     job.lane,
-                    expected_cycle_key,
+                    &previous_resets,
                     request_completed_at_unix_secs,
                 )
                 .await,

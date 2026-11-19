@@ -148,14 +148,15 @@ pub enum WarmupWindowCheck {
 #[async_trait]
 pub trait WarmupWindowVerifier: Send + Sync {
     /// Verify the lane's target windows with a quota reading taken after the
-    /// warm-up response completed. `previous_cycle_key_unix_secs` is the reset
-    /// the caller knew before dispatch; windows that do not reach past it were
-    /// already running and are not evidence of a start.
+    /// warm-up response completed. `previous_resets` holds, per target window,
+    /// the reset the caller knew before dispatch; a running window that does
+    /// not reach past its own previous reset was already running and is not
+    /// evidence of a start.
     async fn verify_warmup_window(
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
-        previous_cycle_key_unix_secs: i64,
+        previous_resets: &[(SubscriptionQuotaWindow, i64)],
         request_completed_at_unix_secs: i64,
     ) -> WarmupWindowCheck;
 }
