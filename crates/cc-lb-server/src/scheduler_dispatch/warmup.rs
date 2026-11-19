@@ -188,16 +188,10 @@ impl SchedulerDispatch {
             return Err(error);
         }
 
-        // Verification anchors resets to the provider request itself, so take
-        // the start right before each dispatch, after token refresh.
-        let mut dispatch_started_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
         let initial_attempt = self.dispatch_warmup_request(upstream, job.lane).await;
         let final_attempt = if response_is_auth_failed(&initial_attempt) {
             match self.force_refresh_oauth_token(upstream).await {
-                Ok(true) => {
-                    dispatch_started_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
-                    self.dispatch_warmup_request(upstream, job.lane).await
-                }
+                Ok(true) => self.dispatch_warmup_request(upstream, job.lane).await,
                 Ok(false) => initial_attempt,
                 Err(error) => {
                     tracing::warn!(upstream_id = %upstream.id, %error, "warmup oauth force-refresh failed");
@@ -225,13 +219,8 @@ impl SchedulerDispatch {
                 WarmupDispatchResult::Response { status, .. } if status.is_success()
             ) {
             Some(
-                self.verify_warmup_window(
-                    upstream,
-                    job.lane,
-                    dispatch_started_at_unix_secs,
-                    request_completed_at_unix_secs,
-                )
-                .await,
+                self.verify_warmup_window(upstream, job.lane, request_completed_at_unix_secs)
+                    .await,
             )
         } else {
             None

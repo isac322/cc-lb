@@ -18,7 +18,6 @@ impl WarmupWindowVerifier for SchedulerDispatch {
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
-        request_started_at_unix_secs: i64,
         request_completed_at_unix_secs: i64,
     ) -> WarmupWindowCheck {
         if upstream.kind != cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth {
@@ -62,7 +61,6 @@ impl WarmupWindowVerifier for SchedulerDispatch {
                     upstream.kind,
                     lane,
                     &snapshots,
-                    request_started_at_unix_secs,
                     request_completed_at_unix_secs,
                 )
             }

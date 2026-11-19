@@ -1535,8 +1535,6 @@ async fn fire_now_upstream_warmup_inner(
     });
     let dialect_plugin_used = dialect_dispatch_bundle.is_some();
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lane = lane.as_str(), cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
-    // Window verification anchors resets to the provider request itself.
-    let dispatch_started_at_unix_secs = unix_now_secs_i64(&*state.clock)?;
     let mut dispatch_attempt =
         if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
             match tokio::time::timeout(
@@ -1618,12 +1616,7 @@ async fn fire_now_upstream_warmup_inner(
         } else {
             match tokio::time::timeout(
                 Duration::from_secs(remaining as u64),
-                verifier.verify_warmup_window(
-                    &upstream,
-                    lane,
-                    dispatch_started_at_unix_secs,
-                    request_completed_at_unix_secs,
-                ),
+                verifier.verify_warmup_window(&upstream, lane, request_completed_at_unix_secs),
             )
             .await
             {
@@ -3463,7 +3456,6 @@ mod tests {
             &self,
             upstream: &UpstreamRecord,
             lane: WarmupLane,
-            _request_started_at_unix_secs: i64,
             _request_completed_at_unix_secs: i64,
         ) -> crate::WarmupWindowCheck {
             self.calls

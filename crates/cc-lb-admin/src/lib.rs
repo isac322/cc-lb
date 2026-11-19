@@ -128,29 +128,31 @@ pub trait WarmupDialectDispatcher: Send + Sync {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum WarmupWindowCheck {
-    /// The request started at least one target window.
+    /// Every reported target window is running after the request: no target
+    /// still looks like an unused rolling window.
     Started {
         observations: Vec<UnifiedQuotaObservation>,
     },
-    /// The request did not start any target window.
+    /// At least one reported target window is still an unused rolling window
+    /// (zero usage, reset still moving with the poll time), so the warm-up did
+    /// not start it.
     NotStarted {
         windows: Vec<SubscriptionQuotaWindow>,
     },
-    /// Samples were not observed after completion, or the started/not-started
-    /// cases are less than MIN_GAP - TOL apart. A target already running before
-    /// the request is not evidence either way.
+    /// The reading cannot tell: stale, observed before the request completed,
+    /// polled too soon after the request to separate a fresh window from a
+    /// rolling one, missing, or every target absent.
     Unknown,
 }
 
 #[async_trait]
 pub trait WarmupWindowVerifier: Send + Sync {
-    /// Verify using samples observed at or after completion, anchored to both
-    /// the request start and completion timestamps.
+    /// Verify the lane's target windows with a quota reading taken after the
+    /// warm-up response completed.
     async fn verify_warmup_window(
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
-        request_started_at_unix_secs: i64,
         request_completed_at_unix_secs: i64,
     ) -> WarmupWindowCheck;
 }
