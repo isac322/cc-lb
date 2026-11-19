@@ -40,12 +40,12 @@ OpenAI and Gemini models are configurable:
 ```toml
 [warmup]
 openai_model = "gpt-6.1-sol"
-gemini_model = "gemini-3.8-flash"
+gemini_model = "gemini-2.5-flash-lite"
 gemini_antigravity_model = "gemini-3.8-flash-low"
 gemini_third_party_model = "gpt-oss-120b-medium"
 ```
 
-These are the defaults. Choose a model available to the connected subscription. Each primary-lane model must belong to the account profile's Gemini models quota group; a model outside that group, such as `gemini-2.5-flash-lite` on Antigravity, returns 200 but does not start the five-hour or weekly window. Antigravity model IDs carry a thinking-level suffix, while Gemini CLI uses bare IDs. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
+These are the defaults. Choose a model available to the connected subscription. Each primary-lane model must belong to the account profile's Gemini models quota group; a model outside that group, such as `gemini-2.5-flash-lite` on Antigravity, returns 200 but does not start the five-hour or weekly window. Antigravity model IDs carry a thinking-level suffix. `gemini_model` applies only to Gemini CLI credentials. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
 ### Shape plugins
 

@@ -345,7 +345,7 @@ impl Default for WarmupConfig {
     fn default() -> Self {
         Self {
             openai_model: "gpt-6.1-sol".to_owned(),
-            gemini_model: "gemini-3.8-flash".to_owned(),
+            gemini_model: "gemini-2.5-flash-lite".to_owned(),
             gemini_antigravity_model: "gemini-3.8-flash-low".to_owned(),
             gemini_third_party_model: "gpt-oss-120b-medium".to_owned(),
         }
@@ -1213,7 +1213,7 @@ mod tests {
     fn warmup_models_default_and_can_be_overridden_independently() {
         let defaults = load_config("").expect("default config");
         assert_eq!(defaults.warmup.openai_model, "gpt-6.1-sol");
-        assert_eq!(defaults.warmup.gemini_model, "gemini-3.8-flash");
+        assert_eq!(defaults.warmup.gemini_model, "gemini-2.5-flash-lite");
         assert_eq!(
             defaults.warmup.gemini_antigravity_model,
             "gemini-3.8-flash-low"
@@ -1222,7 +1222,7 @@ mod tests {
         let overridden =
             load_config("[warmup]\nopenai_model = \"custom-codex\"\n").expect("warmup config");
         assert_eq!(overridden.warmup.openai_model, "custom-codex");
-        assert_eq!(overridden.warmup.gemini_model, "gemini-3.8-flash");
+        assert_eq!(overridden.warmup.gemini_model, "gemini-2.5-flash-lite");
 
         let overridden =
             load_config("[warmup]\ngemini_model = \"custom-gemini\"\n").expect("warmup config");
@@ -1236,7 +1236,7 @@ mod tests {
             overridden.warmup.gemini_antigravity_model,
             "custom-antigravity"
         );
-        assert_eq!(overridden.warmup.gemini_model, "gemini-3.8-flash");
+        assert_eq!(overridden.warmup.gemini_model, "gemini-2.5-flash-lite");
     }
 
     #[test]
@@ -1253,7 +1253,7 @@ mod tests {
             ))
             .expect("third-party warmup model accepted");
             assert_eq!(config.warmup.gemini_third_party_model, model);
-            assert_eq!(config.warmup.gemini_model, "gemini-3.8-flash");
+            assert_eq!(config.warmup.gemini_model, "gemini-2.5-flash-lite");
         }
     }
 
