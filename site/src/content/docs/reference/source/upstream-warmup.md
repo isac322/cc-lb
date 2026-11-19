@@ -47,7 +47,7 @@ gemini_third_party_model = "gpt-oss-120b-medium"
 
 These are the defaults. Choose a model available to the connected subscription. Each primary-lane model must belong to the account profile's Gemini models quota group; a model outside that group, such as `gemini-2.5-flash-lite` on Antigravity, returns 200 but does not start the five-hour or weekly window. Antigravity model IDs carry a thinking-level suffix. `gemini_model` applies only to Gemini CLI credentials. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
-Gemini responses do not include quota headers. After a 2xx warm-up response, cc-lb polls Gemini quota for the lane. If a target window started, the attempt is recorded as `success` with the observed reset. If every present target remains fresh, unused, and valid after the request, the attempt is recorded as `permanent_failure` with reason `window_not_started`; the next attempt uses the usual warm-up interval. If the poll cannot decide, the attempt is recorded using the normal response classification.
+Gemini responses do not include quota headers. After a 2xx warm-up response, cc-lb polls Gemini quota for the lane. A window already running before the request does not count as evidence. If a target window started, the attempt is recorded as `success` with the observed reset. If every present target remains fresh, unused, and valid after the request, the attempt is recorded as `permanent_failure` with reason `window_not_started`; the next attempt is scheduled like a success, after the reported reset of the lane's shortest present window. If the poll cannot decide, the attempt is recorded using the normal response classification.
 
 ### Shape plugins
 

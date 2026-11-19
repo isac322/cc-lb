@@ -757,261 +757,6 @@ fn third_party_success_without_known_reset_falls_back_to_five_hours() {
     );
 }
 
-#[test]
-fn post_warmup_check_started_from_usage() {
-    let snapshots = [
-        active(
-            SubscriptionQuotaWindow::GeminiFiveHour,
-            NOW_UNIX_SECS + FIVE_HOURS,
-        ),
-        absent(SubscriptionQuotaWindow::GeminiSevenDay),
-    ];
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &snapshots,
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Started { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_started_from_fixed_reset_with_zero_usage() {
-    let snapshots = [
-        quota_snapshot(
-            SubscriptionQuotaWindow::GeminiFiveHour,
-            SubscriptionQuotaDataState::Fresh,
-            Some(0.0),
-            Some(NOW_UNIX_SECS + 1_000),
-        ),
-        absent(SubscriptionQuotaWindow::GeminiSevenDay),
-    ];
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &snapshots,
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Started { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_not_started_for_fresh_unused_rolling_windows() {
-    let snapshots = [
-        quota_snapshot(
-            SubscriptionQuotaWindow::GeminiFiveHour,
-            SubscriptionQuotaDataState::Fresh,
-            Some(0.0),
-            Some(NOW_UNIX_SECS + FIVE_HOURS),
-        ),
-        quota_snapshot(
-            SubscriptionQuotaWindow::GeminiSevenDay,
-            SubscriptionQuotaDataState::Fresh,
-            Some(0.0),
-            Some(NOW_UNIX_SECS + SEVEN_DAYS),
-        ),
-    ];
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &snapshots,
-            NOW_UNIX_SECS - 12,
-        ),
-        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_rejects_pre_request_or_stale_samples() {
-    for state in [
-        SubscriptionQuotaDataState::Fresh,
-        SubscriptionQuotaDataState::Stale,
-    ] {
-        let mut snapshot = active(
-            SubscriptionQuotaWindow::GeminiFiveHour,
-            NOW_UNIX_SECS + 1_000,
-        );
-        snapshot.state = state;
-        snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS - 1_000);
-        let snapshots = [snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)];
-        assert_eq!(
-            post_warmup_window_check(
-                UpstreamKind::GeminiOauth,
-                WarmupLane::Primary,
-                &snapshots,
-                NOW_UNIX_SECS,
-            ),
-            cc_lb_admin::WarmupWindowCheck::Unknown
-        );
-    }
-}
-
-#[test]
-fn post_warmup_check_all_absent_is_unknown() {
-    let snapshots = [
-        absent(SubscriptionQuotaWindow::GeminiFiveHour),
-        absent(SubscriptionQuotaWindow::GeminiSevenDay),
-    ];
-    assert_eq!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &snapshots,
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Unknown
-    );
-}
-
-#[test]
-fn post_warmup_check_absent_plus_not_started_is_not_started() {
-    let snapshots = [
-        absent(SubscriptionQuotaWindow::GeminiFiveHour),
-        quota_snapshot(
-            SubscriptionQuotaWindow::GeminiSevenDay,
-            SubscriptionQuotaDataState::Fresh,
-            Some(0.0),
-            Some(NOW_UNIX_SECS + SEVEN_DAYS),
-        ),
-    ];
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &snapshots,
-            NOW_UNIX_SECS - 12,
-        ),
-        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_uses_third_party_windows() {
-    let snapshots = [
-        active(
-            SubscriptionQuotaWindow::ThirdPartyFiveHour,
-            NOW_UNIX_SECS + 1_000,
-        ),
-        absent(SubscriptionQuotaWindow::ThirdPartySevenDay),
-    ];
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::ThirdParty,
-            &snapshots,
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Started { observations }
-            if observations.iter().any(|observation| {
-                observation.window == SubscriptionQuotaWindow::ThirdPartyFiveHour
-            })
-    ));
-}
-#[test]
-fn post_warmup_check_started_zero_usage_after_completion() {
-    let mut snapshot = quota_snapshot(
-        SubscriptionQuotaWindow::ThirdPartyFiveHour,
-        SubscriptionQuotaDataState::Fresh,
-        Some(0.0),
-        Some(NOW_UNIX_SECS + FIVE_HOURS),
-    );
-    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 12_000);
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::ThirdParty,
-            &[
-                snapshot,
-                absent(SubscriptionQuotaWindow::ThirdPartySevenDay)
-            ],
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Started { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_zero_usage_rolling_reset_is_not_started() {
-    let mut snapshot = quota_snapshot(
-        SubscriptionQuotaWindow::GeminiFiveHour,
-        SubscriptionQuotaDataState::Fresh,
-        Some(0.0),
-        Some(NOW_UNIX_SECS + 12 + FIVE_HOURS),
-    );
-    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 12_000);
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::NotStarted { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_zero_usage_before_gap_is_unknown() {
-    let mut snapshot = quota_snapshot(
-        SubscriptionQuotaWindow::GeminiFiveHour,
-        SubscriptionQuotaDataState::Fresh,
-        Some(0.0),
-        Some(NOW_UNIX_SECS + 2 + FIVE_HOURS),
-    );
-    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS + 2_000);
-    assert_eq!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Unknown
-    );
-}
-
-#[test]
-fn post_warmup_check_any_positive_utilization_is_started() {
-    let snapshot = quota_snapshot(
-        SubscriptionQuotaWindow::GeminiFiveHour,
-        SubscriptionQuotaDataState::Fresh,
-        Some(0.001),
-        None,
-    );
-    assert!(matches!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Started { .. }
-    ));
-}
-
-#[test]
-fn post_warmup_check_observed_before_completion_is_unknown() {
-    let mut snapshot = active(
-        SubscriptionQuotaWindow::GeminiFiveHour,
-        NOW_UNIX_SECS + FIVE_HOURS,
-    );
-    snapshot.observed_at_unix_millis = Some(NOW_UNIX_MILLIS - 1_000);
-    assert_eq!(
-        post_warmup_window_check(
-            UpstreamKind::GeminiOauth,
-            WarmupLane::Primary,
-            &[snapshot, absent(SubscriptionQuotaWindow::GeminiSevenDay)],
-            NOW_UNIX_SECS,
-        ),
-        cc_lb_admin::WarmupWindowCheck::Unknown
-    );
-}
-
 fn assert_decision(
     kind: UpstreamKind,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
@@ -1384,5 +1129,155 @@ fn quota_snapshot(
         overage_in_use: None,
         overage_period_monthly_utilization: None,
         upgrade_paths: None,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Expect {
+    Started,
+    NotStarted(Vec<SubscriptionQuotaWindow>),
+    Unknown,
+}
+
+fn reading(
+    window: SubscriptionQuotaWindow,
+    state: SubscriptionQuotaDataState,
+    utilization: Option<f64>,
+    reset: i64,
+    observed_at: i64,
+) -> SubscriptionQuotaCandidateSnapshot {
+    let mut snapshot = quota_snapshot(window, state, utilization, Some(reset));
+    snapshot.observed_at_unix_millis = Some(u64::try_from(observed_at).expect("positive") * 1000);
+    snapshot
+}
+
+#[test]
+fn post_warmup_check_decides_only_from_request_anchored_evidence() {
+    use SubscriptionQuotaDataState::Fresh;
+    use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay, ThirdPartyFiveHour};
+    // Request started at `s`, completed at `c`; the verifier polls at `poll`.
+    let s = NOW_UNIX_SECS;
+    let c = s + 1;
+    let poll = c + 12;
+    let pre_existing_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
+    let cases: Vec<(
+        &str,
+        WarmupLane,
+        Vec<SubscriptionQuotaCandidateSnapshot>,
+        Expect,
+    )> = vec![
+        (
+            "unused 5h next to a running 7d is not started",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.0), poll + FIVE_HOURS, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::NotStarted(vec![GeminiFiveHour]),
+        ),
+        (
+            "5h anchored to the request is started even with zero usage",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.0), s + FIVE_HOURS, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::Started,
+        ),
+        (
+            "third-party window anchored to the request is started",
+            WarmupLane::ThirdParty,
+            vec![reading(
+                ThirdPartyFiveHour,
+                Fresh,
+                Some(0.0),
+                c + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Started,
+        ),
+        (
+            "only pre-existing windows is unknown",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.4), s + 3_600, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::Unknown,
+        ),
+        (
+            "usage on an anchored window is started",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.001),
+                s + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Started,
+        ),
+        (
+            "a poll too close to the request is ambiguous",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.0),
+                c + 2 + FIVE_HOURS,
+                c + 2,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "a reading from before the request completed is unknown",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.0),
+                s + FIVE_HOURS,
+                c - 1,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "a stale reading is unknown",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                SubscriptionQuotaDataState::Stale,
+                Some(0.0),
+                poll + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "every target absent is unknown",
+            WarmupLane::Primary,
+            vec![absent(GeminiFiveHour), absent(GeminiSevenDay)],
+            Expect::Unknown,
+        ),
+        (
+            "absent 5h with an unused 7d is not started",
+            WarmupLane::Primary,
+            vec![
+                absent(GeminiFiveHour),
+                reading(GeminiSevenDay, Fresh, Some(0.0), poll + SEVEN_DAYS, poll),
+            ],
+            Expect::NotStarted(vec![GeminiSevenDay]),
+        ),
+    ];
+    for (name, lane, snapshots, expected) in cases {
+        let actual =
+            match post_warmup_window_check(UpstreamKind::GeminiOauth, lane, &snapshots, s, c) {
+                cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
+                cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => {
+                    Expect::NotStarted(windows)
+                }
+                cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,
+            };
+        assert_eq!(actual, expected, "{name}");
     }
 }

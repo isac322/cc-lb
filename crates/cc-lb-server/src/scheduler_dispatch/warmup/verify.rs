@@ -5,8 +5,12 @@ use cc_lb_storage_api::{UpstreamRecord, WarmupLane};
 
 use crate::scheduler_dispatch::SchedulerDispatch;
 use crate::scheduler_dispatch::time::now_unix_millis;
-use crate::scheduler_dispatch::warmup::quota::post_warmup_window_check;
+use crate::scheduler_dispatch::warmup::quota::{
+    WARMUP_WINDOW_MIN_GAP_SECS, post_warmup_window_check,
+};
 use crate::scheduler_dispatch::warmup::support::now_unix_secs_i64;
+
+const POLL_TIMEOUT_SECS: u64 = 20;
 
 #[async_trait]
 impl WarmupWindowVerifier for SchedulerDispatch {
@@ -14,17 +18,15 @@ impl WarmupWindowVerifier for SchedulerDispatch {
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
+        request_started_at_unix_secs: i64,
         request_completed_at_unix_secs: i64,
     ) -> WarmupWindowCheck {
         if upstream.kind != cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth {
             return WarmupWindowCheck::Unknown;
         }
-        let mut dispatch = self.clone();
+        let dispatch = self.clone();
         let cancel = self.cancel.clone();
-        dispatch.cancel = cancel.clone();
-        const MIN_GAP_SECS: i64 = 10;
-        const POLL_TIMEOUT_SECS: u64 = 20;
-        let wait_until = request_completed_at_unix_secs.saturating_add(MIN_GAP_SECS);
+        let wait_until = request_completed_at_unix_secs.saturating_add(WARMUP_WINDOW_MIN_GAP_SECS);
         let now = match now_unix_secs_i64(&*dispatch.clock) {
             Ok(now) => now,
             Err(_) => return WarmupWindowCheck::Unknown,
@@ -60,6 +62,7 @@ impl WarmupWindowVerifier for SchedulerDispatch {
                     upstream.kind,
                     lane,
                     &snapshots,
+                    request_started_at_unix_secs,
                     request_completed_at_unix_secs,
                 )
             }

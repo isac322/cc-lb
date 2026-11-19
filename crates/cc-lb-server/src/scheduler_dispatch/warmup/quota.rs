@@ -11,7 +11,7 @@ const QUOTA_PREFLIGHT_MAX_AGE_SECS: i64 = 180;
 const FIVE_HOUR_WINDOW_SECS: i64 = 5 * 60 * 60;
 const SEVEN_DAY_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 const WARMUP_WINDOW_TOL_SECS: i64 = 3;
-const WARMUP_WINDOW_MIN_GAP_SECS: i64 = 10;
+pub(super) const WARMUP_WINDOW_MIN_GAP_SECS: i64 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WarmupPreflightReject {
@@ -33,21 +33,24 @@ pub(super) enum WarmupQuotaPreflightDecision {
     SendWarmup,
     Unknown,
 }
+/// Classify only fresh samples observed after completion, using reset timing
+/// anchored to this request. Pre-existing windows are retained as observations
+/// but do not count as evidence.
 pub(super) fn post_warmup_window_check(
     kind: UpstreamKind,
     lane: WarmupLane,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
+    request_started_at_unix_secs: i64,
     request_completed_at_unix_secs: i64,
 ) -> cc_lb_admin::WarmupWindowCheck {
     let mut observations = Vec::new();
     let mut not_started = Vec::new();
     let mut started = false;
     let mut unknown = false;
-
     for window in lane.target_windows(kind) {
         let Some(snapshot) = snapshots
             .iter()
-            .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
+            .find(|s| quota_snapshot_matches_window(s, *window))
         else {
             unknown = true;
             continue;
@@ -65,7 +68,6 @@ pub(super) fn post_warmup_window_check(
             unknown = true;
             continue;
         }
-
         observations.push(UnifiedQuotaObservation {
             window: *window,
             utilization: snapshot.utilization,
@@ -76,51 +78,43 @@ pub(super) fn post_warmup_window_check(
             resets_at_unix_secs: snapshot.resets_at_unix_secs,
             ..UnifiedQuotaObservation::default()
         });
-
-        let reset = snapshot
+        let Some(reset) = snapshot
             .resets_at_unix_secs
-            .and_then(|reset| i64::try_from(reset).ok());
+            .and_then(|r| i64::try_from(r).ok())
+        else {
+            unknown = true;
+            continue;
+        };
         let duration = quota_window_duration_secs(*window);
-        // A just-started window (reset = request + D) and an unused rolling
-        // window (reset = poll + D) are only separable once the poll is at least
-        // MIN_GAP - TOL after the request. A reset clearly earlier than
-        // poll + D can never be a rolling window, so it counts as started.
         let separable = observed_at_unix_secs
-            >= request_completed_at_unix_secs + WARMUP_WINDOW_MIN_GAP_SECS - WARMUP_WINDOW_TOL_SECS;
-        if snapshot
-            .utilization
-            .is_some_and(|utilization| utilization > 0.0)
-            || reset.is_some_and(|reset| {
-                reset > request_completed_at_unix_secs
-                    && reset <= request_completed_at_unix_secs + duration + WARMUP_WINDOW_TOL_SECS
-                    && (separable
-                        || reset < observed_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS)
-            })
+            >= request_completed_at_unix_secs + WARMUP_WINDOW_MIN_GAP_SECS - WARMUP_WINDOW_TOL_SECS
+            || reset < observed_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS;
+        if reset >= request_started_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS
+            && reset <= request_completed_at_unix_secs + duration + WARMUP_WINDOW_TOL_SECS
+            && separable
         {
             started = true;
+        } else if reset < request_started_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS {
             continue;
-        }
-        if separable
+        } else if observed_at_unix_secs
+            >= request_completed_at_unix_secs + WARMUP_WINDOW_MIN_GAP_SECS - WARMUP_WINDOW_TOL_SECS
             && snapshot.utilization == Some(0.0)
-            && reset.is_some_and(|reset| {
-                reset >= observed_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS
-            })
+            && reset >= observed_at_unix_secs + duration - WARMUP_WINDOW_TOL_SECS
         {
             not_started.push(*window);
         } else {
             unknown = true;
         }
     }
-
     if started {
-        return cc_lb_admin::WarmupWindowCheck::Started { observations };
-    }
-    if !not_started.is_empty() && !unknown {
-        return cc_lb_admin::WarmupWindowCheck::NotStarted {
+        cc_lb_admin::WarmupWindowCheck::Started { observations }
+    } else if !not_started.is_empty() && !unknown {
+        cc_lb_admin::WarmupWindowCheck::NotStarted {
             windows: not_started,
-        };
+        }
+    } else {
+        cc_lb_admin::WarmupWindowCheck::Unknown
     }
-    cc_lb_admin::WarmupWindowCheck::Unknown
 }
 
 pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<WarmupPreflightReject> {

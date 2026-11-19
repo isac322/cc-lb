@@ -1606,10 +1606,30 @@ async fn fire_now_upstream_warmup_inner(
         && let Some(verifier) = state.warmup_window_verifier.as_ref()
     {
         let request_completed_at_unix_secs = unix_now_secs_i64(&*state.clock)?;
-        match verifier
-            .verify_warmup_window(&upstream, lane, request_completed_at_unix_secs)
+        const FIRE_NOW_VERIFY_DEADLINE_SECS: i64 = 27;
+        let remaining =
+            FIRE_NOW_VERIFY_DEADLINE_SECS - (request_completed_at_unix_secs - now_unix_secs);
+        // The web client aborts fire-now after 30 s; the attempt row must be
+        // written before that, so verification only gets the remaining budget.
+        let check = if remaining < 13 {
+            crate::WarmupWindowCheck::Unknown
+        } else {
+            match tokio::time::timeout(
+                Duration::from_secs(remaining as u64),
+                verifier.verify_warmup_window(
+                    &upstream,
+                    lane,
+                    now_unix_secs,
+                    request_completed_at_unix_secs,
+                ),
+            )
             .await
-        {
+            {
+                Ok(check) => check,
+                Err(_) => crate::WarmupWindowCheck::Unknown,
+            }
+        };
+        match check {
             crate::WarmupWindowCheck::Started { observations } => {
                 if let FireNowDispatchAttempt::Response {
                     observations: response_observations,
@@ -3441,6 +3461,7 @@ mod tests {
             &self,
             upstream: &UpstreamRecord,
             lane: WarmupLane,
+            _request_started_at_unix_secs: i64,
             _request_completed_at_unix_secs: i64,
         ) -> crate::WarmupWindowCheck {
             self.calls
@@ -3572,6 +3593,77 @@ mod tests {
             *calls.lock().expect("lock"),
             vec![(upstream.id, WarmupLane::Primary)]
         );
+    }
+
+    /// Delegates to a dispatcher, then moves the test clock forward to model a
+    /// slow provider response.
+    struct SlowDispatcher {
+        inner: Arc<dyn crate::WarmupDialectDispatcher>,
+        clock: Arc<cc_lb_clock::TestClock>,
+        elapsed_secs: u64,
+    }
+
+    #[async_trait]
+    impl crate::WarmupDialectDispatcher for SlowDispatcher {
+        async fn dispatch_warmup_with_dialect(
+            &self,
+            runtime: &Arc<cc_lb_runtime_wasmtime::WasmtimeRuntime>,
+            data_dir: &std::path::Path,
+            upstream: &UpstreamRecord,
+            lane: WarmupLane,
+        ) -> Result<crate::WarmupDialectDispatchOutcome, crate::WarmupDialectDispatchError>
+        {
+            let outcome = self
+                .inner
+                .dispatch_warmup_with_dialect(runtime, data_dir, upstream, lane)
+                .await;
+            self.clock.advance_secs(self.elapsed_secs);
+            outcome
+        }
+
+        async fn dispatch_warmup_native(
+            &self,
+            upstream: &UpstreamRecord,
+            lane: WarmupLane,
+        ) -> Result<WarmupNativeDispatchOutcome, crate::WarmupDialectDispatchError> {
+            let outcome = self.inner.dispatch_warmup_native(upstream, lane).await;
+            self.clock.advance_secs(self.elapsed_secs);
+            outcome
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_now_skips_verification_when_the_response_leaves_no_budget() {
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::NotStarted {
+            windows: vec![SubscriptionQuotaWindow::GeminiFiveHour],
+        });
+        let mut context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let clock = Arc::new(cc_lb_clock::TestClock::new());
+        context.state.clock = clock.clone();
+        let inner = context
+            .state
+            .warmup_dialect_dispatcher
+            .clone()
+            .expect("test dispatcher");
+        // 20 s of provider latency leaves 7 s of the 27 s budget, below the
+        // 13 s a verification needs.
+        context.state.warmup_dialect_dispatcher = Some(Arc::new(SlowDispatcher {
+            inner,
+            clock,
+            elapsed_secs: 20,
+        }));
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"]["status"], "success");
+        assert!(calls.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

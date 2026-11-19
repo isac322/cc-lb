@@ -137,19 +137,20 @@ pub enum WarmupWindowCheck {
         windows: Vec<SubscriptionQuotaWindow>,
     },
     /// Samples were not observed after completion, or the started/not-started
-    /// cases are less than MIN_GAP - TOL apart.
+    /// cases are less than MIN_GAP - TOL apart. A target already running before
+    /// the request is not evidence either way.
     Unknown,
 }
 
 #[async_trait]
 pub trait WarmupWindowVerifier: Send + Sync {
-    /// Verify using samples observed at or after the completed request. A
-    /// started versus not-started result is only decided when the cases are
-    /// at least MIN_GAP - TOL apart; otherwise the result is Unknown.
+    /// Verify using samples observed at or after completion, anchored to both
+    /// the request start and completion timestamps.
     async fn verify_warmup_window(
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
+        request_started_at_unix_secs: i64,
         request_completed_at_unix_secs: i64,
     ) -> WarmupWindowCheck;
 }
