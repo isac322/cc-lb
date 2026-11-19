@@ -30,7 +30,6 @@ pub(in crate::scheduler_dispatch) enum WarmupDispatchResult {
         status: http::StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
-        request_sent_at_unix_secs: Option<i64>,
     },
     TransientFailure {
         reason: WarmupTransientFailureReason,
@@ -161,7 +160,6 @@ impl SchedulerDispatch {
                         _ => parse_headers(&outcome.headers),
                     },
                     error_detail: None,
-                    request_sent_at_unix_secs: outcome.request_sent_at_unix_secs,
                 },
             };
         }
@@ -179,7 +177,6 @@ impl SchedulerDispatch {
                 status,
                 observations,
                 error_detail,
-                request_sent_at_unix_secs,
                 ..
             } => WarmupDispatchAttempt {
                 dispatch_kind: WarmupDispatchKind::Http,
@@ -187,7 +184,6 @@ impl SchedulerDispatch {
                     status,
                     observations,
                     error_detail,
-                    request_sent_at_unix_secs,
                 },
             },
             WarmupRequestAttempt::CredentialDecryptFailed { error } => WarmupDispatchAttempt {

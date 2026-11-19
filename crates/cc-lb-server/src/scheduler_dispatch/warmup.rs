@@ -215,13 +215,7 @@ impl SchedulerDispatch {
         };
 
         let request_completed_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
-        let request_started_at_unix_secs = match &final_attempt.result {
-            WarmupDispatchResult::Response {
-                request_sent_at_unix_secs,
-                ..
-            } => request_sent_at_unix_secs.unwrap_or(dispatch_started_at_unix_secs),
-            _ => dispatch_started_at_unix_secs,
-        };
+        // The job has a 60 s timeout; the verification wait plus poll must fit.
         let can_verify_window =
             request_completed_at_unix_secs.saturating_sub(attempted_at_unix_secs) <= 20;
         let window_check = if can_verify_window
@@ -234,7 +228,7 @@ impl SchedulerDispatch {
                 self.verify_warmup_window(
                     upstream,
                     job.lane,
-                    request_started_at_unix_secs,
+                    dispatch_started_at_unix_secs,
                     request_completed_at_unix_secs,
                 )
                 .await,
