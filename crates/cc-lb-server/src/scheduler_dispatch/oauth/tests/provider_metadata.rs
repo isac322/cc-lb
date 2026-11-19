@@ -1066,14 +1066,13 @@ async fn assert_gemini_explicit_destination_matrix_with_query(
             .filter(|record| record.6["request"]["contents"][0]["parts"][0]["text"] == ".")
             .map(|record| record.6["model"].as_str().expect("warmup model"))
             .collect();
+        let warmup = &fixture.dispatch.config.warmup;
         let mut expected_models = vec![
-            fixture.dispatch.config.warmup.gemini_model.as_str(),
-            fixture
-                .dispatch
-                .config
-                .warmup
-                .gemini_third_party_model
-                .as_str(),
+            match profile {
+                GeminiOAuthProfile::Antigravity => warmup.gemini_antigravity_model.as_str(),
+                GeminiOAuthProfile::GeminiCli => warmup.gemini_model.as_str(),
+            },
+            warmup.gemini_third_party_model.as_str(),
         ];
         warmup_models.sort_unstable();
         expected_models.sort_unstable();
@@ -1151,7 +1150,17 @@ async fn assert_gemini_explicit_destination_matrix_with_query(
                 if is_warmup {
                     assert!(
                         [
-                            fixture.dispatch.config.warmup.gemini_model.as_str(),
+                            match profile {
+                                GeminiOAuthProfile::Antigravity => fixture
+                                    .dispatch
+                                    .config
+                                    .warmup
+                                    .gemini_antigravity_model
+                                    .as_str(),
+                                GeminiOAuthProfile::GeminiCli => {
+                                    fixture.dispatch.config.warmup.gemini_model.as_str()
+                                }
+                            },
                             fixture
                                 .dispatch
                                 .config

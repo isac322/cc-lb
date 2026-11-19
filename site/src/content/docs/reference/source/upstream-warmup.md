@@ -33,7 +33,7 @@ Every provider uses the same credential signing and request shaping as proxied t
 
 - Anthropic sends `POST /v1/messages` to `claude-haiku-4-5-20251001` with `max_tokens: 1`.
 - OpenAI sends a ChatGPT Codex `POST /responses` request with `stream: true`, `store: false`, instructions, and one user message `"."`. It reads the SSE stream to completion and parses the Codex quota and credit response headers. The headers do not report `overage_limit_reached`; that restriction comes from the usage poll.
-- Gemini sends `generateContent` with one user message `"."` and `maxOutputTokens: 1`. The issuing OAuth profile determines the envelope, host, user agent, and project. The `third_party` lane sends the same request through the Antigravity envelope, with the Claude/GPT-OSS model below.
+- Gemini sends `generateContent` with one user message `"."` and `maxOutputTokens: 1`. The issuing OAuth profile determines the envelope, host, user agent, and project. The `primary` lane uses `gemini_model` for Gemini CLI credentials and `gemini_antigravity_model` for Antigravity credentials. The `third_party` lane sends the same request through the Antigravity envelope, with the Claude/GPT-OSS model below.
 
 OpenAI and Gemini models are configurable:
 
@@ -41,10 +41,11 @@ OpenAI and Gemini models are configurable:
 [warmup]
 openai_model = "gpt-6.1-sol"
 gemini_model = "gemini-2.5-flash-lite"
+gemini_antigravity_model = "gemini-3.8-flash-low"
 gemini_third_party_model = "gpt-oss-120b-medium"
 ```
 
-These are the defaults. Choose a model available to the connected subscription. `gemini_model` must be a Gemini model. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
+These are the defaults. Choose a model available to the connected subscription. Each primary-lane model must belong to the account profile's Gemini models quota group; a model outside that group, such as `gemini-2.5-flash-lite` on Antigravity, returns 200 but does not start the five-hour or weekly window. Antigravity model IDs carry a thinking-level suffix. `gemini_model` applies only to Gemini CLI credentials. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
 ### Shape plugins
 

@@ -708,7 +708,8 @@ describe('config editor information architecture', () => {
 
   it.each([
     ['openai_model', 'OpenAI model', 'OpenAI'],
-    ['gemini_model', 'Gemini model', 'Gemini'],
+    ['gemini_model', 'Gemini CLI model', 'Gemini CLI'],
+    ['gemini_antigravity_model', 'Gemini Antigravity model', 'Antigravity'],
     [
       'gemini_third_party_model',
       'Gemini Claude and GPT-OSS model',
