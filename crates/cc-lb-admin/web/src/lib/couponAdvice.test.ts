@@ -218,6 +218,17 @@ const matrix: [string, () => CouponAdviceInput, string][] = [
     'save',
   ],
   [
+    'fable-expiry',
+    () =>
+      fable({
+        weeklyUsed: 80,
+        fableUsed: 40,
+        resetIn: 4 * DAY,
+        expiresIn: 2 * DAY,
+      }),
+    'expiry',
+  ],
+  [
     'fable-stale',
     () => fable({ weeklyUsed: 100, fableUsed: 41, fableState: 'stale' }),
     'unknown',
@@ -448,20 +459,27 @@ describe('coupon advice scenario matrix', () => {
     );
     expect(weeklyEmpty?.kind).toBe('nothing_to_restore');
 
-    const fableFull = deriveCouponAdvice(
-      scenario({
-        used: 20,
-        resetIn: 2 * HOUR,
-        expiresIn: 30 * DAY,
-        extra: [quota('7d', 80, 4 * DAY), quota('7d_fable', 100, 4 * DAY)],
-        coupon: {
-          type: 'full',
-          gives_back_weekly: true,
-          clears: ['7d_overage_included'],
-          percent_used: { '5h': 20, '7d': 80, '7d_overage_included': 100 },
-        },
+    const fableBucketOnlyFull = deriveCouponAdvice(
+      fable({
+        weeklyUsed: 20,
+        fableUsed: 100,
+        resetIn: 4 * DAY,
+        expiresIn: 14 * DAY,
       }),
     );
-    expect(fableFull?.kind).toBe('useful_now');
+    expect(fableBucketOnlyFull).toBeNull();
+
+    const fableBothFull = deriveCouponAdvice(
+      fable({
+        weeklyUsed: 100,
+        fableUsed: 100,
+        resetIn: 4 * DAY,
+        expiresIn: 14 * DAY,
+      }),
+    );
+    expect(fableBothFull?.kind).toBe('useful_now');
+    expect(fableBothFull?.message).toContain(
+      'restores the Fable portion of your full Weekly limit',
+    );
   });
 });

@@ -572,9 +572,9 @@ export function chooseCouponGrant(
   let bestPriority = -1;
   let bestExpiry = Infinity;
   for (const grant of usable) {
-    const directFull =
-      presentCoupon(grant, windows, options).hasFullTarget ||
-      fableCanRestoreFullFiveHour(grant, windows, options);
+    const directFull = isFableRebateGrant(grant)
+      ? fableCanRestoreFullFiveHour(grant, windows, options)
+      : presentCoupon(grant, windows, options).hasFullTarget;
     const priority = directFull
       ? 2
       : fableCanRestoreFullWeekly(grant, windows, options)

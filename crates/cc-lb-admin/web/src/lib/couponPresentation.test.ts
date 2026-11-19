@@ -354,6 +354,48 @@ describe('coupon selection', () => {
         FRESH,
       )?.id,
     ).toBe('five-hour-non-full');
+
+    // A full 7d_fable bucket alone does not promote Fable into priority 2:
+    // with 7d = 20% (and 5h < 100%), Fable stays tier 0 so both a later-expiring
+    // direct full reset and an earlier-expiring tier-0 coupon beat it;
+    // with 7d = 100%, Fable stays tier 1 behind direct full resets.
+    const sonnetFullLater = grant({
+      id: 'sonnet-full-later',
+      clears: ['7d_sonnet'],
+      ends_at: '2026-11-25T00:00:00Z',
+    });
+    expect(
+      chooseCouponGrant(
+        [fableEarly, sonnetFullLater],
+        [fableEarly, sonnetFullLater],
+        [
+          quota('5h', 0.2),
+          quota('7d', 0.2),
+          quota('7d_fable', 1),
+          quota('7d_sonnet', 1),
+        ],
+        null,
+        FRESH,
+      )?.id,
+    ).toBe('sonnet-full-later');
+    expect(
+      chooseCouponGrant(
+        [nonFullFiveHour, fableEarly],
+        [nonFullFiveHour, fableEarly],
+        [quota('5h', 0.2), quota('7d', 0.2), quota('7d_fable', 1)],
+        null,
+        FRESH,
+      )?.id,
+    ).toBe('five-hour-non-full');
+    expect(
+      chooseCouponGrant(
+        [fableEarly, weeklyLater],
+        [fableEarly, weeklyLater],
+        [quota('5h', 0.2), quota('7d', 1), quota('7d_fable', 1)],
+        null,
+        FRESH,
+      )?.id,
+    ).toBe('weekly-later');
   });
 
   it('uses earliest expiry when no usable target is full', () => {

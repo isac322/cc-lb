@@ -14,6 +14,7 @@ import {
   couponWindowLabel,
   fableCanRestoreFullFiveHour,
   fableCanRestoreFullWeekly,
+  isFableRebateGrant,
   isFullCouponWindow,
   presentCoupon,
 } from './couponPresentation';
@@ -152,6 +153,14 @@ export function deriveCouponNudge(
     for (const reading of presentation.targets) {
       if (!isFullCouponWindow(reading)) continue;
       const name = reading.window;
+      // Fable grants only nudge weekly exhaustion through fableCanRestoreFullWeekly
+      // (requiring shared Weekly = 100% and Weekly (Fable) > 0%).
+      if (
+        isFableRebateGrant(g) &&
+        (name === '7d_overage_included' || name === '7d_fable')
+      ) {
+        continue;
+      }
       const w =
         byWindow.get(name) ??
         (name === '7d_overage_included' ? byWindow.get('7d_fable') : undefined);

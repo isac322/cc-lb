@@ -1,6 +1,10 @@
 import { WINDOW_DURATION_SECS } from './colors';
 import { formatWait } from './couponNudge';
-import type { CouponEffectRow, CouponEffects } from './couponPresentation';
+import {
+  type CouponEffectRow,
+  type CouponEffects,
+  isFableRebateGrant,
+} from './couponPresentation';
 import type { LimitResetGrant } from './limitResets';
 
 export type CouponAdviceKind =
@@ -130,7 +134,13 @@ export function deriveCouponAdvice({
   ];
   const expiry = grant.ends_at == null ? NaN : Date.parse(grant.ends_at) / 1000;
   const expiryKnown = Number.isFinite(expiry) && expiry > nowSeconds;
-  const hasDirectFullTarget = restored.some(
+  // For Fable rebates, 7d_fable alone does not restore shared Weekly when 7d < 100%;
+  // only non-Fable reset targets count as direct full limits here.
+  const directRestored =
+    isFableRebateGrant(grant) || fableWeeklyRow != null
+      ? restored.filter((row) => row.window !== '7d_fable')
+      : restored;
+  const hasDirectFullTarget = directRestored.some(
     (row) => (freshUsage(row) ?? -1) >= 100,
   );
   const fableUnblocksWeekly =
@@ -187,7 +197,7 @@ export function deriveCouponAdvice({
 
   if (hasFullTarget) {
     const fullRows: CouponEffectRow[] = [
-      ...restored.filter((row) => (freshUsage(row) ?? -1) >= 100),
+      ...directRestored.filter((row) => (freshUsage(row) ?? -1) >= 100),
       ...(fableUnblocksWeekly && fableWeeklyRow ? [fableWeeklyRow] : []),
     ];
     const expiresBeforeReset =

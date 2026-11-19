@@ -1350,4 +1350,37 @@ describe('Gemini and API-key coupon column removal', () => {
     expect(geminiLi.querySelector('.pr-20')).toBeNull();
     expect(keyLi.querySelector('.pr-20')).toBeNull();
   });
+
+  it('hides the Coupons column when all coupon-capable upstreams sit behind the collapsed list', () => {
+    const specs: Spec[] = Array.from({ length: 8 }, (_, index) => [
+      `gemini-${index + 1}`,
+      'gemini_oauth',
+      true,
+      'active',
+      null,
+      null,
+    ]);
+    specs.push(['claude-hidden', 'anthropic_oauth', true, 'active', 0.1, 0.2]);
+    const usageData = data(specs);
+    for (let i = 0; i < 8; i += 1) {
+      usageData.rows[i]!.windows = [
+        snap('gemini_5h', 0.9),
+        snap('gemini_7d', 0.8),
+      ];
+    }
+
+    render(<UpstreamUsageTable data={usageData} layout="shared" />);
+    expect(screen.queryByText('Coupons')).toBeNull();
+    expect(screen.queryAllByTestId('upstream-coupons')).toHaveLength(0);
+    const header = screen.getByTestId('upstream-usage-header');
+    expect(header.className).toContain('pr-3');
+    expect(header.className).not.toContain('pr-20');
+
+    fireEvent.click(screen.getByTestId('upstream-usage-toggle'));
+    expect(screen.getAllByText('Coupons')).toHaveLength(1);
+    expect(screen.getAllByTestId('upstream-coupons')).toHaveLength(1);
+    expect(screen.getByTestId('upstream-usage-header').className).toContain(
+      'pr-20',
+    );
+  });
 });

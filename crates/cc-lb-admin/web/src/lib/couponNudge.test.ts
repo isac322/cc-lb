@@ -180,4 +180,35 @@ describe('deriveCouponNudge', () => {
     expect(bothNudge.kind).toBe('limit');
     expect(bothNudge.detail).toContain('a reset clears it now.');
   });
+
+  it('does not nudge limit for Fable when Weekly is below 100% even if Weekly (Fable) is 100%', () => {
+    const fableGrant = grant({
+      id: 'fable',
+      type: 'full',
+      gives_back_weekly: true,
+      clears: ['7d_overage_included'],
+    });
+    const partialWeekly = deriveCouponNudge(
+      ember([fableGrant]),
+      [
+        window({ window: '7d', utilization: 0.2 }),
+        window({ window: '7d_fable', utilization: 1 }),
+      ],
+      NOW,
+    );
+    expect(partialWeekly.kind).toBe('quiet');
+
+    const fullWeeklyAndBucket = deriveCouponNudge(
+      ember([fableGrant]),
+      [
+        window({ window: '7d', utilization: 1 }),
+        window({ window: '7d_fable', utilization: 1 }),
+      ],
+      NOW,
+    );
+    expect(fullWeeklyAndBucket.kind).toBe('limit');
+    expect(fullWeeklyAndBucket.detail).toContain(
+      'Fable reset restores its Fable portion',
+    );
+  });
 });

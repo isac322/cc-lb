@@ -1269,7 +1269,7 @@ function UpstreamUsageRows({
       row.upstream.kind.endsWith('_oauth') &&
       providerOf(row.upstream.kind) !== 'gemini',
   );
-  const hasCouponColumn = sorted.some(
+  const hasCouponColumn = shown.some(
     (row) => capabilitiesOf(row.upstream.kind).limitReset,
   );
   const firstProvider = sorted[0]
@@ -1355,6 +1355,8 @@ function UpstreamUsageRows({
                 ROW_CLASS,
                 rowGrid,
                 'hover:bg-overlay-2',
+                // Desktop rows share equal-width grid tracks with the header; keeping
+                // the coupon gutter across every row preserves column alignment.
                 hasCouponColumn && '@4xl:pr-20',
               )}
               search={{ selectedId: row.upstream.id }}
