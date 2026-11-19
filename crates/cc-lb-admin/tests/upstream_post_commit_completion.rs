@@ -132,6 +132,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
         Ok(WarmupDialectDispatchOutcome {
             status: StatusCode::OK,
             headers: axum::http::HeaderMap::new(),
+            request_sent_at_unix_secs: None,
         })
     }
 
@@ -148,6 +149,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
                 ..Default::default()
             }],
             error_detail: None,
+            request_sent_at_unix_secs: None,
         })
     }
 }

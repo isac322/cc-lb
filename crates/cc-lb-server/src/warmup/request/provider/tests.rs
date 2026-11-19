@@ -131,6 +131,7 @@ async fn warmup_response_body_timeout_cancels_never_ending_stream() {
         request,
         |_| Vec::new(),
         None,
+        None,
         Duration::from_millis(25),
     )
     .await;
@@ -621,8 +622,14 @@ async fn provider_plugin_output_is_dispatched_before_oauth_signing_and_gemini_wr
         )
         .await
         .unwrap();
-        let result =
-            dispatch_http_request(&client, request, |_| Vec::new(), Some(signer.as_ref())).await;
+        let result = dispatch_http_request(
+            &client,
+            request,
+            |_| Vec::new(),
+            Some(signer.as_ref()),
+            None,
+        )
+        .await;
         assert!(matches!(
             result,
             WarmupRequestAttempt::Response {

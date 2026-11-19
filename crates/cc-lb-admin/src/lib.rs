@@ -86,6 +86,7 @@ impl WarmupDialectDispatchError {
 pub struct WarmupDialectDispatchOutcome {
     pub status: StatusCode,
     pub headers: HeaderMap,
+    pub request_sent_at_unix_secs: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -95,6 +96,7 @@ pub enum WarmupNativeDispatchOutcome {
         dispatch_kind: WarmupDispatchKind,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
+        request_sent_at_unix_secs: Option<i64>,
     },
     TransientFailure {
         dispatch_kind: WarmupDispatchKind,

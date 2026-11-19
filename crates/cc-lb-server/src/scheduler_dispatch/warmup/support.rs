@@ -22,6 +22,7 @@ pub(super) fn execution_result_from_dispatch_attempt<'a>(
             status,
             observations,
             error_detail,
+            ..
         } => WarmupAttemptExecutionResult::Response {
             status: *status,
             observations: observations_override.unwrap_or(observations),

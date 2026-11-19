@@ -1548,6 +1548,7 @@ async fn fire_now_upstream_warmup_inner(
                 Ok(Ok(outcome)) => fire_now_response_attempt(
                     outcome.status,
                     outcome.headers,
+                    outcome.request_sent_at_unix_secs,
                     WarmupDispatchKind::DialectPlugin,
                     upstream.kind,
                 ),
@@ -1616,12 +1617,19 @@ async fn fire_now_upstream_warmup_inner(
         let check = if remaining < 13 {
             crate::WarmupWindowCheck::Unknown
         } else {
+            let request_started_at_unix_secs = match &dispatch_attempt {
+                FireNowDispatchAttempt::Response {
+                    request_sent_at_unix_secs,
+                    ..
+                } => request_sent_at_unix_secs.unwrap_or(dispatch_started_at_unix_secs),
+                _ => dispatch_started_at_unix_secs,
+            };
             match tokio::time::timeout(
                 Duration::from_secs(remaining as u64),
                 verifier.verify_warmup_window(
                     &upstream,
                     lane,
-                    dispatch_started_at_unix_secs,
+                    request_started_at_unix_secs,
                     request_completed_at_unix_secs,
                 ),
             )
@@ -1865,6 +1873,7 @@ enum FireNowDispatchAttempt {
         headers: HeaderMap,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
+        request_sent_at_unix_secs: Option<i64>,
         verified_observations: bool,
     },
     TransientFailure {
@@ -1890,12 +1899,14 @@ fn fire_now_attempt_from_native_outcome(
             dispatch_kind,
             observations,
             error_detail,
+            request_sent_at_unix_secs,
         } => FireNowDispatchAttempt::Response {
             status,
             dispatch_kind,
             headers: HeaderMap::new(),
             observations,
             error_detail,
+            request_sent_at_unix_secs,
             verified_observations: false,
         },
         WarmupNativeDispatchOutcome::TransientFailure {
@@ -1926,6 +1937,7 @@ fn fire_now_attempt_from_native_outcome(
 fn fire_now_response_attempt(
     status: StatusCode,
     headers: HeaderMap,
+    request_sent_at_unix_secs: Option<i64>,
     dispatch_kind: WarmupDispatchKind,
     kind: UpstreamKind,
 ) -> FireNowDispatchAttempt {
@@ -1940,6 +1952,7 @@ fn fire_now_response_attempt(
         headers,
         observations,
         error_detail: None,
+        request_sent_at_unix_secs,
         verified_observations: false,
     }
 }
@@ -3427,6 +3440,7 @@ mod tests {
             Ok(crate::WarmupDialectDispatchOutcome {
                 status: self.status,
                 headers: HeaderMap::new(),
+                request_sent_at_unix_secs: None,
             })
         }
 
@@ -3447,10 +3461,11 @@ mod tests {
                 dispatch_kind: WarmupDispatchKind::Http,
                 observations: Vec::new(),
                 error_detail: None,
+                request_sent_at_unix_secs: Some(42),
             })
         }
     }
-    type VerifierCalls = Arc<std::sync::Mutex<Vec<(Uuid, WarmupLane)>>>;
+    type VerifierCalls = Arc<std::sync::Mutex<Vec<(Uuid, WarmupLane, i64)>>>;
 
     struct TestWarmupWindowVerifier {
         check: crate::WarmupWindowCheck,
@@ -3463,13 +3478,14 @@ mod tests {
             &self,
             upstream: &UpstreamRecord,
             lane: WarmupLane,
-            _request_started_at_unix_secs: i64,
+            request_started_at_unix_secs: i64,
             _request_completed_at_unix_secs: i64,
         ) -> crate::WarmupWindowCheck {
-            self.calls
-                .lock()
-                .expect("verifier calls lock")
-                .push((upstream.id, lane));
+            self.calls.lock().expect("verifier calls lock").push((
+                upstream.id,
+                lane,
+                request_started_at_unix_secs,
+            ));
             self.check.clone()
         }
     }
@@ -3531,7 +3547,26 @@ mod tests {
         );
         assert_eq!(
             *calls.lock().expect("lock"),
-            vec![(upstream.id, WarmupLane::Primary)]
+            vec![(upstream.id, WarmupLane::Primary, 42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_verifies_from_native_request_send_time() {
+        let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::Unknown);
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+
+        let _ = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![(upstream.id, WarmupLane::Primary, 42)]
         );
     }
 
@@ -3556,7 +3591,7 @@ mod tests {
         assert_eq!(body["reason"], "window_not_started");
         assert_eq!(
             *calls.lock().expect("lock"),
-            vec![(upstream.id, WarmupLane::Primary)]
+            vec![(upstream.id, WarmupLane::Primary, 42)]
         );
         assert_eq!(
             context.recorded_attempts.lock().expect("lock")[0],
@@ -3593,7 +3628,7 @@ mod tests {
         assert_eq!(body["outcome"]["reason"], "cycle_advanced");
         assert_eq!(
             *calls.lock().expect("lock"),
-            vec![(upstream.id, WarmupLane::Primary)]
+            vec![(upstream.id, WarmupLane::Primary, 42)]
         );
     }
 
