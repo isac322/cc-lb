@@ -27,7 +27,7 @@ const QUOTA_GROUP_ABSENT_RECHECK_SECS: i64 = 5 * 60 * 60;
 
 use quota::{
     WarmupPreflightReject, WarmupQuotaPreflightDecision, next_warmup_evaluation_after_success,
-    quota_preflight_decision_from_snapshots, warmup_preflight_reject,
+    quota_preflight_decision_from_snapshots, target_window_resets, warmup_preflight_reject,
 };
 use request::{WarmupDispatchAttempt, WarmupDispatchResult};
 use scheduling::next_warmup_task;
@@ -188,16 +188,23 @@ impl SchedulerDispatch {
             return Err(error);
         }
 
-        // Verification anchors resets to the provider request itself, so take
-        // the start right before each dispatch, after token refresh.
-        let mut dispatch_started_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
+        // The resets each target window reported before the request, so the
+        // post-request check can tell a new window from one already running.
+        let previous_resets = {
+            let view = self.dynamic_view.load();
+            let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+            drop(view);
+            let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+                upstream.id,
+                now_unix_millis(&*self.clock),
+                max_staleness_secs,
+            );
+            target_window_resets(upstream.kind, job.lane, &snapshots)
+        };
         let initial_attempt = self.dispatch_warmup_request(upstream, job.lane).await;
         let final_attempt = if response_is_auth_failed(&initial_attempt) {
             match self.force_refresh_oauth_token(upstream).await {
-                Ok(true) => {
-                    dispatch_started_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
-                    self.dispatch_warmup_request(upstream, job.lane).await
-                }
+                Ok(true) => self.dispatch_warmup_request(upstream, job.lane).await,
                 Ok(false) => initial_attempt,
                 Err(error) => {
                     tracing::warn!(upstream_id = %upstream.id, %error, "warmup oauth force-refresh failed");
@@ -215,13 +222,7 @@ impl SchedulerDispatch {
         };
 
         let request_completed_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
-        let request_started_at_unix_secs = match &final_attempt.result {
-            WarmupDispatchResult::Response {
-                request_sent_at_unix_secs,
-                ..
-            } => request_sent_at_unix_secs.unwrap_or(dispatch_started_at_unix_secs),
-            _ => dispatch_started_at_unix_secs,
-        };
+        // The job has a 60 s timeout; the verification wait plus poll must fit.
         let can_verify_window =
             request_completed_at_unix_secs.saturating_sub(attempted_at_unix_secs) <= 20;
         let window_check = if can_verify_window
@@ -234,7 +235,7 @@ impl SchedulerDispatch {
                 self.verify_warmup_window(
                     upstream,
                     job.lane,
-                    request_started_at_unix_secs,
+                    &previous_resets,
                     request_completed_at_unix_secs,
                 )
                 .await,

@@ -1152,14 +1152,22 @@ fn reading(
 }
 
 #[test]
-fn post_warmup_check_decides_only_from_request_anchored_evidence() {
+fn post_warmup_check_separates_running_from_rolling_windows() {
     use SubscriptionQuotaDataState::Fresh;
     use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay, ThirdPartyFiveHour};
-    // Request started at `s`, completed at `c`; the verifier polls at `poll`.
+    // Request sent at `s`, completed at `c`; the verifier polls at `poll`.
+    // `previous` is the reset the caller knew before dispatch (for fire-now,
+    // the still-active window's reset).
     let s = NOW_UNIX_SECS;
     let c = s + 1;
     let poll = c + 12;
-    let pre_existing_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
+    let previous_five_hour = s + 3_600;
+    let previous_weekly = s + 3 * 86_400;
+    let previous = [
+        (GeminiFiveHour, previous_five_hour),
+        (GeminiSevenDay, previous_weekly),
+    ];
+    let running_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
     let cases: Vec<(
         &str,
         WarmupLane,
@@ -1171,54 +1179,71 @@ fn post_warmup_check_decides_only_from_request_anchored_evidence() {
             WarmupLane::Primary,
             vec![
                 reading(GeminiFiveHour, Fresh, Some(0.0), poll + FIVE_HOURS, poll),
-                pre_existing_weekly(),
+                running_weekly(),
             ],
             Expect::NotStarted(vec![GeminiFiveHour]),
         ),
         (
-            "5h anchored to the request is started even with zero usage",
+            "5h started by the request is running even with zero usage",
             WarmupLane::Primary,
             vec![
                 reading(GeminiFiveHour, Fresh, Some(0.0), s + FIVE_HOURS, poll),
-                pre_existing_weekly(),
+                running_weekly(),
             ],
             Expect::Started,
         ),
         (
-            "third-party window anchored to the request is started",
+            "third-party window started by the request is running",
             WarmupLane::ThirdParty,
-            vec![reading(
-                ThirdPartyFiveHour,
-                Fresh,
-                Some(0.0),
-                c + FIVE_HOURS,
-                poll,
-            )],
+            vec![
+                reading(ThirdPartyFiveHour, Fresh, Some(0.0), c + FIVE_HOURS, poll),
+                absent(SubscriptionQuotaWindow::ThirdPartySevenDay),
+            ],
             Expect::Started,
         ),
         (
-            "only pre-existing windows is unknown",
+            // Live case: a warm-up sent 33 s after the previous 5h window
+            // expired got a reset of `previous reset + 5h`, not `request + 5h`.
+            "a window chained to the previous reset is running",
             WarmupLane::Primary,
             vec![
-                reading(GeminiFiveHour, Fresh, Some(0.4), s + 3_600, poll),
-                pre_existing_weekly(),
+                reading(
+                    GeminiFiveHour,
+                    Fresh,
+                    Some(0.000_003),
+                    s - 33 + FIVE_HOURS,
+                    poll,
+                ),
+                reading(
+                    GeminiSevenDay,
+                    Fresh,
+                    Some(0.000_001),
+                    s - 33 + SEVEN_DAYS,
+                    poll,
+                ),
             ],
-            Expect::Unknown,
-        ),
-        (
-            "usage on an anchored window is started",
-            WarmupLane::Primary,
-            vec![reading(
-                GeminiFiveHour,
-                Fresh,
-                Some(0.001),
-                s + FIVE_HOURS,
-                poll,
-            )],
             Expect::Started,
         ),
         (
-            "a poll too close to the request is ambiguous",
+            "zero-usage chained window is running",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.0), s - 33 + FIVE_HOURS, poll),
+                absent(GeminiSevenDay),
+            ],
+            Expect::Started,
+        ),
+        (
+            "usage on a window is running",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.001), s + FIVE_HOURS, poll),
+                absent(GeminiSevenDay),
+            ],
+            Expect::Started,
+        ),
+        (
+            "a poll too close to the request cannot tell a rolling window apart",
             WarmupLane::Primary,
             vec![reading(
                 GeminiFiveHour,
@@ -1226,6 +1251,18 @@ fn post_warmup_check_decides_only_from_request_anchored_evidence() {
                 Some(0.0),
                 c + 2 + FIVE_HOURS,
                 c + 2,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "a missing target reading is unknown",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.001),
+                s + FIVE_HOURS,
+                poll,
             )],
             Expect::Unknown,
         ),
@@ -1268,16 +1305,35 @@ fn post_warmup_check_decides_only_from_request_anchored_evidence() {
             ],
             Expect::NotStarted(vec![GeminiSevenDay]),
         ),
+        (
+            "a window already running before the request is not evidence",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.3), previous_five_hour, poll),
+                absent(GeminiSevenDay),
+            ],
+            Expect::Unknown,
+        ),
+        (
+            // Weekly-only account: the running 7d window kept its known reset.
+            "a weekly window already running before the request is not evidence",
+            WarmupLane::Primary,
+            vec![absent(GeminiFiveHour), running_weekly()],
+            Expect::Unknown,
+        ),
     ];
     for (name, lane, snapshots, expected) in cases {
-        let actual =
-            match post_warmup_window_check(UpstreamKind::GeminiOauth, lane, &snapshots, s, c) {
-                cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
-                cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => {
-                    Expect::NotStarted(windows)
-                }
-                cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,
-            };
+        let actual = match post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            lane,
+            &snapshots,
+            &previous,
+            c,
+        ) {
+            cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
+            cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => Expect::NotStarted(windows),
+            cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,
+        };
         assert_eq!(actual, expected, "{name}");
     }
 }

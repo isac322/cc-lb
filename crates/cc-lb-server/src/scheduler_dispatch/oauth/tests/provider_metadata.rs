@@ -1019,7 +1019,6 @@ async fn assert_gemini_explicit_destination_matrix_with_query(
                         status: http::StatusCode::OK,
                         ref observations,
                         ref error_detail,
-                        ..
                     } if observations.is_empty() && error_detail.is_none()
                 ),
                 "real provider warmup response for {lane:?}: {warmup:?}"

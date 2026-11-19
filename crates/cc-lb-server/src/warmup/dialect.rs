@@ -37,7 +37,6 @@ use crate::warmup::request::{
 pub struct WarmupDispatchOutcome {
     pub status: StatusCode,
     pub headers: HeaderMap,
-    pub request_sent_at_unix_secs: Option<i64>,
 }
 
 pub struct WarmupDialectDispatchParams<'a> {
@@ -233,15 +232,13 @@ pub async fn dispatch_warmup_with_dialect(
                 lane: params.lane,
                 aead: params.aead.as_ref(),
                 config: params.config,
-                clock: params.clock.clone(),
+                clock: params.clock,
             },
             &bundle,
             dialect.as_ref(),
         )
         .await
         .map_err(WarmupDispatchError::Shape)?;
-        let request_sent_at_unix_secs =
-            i64::try_from(cc_lb_clock::unix_secs(params.clock.now())).ok();
         let response = tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, params.http.request(request))
             .await
             .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))?
@@ -249,7 +246,6 @@ pub async fn dispatch_warmup_with_dialect(
         let outcome = WarmupDispatchOutcome {
             status: response.status(),
             headers: response.headers().clone(),
-            request_sent_at_unix_secs,
         };
         let mut body = response.into_body();
         tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, async {
@@ -327,7 +323,6 @@ pub async fn dispatch_warmup_with_dialect(
     Ok(WarmupDispatchOutcome {
         status: response.status(),
         headers: response.headers().clone(),
-        request_sent_at_unix_secs: None,
     })
 }
 

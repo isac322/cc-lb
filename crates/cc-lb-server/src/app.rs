@@ -1989,7 +1989,6 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
         Ok(WarmupDialectDispatchOutcome {
             status: outcome.status,
             headers: outcome.headers,
-            request_sent_at_unix_secs: outcome.request_sent_at_unix_secs,
         })
     }
 
@@ -2064,13 +2063,11 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                     status,
                     observations,
                     error_detail,
-                    request_sent_at_unix_secs,
                 } => WarmupNativeDispatchOutcome::Response {
                     status,
                     dispatch_kind: WarmupDispatchKind::Http,
                     observations,
                     error_detail,
-                    request_sent_at_unix_secs,
                 },
                 WarmupRequestAttempt::CredentialDecryptFailed { error } => {
                     WarmupNativeDispatchOutcome::PermanentFailure {
