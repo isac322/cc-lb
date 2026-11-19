@@ -631,6 +631,14 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         Ok(false)
     }
 
+    async fn record_subscription_quota_fenced_headers(
+        &self,
+        _records: &[SubscriptionQuotaSample],
+        _fence: &cc_lb_storage_api::SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool> {
+        Ok(false)
+    }
+
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         _upstream_ids: &[Uuid],

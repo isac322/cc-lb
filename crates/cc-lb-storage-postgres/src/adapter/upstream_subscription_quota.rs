@@ -84,62 +84,17 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
         records: &[SubscriptionQuotaSample],
         fence: &SubscriptionQuotaPollFence,
     ) -> StorageResult<bool> {
-        if fence.epoch_key.is_empty()
-            || records.iter().any(|record| {
-                record.upstream_id != fence.upstream_id
-                    || record.source != SubscriptionQuotaSource::Api
-            })
-        {
-            return Err(StorageError::InvalidInput {
-                field: "subscription_quota_poll".to_owned(),
-                reason: "poll requires an epoch key and API samples for its fenced upstream"
-                    .to_owned(),
-            });
-        }
-
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        lock_meta_value(&mut tx, &fence.epoch_key).await?;
-        // OAuth rotation and deletion lock the spec row before changing tokens.
-        // Keep that lock until quota publication commits, including generation 0
-        // when an OAuth token row has not been created yet.
-        let active: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM upstream_spec_v1 \
-             WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-        )
-        .bind(fence.upstream_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        if active.is_none() {
-            tx.rollback().await.map_err(map_sqlx_error)?;
-            return Ok(false);
-        }
-        let generation: Option<i64> = sqlx::query_scalar(
-            "SELECT oauth_token_generation FROM upstream_oauth_token_v1 \
-             WHERE upstream_id = $1 FOR UPDATE",
-        )
-        .bind(fence.upstream_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        let epoch: Option<String> = sqlx::query_scalar("SELECT value FROM meta WHERE key = $1")
-            .bind(&fence.epoch_key)
-            .fetch_optional(&mut *tx)
+        record_subscription_quota_with_fence(self, records, fence, SubscriptionQuotaSource::Api)
             .await
-            .map_err(map_sqlx_error)?;
-        if i64_to_u64(generation.unwrap_or_default(), "oauth token generation")?
-            != fence.oauth_token_generation
-            || epoch != fence.epoch_value
-        {
-            tx.rollback().await.map_err(map_sqlx_error)?;
-            return Ok(false);
-        }
-        record_samples_in_tx(&mut tx, records).await?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        if !records.is_empty() {
-            notify_quota_change(self, fence.upstream_id).await;
-        }
-        Ok(true)
+    }
+
+    async fn record_subscription_quota_fenced_headers(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool> {
+        record_subscription_quota_with_fence(self, records, fence, SubscriptionQuotaSource::Header)
+            .await
     }
 
     async fn list_latest_subscription_quota_for_upstreams(
@@ -193,6 +148,71 @@ impl UpstreamSubscriptionQuotaAggregateStore for PostgresStorage {
     ) -> StorageResult<Vec<SubscriptionQuotaProviderLot>> {
         aggregate::list_provider_lots(self, &query).await
     }
+}
+
+async fn record_subscription_quota_with_fence(
+    storage: &PostgresStorage,
+    records: &[SubscriptionQuotaSample],
+    fence: &SubscriptionQuotaPollFence,
+    expected_source: SubscriptionQuotaSource,
+) -> StorageResult<bool> {
+    if fence.epoch_key.is_empty()
+        || records.iter().any(|record| {
+            record.upstream_id != fence.upstream_id || record.source != expected_source
+        })
+    {
+        return Err(StorageError::InvalidInput {
+            field: "subscription_quota_poll".to_owned(),
+            reason: format!(
+                "fenced quota write requires an epoch key and {} samples for its fenced upstream",
+                expected_source.as_str()
+            ),
+        });
+    }
+
+    let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
+    lock_meta_value(&mut tx, &fence.epoch_key).await?;
+    // OAuth rotation and deletion lock the spec row before changing tokens.
+    // Keep that lock until quota publication commits, including generation 0
+    // when an OAuth token row has not been created yet.
+    let active: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM upstream_spec_v1 \
+         WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(fence.upstream_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if active.is_none() {
+        tx.rollback().await.map_err(map_sqlx_error)?;
+        return Ok(false);
+    }
+    let generation: Option<i64> = sqlx::query_scalar(
+        "SELECT oauth_token_generation FROM upstream_oauth_token_v1 \
+         WHERE upstream_id = $1 FOR UPDATE",
+    )
+    .bind(fence.upstream_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let epoch: Option<String> = sqlx::query_scalar("SELECT value FROM meta WHERE key = $1")
+        .bind(&fence.epoch_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if i64_to_u64(generation.unwrap_or_default(), "oauth token generation")?
+        != fence.oauth_token_generation
+        || epoch != fence.epoch_value
+    {
+        tx.rollback().await.map_err(map_sqlx_error)?;
+        return Ok(false);
+    }
+    record_samples_in_tx(&mut tx, records).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    if !records.is_empty() {
+        notify_quota_change(storage, fence.upstream_id).await;
+    }
+    Ok(true)
 }
 
 async fn record_samples_in_tx(

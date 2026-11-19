@@ -20,12 +20,12 @@ use super::SchedulerDispatch;
 
 const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 
-pub(super) struct WarmupDispatchAttempt {
+pub(in crate::scheduler_dispatch) struct WarmupDispatchAttempt {
     pub(super) dispatch_kind: WarmupDispatchKind,
-    pub(super) result: WarmupDispatchResult,
+    pub(in crate::scheduler_dispatch) result: WarmupDispatchResult,
 }
 
-pub(super) enum WarmupDispatchResult {
+pub(in crate::scheduler_dispatch) enum WarmupDispatchResult {
     Response {
         status: http::StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
@@ -105,7 +105,7 @@ impl SchedulerDispatch {
         Ok(true)
     }
 
-    pub(super) async fn dispatch_warmup_request(
+    pub(in crate::scheduler_dispatch) async fn dispatch_warmup_request(
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,

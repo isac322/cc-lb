@@ -23,13 +23,28 @@ const WINDOW_LABELS: Record<string, string> = {
   '7d_cowork': 'Weekly (Cowork)',
   '7d_omelette': 'Weekly (Omelette)',
   '7d_oauth_apps': 'Weekly (OAuth apps)',
-  '7d_overage_included': 'Weekly (included usage)',
+  // Anthropic's cedar_ember reports the Fable/overage-included weekly bucket under this key.
+  '7d_overage_included': 'Weekly (Fable)',
   overage: 'Extra usage',
   monthly: 'Monthly',
 };
 
+function relatedQuotaKeys(window: string): readonly string[] {
+  if (window === '7d_fable') return ['7d_fable', '7d_overage_included'];
+  if (window === '7d_overage_included')
+    return ['7d_overage_included', '7d_fable'];
+  return [window];
+}
+
+function grantClearsWindow(
+  grant: Pick<LimitResetGrant, 'clears'>,
+  window: string,
+): boolean {
+  return relatedQuotaKeys(window).some((key) => grant.clears.includes(key));
+}
+
 export function couponWindowLabel(window: string): string {
-  // Labels never alias provider keys to a different quota observation.
+  // Keep provider keys unaliased unless a 1:1 equivalence is confirmed.
   return WINDOW_LABELS[window] ?? 'Provider-defined scope';
 }
 export function isFableRebateGrant(grant: LimitResetGrant): boolean {
@@ -256,13 +271,19 @@ export function presentCoupon(
 ): CouponPresentation {
   const byWindow = new Map(windows.map((window) => [window.window, window]));
   const usage = (name: string): CouponWindowUsage => {
-    const providerPercent = grant.percent_used[name];
-    const quota = byWindow.get(name);
+    const keys = relatedQuotaKeys(name);
+    const providerPercent = keys
+      .map((key) => grant.percent_used[key])
+      .find((value) => value !== undefined);
+    const quota = keys
+      .map((key) => byWindow.get(key))
+      .find((entry) => entry !== undefined);
     const quotaPercent =
       quota?.utilization == null ? null : quota.utilization * 100;
     const base = { window: name, label: couponWindowLabel(name) };
-    // percent_used and clears share the provider's exact namespace. A valid
-    // zero is authoritative even when this key is absent from /quota/latest.
+    // percent_used and clears share the provider's exact namespace, with a
+    // confirmed 1:1 equivalence between 7d_overage_included and 7d_fable. A
+    // valid zero is authoritative even when the key is absent from /quota/latest.
     if (providerFresh && validPercent(providerPercent)) {
       return {
         ...base,
@@ -298,11 +319,14 @@ export function presentCoupon(
     return { ...base, percentUsed: null, state: 'unknown', source: null };
   };
   const targets = grant.clears.map(usage);
-  const targetNames = new Set(grant.clears);
-  const observedNames = new Set([
-    ...Object.keys(grant.percent_used),
-    ...byWindow.keys(),
-  ]);
+  const targetNames = new Set(
+    grant.clears.flatMap((name) => [...relatedQuotaKeys(name)]),
+  );
+  const observedNames = new Set(
+    [...Object.keys(grant.percent_used), ...byWindow.keys()].map((name) =>
+      name === '7d_overage_included' ? '7d_fable' : name,
+    ),
+  );
   const fullNonTargets = [...observedNames]
     .filter((name) => !targetNames.has(name))
     .map(usage)
@@ -404,12 +428,16 @@ export function presentCouponEffects(
 
   const fable = isFableRebateGrant(grant);
   const byWindow = new Map(windows.map((window) => [window.window, window]));
+  const clearsFable =
+    grantClearsWindow(grant, '7d_fable') ||
+    Object.hasOwn(grant.percent_used, '7d_overage_included');
   const names = new Set([
     ...windows
       .filter((window) => window.state !== 'absent')
       .map((window) => window.window),
     ...grant.clears,
     ...Object.keys(grant.percent_used),
+    ...(clearsFable ? ['7d_fable'] : []),
     ...(fable ? ['5h', '7d'] : []),
   ]);
   const visibleNames = [...names].filter(
@@ -450,9 +478,9 @@ export function presentCouponEffects(
       if (fable && current.window === '5h')
         effect = known5h ? 'reset' : 'conditional_5h';
       else if (fable && current.window === '7d') effect = 'fable_weekly';
-      else if (fable && current.window === '7d_fable') effect = 'fable_scoped';
       else if (current.window === 'overage') effect = 'unchanged';
-      else if (grant.clears.includes(current.window)) effect = 'reset';
+      else if (grantClearsWindow(grant, current.window)) effect = 'reset';
+      else if (fable && current.window === '7d_fable') effect = 'fable_scoped';
       else if (current.window.startsWith('7d_')) effect = 'unknown';
       else if (
         fable ||

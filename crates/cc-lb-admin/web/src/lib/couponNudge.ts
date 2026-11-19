@@ -149,7 +149,9 @@ export function deriveCouponNudge(
     for (const reading of presentation.targets) {
       if (!isFullCouponWindow(reading)) continue;
       const name = reading.window;
-      const w = byWindow.get(name);
+      const w =
+        byWindow.get(name) ??
+        (name === '7d_overage_included' ? byWindow.get('7d_fable') : undefined);
       if (w?.state !== 'fresh' || w.resets_at_unix_secs == null) continue;
       const wait = w.resets_at_unix_secs * 1000 - nowMs;
       // A natural reset inside the hour is left to happen on its own.

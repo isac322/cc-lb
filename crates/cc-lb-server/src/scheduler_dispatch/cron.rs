@@ -198,6 +198,14 @@ impl SchedulerDispatch {
         let upstream_ids = self.list_oauth_usage_poll_upstream_ids().await?;
         let total = upstream_ids.len();
         let traceparent = job.traceparent.as_deref();
+        let throttle_backoff_secs = self
+            .config
+            .scheduler
+            .recurring_jobs
+            .get("oauth_usage_poll")
+            .map(|cfg| cfg.interval_secs.max(1))
+            .unwrap_or(60)
+            .saturating_mul(2);
         // Poll upstreams concurrently so one slow/hanging upstream cannot
         // consume the shared 60s tick budget and starve the rest (the prior
         // sequential loop did exactly that). Per-call/job timeouts unchanged.
@@ -205,8 +213,12 @@ impl SchedulerDispatch {
             |upstream_id| async move {
                 (
                     upstream_id,
-                    self.poll_and_record_oauth_usage(upstream_id, traceparent)
-                        .await,
+                    self.poll_and_record_oauth_usage(
+                        upstream_id,
+                        traceparent,
+                        throttle_backoff_secs,
+                    )
+                    .await,
                 )
             },
         ))
@@ -226,6 +238,7 @@ impl SchedulerDispatch {
             total,
             success = stats.success,
             throttled = stats.throttled,
+            backed_off = stats.backed_off,
             status_failure = stats.status_failure,
             network_failure = stats.network_failure,
             skipped = stats.skipped,
@@ -239,7 +252,16 @@ impl SchedulerDispatch {
         &self,
         upstream_id: Uuid,
         traceparent: Option<&str>,
+        throttle_backoff_secs: u64,
     ) -> SchedulerResult<OAuthUsagePollOutcomeLabel> {
+        if let Some(cursor) = self.read_oauth_usage_cursor(upstream_id).await
+            && cursor.last_status == Some(429)
+            && let Some(last_observed_at_unix_secs) = cursor.last_observed_at_unix_secs
+            && unix_secs(self.clock.now()).saturating_sub(last_observed_at_unix_secs)
+                < throttle_backoff_secs
+        {
+            return Ok(OAuthUsagePollOutcomeLabel::BackedOff);
+        }
         let observation = self.poll_usage(upstream_id, traceparent).await?;
         let label = OAuthUsagePollOutcomeLabel::from_observation(&observation);
         self.record_oauth_usage_observation(upstream_id, observation)
@@ -247,7 +269,38 @@ impl SchedulerDispatch {
         Ok(label)
     }
 
-    async fn record_oauth_usage_observation(
+    async fn read_oauth_usage_cursor(
+        &self,
+        upstream_id: Uuid,
+    ) -> Option<cc_lb_scheduler::state_stores::OAuthUsagePollCursor> {
+        let result = match &self.backend {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
+                    .read(upstream_id)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => {
+                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
+                    .read(upstream_id)
+                    .await
+            }
+        };
+        match result {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                tracing::warn!(
+                    %upstream_id,
+                    %error,
+                    "oauth usage poll cursor read failed; polling anyway"
+                );
+                None
+            }
+        }
+    }
+
+    pub(super) async fn record_oauth_usage_observation(
         &self,
         upstream_id: Uuid,
         observation: OAuthUsagePollObservation,
@@ -388,6 +441,7 @@ impl OAuthUsageCursorUpdate {
 struct OAuthUsagePollTickStats {
     success: usize,
     throttled: usize,
+    backed_off: usize,
     status_failure: usize,
     network_failure: usize,
     skipped: usize,
@@ -399,6 +453,7 @@ impl OAuthUsagePollTickStats {
         match label {
             OAuthUsagePollOutcomeLabel::Success => self.success += 1,
             OAuthUsagePollOutcomeLabel::Throttled => self.throttled += 1,
+            OAuthUsagePollOutcomeLabel::BackedOff => self.backed_off += 1,
             OAuthUsagePollOutcomeLabel::StatusFailure => self.status_failure += 1,
             OAuthUsagePollOutcomeLabel::NetworkFailure => self.network_failure += 1,
             OAuthUsagePollOutcomeLabel::Skipped => self.skipped += 1,
@@ -410,6 +465,7 @@ impl OAuthUsagePollTickStats {
 enum OAuthUsagePollOutcomeLabel {
     Success,
     Throttled,
+    BackedOff,
     StatusFailure,
     NetworkFailure,
     Skipped,

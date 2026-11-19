@@ -434,6 +434,100 @@ async fn quota_poll_rejects_rotated_generation_and_deleted_upstream() -> Result<
 }
 
 #[tokio::test]
+async fn quota_fenced_headers_enforces_source_epoch_generation_and_deletion() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let fence = poll_fence(&storage).await?;
+        let header = sample(fence.upstream_id, 10, 1, 0.2, 1_000);
+        for invalid in [
+            api_sample(fence.upstream_id, 20, 2, 0.3),
+            sample(Uuid::new_v4(), 30, 3, 0.4, 1_000),
+        ] {
+            assert!(
+                storage
+                    .record_subscription_quota_fenced_headers(&[header.clone(), invalid], &fence)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            storage
+                .record_subscription_quota_fenced_headers(std::slice::from_ref(&header), &fence)
+                .await?
+        );
+        assert!(
+            storage
+                .compare_and_put_meta_value(&fence.epoch_key, fence.epoch_value.as_deref(), "next")
+                .await?
+        );
+        let stale = sample(fence.upstream_id, 40, 4, 0.8, 1_000);
+        assert!(
+            !storage
+                .record_subscription_quota_fenced_headers(std::slice::from_ref(&stale), &fence)
+                .await?
+        );
+        let next_fence = SubscriptionQuotaPollFence {
+            epoch_value: Some("next".to_owned()),
+            ..fence
+        };
+        let rotated = UpstreamStore::update_oauth_token(
+            &storage,
+            next_fence.upstream_id,
+            EncryptedOAuthTokens::from_ciphertext(b"rotated".to_vec()),
+        )
+        .await?;
+        assert!(
+            !storage
+                .record_subscription_quota_fenced_headers(
+                    std::slice::from_ref(&stale),
+                    &next_fence,
+                )
+                .await?
+        );
+        let latest_fence = SubscriptionQuotaPollFence {
+            oauth_token_generation: rotated.oauth_token_generation,
+            ..next_fence
+        };
+        assert!(
+            storage
+                .record_subscription_quota_fenced_headers(
+                    std::slice::from_ref(&stale),
+                    &latest_fence
+                )
+                .await?
+        );
+        sqlx::query("UPDATE upstream_spec_v1 SET deleted_at = NOW() WHERE id = $1")
+            .bind(latest_fence.upstream_id)
+            .execute(storage.pool())
+            .await?;
+        assert!(
+            !storage
+                .record_subscription_quota_fenced_headers(
+                    &[sample(latest_fence.upstream_id, 50, 5, 0.9, 1_000)],
+                    &latest_fence,
+                )
+                .await?
+        );
+        assert_eq!(
+            storage
+                .list_latest_subscription_quota_for_upstreams(&[latest_fence.upstream_id])
+                .await?,
+            vec![stale],
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
 async fn quota_poll_absent_epoch_serializes_with_cas_and_direct_meta_writes() -> Result<()> {
     let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
         return Ok(());

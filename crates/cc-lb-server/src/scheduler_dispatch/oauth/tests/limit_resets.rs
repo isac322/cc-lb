@@ -985,6 +985,7 @@ async fn valid_monthly_poll_records_successful_scheduler_attempt_without_claimin
         "valid provider usage is a normal scheduler attempt"
     );
     let cursor = match &fixture.dispatch.backend {
+        #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
             .read(upstream.id)
             .await
@@ -1035,4 +1036,378 @@ async fn valid_monthly_poll_records_successful_scheduler_attempt_without_claimin
         LimitResetUsageRefresh::Failed,
         "normal provider success does not prove affected routing quota publication"
     );
+}
+
+struct AnthropicResetServerState {
+    usage_status: AtomicU16,
+    usage_body: Mutex<Value>,
+    usage_calls: AtomicUsize,
+    probe_status: AtomicU16,
+    probe_headers: Mutex<Vec<(&'static str, &'static str)>>,
+    probe_calls: AtomicUsize,
+    delay_next_probe: AtomicBool,
+    probe_entered: tokio::sync::Notify,
+    probe_release: tokio::sync::Notify,
+}
+
+struct AnthropicResetServer {
+    state: Arc<AnthropicResetServerState>,
+    base: Url,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for AnthropicResetServer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl AnthropicResetServer {
+    async fn new(initial_seven_day_percent: u64) -> Self {
+        let state = Arc::new(AnthropicResetServerState {
+            usage_status: AtomicU16::new(200),
+            usage_body: Mutex::new(json!({
+                "five_hour": {"utilization": 20, "resets_at": 1_700_018_000},
+                "seven_day": {"utilization": initial_seven_day_percent, "resets_at": 1_700_500_000},
+                "seven_day_overage_included": {"utilization": 80, "resets_at": 1_700_500_000},
+            })),
+            usage_calls: AtomicUsize::new(0),
+            probe_status: AtomicU16::new(200),
+            probe_headers: Mutex::new(vec![
+                ("anthropic-ratelimit-unified-5h-utilization", "0.20"),
+                ("anthropic-ratelimit-unified-5h-status", "allowed"),
+                ("anthropic-ratelimit-unified-5h-reset", "1700018000"),
+                ("anthropic-ratelimit-unified-7d-utilization", "0.12"),
+                ("anthropic-ratelimit-unified-7d-status", "allowed"),
+                ("anthropic-ratelimit-unified-7d-reset", "1700500000"),
+                ("anthropic-ratelimit-unified-7d_oi-utilization", "0.00"),
+                ("anthropic-ratelimit-unified-7d_oi-status", "allowed"),
+                ("anthropic-ratelimit-unified-7d_oi-reset", "1700500000"),
+            ]),
+            probe_calls: AtomicUsize::new(0),
+            delay_next_probe: AtomicBool::new(false),
+            probe_entered: tokio::sync::Notify::new(),
+            probe_release: tokio::sync::Notify::new(),
+        });
+        let srv = state.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/oauth/usage",
+                axum::routing::get({
+                    let srv = srv.clone();
+                    move || {
+                        let srv = srv.clone();
+                        async move {
+                            srv.usage_calls.fetch_add(1, Ordering::SeqCst);
+                            let status = srv.usage_status.load(Ordering::SeqCst);
+                            let body = srv.usage_body.lock().unwrap().clone();
+                            (
+                                http::StatusCode::from_u16(status).unwrap(),
+                                axum::Json(body),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/messages",
+                axum::routing::post({
+                    let srv = srv.clone();
+                    move || {
+                        let srv = srv.clone();
+                        async move {
+                            srv.probe_calls.fetch_add(1, Ordering::SeqCst);
+                            if srv.delay_next_probe.swap(false, Ordering::SeqCst) {
+                                srv.probe_entered.notify_one();
+                                srv.probe_release.notified().await;
+                            }
+                            let status = srv.probe_status.load(Ordering::SeqCst);
+                            let headers = srv.probe_headers.lock().unwrap().clone();
+                            let mut builder = axum::response::Response::builder()
+                                .status(http::StatusCode::from_u16(status).unwrap())
+                                .header("content-type", "application/json");
+                            for (k, v) in headers {
+                                builder = builder.header(k, v);
+                            }
+                            builder
+                                .body(axum::body::Body::from(
+                                    r#"{"id":"msg_probe","type":"message","role":"assistant","content":[]}"#,
+                                ))
+                                .unwrap()
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind anthropic mock");
+        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            state,
+            base,
+            server,
+        }
+    }
+
+    async fn upstream(&self, fixture: &DispatchFixture) -> UpstreamRecord {
+        provider_metadata::create_provider(
+            fixture,
+            UpstreamKind::AnthropicOauth,
+            self.base.clone(),
+            Default::default(),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn oauth_usage_poll_backs_off_after_429_and_resumes_after_interval_window() {
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+    use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
+    use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+
+    let server = AnthropicResetServer::new(50).await;
+    server.state.usage_status.store(429, Ordering::SeqCst);
+    let fixture = DispatchFixture::new().await;
+    let upstream = server.upstream(&fixture).await;
+
+    let read_cursor = || async {
+        match &fixture.dispatch.backend {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
+                    .read(upstream.id)
+                    .await
+                    .unwrap()
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
+        }
+    };
+
+    // Tick 1 at t = 1_700_000_000: hits /api/oauth/usage, gets 429, records 429 cursor.
+    fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(
+            1_700_000_000,
+        )))
+        .await
+        .expect("tick 1");
+    assert_eq!(server.state.usage_calls.load(Ordering::SeqCst), 1);
+    let cursor = read_cursor().await.expect("cursor recorded");
+    assert_eq!(cursor.last_status, Some(429));
+    assert_eq!(cursor.last_observed_at_unix_secs, Some(1_700_000_000));
+
+    // Tick 2 at +60s (< 2 * interval_secs = 120s): backed off without hitting provider.
+    fixture.clock.advance_secs(60);
+    server.state.usage_status.store(200, Ordering::SeqCst);
+    fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(
+            1_700_000_060,
+        )))
+        .await
+        .expect("tick 2 backed off");
+    assert_eq!(
+        server.state.usage_calls.load(Ordering::SeqCst),
+        1,
+        "429 backoff must suppress the next 60s poll tick"
+    );
+
+    // Tick 3 at +120s (>= 2 * interval_secs): backoff expires, resumes polling and records 200.
+    fixture.clock.advance_secs(60);
+    fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(
+            1_700_000_120,
+        )))
+        .await
+        .expect("tick 3 resumed");
+    assert_eq!(server.state.usage_calls.load(Ordering::SeqCst), 2);
+    let cursor = read_cursor().await.expect("cursor updated");
+    assert_eq!(cursor.last_status, Some(200));
+    assert_eq!(cursor.last_observed_at_unix_secs, Some(1_700_000_120));
+}
+
+#[tokio::test]
+async fn anthropic_throttled_post_claim_refresh_uses_header_probe_and_unblocks_routing() {
+    use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
+    use cc_lb_scheduler::worker::SchedulerBackend;
+    use cc_lb_storage_api::{
+        SubscriptionQuotaSource, SubscriptionQuotaWindow, UpstreamWarmupAttemptStore,
+        WarmupAttemptListFilters,
+    };
+
+    let server = AnthropicResetServer::new(100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = server.upstream(&fixture).await;
+
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    assert_eq!(selected(&fixture, &upstream), Uuid::from_u128(1));
+
+    // Advance clock 1s (matching real time passing between poll and claim) and settle a new reset epoch.
+    fixture.clock.advance_secs(1);
+    fixture
+        .storage
+        .put_meta_value(
+            &cedar_ember_epoch_meta_key(upstream.id),
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+    server.state.usage_status.store(429, Ordering::SeqCst);
+
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed,
+        "429 on /api/oauth/usage must fall back to /v1/messages quota headers for Anthropic"
+    );
+    assert_eq!(server.state.probe_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        selected(&fixture, &upstream),
+        upstream.id,
+        "routing must immediately unblock after header probe reports allowed 7d quota"
+    );
+
+    let latest = fixture
+        .storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream.id])
+        .await
+        .unwrap();
+    assert!(latest.iter().any(|sample| {
+        sample.window == SubscriptionQuotaWindow::SevenDay
+            && sample.source == SubscriptionQuotaSource::Header
+            && sample.utilization == Some(0.12)
+    }));
+    assert!(latest.iter().any(|sample| {
+        sample.window == SubscriptionQuotaWindow::SevenDayFable
+            && sample.source == SubscriptionQuotaSource::Header
+            && sample.utilization == Some(0.0)
+    }));
+
+    // Post-claim 429 was recorded in the poll cursor without polluting warmup_attempts.
+    let cursor = match &fixture.dispatch.backend {
+        #[cfg(feature = "sqlite")]
+        SchedulerBackend::Sqlite(sqlite) => OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
+            .read(upstream.id)
+            .await
+            .unwrap()
+            .expect("429 recorded in cursor"),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
+    };
+    assert_eq!(cursor.last_status, Some(429));
+    assert_eq!(cursor.last_observed_at_unix_secs, Some(1_700_000_001));
+
+    let attempts = UpstreamWarmupAttemptStore::list_warmup_attempts_for_upstream(
+        fixture.storage.as_ref(),
+        upstream.id,
+        WarmupAttemptListFilters {
+            limit: None,
+            before: None,
+            since_unix_secs: None,
+            status: None,
+            lane: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        attempts.is_empty(),
+        "post-claim quota probe must not write warmup_attempts rows"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_throttled_post_claim_refresh_without_probe_headers_fails_honestly() {
+    let server = AnthropicResetServer::new(100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = server.upstream(&fixture).await;
+
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    assert_eq!(selected(&fixture, &upstream), Uuid::from_u128(1));
+
+    fixture.clock.advance_secs(1);
+    server.state.usage_status.store(429, Ordering::SeqCst);
+    server.state.probe_status.store(503, Ordering::SeqCst);
+    server.state.probe_headers.lock().unwrap().clear();
+
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Failed,
+        "must fail honestly rather than fabricating 0% usage when probe carries no main quota headers"
+    );
+    assert_eq!(server.state.probe_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(selected(&fixture, &upstream), Uuid::from_u128(1));
+}
+
+#[tokio::test]
+async fn anthropic_header_probe_mid_flight_reset_epoch_change_cannot_overwrite_newer_quota() {
+    let server = AnthropicResetServer::new(100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = server.upstream(&fixture).await;
+
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    assert_eq!(selected(&fixture, &upstream), Uuid::from_u128(1));
+
+    // Configure delayed stale header probe (reporting 100% exhaustion) during /api/oauth/usage 429.
+    fixture.clock.advance_secs(1);
+    server.state.usage_status.store(429, Ordering::SeqCst);
+    *server.state.probe_headers.lock().unwrap() = vec![
+        ("anthropic-ratelimit-unified-7d-utilization", "1.00"),
+        ("anthropic-ratelimit-unified-7d-status", "rejected"),
+        ("anthropic-ratelimit-unified-7d-reset", "1700500000"),
+    ];
+    server.state.delay_next_probe.store(true, Ordering::SeqCst);
+
+    let dispatch = fixture.dispatch.clone();
+    let pending = tokio::spawn(async move {
+        dispatch
+            .refresh_upstream_usage(upstream.id, &CancellationToken::new())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server.state.probe_entered.notified(),
+    )
+    .await
+    .expect("delayed header probe starts");
+
+    // Newer reset lands and publishes 12% usage via /api/oauth/usage while stale probe is in flight.
+    fixture.clock.advance_secs(1);
+    let epoch = Uuid::new_v4();
+    fixture
+        .storage
+        .put_meta_value(&cedar_ember_epoch_meta_key(upstream.id), &epoch.to_string())
+        .await
+        .unwrap();
+    *server.state.usage_body.lock().unwrap() = json!({
+        "five_hour": {"utilization": 10, "resets_at": 1_700_018_000},
+        "seven_day": {"utilization": 12, "resets_at": 1_700_500_000},
+    });
+    server.state.usage_status.store(200, Ordering::SeqCst);
+    assert_eq!(
+        refresh(&fixture, &upstream).await,
+        LimitResetUsageRefresh::Refreshed
+    );
+    assert_eq!(selected(&fixture, &upstream), upstream.id);
+
+    // Release delayed pre-reset header probe: fence mismatch must reject it so 100% cannot overwrite 12%.
+    server.state.probe_release.notify_one();
+    assert_eq!(
+        pending.await.unwrap(),
+        LimitResetUsageRefresh::Failed,
+        "stale header probe must fail epoch fence validation"
+    );
+    assert_eq!(selected(&fixture, &upstream), upstream.id);
 }

@@ -283,51 +283,96 @@ fn push_singleton_spec(
     });
 }
 
+#[derive(Clone, Copy)]
+enum NextTickState {
+    Unstarted,
+    At(u64),
+    Exhausted,
+}
+
 #[derive(Clone)]
 struct IntervalSchedule {
-    interval: chrono::Duration,
-    first_delay: chrono::Duration,
-    next: Option<DateTime<Utc>>,
+    interval_secs: u64,
+    phase_secs: u64,
+    state: NextTickState,
     clock: ClockHandle,
 }
 
 impl IntervalSchedule {
     /// Returns `None` when the first tick or the one after it cannot be
     /// represented as a `DateTime<Utc>`.
+    ///
+    /// Ticks are aligned to `k * interval_secs + phase_secs` in Unix epoch
+    /// time (with `phase_secs` derived solely from the job name) so every
+    /// replica computes identical `tick_secs` and deduplicates in Apalis via
+    /// the `(job_type, idempotency_key)` unique index regardless of startup time.
     fn new(name: &str, interval_secs: u64, jitter_secs: u64, clock: ClockHandle) -> Option<Self> {
-        let bounded_jitter = if jitter_secs == 0 {
+        let interval_secs = interval_secs.max(1);
+        let phase_secs = if jitter_secs == 0 {
             0
         } else {
-            stable_hash(name) % jitter_secs.saturating_add(1)
+            (stable_hash(name) % jitter_secs.saturating_add(1)) % interval_secs
         };
-        let interval = chrono_seconds(interval_secs.max(1))?;
-        let first_delay = chrono_seconds(interval_secs.max(1).checked_add(bounded_jitter)?)?;
-        DateTime::<Utc>::from(clock.now())
-            .checked_add_signed(first_delay)?
-            .checked_add_signed(interval)?;
+        let now_secs = cc_lb_clock::unix_secs(clock.now());
+        let first = first_aligned_tick_secs(now_secs, interval_secs, phase_secs)?;
+        utc_timestamp_secs(first)?;
+        let second = first.checked_add(interval_secs)?;
+        utc_timestamp_secs(second)?;
         Some(Self {
-            interval,
-            first_delay,
-            next: None,
+            interval_secs,
+            phase_secs,
+            state: NextTickState::Unstarted,
             clock,
         })
+    }
+
+    fn advance_after(&mut self, emitted_secs: u64) {
+        self.state = match emitted_secs
+            .checked_add(self.interval_secs)
+            .filter(|&next| utc_timestamp_secs(next).is_some())
+        {
+            Some(next) => NextTickState::At(next),
+            None => NextTickState::Exhausted,
+        };
     }
 }
 
 impl apalis_cron::Schedule<Utc> for IntervalSchedule {
     fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
-        let next = match self.next {
-            Some(next) => next,
-            None => DateTime::<Utc>::from(self.clock.now()).checked_add_signed(self.first_delay)?,
+        let tick_secs = match self.state {
+            NextTickState::Unstarted => first_aligned_tick_secs(
+                cc_lb_clock::unix_secs(self.clock.now()),
+                self.interval_secs,
+                self.phase_secs,
+            ),
+            NextTickState::At(ts) => Some(ts),
+            NextTickState::Exhausted => None,
+        }
+        .filter(|&ts| utc_timestamp_secs(ts).is_some());
+
+        let Some(tick_secs) = tick_secs else {
+            self.state = NextTickState::Exhausted;
+            return None;
         };
-        self.next = Some(next.checked_add_signed(self.interval)?);
-        let tick_secs = u64::try_from(next.timestamp()).ok()?;
+        self.advance_after(tick_secs);
         Some(apalis_cron::Tick::new(tick_secs))
     }
 }
 
-fn chrono_seconds(seconds: u64) -> Option<chrono::Duration> {
-    chrono::Duration::try_seconds(i64::try_from(seconds).ok()?)
+fn first_aligned_tick_secs(now_secs: u64, interval_secs: u64, phase_secs: u64) -> Option<u64> {
+    let interval_secs = interval_secs.max(1);
+    let phase_secs = phase_secs % interval_secs;
+    let base = now_secs - (now_secs % interval_secs);
+    let candidate = base.checked_add(phase_secs)?;
+    if candidate > now_secs {
+        Some(candidate)
+    } else {
+        candidate.checked_add(interval_secs)
+    }
+}
+
+fn utc_timestamp_secs(secs: u64) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(i64::try_from(secs).ok()?, 0)
 }
 
 fn stable_hash(value: &str) -> u64 {
@@ -400,12 +445,13 @@ mod tests {
     fn next_tick_ends_the_schedule_instead_of_overflowing() {
         let clock: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_000));
         let mut schedule = IntervalSchedule {
-            interval: chrono::Duration::MAX,
-            first_delay: chrono::Duration::MAX,
-            next: None,
+            interval_secs: u64::MAX,
+            phase_secs: 0,
+            state: NextTickState::Unstarted,
             clock,
         };
 
+        assert_eq!(apalis_cron::Schedule::next_tick(&mut schedule, &Utc), None);
         assert_eq!(apalis_cron::Schedule::next_tick(&mut schedule, &Utc), None);
     }
 
@@ -414,12 +460,18 @@ mod tests {
         let config = SchedulerConfig::default();
         let clock: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_000));
         let specs = singleton_cron_specs(&config, clock);
-        let spec = specs
+        let mut schedule = specs
             .iter()
             .find(|spec| spec.name == "api_key_usage_poll")
-            .expect("default api-key usage poll cron registration");
+            .expect("default api-key usage poll cron registration")
+            .schedule
+            .clone();
 
-        let job = (spec.factory)(1_800_000_300);
+        let job = (specs
+            .iter()
+            .find(|spec| spec.name == "api_key_usage_poll")
+            .expect("default api-key usage poll cron registration")
+            .factory)(1_800_000_300);
         assert!(matches!(
             &job,
             CronJob::ApiKeyUsagePoll(ApiKeyUsagePollCronJob {
@@ -429,8 +481,63 @@ mod tests {
             })
         ));
         assert_eq!(job.kind(), "api_key_usage_poll");
-        assert_eq!(spec.schedule.interval, chrono::Duration::seconds(300));
-        assert!(spec.schedule.first_delay >= chrono::Duration::seconds(300));
-        assert!(spec.schedule.first_delay <= chrono::Duration::seconds(315));
+        assert_eq!(schedule.interval_secs, 300);
+        assert!(schedule.phase_secs <= 15);
+        let t1 = apalis_cron::Schedule::next_tick(&mut schedule, &Utc)
+            .expect("first tick")
+            .get_timestamp();
+        let t2 = apalis_cron::Schedule::next_tick(&mut schedule, &Utc)
+            .expect("second tick")
+            .get_timestamp();
+        assert!(t1 > 1_800_000_000);
+        assert_eq!(t1 % 300, schedule.phase_secs);
+        assert_eq!(t2 - t1, 300);
+    }
+
+    #[test]
+    fn replicas_started_at_different_times_emit_identical_epoch_aligned_ticks() {
+        let config = SchedulerConfig::default();
+        let start_a: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_003));
+        let start_b: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_027));
+        let start_c: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_065));
+
+        let take_ticks = |clock: ClockHandle, name: &str, count: usize| {
+            let mut sched = singleton_cron_specs(&config, clock)
+                .into_iter()
+                .find(|spec| spec.name == name)
+                .expect("cron registration")
+                .schedule;
+            (
+                sched.phase_secs,
+                (0..count)
+                    .map(|_| {
+                        apalis_cron::Schedule::next_tick(&mut sched, &Utc)
+                            .expect("tick")
+                            .get_timestamp()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let (phase_a, ticks_a) = take_ticks(start_a.clone(), "oauth_usage_poll", 4);
+        let (phase_b, ticks_b) = take_ticks(start_b.clone(), "oauth_usage_poll", 4);
+        let (phase_c, ticks_c) = take_ticks(start_c.clone(), "oauth_usage_poll", 3);
+        assert_eq!(phase_a, 0);
+        assert_eq!(phase_a, phase_b);
+        assert_eq!(phase_a, phase_c);
+        // Same 60s window => identical full tick sequence.
+        assert_eq!(ticks_a, ticks_b);
+        // Started in the next 60s window => joins the exact epoch grid on the next tick.
+        assert_eq!(&ticks_a[1..], &ticks_c[..3]);
+
+        // Also verify a job with jitter_secs > 0 (api_key_usage_poll: interval 300s, jitter 15s).
+        let (jitter_a, api_a) = take_ticks(start_a, API_KEY_USAGE_POLL_JOB, 3);
+        let (jitter_b, api_b) = take_ticks(start_b, API_KEY_USAGE_POLL_JOB, 3);
+        let (jitter_c, api_c) = take_ticks(start_c, API_KEY_USAGE_POLL_JOB, 3);
+        assert!(jitter_a <= 15);
+        assert_eq!(jitter_a, jitter_b);
+        assert_eq!(jitter_a, jitter_c);
+        assert_eq!(api_a, api_b);
+        assert_eq!(api_a, api_c);
     }
 }

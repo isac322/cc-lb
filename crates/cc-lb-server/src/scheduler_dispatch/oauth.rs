@@ -154,7 +154,7 @@ impl SchedulerDispatch {
         }))
     }
 
-    async fn record_reconnect_required(
+    pub(super) async fn record_reconnect_required(
         &self,
         upstream: &UpstreamRecord,
         reason: &str,
@@ -806,7 +806,10 @@ impl SchedulerDispatch {
         })
     }
 
-    async fn ensure_fresh_usage_token(&self, upstream: &mut UpstreamRecord) -> SchedulerResult<()> {
+    pub(super) async fn ensure_fresh_usage_token(
+        &self,
+        upstream: &mut UpstreamRecord,
+    ) -> SchedulerResult<()> {
         if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(());
         }
@@ -845,7 +848,7 @@ impl SchedulerDispatch {
         Ok(())
     }
 
-    async fn force_refresh_usage_token(
+    pub(super) async fn force_refresh_usage_token(
         &self,
         upstream: &mut UpstreamRecord,
     ) -> SchedulerResult<bool> {
@@ -1044,7 +1047,7 @@ fn merge_gemini_account_metadata(
     changed
 }
 
-fn should_poll_oauth_usage(upstream: &UpstreamRecord) -> bool {
+pub(super) fn should_poll_oauth_usage(upstream: &UpstreamRecord) -> bool {
     matches!(
         upstream.kind,
         UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth

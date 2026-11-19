@@ -15,7 +15,7 @@ use crate::warmup::execute::{WarmupAttemptExecution, execute_warmup_attempt};
 
 mod quota;
 mod record;
-mod request;
+pub(super) mod request;
 mod scheduling;
 mod support;
 
