@@ -18,12 +18,6 @@ function afterUse(row: CouponEffectRow): string {
       return 'Unchanged';
     case 'fable_weekly':
       return 'Fable portion restored';
-    case 'fable_scoped':
-      return 'Fable usage restored';
-    case 'conditional_5h':
-      return 'Fully refilled if this account has a 5-hour limit.';
-    case 'unknown':
-      return 'Effect not reported';
   }
 }
 
@@ -41,8 +35,6 @@ function ResetSchedule({ row }: { row: CouponEffectRow }) {
       return 'Reset time · Confirmed after use';
     case 'updated_after_use':
       return 'Reset time · Updated after use';
-    case 'unknown':
-      return 'Reset time not reported';
   }
 }
 
@@ -101,7 +93,7 @@ export function CouponEffects({ effects }: { effects: Effects }) {
               />
               <span
                 className={`min-w-0 break-words ${
-                  row.effect === 'unchanged' || row.effect === 'unknown'
+                  row.effect === 'unchanged'
                     ? 'text-body-sm text-text-muted'
                     : 'text-body font-medium text-text'
                 }`}

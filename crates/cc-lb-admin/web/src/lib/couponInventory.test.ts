@@ -137,7 +137,7 @@ describe('couponInventoryForUpstream', () => {
     expect(inventory('gemini', [], 'gemini_oauth').supported).toBe(false);
   });
 
-  it('formats the confirmed 7d_overage_included scope as Weekly (Fable)', () => {
+  it('formats the confirmed 7d_overage_included scope as Weekly (Fable) and includes Weekly (Fable portion) for Fable grants', () => {
     const result = inventory('first', [
       observation('first', [
         grant({
@@ -147,7 +147,9 @@ describe('couponInventoryForUpstream', () => {
         }),
       ]),
     ]);
-    expect(result.groups[0]?.scope).toBe('Weekly (Fable)');
+    expect(result.groups[0]?.scope).toBe(
+      'Weekly (Fable portion), Weekly (Fable)',
+    );
   });
 
   it('uses OpenAI native summary counts when credit details are partial', () => {

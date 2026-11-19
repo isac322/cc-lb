@@ -42,6 +42,7 @@ import {
   savePendingLimitResetOp,
   useClaimLimitReset,
 } from '../../lib/limitResets';
+import { capabilitiesOf } from '../../lib/providers';
 import type { Upstream } from '../../lib/queries';
 import { Button, Drawer, Modal, Notice } from '../ui/primitives';
 import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
@@ -223,7 +224,7 @@ export function LimitResetAction({
   returnFocus?: HTMLElement | null;
 }) {
   const isOpenAI = upstream.kind === 'openai_oauth';
-  const isOauth = upstream.kind === 'anthropic_oauth' || isOpenAI;
+  const isOauth = capabilitiesOf(upstream.kind).limitReset;
   const surfaceUrl = isOpenAI
     ? 'https://chatgpt.com/codex/settings/usage'
     : 'https://claude.ai/settings/usage';

@@ -109,11 +109,12 @@ for (const provider of ['gemini', 'anthropic'] as const) {
     await expect(page.getByTestId('upstream-usage-row').first()).toBeVisible();
     await expect.poll(() => headerLabels(page)).toEqual(
       provider === 'gemini'
-        ? ['Upstream', 'Gemini 5h', 'Gemini 7d', 'Claude·OSS 5h', 'Claude·OSS 7d', 'Coupons']
+        ? ['Upstream', 'Gemini 5h', 'Gemini 7d', 'Claude·OSS 5h', 'Claude·OSS 7d']
         : ['Upstream', '5h', '7d', '7d (Fable)', 'Coupons'],
     );
     await expect(page.locator('[data-testid="usage-cell-group"]')).toHaveCount(0);
     if (provider !== 'gemini') return;
+    await expect(page.getByTestId('upstream-coupons')).toHaveCount(0);
 
     // Weekly exhausted with the 5h withheld: the provider columns show the
     // same neutral placeholders as the shared Overview, never a blank cell.
@@ -276,7 +277,8 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
     await page.goto('/');
     const rows = page.getByTestId('upstream-usage-row');
     await expect(rows).toHaveCount(3);
-    expect(await headerLabels(page)).toEqual(['Upstream', '5h', '7d', 'Coupons']);
+    expect(await headerLabels(page)).toEqual(['Upstream', '5h', '7d']);
+    await expect(page.getByTestId('upstream-coupons')).toHaveCount(0);
     for (const name of ['Gemini both groups', 'Gemini weekly exhausted']) {
       const row = rows.filter({ hasText: name });
       await expect.poll(() => slotWindows(row)).toEqual(['5h', '7d']);

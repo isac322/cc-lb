@@ -460,6 +460,61 @@ describe('approved nonblocking guidance', () => {
         .disabled,
     ).toBe(false);
   });
+
+  it('shows info guidance when Fable unblocks full 7d and hides uncertain guidance on intermediate Fable usage', async () => {
+    const fableGrant = grant({
+      id: 'fable',
+      label: 'Fable launch reset',
+      type: 'full',
+      gives_back_weekly: true,
+      clears: ['7d_overage_included'],
+    });
+    const fullWeekly: CouponQuotaWindow[] = [
+      {
+        window: '7d',
+        utilization: 1,
+        state: 'fresh',
+        resets_at_unix_secs: NOW / 1000 + 4 * 86400,
+      },
+      {
+        window: '7d_fable',
+        utilization: 0.41,
+        state: 'fresh',
+        resets_at_unix_secs: NOW / 1000 + 4 * 86400,
+      },
+    ];
+    observe(inventory('anthropic', [fableGrant]), fullWeekly);
+    const view = render(
+      <LimitResetAction
+        upstream={makeOauthUpstream()}
+        credentialsStored
+        defaultOpen
+        quotaWindows={fullWeekly}
+      />,
+    );
+    const group = await screen.findByRole('group', { name: 'Coupon guidance' });
+    expect(within(group).getByRole('status').getAttribute('data-tone')).toBe(
+      'info',
+    );
+    expect(group.textContent).toContain('Restores a full limit');
+    expect(group.textContent).not.toContain('Not enough information');
+    expect(group.textContent).not.toContain('cannot be estimated');
+
+    const intermediate: CouponQuotaWindow[] = [
+      { ...fullWeekly[0]!, utilization: 0.8 },
+      { ...fullWeekly[1]!, utilization: 0.56 },
+    ];
+    observe(inventory('anthropic', [fableGrant]), intermediate);
+    view.rerender(
+      <LimitResetAction
+        upstream={makeOauthUpstream()}
+        credentialsStored
+        defaultOpen
+        quotaWindows={intermediate}
+      />,
+    );
+    expect(screen.queryByRole('group', { name: 'Coupon guidance' })).toBeNull();
+  });
 });
 
 describe('coupon workflow focus ownership', () => {

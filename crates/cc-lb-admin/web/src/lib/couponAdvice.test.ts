@@ -79,15 +79,31 @@ function scenario({
   };
 }
 
-function fable(fiveHour: boolean): CouponAdviceInput {
+function fable({
+  fiveHour = false,
+  weeklyUsed = fiveHour ? 80 : 100,
+  fableUsed = 0,
+  resetIn = 4 * DAY,
+  expiresIn = 30 * DAY,
+  weeklyState = 'fresh',
+  fableState = 'fresh',
+}: {
+  fiveHour?: boolean;
+  weeklyUsed?: number;
+  fableUsed?: number;
+  resetIn?: number;
+  expiresIn?: number | null;
+  weeklyState?: CouponQuotaWindow['state'];
+  fableState?: CouponQuotaWindow['state'];
+} = {}): CouponAdviceInput {
   return scenario({
     used: 100,
     resetIn: 3 * HOUR,
-    expiresIn: 30 * DAY,
+    expiresIn,
     state: fiveHour ? 'fresh' : 'absent',
     extra: [
-      quota('7d', fiveHour ? 80 : 100, 4 * DAY),
-      quota('7d_fable', 0, 4 * DAY),
+      quota('7d', weeklyUsed, resetIn, weeklyState),
+      quota('7d_fable', fableUsed, resetIn, fableState),
     ],
     coupon: {
       type: 'full',
@@ -174,8 +190,49 @@ const matrix: [string, () => CouponAdviceInput, string][] = [
     () => scenario({ expiresIn: 14 * DAY, extra: [quota('7d', 100, 4 * DAY)] }),
     'scope',
   ],
-  ['fable-unknown', () => fable(false), 'unknown'],
-  ['fable-five-hour', () => fable(true), 'useful_now'],
+  ['fable-zero-bucket-on-full-weekly', () => fable(), 'scope'],
+  ['fable-five-hour', () => fable({ fiveHour: true }), 'useful_now'],
+  [
+    'fable-unblocks-weekly',
+    () => fable({ weeklyUsed: 100, fableUsed: 41 }),
+    'useful_now',
+  ],
+  [
+    'fable-nothing-to-restore',
+    () => fable({ weeklyUsed: 74, fableUsed: 0 }),
+    'nothing_to_restore',
+  ],
+  [
+    'fable-intermediate-quiet',
+    () => fable({ weeklyUsed: 80, fableUsed: 56 }),
+    'none',
+  ],
+  [
+    'fable-wait',
+    () => fable({ weeklyUsed: 100, fableUsed: 40, resetIn: 20 * 60 }),
+    'wait',
+  ],
+  [
+    'fable-save',
+    () => fable({ weeklyUsed: 15, fableUsed: 10, resetIn: 3 * DAY }),
+    'save',
+  ],
+  [
+    'fable-expiry',
+    () =>
+      fable({
+        weeklyUsed: 80,
+        fableUsed: 40,
+        resetIn: 4 * DAY,
+        expiresIn: 2 * DAY,
+      }),
+    'expiry',
+  ],
+  [
+    'fable-stale',
+    () => fable({ weeklyUsed: 100, fableUsed: 41, fableState: 'stale' }),
+    'unknown',
+  ],
   ['openai-blocked', () => monthly(20), 'provider_blocked'],
   ['openai-below-pace', () => monthly(25), 'save'],
   ['neutral', () => scenario({ used: 55 }), 'none'],
@@ -208,16 +265,16 @@ describe('coupon advice scenario matrix', () => {
         scenario({ extra: [quota('7d_sonnet', 100, 4 * DAY)] }),
       )?.kind,
     ).not.toBe('scope');
-    const unknown = {
+    const resetInsteadOfUnchanged = {
       ...fresh,
       effects: {
         ...fresh.effects,
         rows: fresh.effects.rows.map((row) =>
-          row.window === '7d' ? { ...row, effect: 'unknown' as const } : row,
+          row.window === '7d' ? { ...row, effect: 'reset' as const } : row,
         ),
       },
     };
-    expect(deriveCouponAdvice(unknown)?.kind).not.toBe('scope');
+    expect(deriveCouponAdvice(resetInsteadOfUnchanged)?.kind).not.toBe('scope');
   });
 
   it('includes one hour but not one hour plus a second in conditional wait guidance', () => {
@@ -274,10 +331,73 @@ describe('coupon advice scenario matrix', () => {
     expect(deriveCouponAdvice(uncertain)?.kind).toBe('unknown');
   });
 
-  it('never treats the Fable percentage bar as the refundable weekly portion', () => {
-    expect(deriveCouponAdvice(fable(false))?.kind).toBe('unknown');
-    expect(deriveCouponAdvice(fable(false))?.message).toContain('Fable');
-    expect(deriveCouponAdvice(fable(true))?.kind).toBe('useful_now');
+  it('gives determinate Fable advice for all observed weekly and bucket combinations', () => {
+    const unblocks = deriveCouponAdvice(
+      fable({ weeklyUsed: 100, fableUsed: 41 }),
+    );
+    expect(unblocks?.kind).toBe('useful_now');
+    expect(unblocks?.message).toContain('Fable portion');
+    expect(unblocks?.message).not.toContain('expires');
+
+    const unblocksExpiring = deriveCouponAdvice(
+      fable({
+        weeklyUsed: 100,
+        fableUsed: 41,
+        resetIn: 4 * DAY,
+        expiresIn: 2 * DAY,
+      }),
+    );
+    expect(unblocksExpiring?.kind).toBe('useful_now');
+    expect(unblocksExpiring?.message).toContain('Fable portion');
+    expect(unblocksExpiring?.message).toContain('expires');
+
+    expect(
+      deriveCouponAdvice(fable({ weeklyUsed: 80, fableUsed: 56 })),
+    ).toBeNull();
+    expect(
+      deriveCouponAdvice(fable({ weeklyUsed: 74, fableUsed: 0 }))?.kind,
+    ).toBe('nothing_to_restore');
+
+    const zeroOnFull = deriveCouponAdvice(
+      fable({ weeklyUsed: 100, fableUsed: 0 }),
+    );
+    expect(zeroOnFull?.kind).toBe('scope');
+    expect(zeroOnFull?.message).toContain('Weekly (Fable) is at 0%');
+
+    expect(
+      deriveCouponAdvice(
+        fable({ weeklyUsed: 15, fableUsed: 10, resetIn: 3 * DAY }),
+      )?.kind,
+    ).toBe('save');
+    expect(
+      deriveCouponAdvice(
+        fable({ weeklyUsed: 100, fableUsed: 40, resetIn: 20 * 60 }),
+      )?.kind,
+    ).toBe('wait');
+
+    expect(
+      deriveCouponAdvice(
+        fable({ weeklyUsed: 100, fableUsed: 41, weeklyState: 'stale' }),
+      )?.message,
+    ).toContain('stale');
+    expect(
+      deriveCouponAdvice(
+        fable({ weeklyUsed: 100, fableUsed: 41, fableState: 'stale' }),
+      )?.message,
+    ).toContain('stale');
+    // Fresh 0% Weekly (Fable) must not emit nothing_to_restore when Weekly is stale or unobserved.
+    const staleWeeklyZeroBucket = deriveCouponAdvice(
+      fable({ weeklyUsed: 100, fableUsed: 0, weeklyState: 'stale' }),
+    );
+    expect(staleWeeklyZeroBucket?.kind).toBe('unknown');
+    expect(staleWeeklyZeroBucket?.message).toContain('stale');
+    const unobservedWeeklyZeroBucket = deriveCouponAdvice(
+      fable({ weeklyUsed: 74, fableUsed: 0, weeklyState: 'unobserved' }),
+    );
+    expect(unobservedWeeklyZeroBucket?.kind).toBe('unknown');
+    expect(deriveCouponAdvice(fable({ fiveHour: true }))?.kind).toBe(
+      'useful_now',
+    );
   });
 
   it('distinguishes stale usage from missing expiry in neutral guidance', () => {
@@ -339,20 +459,27 @@ describe('coupon advice scenario matrix', () => {
     );
     expect(weeklyEmpty?.kind).toBe('nothing_to_restore');
 
-    const fableFull = deriveCouponAdvice(
-      scenario({
-        used: 20,
-        resetIn: 2 * HOUR,
-        expiresIn: 30 * DAY,
-        extra: [quota('7d', 80, 4 * DAY), quota('7d_fable', 100, 4 * DAY)],
-        coupon: {
-          type: 'full',
-          gives_back_weekly: true,
-          clears: ['7d_overage_included'],
-          percent_used: { '5h': 20, '7d': 80, '7d_overage_included': 100 },
-        },
+    const fableBucketOnlyFull = deriveCouponAdvice(
+      fable({
+        weeklyUsed: 20,
+        fableUsed: 100,
+        resetIn: 4 * DAY,
+        expiresIn: 14 * DAY,
       }),
     );
-    expect(fableFull?.kind).toBe('useful_now');
+    expect(fableBucketOnlyFull).toBeNull();
+
+    const fableBothFull = deriveCouponAdvice(
+      fable({
+        weeklyUsed: 100,
+        fableUsed: 100,
+        resetIn: 4 * DAY,
+        expiresIn: 14 * DAY,
+      }),
+    );
+    expect(fableBothFull?.kind).toBe('useful_now');
+    expect(fableBothFull?.message).toContain(
+      'restores the Fable portion of your full Weekly limit',
+    );
   });
 });

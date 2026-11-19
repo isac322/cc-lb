@@ -12,6 +12,7 @@ import type {
   LimitResetsResponse,
   OpenAILimitResetCredit,
 } from './limitResets';
+import { capabilitiesOf } from './providers';
 import type { Upstream } from './queries';
 import { usePolledData } from './usePolledData';
 
@@ -42,10 +43,11 @@ export interface CouponInventory {
 }
 
 /** One cached fleet read; each upstream keeps its own provider observation. */
-export function useCouponInventory() {
+export function useCouponInventory(enabled = true) {
   return usePolledData(
     {
       queryKey: ['limit-resets', 'inventory'] as const,
+      enabled,
       queryFn: ({ signal }) =>
         getJson<CouponInventoryResponse>('/admin/v1/upstreams/limit-resets', {
           signal,
@@ -81,8 +83,7 @@ export function couponInventoryForUpstream({
   fleet: CouponInventoryResponse | undefined;
   nowMs: number;
 }): CouponInventory {
-  const supported =
-    upstream.kind === 'anthropic_oauth' || upstream.kind === 'openai_oauth';
+  const supported = capabilitiesOf(upstream.kind).limitReset;
   const unknown: CouponInventory = {
     total: null,
     complete: false,
@@ -170,10 +171,15 @@ export function couponInventoryForUpstream({
 }
 
 export function useUpstreamCouponInventory(upstreams: readonly Upstream[]) {
-  const query = useCouponInventory();
+  const hasSupported = upstreams.some(
+    (upstream) => capabilitiesOf(upstream.kind).limitReset,
+  );
+  const query = useCouponInventory(hasSupported);
   const nowMs = useCouponNow();
   const fleet =
-    query.isError || query.isPlaceholderData ? undefined : query.data;
+    !hasSupported || query.isError || query.isPlaceholderData
+      ? undefined
+      : query.data;
   const inventories = useMemo(
     () =>
       new Map(
@@ -184,5 +190,9 @@ export function useUpstreamCouponInventory(upstreams: readonly Upstream[]) {
       ),
     [upstreams, fleet, nowMs],
   );
-  return { inventories, loading: query.isPending, error: query.isError };
+  return {
+    inventories,
+    loading: hasSupported && query.isPending,
+    error: hasSupported && query.isError,
+  };
 }

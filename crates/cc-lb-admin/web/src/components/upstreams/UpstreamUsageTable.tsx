@@ -37,7 +37,11 @@ import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
-import { type ProviderFamily, providerOf } from '../../lib/providers';
+import {
+  capabilitiesOf,
+  type ProviderFamily,
+  providerOf,
+} from '../../lib/providers';
 import {
   type Upstream,
   useCreditHistory,
@@ -1029,7 +1033,12 @@ function RowBody({
   // desktop slot for a row that does not report the shared window.
   return (
     <>
-      <div className="col-span-full min-w-0 pr-20 @4xl:col-span-1 @4xl:pr-0">
+      <div
+        className={cx(
+          'col-span-full min-w-0 @4xl:col-span-1',
+          capabilitiesOf(row.upstream.kind).limitReset && 'pr-20 @4xl:pr-0',
+        )}
+      >
         <NameCell row={row} />
       </div>
       {row.upstream.kind.endsWith('_oauth') ? (
@@ -1158,6 +1167,7 @@ export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
     row: UpstreamUsageRow,
     returnFocus: HTMLButtonElement,
   ) => {
+    if (!capabilitiesOf(row.upstream.kind).limitReset) return;
     if (workflowOpen.current) return;
     workflowOpen.current = true;
     setActive((previous) => ({
@@ -1178,7 +1188,9 @@ export function UpstreamUsageTable(props: UpstreamUsageTableProps) {
   return (
     <>
       <UpstreamUsageRows {...props} onCouponClick={openCoupon} />
-      {active && activeRow ? (
+      {active &&
+      activeRow &&
+      capabilitiesOf(activeRow.upstream.kind).limitReset ? (
         <UpstreamCouponAction
           key={active.instance}
           upstream={activeRow.upstream}
@@ -1257,6 +1269,9 @@ function UpstreamUsageRows({
       row.upstream.kind.endsWith('_oauth') &&
       providerOf(row.upstream.kind) !== 'gemini',
   );
+  const hasCouponColumn = shown.some(
+    (row) => capabilitiesOf(row.upstream.kind).limitReset,
+  );
   const firstProvider = sorted[0]
     ? providerOf(sorted[0].upstream.kind)
     : undefined;
@@ -1310,7 +1325,8 @@ function UpstreamUsageRows({
       <div
         aria-hidden="true"
         className={cx(
-          'relative hidden border-b border-row py-2 pl-3 pr-20 text-label text-text-faint @4xl:grid',
+          'relative hidden border-b border-row py-2 pl-3 text-label text-text-faint @4xl:grid',
+          hasCouponColumn ? 'pr-20' : 'pr-3',
           rowGrid,
         )}
         data-testid="upstream-usage-header"
@@ -1321,7 +1337,11 @@ function UpstreamUsageRows({
             {windowLabel(w)}
           </span>
         ))}
-        <span className="absolute right-3 top-2 w-16 text-right">Coupons</span>
+        {hasCouponColumn ? (
+          <span className="absolute right-3 top-2 w-16 text-right">
+            Coupons
+          </span>
+        ) : null}
       </div>
       <ul aria-label={ariaLabel} className="flex flex-col" id={listId}>
         {shown.map((row) => (
@@ -1334,7 +1354,10 @@ function UpstreamUsageRows({
               className={cx(
                 ROW_CLASS,
                 rowGrid,
-                'hover:bg-overlay-2 @4xl:pr-20',
+                'hover:bg-overlay-2',
+                // Desktop rows share equal-width grid tracks with the header; keeping
+                // the coupon gutter across every row preserves column alignment.
+                hasCouponColumn && '@4xl:pr-20',
               )}
               search={{ selectedId: row.upstream.id }}
               title={row.runtimeError ?? undefined}
@@ -1349,14 +1372,16 @@ function UpstreamUsageRows({
                 layout={layout}
               />
             </Link>
-            <div className="absolute right-0 top-1 w-max @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
-              <UpstreamCouponTrigger
-                upstream={row.upstream}
-                inventory={data.coupons?.get(row.upstream.id)}
-                loading={data.couponsLoading}
-                onClick={(trigger) => onCouponClick(row, trigger)}
-              />
-            </div>
+            {capabilitiesOf(row.upstream.kind).limitReset ? (
+              <div className="absolute right-0 top-1 w-max @4xl:right-3 @4xl:top-1/2 @4xl:-translate-y-1/2">
+                <UpstreamCouponTrigger
+                  upstream={row.upstream}
+                  inventory={data.coupons?.get(row.upstream.id)}
+                  loading={data.couponsLoading}
+                  onClick={(trigger) => onCouponClick(row, trigger)}
+                />
+              </div>
+            ) : null}
           </li>
         ))}
       </ul>

@@ -4,6 +4,7 @@ import {
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -16,6 +17,7 @@ import type { QuotaSnapshot, UpstreamOAuthStatusResponse } from '../../lib/api';
 import {
   type CouponInventoryResponse,
   couponInventoryForUpstream,
+  useUpstreamCouponInventory,
 } from '../../lib/couponInventory';
 import {
   clearPendingLimitResetOp,
@@ -434,5 +436,66 @@ describe('Overview coupon action lifetime', () => {
     }
     expect(requests.some((path) => path.endsWith('/claim'))).toBe(false);
     expect(loadPendingLimitResetOp(TARGET)).toBeNull();
+  });
+
+  it('skips polling fleet coupon inventory when only Gemini or API-key upstreams exist', async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    clients.push(client);
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        fetched.push(String(input));
+        return jsonResponse({ upstreams: [] });
+      }),
+    );
+    const geminiUpstreams: Upstream[] = [
+      {
+        id: 'gemini-oauth-1',
+        name: 'gemini-oauth-1',
+        kind: 'gemini_oauth',
+        enabled: true,
+        base_url: null,
+        spec_revision: 1,
+        warmup_enabled: false,
+        warmup_dialect_plugin: null,
+        status: {
+          last_apply_error: null,
+          last_apply_at_unix_secs: null,
+          last_warmup_at_unix_secs: null,
+        },
+      },
+      {
+        id: 'gemini-key-1',
+        name: 'gemini-key-1',
+        kind: 'gemini_api_key',
+        enabled: true,
+        base_url: null,
+        spec_revision: 1,
+        warmup_enabled: false,
+        warmup_dialect_plugin: null,
+        status: {
+          last_apply_error: null,
+          last_apply_at_unix_secs: null,
+          last_warmup_at_unix_secs: null,
+        },
+      },
+    ];
+    const { result } = renderHook(
+      () => useUpstreamCouponInventory(geminiUpstreams),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe(false);
+    expect(result.current.inventories.get('gemini-oauth-1')?.supported).toBe(
+      false,
+    );
+    expect(fetched).toEqual([]);
   });
 });
