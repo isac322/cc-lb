@@ -880,6 +880,7 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: None,
         dynamic_view: Arc::new(DynamicViewHolder::new(view)),
         config: Arc::new(stage.config.clone()),

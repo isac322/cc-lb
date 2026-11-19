@@ -251,6 +251,7 @@ fn test_state(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
         dynamic_view_rebinder: None,

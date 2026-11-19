@@ -4,6 +4,7 @@ use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
+use super::quota::post_warmup_window_check;
 use super::scheduling::POST_RESET_GUARD_SECS;
 
 const NOW_UNIX_SECS: i64 = 1_782_000_000;
@@ -1128,5 +1129,155 @@ fn quota_snapshot(
         overage_in_use: None,
         overage_period_monthly_utilization: None,
         upgrade_paths: None,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Expect {
+    Started,
+    NotStarted(Vec<SubscriptionQuotaWindow>),
+    Unknown,
+}
+
+fn reading(
+    window: SubscriptionQuotaWindow,
+    state: SubscriptionQuotaDataState,
+    utilization: Option<f64>,
+    reset: i64,
+    observed_at: i64,
+) -> SubscriptionQuotaCandidateSnapshot {
+    let mut snapshot = quota_snapshot(window, state, utilization, Some(reset));
+    snapshot.observed_at_unix_millis = Some(u64::try_from(observed_at).expect("positive") * 1000);
+    snapshot
+}
+
+#[test]
+fn post_warmup_check_decides_only_from_request_anchored_evidence() {
+    use SubscriptionQuotaDataState::Fresh;
+    use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay, ThirdPartyFiveHour};
+    // Request started at `s`, completed at `c`; the verifier polls at `poll`.
+    let s = NOW_UNIX_SECS;
+    let c = s + 1;
+    let poll = c + 12;
+    let pre_existing_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
+    let cases: Vec<(
+        &str,
+        WarmupLane,
+        Vec<SubscriptionQuotaCandidateSnapshot>,
+        Expect,
+    )> = vec![
+        (
+            "unused 5h next to a running 7d is not started",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.0), poll + FIVE_HOURS, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::NotStarted(vec![GeminiFiveHour]),
+        ),
+        (
+            "5h anchored to the request is started even with zero usage",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.0), s + FIVE_HOURS, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::Started,
+        ),
+        (
+            "third-party window anchored to the request is started",
+            WarmupLane::ThirdParty,
+            vec![reading(
+                ThirdPartyFiveHour,
+                Fresh,
+                Some(0.0),
+                c + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Started,
+        ),
+        (
+            "only pre-existing windows is unknown",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.4), s + 3_600, poll),
+                pre_existing_weekly(),
+            ],
+            Expect::Unknown,
+        ),
+        (
+            "usage on an anchored window is started",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.001),
+                s + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Started,
+        ),
+        (
+            "a poll too close to the request is ambiguous",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.0),
+                c + 2 + FIVE_HOURS,
+                c + 2,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "a reading from before the request completed is unknown",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                Fresh,
+                Some(0.0),
+                s + FIVE_HOURS,
+                c - 1,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "a stale reading is unknown",
+            WarmupLane::Primary,
+            vec![reading(
+                GeminiFiveHour,
+                SubscriptionQuotaDataState::Stale,
+                Some(0.0),
+                poll + FIVE_HOURS,
+                poll,
+            )],
+            Expect::Unknown,
+        ),
+        (
+            "every target absent is unknown",
+            WarmupLane::Primary,
+            vec![absent(GeminiFiveHour), absent(GeminiSevenDay)],
+            Expect::Unknown,
+        ),
+        (
+            "absent 5h with an unused 7d is not started",
+            WarmupLane::Primary,
+            vec![
+                absent(GeminiFiveHour),
+                reading(GeminiSevenDay, Fresh, Some(0.0), poll + SEVEN_DAYS, poll),
+            ],
+            Expect::NotStarted(vec![GeminiSevenDay]),
+        ),
+    ];
+    for (name, lane, snapshots, expected) in cases {
+        let actual =
+            match post_warmup_window_check(UpstreamKind::GeminiOauth, lane, &snapshots, s, c) {
+                cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
+                cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => {
+                    Expect::NotStarted(windows)
+                }
+                cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,
+            };
+        assert_eq!(actual, expected, "{name}");
     }
 }

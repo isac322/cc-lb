@@ -132,6 +132,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
         Ok(WarmupDialectDispatchOutcome {
             status: StatusCode::OK,
             headers: axum::http::HeaderMap::new(),
+            request_sent_at_unix_secs: None,
         })
     }
 
@@ -148,6 +149,7 @@ impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
                 ..Default::default()
             }],
             error_detail: None,
+            request_sent_at_unix_secs: None,
         })
     }
 }
@@ -213,6 +215,7 @@ async fn harness_with(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: warmup_dispatcher,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: None,
         start_time: std::time::Instant::now(),
         event_bus: None,

@@ -134,6 +134,7 @@ impl Harness {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
+            warmup_window_verifier: None,
             limit_reset_usage_refresh: None,
             dynamic_view: holder.clone(),
             config: Arc::new(config),

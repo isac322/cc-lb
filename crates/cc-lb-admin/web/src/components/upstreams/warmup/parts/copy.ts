@@ -40,4 +40,5 @@ export const REASON_LABEL: Record<
   bad_request: 'Bad request (400)',
   not_found: 'Not found (404)',
   dialect_plugin_failed: 'Shape plugin error',
+  window_not_started: 'Quota window did not start',
 };

@@ -1570,6 +1570,7 @@ fn refresh_test_router(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: Some(refresh),
         dynamic_view: server.dynamic_view.clone(),
         config: std::sync::Arc::new(config),

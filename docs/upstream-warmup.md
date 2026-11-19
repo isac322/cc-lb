@@ -45,6 +45,8 @@ gemini_third_party_model = "gpt-oss-120b-medium"
 
 These are the defaults. Choose a model available to the connected subscription. Each primary-lane model must belong to the account profile's Gemini models quota group; a model outside that group, such as `gemini-2.5-flash-lite` on Antigravity, returns 200 but does not start the five-hour or weekly window. Antigravity model IDs carry a thinking-level suffix. `gemini_model` applies only to Gemini CLI credentials. `gemini_third_party_model` must start with `claude-` or `gpt-oss-`; any other value fails at config load.
 
+Gemini responses do not include quota headers. After a 2xx warm-up response, cc-lb polls Gemini quota for the lane. A window already running before the request does not count as evidence. If a target window started, the attempt is recorded as `success` with the observed reset. If every present target remains fresh, unused, and valid after the request, the attempt is recorded as `permanent_failure` with reason `window_not_started`; the next attempt is scheduled like a success, after the reported reset of the lane's shortest present window. If the poll cannot decide, the attempt is recorded using the normal response classification.
+
 ### Shape plugins
 
 `warmup_dialect_plugin` is available for all three OAuth kinds. The selected plugin receives the minimal native request before the normal credential signer runs:
@@ -159,6 +161,8 @@ Every attempt record carries a `lane` field. Attempts recorded before lanes exis
 History also accepts `status`, `limit`, `before` (an opaque pagination cursor), and `since_unix_secs` (non-negative integer Unix seconds). The time filter includes attempts at or after the supplied second and combines with the other filters before pagination. Keep the same `since_unix_secs` when following `next_cursor`; omit it for all-time history. A negative value returns `400 invalid_warmup_since`.
 
 The upstream's `status.last_warmup_at_unix_secs` is the time any lane last succeeded.
+
+A Gemini 2xx response is not by itself proof that the quota window started: cc-lb verifies the lane with a post-request quota poll only when the response arrives early enough to finish within the request budget. A verified start records the real reset; a still-unused target records `permanent_failure` / `window_not_started` without updating `last_warmup_at_unix_secs`. Poll failures and inconclusive samples retain the normal response-based result.
 
 ## What you'll see
 

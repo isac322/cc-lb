@@ -1719,34 +1719,35 @@ async fn build_app_with_storage_inner(
     let anthropic_org_api =
         AnthropicOrgApi::production().map_err(BuildError::AnthropicOrgOrigin)?;
     let scheduler_cancel = CancellationToken::new();
-    let (scheduler_ctx, limit_reset_usage_refresh) = crate::scheduler_dispatch::build_scheduler_ctx(
-        crate::scheduler_dispatch::SchedulerDispatchDeps {
-            backend: opened_scheduler.backend.clone(),
-            cache_keepalive_pusher: Arc::new(opened_scheduler.backend.clone()),
-            config: config.clone(),
-            storage: storage.clone(),
-            stores: stores.clone(),
-            aead: aead.clone(),
-            oauth_cfg: oauth_cfg.clone(),
-            runtime: runtime.clone(),
-            data_dir: data_dir.clone(),
-            lazy_refresher: lazy_refresher_concrete.clone(),
-            subscription_quota_sink: subscription_quota_sink.clone(),
-            subscription_quota_cache: subscription_quota_cache.clone(),
-            cancel: scheduler_cancel.clone(),
-            replica_id: scheduler_replica_id,
-            price_catalog: price_catalog.clone(),
-            key_store: key_store.clone(),
-            limit_engine: limit_engine.clone(),
-            dynamic_view: dynamic_view_holder.clone(),
-            keepalive_dispatcher,
-            event_bus: event_bus.clone(),
-            clock: clock.clone(),
-            anthropic_org_api: anthropic_org_api.clone(),
-            openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi::production()
-                .expect("OpenAI production organization origin parses"),
-        },
-    );
+    let (scheduler_ctx, limit_reset_usage_refresh, warmup_window_verifier) =
+        crate::scheduler_dispatch::build_scheduler_ctx(
+            crate::scheduler_dispatch::SchedulerDispatchDeps {
+                backend: opened_scheduler.backend.clone(),
+                cache_keepalive_pusher: Arc::new(opened_scheduler.backend.clone()),
+                config: config.clone(),
+                storage: storage.clone(),
+                stores: stores.clone(),
+                aead: aead.clone(),
+                oauth_cfg: oauth_cfg.clone(),
+                runtime: runtime.clone(),
+                data_dir: data_dir.clone(),
+                lazy_refresher: lazy_refresher_concrete.clone(),
+                subscription_quota_sink: subscription_quota_sink.clone(),
+                subscription_quota_cache: subscription_quota_cache.clone(),
+                cancel: scheduler_cancel.clone(),
+                replica_id: scheduler_replica_id,
+                price_catalog: price_catalog.clone(),
+                key_store: key_store.clone(),
+                limit_engine: limit_engine.clone(),
+                dynamic_view: dynamic_view_holder.clone(),
+                keepalive_dispatcher,
+                event_bus: event_bus.clone(),
+                clock: clock.clone(),
+                anthropic_org_api: anthropic_org_api.clone(),
+                openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi::production()
+                    .expect("OpenAI production organization origin parses"),
+            },
+        );
     let scheduler_tasks = opened_scheduler
         .spawn(scheduler_ctx, scheduler_cancel.clone())
         .await?;
@@ -1819,6 +1820,7 @@ async fn build_app_with_storage_inner(
                 config: admin_config.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
         }),
+        warmup_window_verifier: Some(warmup_window_verifier),
         limit_reset_usage_refresh: Some(limit_reset_usage_refresh),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
@@ -1987,6 +1989,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
         Ok(WarmupDialectDispatchOutcome {
             status: outcome.status,
             headers: outcome.headers,
+            request_sent_at_unix_secs: outcome.request_sent_at_unix_secs,
         })
     }
 
@@ -2061,11 +2064,13 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                     status,
                     observations,
                     error_detail,
+                    request_sent_at_unix_secs,
                 } => WarmupNativeDispatchOutcome::Response {
                     status,
                     dispatch_kind: WarmupDispatchKind::Http,
                     observations,
                     error_detail,
+                    request_sent_at_unix_secs,
                 },
                 WarmupRequestAttempt::CredentialDecryptFailed { error } => {
                     WarmupNativeDispatchOutcome::PermanentFailure {

@@ -56,6 +56,7 @@ fn test_state() -> AdminState {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
         limit_reset_usage_refresh: None,
         start_time: std::time::Instant::now(),
         event_bus: None,

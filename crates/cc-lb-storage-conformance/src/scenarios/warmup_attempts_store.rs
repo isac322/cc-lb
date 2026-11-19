@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
-    WarmupAttemptStatus, WarmupDispatchKind, WarmupLane, WarmupSkipReason, WarmupSuccessReason,
-    WarmupTransientFailureReason,
+    WarmupAttemptStatus, WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason,
+    WarmupSkipReason, WarmupSuccessReason, WarmupTransientFailureReason,
 };
 
 use crate::{
@@ -20,6 +20,7 @@ where
     B::Storage: UpstreamStore + UpstreamWarmupAttemptStore,
 {
     insert_and_read_back(Arc::clone(&backend)).await?;
+    permanent_failure_window_not_started_roundtrip(Arc::clone(&backend)).await?;
     cursor_pagination(Arc::clone(&backend)).await?;
     outcome_filter(Arc::clone(&backend)).await?;
     since_filter(Arc::clone(&backend)).await?;
@@ -60,6 +61,28 @@ scenario!(insert_and_read_back, |storage| async move {
     );
     Ok(())
 });
+
+scenario!(
+    permanent_failure_window_not_started_roundtrip,
+    |storage| async move {
+        let upstream = create_upstream(storage.as_ref(), "warmup-window-not-started").await?;
+        let record = attempt(
+            upstream.id,
+            1,
+            1_800_000_000,
+            WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::WindowNotStarted),
+        );
+        storage.insert_warmup_attempt(&record).await?;
+        ensure!(
+            storage
+                .list_warmup_attempts_for_upstream(upstream.id, WarmupAttemptListFilters::default())
+                .await?
+                == [record],
+            "window_not_started should round-trip"
+        );
+        Ok(())
+    }
+);
 
 scenario!(cursor_pagination, |storage| async move {
     let upstream = create_upstream(storage.as_ref(), "warmup-cursor-pagination").await?;

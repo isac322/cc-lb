@@ -118,6 +118,9 @@ pub(crate) fn outcome_components(outcome: WarmupAttemptOutcome) -> (&'static str
         WarmupAttemptOutcome::PermanentFailure(
             WarmupPermanentFailureReason::DialectPluginFailed,
         ) => ("permanent_failure", "dialect_plugin_failed"),
+        WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::WindowNotStarted) => {
+            ("permanent_failure", "window_not_started")
+        }
     }
 }
 
@@ -221,6 +224,9 @@ pub(crate) fn parse_reason(
                 WarmupPermanentFailureReason::DialectPluginFailed,
             ))
         }
+        (WarmupAttemptStatus::PermanentFailure, "window_not_started") => Ok(
+            WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::WindowNotStarted),
+        ),
         (status, reason) => Err(StorageError::Corrupted {
             message: format!("invalid warmup attempt reason {reason} for status {status:?}"),
         }),

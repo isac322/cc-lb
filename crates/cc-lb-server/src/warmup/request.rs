@@ -28,6 +28,7 @@ pub enum WarmupRequestAttempt {
         status: StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
+        request_sent_at_unix_secs: Option<i64>,
     },
     CredentialDecryptFailed {
         error: String,
@@ -89,7 +90,7 @@ async fn dispatch_anthropic_warmup_attempt(
     };
 
     let mut attempt =
-        dispatch_http_request(client, request, parse_anthropic_unified_headers, None).await;
+        dispatch_http_request(client, request, parse_anthropic_unified_headers, None, None).await;
     if let WarmupRequestAttempt::Response {
         error_detail: Some(detail),
         ..
@@ -107,12 +108,14 @@ async fn dispatch_http_request(
     request: Request<Full<Bytes>>,
     parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
     signer: Option<&dyn cc_lb_upstream::Signer>,
+    request_sent_at_unix_secs: Option<i64>,
 ) -> WarmupRequestAttempt {
     dispatch_http_request_with_timeout(
         client,
         request,
         parse_observations,
         signer,
+        request_sent_at_unix_secs,
         WARMUP_RESPONSE_TIMEOUT,
     )
     .await
@@ -123,11 +126,18 @@ pub(crate) async fn dispatch_http_request_with_timeout(
     request: Request<Full<Bytes>>,
     parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
     signer: Option<&dyn cc_lb_upstream::Signer>,
+    request_sent_at_unix_secs: Option<i64>,
     timeout: Duration,
 ) -> WarmupRequestAttempt {
     match tokio::time::timeout(
         timeout,
-        dispatch_http_request_inner(client, request, parse_observations, signer),
+        dispatch_http_request_inner(
+            client,
+            request,
+            parse_observations,
+            signer,
+            request_sent_at_unix_secs,
+        ),
     )
     .await
     {
@@ -143,6 +153,7 @@ async fn dispatch_http_request_inner(
     request: Request<Full<Bytes>>,
     parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
     signer: Option<&dyn cc_lb_upstream::Signer>,
+    request_sent_at_unix_secs: Option<i64>,
 ) -> WarmupRequestAttempt {
     let response = match client.request(request).await {
         Ok(response) => response,
@@ -187,6 +198,7 @@ async fn dispatch_http_request_inner(
         status,
         observations,
         error_detail,
+        request_sent_at_unix_secs,
     }
 }
 

@@ -13,17 +13,19 @@ pub(super) fn response_is_auth_failed(attempt: &WarmupDispatchAttempt) -> bool {
     )
 }
 
-pub(super) fn execution_result_from_dispatch_attempt(
-    attempt: &WarmupDispatchAttempt,
-) -> WarmupAttemptExecutionResult<'_> {
+pub(super) fn execution_result_from_dispatch_attempt<'a>(
+    attempt: &'a WarmupDispatchAttempt,
+    observations_override: Option<&'a [cc_lb_quota::UnifiedQuotaObservation]>,
+) -> WarmupAttemptExecutionResult<'a> {
     match &attempt.result {
         WarmupDispatchResult::Response {
             status,
             observations,
             error_detail,
+            ..
         } => WarmupAttemptExecutionResult::Response {
             status: *status,
-            observations,
+            observations: observations_override.unwrap_or(observations),
             error_detail: error_detail.as_deref(),
         },
         WarmupDispatchResult::TransientFailure {

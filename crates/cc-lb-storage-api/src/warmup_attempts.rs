@@ -169,6 +169,7 @@ pub enum WarmupPermanentFailureReason {
     BadRequest,
     NotFound,
     DialectPluginFailed,
+    WindowNotStarted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -432,6 +433,15 @@ mod tests {
         assert_eq!(
             upstream_5xx_json,
             r#"{"status":"transient_failure","reason":"upstream_5xx"}"#
+        );
+
+        let window_not_started =
+            WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::WindowNotStarted);
+        let window_not_started_json =
+            serde_json::to_string(&window_not_started).expect("serialize outcome");
+        assert_eq!(
+            window_not_started_json,
+            r#"{"status":"permanent_failure","reason":"window_not_started"}"#
         );
 
         let success = WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive);

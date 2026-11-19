@@ -100,6 +100,7 @@ pub(crate) fn build_scheduler_ctx(
 ) -> (
     SchedulerCtx,
     Arc<dyn cc_lb_admin::LimitResetUsageRefreshPort>,
+    Arc<dyn cc_lb_admin::WarmupWindowVerifier>,
 ) {
     let dispatch = SchedulerDispatch::new(deps);
     let ctx = SchedulerCtx::new(
@@ -108,7 +109,7 @@ pub(crate) fn build_scheduler_ctx(
         dispatch.clone().cron_dispatch(),
         dispatch.clock.clone(),
     );
-    (ctx, Arc::new(dispatch))
+    (ctx, Arc::new(dispatch.clone()), Arc::new(dispatch))
 }
 
 impl SchedulerDispatch {

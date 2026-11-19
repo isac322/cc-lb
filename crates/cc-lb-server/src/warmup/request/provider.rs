@@ -76,11 +76,13 @@ async fn build_and_dispatch(
         UpstreamKind::OpenaiOauth => parse_openai_codex_quota_headers,
         _ => |_| Vec::new(),
     };
+    let request_sent_at_unix_secs = i64::try_from(cc_lb_clock::unix_secs(params.clock.now())).ok();
     Ok(dispatch_http_request(
         params.http,
         request,
         parse_observations,
         Some(signer.as_ref()),
+        request_sent_at_unix_secs,
     )
     .await)
 }

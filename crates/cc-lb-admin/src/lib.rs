@@ -38,8 +38,8 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord, WarmupDispatchKind, WarmupLane, WarmupPermanentFailureReason,
-    WarmupTransientFailureReason,
+    Storage, SubscriptionQuotaWindow, UpstreamRecord, WarmupDispatchKind, WarmupLane,
+    WarmupPermanentFailureReason, WarmupTransientFailureReason,
 };
 
 use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
@@ -86,6 +86,7 @@ impl WarmupDialectDispatchError {
 pub struct WarmupDialectDispatchOutcome {
     pub status: StatusCode,
     pub headers: HeaderMap,
+    pub request_sent_at_unix_secs: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -95,6 +96,7 @@ pub enum WarmupNativeDispatchOutcome {
         dispatch_kind: WarmupDispatchKind,
         observations: Vec<UnifiedQuotaObservation>,
         error_detail: Option<String>,
+        request_sent_at_unix_secs: Option<i64>,
     },
     TransientFailure {
         dispatch_kind: WarmupDispatchKind,
@@ -125,6 +127,34 @@ pub trait WarmupDialectDispatcher: Send + Sync {
         upstream: &UpstreamRecord,
         lane: WarmupLane,
     ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError>;
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum WarmupWindowCheck {
+    /// The request started at least one target window.
+    Started {
+        observations: Vec<UnifiedQuotaObservation>,
+    },
+    /// The request did not start any target window.
+    NotStarted {
+        windows: Vec<SubscriptionQuotaWindow>,
+    },
+    /// Samples were not observed after completion, or the started/not-started
+    /// cases are less than MIN_GAP - TOL apart. A target already running before
+    /// the request is not evidence either way.
+    Unknown,
+}
+
+#[async_trait]
+pub trait WarmupWindowVerifier: Send + Sync {
+    /// Verify using samples observed at or after completion, anchored to both
+    /// the request start and completion timestamps.
+    async fn verify_warmup_window(
+        &self,
+        upstream: &UpstreamRecord,
+        lane: WarmupLane,
+        request_started_at_unix_secs: i64,
+        request_completed_at_unix_secs: i64,
+    ) -> WarmupWindowCheck;
 }
 
 #[async_trait]
@@ -170,6 +200,7 @@ pub struct AdminState {
     pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
+    pub warmup_window_verifier: Option<Arc<dyn WarmupWindowVerifier>>,
     pub limit_reset_usage_refresh: Option<Arc<dyn LimitResetUsageRefreshPort>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<Config>,
