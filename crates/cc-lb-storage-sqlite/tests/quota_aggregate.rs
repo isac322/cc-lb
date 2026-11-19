@@ -330,6 +330,60 @@ async fn quota_poll_rejects_mixed_upstreams_and_non_api_sources_before_writing()
 }
 
 #[tokio::test]
+async fn quota_fenced_headers_enforces_source_epoch_and_generation_fences() {
+    let (_dir, storage) = quota_storage("fenced-headers.sqlite").await;
+    let fence = quota_poll_fence(&storage).await;
+    let mut header = quota_poll_sample(fence.upstream_id, 100, 1, 0.2);
+    header.source = SubscriptionQuotaSource::Header;
+    let api = quota_poll_sample(fence.upstream_id, 200, 2, 0.4);
+    let other_upstream = quota_poll_sample(Uuid::new_v4(), 300, 3, 0.6);
+
+    for invalid in [api, other_upstream] {
+        assert!(matches!(
+            storage
+                .record_subscription_quota_fenced_headers(&[header.clone(), invalid], &fence)
+                .await,
+            Err(StorageError::InvalidInput { .. })
+        ));
+    }
+    assert!(
+        storage
+            .record_subscription_quota_fenced_headers(std::slice::from_ref(&header), &fence)
+            .await
+            .expect("matching fence writes header sample")
+    );
+    assert_quota_poll_records(
+        &storage,
+        fence.upstream_id,
+        std::slice::from_ref(&header),
+        std::slice::from_ref(&header),
+    )
+    .await;
+
+    assert!(
+        storage
+            .compare_and_put_meta_value(&fence.epoch_key, fence.epoch_value.as_deref(), "next")
+            .await
+            .expect("advance epoch")
+    );
+    let mut stale_header = quota_poll_sample(fence.upstream_id, 400, 4, 0.9);
+    stale_header.source = SubscriptionQuotaSource::Header;
+    assert!(
+        !storage
+            .record_subscription_quota_fenced_headers(&[stale_header], &fence)
+            .await
+            .expect("stale epoch rejects fenced header")
+    );
+    assert_quota_poll_records(
+        &storage,
+        fence.upstream_id,
+        std::slice::from_ref(&header),
+        std::slice::from_ref(&header),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn quota_poll_rolls_back_latest_and_checkpoints_when_a_later_sample_is_invalid() {
     let (_dir, storage) = quota_storage("poll-rollback.sqlite").await;
     let fence = quota_poll_fence(&storage).await;

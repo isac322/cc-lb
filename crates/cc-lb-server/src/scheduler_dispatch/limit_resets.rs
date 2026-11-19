@@ -10,16 +10,21 @@ use cc_lb_control::openai_limit_resets::{
     openai_limit_reset_epoch_meta_key, openai_limit_reset_fence_started_at_millis,
     openai_limit_reset_meta_key, settled_openai_limit_reset_epoch,
 };
+use cc_lb_quota::unified_observation_to_sample;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
-use cc_lb_storage_api::{UpstreamRecord, UpstreamStore, upstream::UpstreamKind};
+use cc_lb_storage_api::{
+    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, WarmupLane, upstream::UpstreamKind,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
     SchedulerDispatch,
     http::{decrypt_bundle, upstream_base_url},
+    oauth::should_poll_oauth_usage,
     time::now_unix_millis,
+    warmup::request::WarmupDispatchResult,
 };
 
 /// Captured before the provider GET, including before any 401 retry. A reset
@@ -170,6 +175,193 @@ impl SchedulerDispatch {
         Ok(())
     }
 
+    pub(super) async fn publish_header_probe(
+        &self,
+        upstream: &UpstreamRecord,
+        fence: &UsagePollFence,
+        sequence: u64,
+        records: &[cc_lb_storage_api::SubscriptionQuotaSample],
+    ) -> SchedulerResult<()> {
+        let Some(epoch_key) = &fence.epoch_key else {
+            return Err(SchedulerError::Job(
+                "missing reset epoch key for fenced header probe".to_owned(),
+            ));
+        };
+        let publication = cc_lb_storage_api::SubscriptionQuotaPollFence {
+            upstream_id: upstream.id,
+            oauth_token_generation: upstream.oauth_token_generation,
+            epoch_key: epoch_key.clone(),
+            epoch_value: fence.epoch.map(|epoch| epoch.to_string()),
+        };
+        if !self
+            .storage
+            .record_subscription_quota_fenced_headers(records, &publication)
+            .await
+            .map_err(super::storage::storage_scheduler_error)?
+        {
+            return Err(SchedulerError::Job(
+                "header probe identity or reset epoch changed before durable publication"
+                    .to_owned(),
+            ));
+        }
+        if !self
+            .subscription_quota_cache
+            .publish_poll(upstream.id, sequence, records)
+        {
+            return Err(SchedulerError::Job(
+                "a newer quota poll already published routing quota".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn probe_anthropic_quota_headers_after_reset(
+        &self,
+        upstream_id: Uuid,
+    ) -> SchedulerResult<bool> {
+        let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await
+            .map_err(super::storage::storage_scheduler_error)?
+        else {
+            return Ok(false);
+        };
+        if upstream.kind != UpstreamKind::AnthropicOauth || !should_poll_oauth_usage(&upstream) {
+            return Ok(false);
+        }
+        self.ensure_fresh_usage_token(&mut upstream).await?;
+        if !should_poll_oauth_usage(&upstream) {
+            return Ok(false);
+        }
+        let fence = self.capture_usage_poll_fence(&upstream).await?;
+        let poll_sequence = self.subscription_quota_cache.begin_poll();
+
+        let first = self
+            .dispatch_warmup_request(&upstream, WarmupLane::Primary)
+            .await;
+        let (status, observations) = match first.result {
+            WarmupDispatchResult::Response {
+                status: http::StatusCode::UNAUTHORIZED,
+                ..
+            } => match self.force_refresh_usage_token(&mut upstream).await {
+                Ok(true) => match self
+                    .dispatch_warmup_request(&upstream, WarmupLane::Primary)
+                    .await
+                    .result
+                {
+                    WarmupDispatchResult::Response {
+                        status,
+                        observations,
+                        ..
+                    } => {
+                        if status == http::StatusCode::UNAUTHORIZED {
+                            self.record_reconnect_required(&upstream, "status_401")
+                                .await?;
+                            return Ok(false);
+                        }
+                        (status, observations)
+                    }
+                    WarmupDispatchResult::TransientFailure { reason, .. } => {
+                        tracing::warn!(
+                            %upstream_id,
+                            ?reason,
+                            "anthropic header probe retry failed transiently"
+                        );
+                        return Ok(false);
+                    }
+                    WarmupDispatchResult::PermanentFailure { reason, .. } => {
+                        tracing::warn!(
+                            %upstream_id,
+                            ?reason,
+                            "anthropic header probe retry failed permanently"
+                        );
+                        return Ok(false);
+                    }
+                },
+                Ok(false) => {
+                    tracing::warn!(
+                        %upstream_id,
+                        "anthropic header probe received 401 with no token refresher available"
+                    );
+                    return Ok(false);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %upstream_id,
+                        %error,
+                        "anthropic header probe force-refresh failed"
+                    );
+                    return Ok(false);
+                }
+            },
+            WarmupDispatchResult::Response {
+                status,
+                observations,
+                ..
+            } => (status, observations),
+            WarmupDispatchResult::TransientFailure { reason, .. } => {
+                tracing::warn!(
+                    %upstream_id,
+                    ?reason,
+                    "anthropic header probe failed transiently"
+                );
+                return Ok(false);
+            }
+            WarmupDispatchResult::PermanentFailure { reason, .. } => {
+                tracing::warn!(
+                    %upstream_id,
+                    ?reason,
+                    "anthropic header probe failed permanently"
+                );
+                return Ok(false);
+            }
+        };
+
+        if !status.is_success() && status != http::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!(
+                %upstream_id,
+                status = status.as_u16(),
+                "anthropic header probe returned non-quota HTTP status"
+            );
+            return Ok(false);
+        }
+
+        let observed_at_unix_millis = now_unix_millis(&*self.clock);
+        let records: Vec<_> = observations
+            .into_iter()
+            .map(|observation| {
+                unified_observation_to_sample(upstream.id, observation, observed_at_unix_millis)
+            })
+            .collect();
+        let has_main_quota = records.iter().any(|record| {
+            matches!(
+                record.window,
+                SubscriptionQuotaWindow::FiveHour
+                    | SubscriptionQuotaWindow::SevenDay
+                    | SubscriptionQuotaWindow::SevenDayFable
+            ) && (record.utilization.is_some() || record.status.is_some())
+        });
+        if !has_main_quota {
+            tracing::warn!(
+                %upstream_id,
+                status = status.as_u16(),
+                samples = records.len(),
+                "anthropic header probe response carried no main quota observations"
+            );
+            return Ok(false);
+        }
+
+        self.validate_usage_poll_fence(&upstream, &fence).await?;
+        self.publish_header_probe(&upstream, &fence, poll_sequence, &records)
+            .await?;
+        tracing::info!(
+            %upstream_id,
+            status = status.as_u16(),
+            samples = records.len(),
+            "post-claim anthropic header probe refreshed routing quota after 429"
+        );
+        Ok(true)
+    }
+
     pub(super) async fn fetch_openai_reset_inventory(
         &self,
         upstream: &UpstreamRecord,
@@ -309,14 +501,92 @@ impl LimitResetUsageRefreshPort for SchedulerDispatch {
         let mut dispatch = self.clone();
         dispatch.cancel = cancel.clone();
         tokio::select! {
-            _ = cancel.cancelled() => LimitResetUsageRefresh::Failed,
-            result = tokio::time::timeout(std::time::Duration::from_secs(30), dispatch.poll_usage(upstream_id, None)) => {
-                match result {
-                    Ok(Ok(OAuthUsagePollObservation::Success {
-                        affected_main_quota_published: true, ..
-                    })) => LimitResetUsageRefresh::Refreshed,
-                    Ok(Ok(OAuthUsagePollObservation::Skip)) => LimitResetUsageRefresh::NotApplicable,
-                    _ => LimitResetUsageRefresh::Failed,
+            _ = cancel.cancelled() => {
+                tracing::warn!(%upstream_id, "post-claim usage refresh cancelled");
+                LimitResetUsageRefresh::Failed
+            }
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                match dispatch.poll_usage(upstream_id, None).await {
+                    Ok(OAuthUsagePollObservation::Success {
+                        affected_main_quota_published: true,
+                        ..
+                    }) => LimitResetUsageRefresh::Refreshed,
+                    Ok(OAuthUsagePollObservation::Success {
+                        affected_main_quota_published: false,
+                        ..
+                    }) => {
+                        tracing::warn!(
+                            %upstream_id,
+                            "post-claim usage poll succeeded without affected main quota observations"
+                        );
+                        LimitResetUsageRefresh::Failed
+                    }
+                    Ok(OAuthUsagePollObservation::Throttled {
+                        observed_at_unix_secs,
+                    }) => {
+                        if let Err(error) = dispatch
+                            .record_oauth_usage_observation(
+                                upstream_id,
+                                OAuthUsagePollObservation::Throttled {
+                                    observed_at_unix_secs,
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %upstream_id,
+                                %error,
+                                "failed to record post-claim 429 usage poll cursor"
+                            );
+                        }
+                        match dispatch
+                            .probe_anthropic_quota_headers_after_reset(upstream_id)
+                            .await
+                        {
+                            Ok(true) => LimitResetUsageRefresh::Refreshed,
+                            Ok(false) => {
+                                tracing::warn!(
+                                    %upstream_id,
+                                    "post-claim usage poll throttled (429); fallback probe yielded no main quota headers"
+                                );
+                                LimitResetUsageRefresh::Failed
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %upstream_id,
+                                    %error,
+                                    "post-claim usage poll throttled (429) and fallback probe failed"
+                                );
+                                LimitResetUsageRefresh::Failed
+                            }
+                        }
+                    }
+                    Ok(OAuthUsagePollObservation::StatusFailure { status, .. }) => {
+                        tracing::warn!(
+                            %upstream_id,
+                            status,
+                            "post-claim usage poll returned non-success status"
+                        );
+                        LimitResetUsageRefresh::Failed
+                    }
+                    Ok(OAuthUsagePollObservation::NetworkFailure { .. }) => {
+                        tracing::warn!(
+                            %upstream_id,
+                            "post-claim usage poll failed due to network or credential error"
+                        );
+                        LimitResetUsageRefresh::Failed
+                    }
+                    Ok(OAuthUsagePollObservation::Skip) => LimitResetUsageRefresh::NotApplicable,
+                    Err(error) => {
+                        tracing::warn!(%upstream_id, %error, "post-claim usage poll handler errored");
+                        LimitResetUsageRefresh::Failed
+                    }
+                }
+            }) => match result {
+                Ok(refresh) => refresh,
+                Err(_) => {
+                    tracing::warn!(%upstream_id, "post-claim usage refresh timed out");
+                    LimitResetUsageRefresh::Failed
                 }
             }
         }

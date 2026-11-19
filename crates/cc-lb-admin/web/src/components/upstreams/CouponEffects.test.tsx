@@ -104,6 +104,62 @@ describe('expected quota changes', () => {
     ).toBeDefined();
   });
 
+  it('renders Weekly (Fable) as 0% used for weekly coupons clearing 7d_overage_included instead of Effect not reported', async () => {
+    const { presentCouponEffects } = await import(
+      '../../lib/couponPresentation'
+    );
+    const effects = presentCouponEffects(
+      {
+        id: 'full-reset-2611',
+        label: 'Weekly limit reset',
+        type: 'weekly',
+        gives_back_weekly: false,
+        unavailable_reason: null,
+        resets_total: 1,
+        resets_left: 1,
+        starts_at: null,
+        ends_at: '2026-12-01T00:00:00Z',
+        clears: ['7d', '7d_overage_included'],
+        paused: false,
+        usable_now: true,
+        use_requires_limit: true,
+        percent_used: { '7d': 100, '7d_overage_included': 80 },
+        blocking: [],
+      },
+      [
+        {
+          window: '5h',
+          utilization: 0.2,
+          state: 'fresh',
+          resets_at_unix_secs: null,
+        },
+        {
+          window: '7d',
+          utilization: 1,
+          state: 'fresh',
+          resets_at_unix_secs: null,
+        },
+        {
+          window: '7d_fable',
+          utilization: 0.8,
+          state: 'fresh',
+          resets_at_unix_secs: null,
+        },
+      ],
+      { provider: 'anthropic', providerFresh: true },
+    );
+    render(<CouponEffects effects={effects} />);
+    expect(screen.queryByText(/Effect not reported/)).toBeNull();
+    const defs = screen.getAllByRole('definition').map((el) => el.textContent);
+    expect(defs).toHaveLength(3);
+    expect(defs[0]).toContain('20% used');
+    expect(defs[0]).toContain('After use: Unchanged');
+    expect(defs[1]).toContain('100% used');
+    expect(defs[1]).toContain('After use: 0% used');
+    expect(defs[2]).toContain('80% used');
+    expect(defs[2]).toContain('After use: 0% used');
+  });
+
   it('does not invent a precise future reset timestamp for a restarted window', () => {
     const future = Date.now() / 1000 + 3600;
     render(

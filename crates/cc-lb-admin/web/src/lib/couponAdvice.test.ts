@@ -305,4 +305,54 @@ describe('coupon advice scenario matrix', () => {
       deriveCouponAdvice({ ...scenario({ used: 100 }), blocked: true }),
     ).toBeNull();
   });
+
+  it('gives determinate advice for weekly coupons clearing 7d and 7d_overage_included without false unknown status', () => {
+    const weeklyFull = deriveCouponAdvice(
+      scenario({
+        used: 20,
+        resetIn: 2 * HOUR,
+        expiresIn: 30 * DAY,
+        extra: [quota('7d', 100, 4 * DAY), quota('7d_fable', 80, 4 * DAY)],
+        coupon: {
+          type: 'weekly',
+          gives_back_weekly: false,
+          clears: ['7d', '7d_overage_included'],
+          percent_used: { '7d': 100, '7d_overage_included': 80 },
+        },
+      }),
+    );
+    expect(weeklyFull?.kind).toBe('useful_now');
+
+    const weeklyEmpty = deriveCouponAdvice(
+      scenario({
+        used: 20,
+        resetIn: 2 * HOUR,
+        expiresIn: 30 * DAY,
+        extra: [quota('7d', 0, 4 * DAY), quota('7d_fable', 0, 4 * DAY)],
+        coupon: {
+          type: 'weekly',
+          gives_back_weekly: false,
+          clears: ['7d', '7d_overage_included'],
+          percent_used: { '7d': 0, '7d_overage_included': 0 },
+        },
+      }),
+    );
+    expect(weeklyEmpty?.kind).toBe('nothing_to_restore');
+
+    const fableFull = deriveCouponAdvice(
+      scenario({
+        used: 20,
+        resetIn: 2 * HOUR,
+        expiresIn: 30 * DAY,
+        extra: [quota('7d', 80, 4 * DAY), quota('7d_fable', 100, 4 * DAY)],
+        coupon: {
+          type: 'full',
+          gives_back_weekly: true,
+          clears: ['7d_overage_included'],
+          percent_used: { '5h': 20, '7d': 80, '7d_overage_included': 100 },
+        },
+      }),
+    );
+    expect(fableFull?.kind).toBe('useful_now');
+  });
 });

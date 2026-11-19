@@ -486,6 +486,14 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         fence: &SubscriptionQuotaPollFence,
     ) -> StorageResult<bool>;
 
+    /// Records provider response-header observations under the same OAuth
+    /// generation and reset-epoch fence as `record_subscription_quota_poll`.
+    async fn record_subscription_quota_fenced_headers(
+        &self,
+        records: &[SubscriptionQuotaSample],
+        fence: &SubscriptionQuotaPollFence,
+    ) -> StorageResult<bool>;
+
     /// Returns the latest sidecar row for each `(upstream_id, window, source)`
     /// intersected with the given upstream IDs. Empty input returns empty.
     async fn list_latest_subscription_quota_for_upstreams(

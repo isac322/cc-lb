@@ -129,17 +129,39 @@ describe('exact coupon scope and usage', () => {
     );
   });
 
-  it('never aliases an unconfirmed key to the Fable quota window', () => {
+  it('resolves the confirmed 7d_overage_included and 7d_fable equivalence without guessing unconfirmed keys', () => {
     const presentation = presentCoupon(
       grant({ clears: ['7d_overage_included'] }),
       [quota('7d_fable', 1)],
       FRESH,
     );
-    expect(couponWindowLabel('7d_overage_included')).toBe(
-      'Weekly (included usage)',
+    expect(couponWindowLabel('7d_overage_included')).toBe('Weekly (Fable)');
+    expect(presentation.targets[0]).toMatchObject({
+      window: '7d_overage_included',
+      label: 'Weekly (Fable)',
+      percentUsed: 100,
+      state: 'fresh',
+      source: 'quota',
+    });
+    expect(presentation.hasFullTarget).toBe(true);
+    expect(presentation.fullNonTargets).toEqual([]);
+  });
+
+  it('deduplicates full non-target 7d_overage_included and 7d_fable readings', () => {
+    const presentation = presentCoupon(
+      grant({
+        clears: ['5h'],
+        percent_used: { '5h': 10, '7d_overage_included': 100 },
+      }),
+      [quota('5h', 0.1), quota('7d_fable', 1)],
+      FRESH,
     );
-    expect(presentation.targets[0].state).toBe('unknown');
-    expect(presentation.hasFullTarget).toBe(false);
+    expect(presentation.fullNonTargets).toHaveLength(1);
+    expect(presentation.fullNonTargets[0]).toMatchObject({
+      window: '7d_fable',
+      label: 'Weekly (Fable)',
+      percentUsed: 100,
+    });
   });
 
   it('falls back only to a matching fresh quota snapshot', () => {
@@ -344,7 +366,7 @@ function openAIStatus(
 }
 
 describe('provider-specific reset semantics', () => {
-  it('presents the observed Fable giveback without aliasing its scope or projecting a rebate', () => {
+  it('presents the observed Fable giveback scope as Weekly (Fable) without projecting a numeric weekly rebate', () => {
     const live = grant({
       id: 'opaque-fable',
       label:
@@ -356,7 +378,7 @@ describe('provider-specific reset semantics', () => {
     });
     expect(isFableRebateGrant(live)).toBe(true);
     expect(couponProductLabel(live)).toBe('Fable usage reset');
-    expect(couponScopeLabel(live)).toBe('Weekly (included usage)');
+    expect(couponScopeLabel(live)).toBe('Weekly (Fable)');
     const observed = presentCoupon(live, [quota('7d_fable', 0)], FRESH);
     expect(observed.targets[0].window).toBe('7d_overage_included');
     expect(observed.fullNonTargets[0].window).toBe('7d');
@@ -592,7 +614,7 @@ describe('expected quota effects', () => {
     percent_used: { '7d_overage_included': 0 },
   });
 
-  it('restores existing 5h and Fable weekly usage without subtracting percentage windows', () => {
+  it('restores existing 5h and 7d_fable directly while keeping Fable weekly rebate qualitative', () => {
     const effects = presentCouponEffects(
       fable,
       [quota('5h', 0.6), quota('7d', 0.8), quota('7d_fable', 0.5)],
@@ -601,7 +623,7 @@ describe('expected quota effects', () => {
     expect(effects.rows.map((row) => [row.window, row.effect])).toEqual([
       ['5h', 'reset'],
       ['7d', 'fable_weekly'],
-      ['7d_fable', 'fable_scoped'],
+      ['7d_fable', 'reset'],
     ]);
     expect(effects.rows[0].schedule).toBe('confirmed_after_use');
     expect(effects.rows[1].schedule).toBe('unchanged');
@@ -609,11 +631,11 @@ describe('expected quota effects', () => {
     expect(
       effects.rows.some((row) => row.window === '7d_overage_included'),
     ).toBe(false);
-    // Effects are qualitative, not an invented 80% - 50% = 30% prediction.
+    // Effects for `7d` on Fable rebates remain qualitative, not an invented subtraction.
     expect(effects.rows[1]).not.toHaveProperty('afterPercent');
   });
 
-  it('does not turn fresh zero Fable-bar usage into no-benefit advice', () => {
+  it('does not turn fresh zero Fable-bar usage into no-benefit advice and falls back to fable_scoped when clears omits it', () => {
     const effects = presentCouponEffects(
       fable,
       [quota('7d', 1), quota('7d_fable', 0)],
@@ -623,8 +645,35 @@ describe('expected quota effects', () => {
       'fable_weekly',
     );
     expect(effects.rows.find((row) => row.window === '7d_fable')?.effect).toBe(
-      'fable_scoped',
+      'reset',
     );
+    const undeclaredFable = presentCouponEffects(
+      { ...fable, clears: [], percent_used: {} },
+      [quota('7d', 1), quota('7d_fable', 0.4)],
+      anthropic,
+    );
+    expect(
+      undeclaredFable.rows.find((row) => row.window === '7d_fable')?.effect,
+    ).toBe('fable_scoped');
+  });
+
+  it('marks both 7d and 7d_fable as reset for 7d weekly coupons declaring 7d_overage_included', () => {
+    const weeklyWithOverageIncluded = grant({
+      type: 'weekly',
+      clears: ['7d', '7d_overage_included'],
+      percent_used: { '7d': 100, '7d_overage_included': 80 },
+    });
+    const effects = presentCouponEffects(
+      weeklyWithOverageIncluded,
+      [quota('5h', 0.2), quota('7d', 1), quota('7d_fable', 0.8)],
+      anthropic,
+    );
+    expect(effects.rows.map((row) => [row.window, row.effect])).toEqual([
+      ['5h', 'unchanged'],
+      ['7d', 'reset'],
+      ['7d_fable', 'reset'],
+    ]);
+    expect(effects.rows[2].current.percentUsed).toBe(80);
   });
 
   it('distinguishes absent 5h from unobserved existence and stale known existence', () => {
