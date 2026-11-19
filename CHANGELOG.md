@@ -66,6 +66,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Gemini OAuth warm-up on Antigravity accounts now starts the Gemini models quota window. Previously, the default `gemini-2.5-flash-lite` was answered without metering that group, so warm-ups reported success while the window never started. Added `[warmup].gemini_antigravity_model` (default `gemini-3.8-flash-low`); `gemini_model` now defaults to `gemini-3.8-flash` for Gemini CLI.
+
 - OpenAI and Gemini OAuth upstream cards now always show a **Connect** or **Reconnect** button on the **Connection** section header, matching Anthropic OAuth. Removed unused error strings (`refresh_token_reused`, `refresh_token_invalidated`, `invalid_grant`) from the web reconnect classifier that the server never persists.
 - Live proxy requests and periodic usage polls now persist `status_401` (with `expected_oauth_token_generation` fencing) when a refreshable OpenAI, Gemini, or Anthropic OAuth credential still receives HTTP 401 after a successful forced token refresh, excluding the upstream from routing and scheduled polling until reconnected. Forced OAuth refreshes also expedite any matching unstarted `Pending` scheduled refresh job to run immediately instead of waiting behind its pre-expiry `run_at` schedule.
 

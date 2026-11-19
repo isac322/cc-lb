@@ -307,7 +307,8 @@ async fn gemini_profiles_reuse_proxy_envelope_host_and_headers() {
             assert_eq!(base_url.host_str(), server.base_url.host_str());
             let record = upstream(UpstreamKind::GeminiOauth, profile, base_url, &aead);
             let mut config = Config::default();
-            config.warmup.gemini_model = "custom-gemini-model".to_owned();
+            config.warmup.gemini_model = "custom-gemini-cli-model".to_owned();
+            config.warmup.gemini_antigravity_model = "custom-antigravity-model".to_owned();
             config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
                 code_assist_url: server.base_url.clone(),
                 user_agent: "antigravity/mock".to_owned(),
@@ -333,7 +334,14 @@ async fn gemini_profiles_reuse_proxy_envelope_host_and_headers() {
             for header in ["authorization", "content-type"] {
                 assert!(request.headers.contains_key(header), "missing {header}");
             }
-            assert_eq!(request.body["model"], "custom-gemini-model");
+            assert_eq!(
+                request.body["model"],
+                if is_antigravity {
+                    "custom-antigravity-model"
+                } else {
+                    "custom-gemini-cli-model"
+                }
+            );
             assert_eq!(request.body["project"], "mock-project");
             assert_eq!(
                 request.body["request"]["contents"],
@@ -376,7 +384,7 @@ async fn gemini_third_party_lane_uses_third_party_model_through_antigravity_enve
         &aead,
     );
     let mut config = Config::default();
-    config.warmup.gemini_model = "custom-gemini-model".to_owned();
+    config.warmup.gemini_antigravity_model = "custom-antigravity-model".to_owned();
     config.warmup.gemini_third_party_model = "claude-sonnet-5-5-low".to_owned();
     config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
         code_assist_url: server.base_url.clone(),

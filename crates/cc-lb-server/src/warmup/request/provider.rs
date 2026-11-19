@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_aead::{AeadService, OAuthTokenBundle};
+use cc_lb_aead::{AeadService, GeminiOAuthProfile, OAuthTokenBundle};
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
@@ -113,7 +113,12 @@ pub(crate) async fn build_provider_warmup_request(
             format!(
                 "/v1beta/models/{}:generateContent",
                 match lane {
-                    WarmupLane::Primary => &params.config.warmup.gemini_model,
+                    WarmupLane::Primary => match bundle.oauth_profile {
+                        GeminiOAuthProfile::Antigravity => {
+                            &params.config.warmup.gemini_antigravity_model
+                        }
+                        GeminiOAuthProfile::GeminiCli => &params.config.warmup.gemini_model,
+                    },
                     WarmupLane::ThirdParty => &params.config.warmup.gemini_third_party_model,
                 }
             ),

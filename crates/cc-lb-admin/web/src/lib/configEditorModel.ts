@@ -251,6 +251,7 @@ export const CONFIG_EDITOR_SECTIONS = [
     paths: [
       'warmup.openai_model',
       'warmup.gemini_model',
+      'warmup.gemini_antigravity_model',
       'warmup.gemini_third_party_model',
     ],
     advancedPaths: [],
@@ -1898,9 +1899,20 @@ const CONFIG_FIELD_GUIDANCE: readonly {
   {
     pattern: 'warmup.gemini_model',
     guidance: {
-      description: 'Gemini model used for Gemini OAuth warm-up requests.',
+      description:
+        'Gemini CLI model used for the primary lane of Gemini OAuth warm-up requests.',
       recommendation:
-        'Choose a Gemini model available to the connected Google accounts.',
+        'Choose a bare Gemini model available to the connected Gemini CLI accounts and their Gemini models quota group.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'warmup.gemini_antigravity_model',
+    guidance: {
+      description:
+        'Antigravity model used for the primary lane of Gemini OAuth warm-up requests.',
+      recommendation:
+        'Choose a thinking-level Gemini model available to the connected Antigravity accounts and their Gemini models quota group.',
       impactDimensions: ['availability'],
     },
   },
@@ -2090,7 +2102,8 @@ export function isConfigLeafActive(
  */
 const CONFIG_KEY_LABELS: Record<string, string> = {
   openai_model: 'OpenAI model',
-  gemini_model: 'Gemini model',
+  gemini_model: 'Gemini CLI model',
+  gemini_antigravity_model: 'Gemini Antigravity model',
   gemini_third_party_model: 'Gemini Claude and GPT-OSS model',
   drain_secs: 'Shutdown drain period',
   tick_secs: 'Tick interval',
