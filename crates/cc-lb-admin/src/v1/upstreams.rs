@@ -1509,9 +1509,10 @@ async fn fire_now_upstream_warmup_inner(
             }
             let reset = cycle_key_from_latest_observation(latest)?;
             let observed_at = i64::try_from(latest.observed_at_unix_millis / 1_000).ok()?;
-            // A rolling reset sits one window length after the observation.
-            let rolling = latest.utilization == Some(0.0)
-                && (reset - observed_at - window_secs(*window)).abs() <= 60;
+            // Same rolling contract as the scheduler preflight: zero usage
+            // and a reset at least one window length after the observation.
+            let rolling =
+                latest.utilization == Some(0.0) && reset - observed_at >= window_secs(*window) - 60;
             (!rolling).then_some((*window, reset))
         })
         .collect();
@@ -4006,12 +4007,15 @@ mod tests {
             SubscriptionQuotaSampleKind::Sample,
         );
         gemini.resets_at_unix_secs = Some(4_000_000_000);
+        // Running windows (with usage) carry the lane's cycle key.
+        gemini.utilization = Some(0.2);
         let mut third_party = quota_sample(
             upstream.id,
             SubscriptionQuotaWindow::ThirdPartyFiveHour,
             SubscriptionQuotaSampleKind::Sample,
         );
         third_party.resets_at_unix_secs = Some(4_000_000_777);
+        third_party.utilization = Some(0.2);
         context
             .storage
             .record_subscription_quota_samples(&[gemini, third_party])
