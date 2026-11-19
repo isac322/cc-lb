@@ -4,7 +4,7 @@ use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
-use super::quota::post_warmup_window_check;
+use super::quota::{post_warmup_window_check, target_window_resets};
 use super::scheduling::POST_RESET_GUARD_SECS;
 
 const NOW_UNIX_SECS: i64 = 1_782_000_000;
@@ -1336,4 +1336,61 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
         };
         assert_eq!(actual, expected, "{name}");
     }
+}
+
+#[test]
+fn previous_resets_skip_unused_rolling_windows_so_chained_starts_count() {
+    use SubscriptionQuotaDataState::Fresh;
+    use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay};
+    // Live case: the 5h window expired at `expired`; the cron poll at
+    // `pre_poll` saw it as an unused rolling window (reset = pre_poll + 5h).
+    // The warm-up then started a window chained to `expired + 5h`.
+    let expired = NOW_UNIX_SECS - 55;
+    let pre_poll = NOW_UNIX_SECS - 30;
+    let weekly_reset = NOW_UNIX_SECS + 5 * 86_400;
+    let before = [
+        reading(
+            GeminiFiveHour,
+            Fresh,
+            Some(0.0),
+            pre_poll + FIVE_HOURS,
+            pre_poll,
+        ),
+        reading(GeminiSevenDay, Fresh, Some(0.0002), weekly_reset, pre_poll),
+    ];
+    let previous = target_window_resets(UpstreamKind::GeminiOauth, WarmupLane::Primary, &before);
+    assert_eq!(previous, vec![(GeminiSevenDay, weekly_reset)]);
+
+    let completed = NOW_UNIX_SECS + 1;
+    let poll = completed + 12;
+    let after = [
+        reading(GeminiFiveHour, Fresh, Some(0.0), expired + FIVE_HOURS, poll),
+        reading(GeminiSevenDay, Fresh, Some(0.0002), weekly_reset, poll),
+    ];
+    assert!(matches!(
+        post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            WarmupLane::Primary,
+            &after,
+            &previous,
+            completed,
+        ),
+        cc_lb_admin::WarmupWindowCheck::Started { .. }
+    ));
+}
+
+#[test]
+fn previous_resets_keep_running_windows_and_drop_absent_ones() {
+    use SubscriptionQuotaDataState::Fresh;
+    use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay};
+    let reset = NOW_UNIX_SECS + 3_600;
+    let previous = target_window_resets(
+        UpstreamKind::GeminiOauth,
+        WarmupLane::Primary,
+        &[
+            reading(GeminiFiveHour, Fresh, Some(0.0), reset, NOW_UNIX_SECS),
+            absent(GeminiSevenDay),
+        ],
+    );
+    assert_eq!(previous, vec![(GeminiFiveHour, reset)]);
 }

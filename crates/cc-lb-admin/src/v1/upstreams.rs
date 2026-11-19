@@ -1495,14 +1495,10 @@ async fn fire_now_upstream_warmup_inner(
             outcome,
         )));
     }
-    let candidate_cycle_key = lane
-        .target_windows(upstream.kind)
-        .first()
-        .and_then(|window| latest_window_quota(&latest_quota, *window))
-        .and_then(cycle_key_from_latest_observation)
-        .unwrap_or(now_unix_secs);
     // The reset each target window reported before the request, so the
     // post-request check can tell a new window from one already running.
+    // Unused rolling windows (zero usage, reset = observation + window) are
+    // left out: their reset is later than a chained start's reset.
     let previous_resets: Vec<(SubscriptionQuotaWindow, i64)> = lane
         .target_windows(upstream.kind)
         .iter()
@@ -1511,9 +1507,27 @@ async fn fire_now_upstream_warmup_inner(
             if latest.sample_kind == cc_lb_storage_api::SubscriptionQuotaSampleKind::Absent {
                 return None;
             }
-            Some((*window, cycle_key_from_latest_observation(latest)?))
+            let reset = cycle_key_from_latest_observation(latest)?;
+            let observed_at = i64::try_from(latest.observed_at_unix_millis / 1_000).ok()?;
+            // Same rolling contract as the scheduler preflight: zero usage
+            // and a reset at least one window length after the observation.
+            let rolling =
+                latest.utilization == Some(0.0) && reset - observed_at >= window_secs(*window) - 60;
+            (!rolling).then_some((*window, reset))
         })
         .collect();
+    // An unused rolling window has no running cycle, so it gives no candidate
+    // key; a chained start (`expired + D`) then classifies as `cycle_advanced`.
+    let candidate_cycle_key = lane
+        .target_windows(upstream.kind)
+        .first()
+        .and_then(|first| {
+            previous_resets
+                .iter()
+                .find(|(window, _)| window == first)
+                .map(|(_, reset)| *reset)
+        })
+        .unwrap_or(now_unix_secs);
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()
             || state.data_dir.is_none()
@@ -1801,6 +1815,16 @@ fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaSample) -> Option
     latest
         .resets_at_unix_secs
         .and_then(|resets_at| i64::try_from(resets_at).ok())
+}
+
+/// Length of a quota window: five hours for the 5h windows, seven days otherwise.
+fn window_secs(window: SubscriptionQuotaWindow) -> i64 {
+    match window {
+        SubscriptionQuotaWindow::FiveHour
+        | SubscriptionQuotaWindow::GeminiFiveHour
+        | SubscriptionQuotaWindow::ThirdPartyFiveHour => 5 * 60 * 60,
+        _ => 7 * 24 * 60 * 60,
+    }
 }
 
 async fn record_fire_now_subscription_quota_observations(
@@ -3547,6 +3571,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fire_now_chained_start_after_rolling_reading_records_cycle_advanced() {
+        // Before the request the 5h window read as unused and rolling
+        // (reset = observation + 5h). The warm-up started a window chained to
+        // the just-expired reset, which is earlier than that rolling reset.
+        let now = i64::try_from(cc_lb_clock::unix_secs(std::time::SystemTime::now()))
+            .expect("now fits i64");
+        let chained_reset = u64::try_from(now - 55 + 5 * 60 * 60).expect("positive");
+        let (verifier, _calls) = test_verifier(crate::WarmupWindowCheck::Started {
+            observations: vec![UnifiedQuotaObservation {
+                window: SubscriptionQuotaWindow::GeminiFiveHour,
+                utilization: Some(0.0),
+                resets_at_unix_secs: Some(chained_reset),
+                ..UnifiedQuotaObservation::default()
+            }],
+        });
+        let context = test_context_with_dispatcher_and_verifier(StatusCode::OK, verifier).await;
+        let upstream = create_gemini_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity,
+        )
+        .await;
+        let mut rolling = quota_sample(
+            upstream.id,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            SubscriptionQuotaSampleKind::Sample,
+        );
+        rolling.resets_at_unix_secs = Some(rolling.observed_at_unix_millis / 1_000 + 5 * 60 * 60);
+        context
+            .storage
+            .record_subscription_quota_samples(&[rolling])
+            .await
+            .expect("quota samples record");
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"]["status"], "success");
+        assert_eq!(body["outcome"]["reason"], "cycle_advanced");
+    }
+
+    #[tokio::test]
     async fn fire_now_gemini_not_started_records_window_not_started() {
         let (verifier, calls) = test_verifier(crate::WarmupWindowCheck::NotStarted {
             windows: vec![SubscriptionQuotaWindow::GeminiFiveHour],
@@ -3941,12 +4007,15 @@ mod tests {
             SubscriptionQuotaSampleKind::Sample,
         );
         gemini.resets_at_unix_secs = Some(4_000_000_000);
+        // Running windows (with usage) carry the lane's cycle key.
+        gemini.utilization = Some(0.2);
         let mut third_party = quota_sample(
             upstream.id,
             SubscriptionQuotaWindow::ThirdPartyFiveHour,
             SubscriptionQuotaSampleKind::Sample,
         );
         third_party.resets_at_unix_secs = Some(4_000_000_777);
+        third_party.utilization = Some(0.2);
         context
             .storage
             .record_subscription_quota_samples(&[gemini, third_party])
