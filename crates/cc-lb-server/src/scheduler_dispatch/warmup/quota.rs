@@ -42,6 +42,9 @@ pub(super) enum WarmupQuotaPreflightDecision {
 /// window, `previous reset + D`. A window is therefore running when its reset
 /// is clearly earlier than `poll + D`, or when it shows usage. The two are only
 /// separable once the poll is `MIN_GAP - TOL` after the request.
+/// A running window whose reset is not later than `previous_cycle_key` (the
+/// reset the caller already knew before dispatch) was running before the
+/// request, so it is not evidence of a start.
 ///
 /// Any target that is still rolling makes the result `NotStarted`, so a busy
 /// weekly window cannot hide an unstarted five-hour window.
@@ -49,11 +52,12 @@ pub(super) fn post_warmup_window_check(
     kind: UpstreamKind,
     lane: WarmupLane,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
+    previous_cycle_key_unix_secs: i64,
     request_completed_at_unix_secs: i64,
 ) -> cc_lb_admin::WarmupWindowCheck {
     let mut observations = Vec::new();
     let mut not_started = Vec::new();
-    let mut running = 0usize;
+    let mut advanced = 0usize;
     let mut unknown = false;
     for window in lane.target_windows(kind) {
         let Some(snapshot) = snapshots
@@ -98,7 +102,9 @@ pub(super) fn post_warmup_window_check(
             .is_some_and(|utilization| utilization > 0.0)
             || reset < rolling_reset - WARMUP_WINDOW_TOL_SECS
         {
-            running += 1;
+            if reset > previous_cycle_key_unix_secs + WARMUP_WINDOW_TOL_SECS {
+                advanced += 1;
+            }
         } else if separable && snapshot.utilization == Some(0.0) {
             not_started.push(*window);
         } else {
@@ -109,7 +115,7 @@ pub(super) fn post_warmup_window_check(
         cc_lb_admin::WarmupWindowCheck::NotStarted {
             windows: not_started,
         }
-    } else if running > 0 && !unknown {
+    } else if advanced > 0 && !unknown {
         cc_lb_admin::WarmupWindowCheck::Started { observations }
     } else {
         cc_lb_admin::WarmupWindowCheck::Unknown

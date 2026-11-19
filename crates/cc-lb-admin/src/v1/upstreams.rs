@@ -1616,7 +1616,12 @@ async fn fire_now_upstream_warmup_inner(
         } else {
             match tokio::time::timeout(
                 Duration::from_secs(remaining as u64),
-                verifier.verify_warmup_window(&upstream, lane, request_completed_at_unix_secs),
+                verifier.verify_warmup_window(
+                    &upstream,
+                    lane,
+                    candidate_cycle_key,
+                    request_completed_at_unix_secs,
+                ),
             )
             .await
             {
@@ -3456,6 +3461,7 @@ mod tests {
             &self,
             upstream: &UpstreamRecord,
             lane: WarmupLane,
+            _previous_cycle_key_unix_secs: i64,
             _request_completed_at_unix_secs: i64,
         ) -> crate::WarmupWindowCheck {
             self.calls

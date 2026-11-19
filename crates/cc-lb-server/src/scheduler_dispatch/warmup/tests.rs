@@ -1156,9 +1156,12 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
     use SubscriptionQuotaDataState::Fresh;
     use SubscriptionQuotaWindow::{GeminiFiveHour, GeminiSevenDay, ThirdPartyFiveHour};
     // Request sent at `s`, completed at `c`; the verifier polls at `poll`.
+    // `previous` is the reset the caller knew before dispatch (for fire-now,
+    // the still-active window's reset).
     let s = NOW_UNIX_SECS;
     let c = s + 1;
     let poll = c + 12;
+    let previous = s + 3_600;
     let running_weekly = || reading(GeminiSevenDay, Fresh, Some(0.4), s + 3 * 86_400, poll);
     let cases: Vec<(
         &str,
@@ -1297,10 +1300,24 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
             ],
             Expect::NotStarted(vec![GeminiSevenDay]),
         ),
+        (
+            "a window already running before the request is not evidence",
+            WarmupLane::Primary,
+            vec![
+                reading(GeminiFiveHour, Fresh, Some(0.3), previous, poll),
+                absent(GeminiSevenDay),
+            ],
+            Expect::Unknown,
+        ),
     ];
     for (name, lane, snapshots, expected) in cases {
-        let actual = match post_warmup_window_check(UpstreamKind::GeminiOauth, lane, &snapshots, c)
-        {
+        let actual = match post_warmup_window_check(
+            UpstreamKind::GeminiOauth,
+            lane,
+            &snapshots,
+            previous,
+            c,
+        ) {
             cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
             cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => Expect::NotStarted(windows),
             cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,

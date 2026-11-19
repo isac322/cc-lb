@@ -219,8 +219,13 @@ impl SchedulerDispatch {
                 WarmupDispatchResult::Response { status, .. } if status.is_success()
             ) {
             Some(
-                self.verify_warmup_window(upstream, job.lane, request_completed_at_unix_secs)
-                    .await,
+                self.verify_warmup_window(
+                    upstream,
+                    job.lane,
+                    expected_cycle_key,
+                    request_completed_at_unix_secs,
+                )
+                .await,
             )
         } else {
             None
