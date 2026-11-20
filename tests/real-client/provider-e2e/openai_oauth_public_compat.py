@@ -28,6 +28,7 @@ ADMIN_URL = os.environ.get("CC_LB_ADMIN_URL", "").rstrip("/")
 ADMIN_TOKEN = os.environ.get("CC_LB_ADMIN_TOKEN")
 PRINCIPAL_ID = os.environ.get("CC_LB_PRINCIPAL_ID")
 BASE_URL = f"{PROXY}/openai/v1"
+OUTPUT_TOKENS = 256
 
 
 @dataclass
@@ -123,7 +124,7 @@ def override_case(client: OpenAI, http: httpx.Client) -> None:
         set_override(http, {"store_true": "reject"})
         caught: BaseException | None = None
         try:
-            client.responses.create(model=MODEL, input="override must reject store", store=True, max_output_tokens=4)
+            client.responses.create(model=MODEL, input="override must reject store", store=True, max_output_tokens=OUTPUT_TOKENS)
         except BaseException as error:  # SDK's APIError is version-dependent
             caught = error
         require(caught is not None, "store:true override unexpectedly succeeded")
@@ -154,7 +155,8 @@ def input_token_count(client: OpenAI) -> Any:
 
 
 def compact(client: OpenAI) -> Any:
-    body = {"model": MODEL, "input": [{"role": "user", "content": [{"type": "input_text", "text": "Keep only this short fact: the color is blue."}]}], "store": False}
+    # `store` is a Responses create field; the compact endpoint does not accept it.
+    body = {"model": MODEL, "input": [{"role": "user", "content": [{"type": "input_text", "text": "Keep only this short fact: the color is blue."}]}]}
     if hasattr(client.responses, "compact"):
         return client.responses.compact(**body)
     return raw_post(client, "/responses/compact", body)
@@ -169,6 +171,10 @@ async def _exercise_sdk_websocket_async(connection: Any) -> None:
             await result
 
     async def wait_for(predicate: Callable[[dict[str, Any]], bool], label: str) -> dict[str, Any]:
+        # Lanes complete in any order; an event seen while waiting for another lane counts.
+        for seen in events:
+            if predicate(seen):
+                return seen
         deadline = asyncio.get_running_loop().time() + 60
         while asyncio.get_running_loop().time() < deadline:
             raw = await asyncio.wait_for(connection.recv(), timeout=max(0.1, deadline - asyncio.get_running_loop().time()))
@@ -183,12 +189,12 @@ async def _exercise_sdk_websocket_async(connection: Any) -> None:
                 return event
         raise AssertionError(f"timed out waiting for {label}")
 
-    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "input": "Say exactly A", "max_output_tokens": 4})
-    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_b", "input": "Say exactly B", "max_output_tokens": 4})
+    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "input": "Say exactly A", "max_output_tokens": OUTPUT_TOKENS})
+    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_b", "input": "Say exactly B", "max_output_tokens": OUTPUT_TOKENS})
     first_a = await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_a", "lane_a completion")
     first_b = await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_b", "lane_b completion")
     require(first_a.get("response", {}).get("id") and first_b.get("response", {}).get("id"), "SDK WebSocket lanes did not return response ids")
-    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "previous_response_id": first_a["response"]["id"], "input": "Say exactly C", "max_output_tokens": 4})
+    await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "previous_response_id": first_a["response"]["id"], "input": "Say exactly C", "max_output_tokens": OUTPUT_TOKENS})
     await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_a" and event.get("response", {}).get("id") != first_a["response"]["id"], "same-lane continuation")
     require(any(event.get("stream_id") == "lane_a" for event in events) and any(event.get("stream_id") == "lane_b" for event in events), "SDK WebSocket events lost stream_id lane routing")
     require(not any(event.get("type") == "response.metadata" for event in events), "SDK WebSocket emitted response.metadata")
@@ -235,6 +241,10 @@ async def websocket_raw_async() -> None:
             await socket.send(json.dumps(value))
 
         async def wait_for(predicate: Callable[[dict[str, Any]], bool], label: str) -> dict[str, Any]:
+            # Lanes complete in any order; an event seen while waiting for another lane counts.
+            for seen in events:
+                if predicate(seen):
+                    return seen
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 60
             while loop.time() < deadline:
@@ -253,12 +263,12 @@ async def websocket_raw_async() -> None:
                     return event
             raise AssertionError(f"timed out waiting for {label}")
 
-        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "input": "Say exactly A", "max_output_tokens": 4})
-        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_b", "input": "Say exactly B", "max_output_tokens": 4})
+        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "input": "Say exactly A", "max_output_tokens": OUTPUT_TOKENS})
+        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_b", "input": "Say exactly B", "max_output_tokens": OUTPUT_TOKENS})
         first_a = await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_a", "lane_a completion")
         first_b = await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_b", "lane_b completion")
         require(first_a.get("response", {}).get("id") and first_b.get("response", {}).get("id"), "WebSocket lanes did not return response ids")
-        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "previous_response_id": first_a["response"]["id"], "input": "Say exactly C", "max_output_tokens": 4})
+        await send({"type": "response.create", "model": MODEL, "stream_id": "lane_a", "previous_response_id": first_a["response"]["id"], "input": "Say exactly C", "max_output_tokens": OUTPUT_TOKENS})
         await wait_for(lambda event: event.get("type") == "response.completed" and event.get("stream_id") == "lane_a" and event.get("response", {}).get("id") != first_a["response"]["id"], "same-lane continuation")
     require(any(event.get("stream_id") == "lane_a" for event in events) and any(event.get("stream_id") == "lane_b" for event in events), "WebSocket events lost stream_id lane routing")
     require(not any(event.get("type") == "response.metadata" for event in events), "public WebSocket emitted response.metadata")
@@ -278,25 +288,25 @@ def main() -> int:
     if CA_CERT:
         sdk_kwargs["http_client"] = httpx.Client(verify=CA_CERT, timeout=90)
     client = OpenAI(**sdk_kwargs)
-    run("QA-C-143", "responses non-stream string input returns output_text", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="Reply with one short word: ok", max_output_tokens=4))), "Responses output_text was empty"))
+    run("QA-C-143", "responses non-stream string input returns output_text", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="Reply with one short word: ok", max_output_tokens=OUTPUT_TOKENS))), "Responses output_text was empty"))
 
     def responses_stream() -> None:
-        events = list(client.responses.create(model=MODEL, input="Reply with one short word: stream", max_output_tokens=4, stream=True))
+        events = list(client.responses.create(model=MODEL, input="Reply with one short word: stream", max_output_tokens=OUTPUT_TOKENS, stream=True))
         types = [event.type for event in events]
         require({"response.created", "response.in_progress", "response.completed"}.issubset(types), f"unexpected event sequence: {types}")
         require("response.output_text.delta" in types, "stream had no output text delta")
         require("response.metadata" not in types, "stream emitted response.metadata")
     run("QA-C-42", "responses stream event sequence has no response.metadata", responses_stream)
-    run("QA-C-12", "store:true is coerced and succeeds", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="store coercion control: say ok", store=True, max_output_tokens=4))), "store coercion response was empty"))
+    run("QA-C-12", "store:true is coerced and succeeds", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="store coercion control: say ok", store=True, max_output_tokens=OUTPUT_TOKENS))), "store coercion response was empty"))
     if ADMIN_URL and ADMIN_TOKEN and PRINCIPAL_ID:
         run("QA-C-04", "store:true override rejects and restores", lambda: override_case(client, http_client))
     else:
         skip("QA-C-04", "store:true override rejects and restores", "admin override environment not supplied")
-    run("QA-C-13", "temperature is dropped", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="temperature drop control: say ok", temperature=0.2, max_output_tokens=4))), "temperature request failed"))
+    run("QA-C-13", "temperature is dropped", lambda: require(bool(output_text(client.responses.create(model=MODEL, input="temperature drop control: say ok", temperature=0.2, max_output_tokens=OUTPUT_TOKENS))), "temperature request failed"))
 
     def metadata_case() -> None:
         metadata = {"qa_case": "metadata_echo", "short": "1"}
-        response = client.responses.create(model=MODEL, input="Echo metadata control: say ok", metadata=metadata, max_output_tokens=4)
+        response = client.responses.create(model=MODEL, input="Echo metadata control: say ok", metadata=metadata, max_output_tokens=OUTPUT_TOKENS)
         require(getattr(response, "metadata", None) == metadata, f"metadata mismatch: {getattr(response, 'metadata', None)}")
     run("QA-C-17", "metadata is echoed", metadata_case)
     run("QA-C-16", "web_search_preview tool works", lambda: web_search_case(client))
@@ -329,49 +339,49 @@ def main() -> int:
 
 
 def web_search_case(client: OpenAI) -> None:
-    response = client.responses.create(model=MODEL, input="Use web search to find the current weekday, then answer briefly.", tools=[{"type": "web_search_preview"}], tool_choice="required", max_output_tokens=8)
+    response = client.responses.create(model=MODEL, input="Use web search to find the current weekday, then answer briefly.", tools=[{"type": "web_search_preview"}], tool_choice="required", max_output_tokens=OUTPUT_TOKENS)
     require(bool(output_text(response)), "web search response was empty")
     require(any("web_search" in str(getattr(item, "type", "")) for item in getattr(response, "output", None) or []), "response contained no web search call")
 
 
 def function_tool_case(client: OpenAI) -> None:
     tool = {"type": "function", "name": "lookup", "description": "Look up a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": False}}
-    first = client.responses.create(model=MODEL, input="Call lookup with city=Paris, then wait for the result.", tools=[tool], tool_choice={"type": "function", "name": "lookup"}, max_output_tokens=8)
+    first = client.responses.create(model=MODEL, input="Call lookup with city=Paris, then wait for the result.", tools=[tool], tool_choice={"type": "function", "name": "lookup"}, max_output_tokens=OUTPUT_TOKENS)
     call = next((item for item in first.output if item.type == "function_call"), None)
     require(call and call.call_id, "model did not return a function call")
-    second = client.responses.create(model=MODEL, input=[*first.output, {"type": "function_call_output", "call_id": call.call_id, "output": json.dumps({"temperature": 18})}, {"role": "user", "content": [{"type": "input_text", "text": "Answer in one word."}]}], max_output_tokens=8)
+    second = client.responses.create(model=MODEL, input=[*first.output, {"type": "function_call_output", "call_id": call.call_id, "output": json.dumps({"temperature": 18})}, {"role": "user", "content": [{"type": "input_text", "text": "Answer in one word."}]}], max_output_tokens=OUTPUT_TOKENS)
     require(bool(output_text(second)), "function_call_output follow-up was empty")
 
 
 def chat_nonstream(client: OpenAI) -> None:
-    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: chat"}], max_tokens=4)
+    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: chat"}], max_tokens=OUTPUT_TOKENS)
     require(bool(response.choices[0].message.content), "chat non-stream content was empty")
 
 
 def chat_stream(client: OpenAI) -> None:
-    chunks = list(client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: stream"}], max_tokens=4, stream=True))
+    chunks = list(client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: stream"}], max_tokens=OUTPUT_TOKENS, stream=True))
     require(len(chunks) > 1 and any(chunk.choices and chunk.choices[0].delta.content for chunk in chunks), "chat stream had no content deltas")
     require(chunks[-1].choices and chunks[-1].choices[0].finish_reason, "chat stream had no terminal finish_reason")
 
 
 def chat_tool(client: OpenAI) -> None:
-    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Call lookup for Paris."}], tools=[{"type": "function", "function": {"name": "lookup", "description": "Look up a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}], tool_choice={"type": "function", "function": {"name": "lookup"}}, max_tokens=8)
+    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Call lookup for Paris."}], tools=[{"type": "function", "function": {"name": "lookup", "description": "Look up a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}], tool_choice={"type": "function", "function": {"name": "lookup"}}, max_tokens=OUTPUT_TOKENS)
     require(response.choices[0].message.tool_calls and response.choices[0].message.tool_calls[0].function.name == "lookup", "chat tool call was not returned")
 
 
 def chat_n(client: OpenAI) -> None:
-    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: choices"}], n=2, max_tokens=4)
+    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: choices"}], n=2, max_tokens=OUTPUT_TOKENS)
     require(len(response.choices) == 2, f"expected two choices, got {len(response.choices)}")
 
 
 def chat_stop(client: OpenAI) -> None:
-    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply exactly ALPHA-BETA."}], stop=["-"], max_tokens=8)
+    response = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply exactly ALPHA-BETA."}], stop=["-"], max_tokens=OUTPUT_TOKENS)
     content = response.choices[0].message.content or ""
     require("-" not in content, f"stop sequence was not cut: {content}")
 
 
 def chat_usage(client: OpenAI) -> None:
-    chunks = list(client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: usage"}], max_tokens=4, stream=True, stream_options={"include_usage": True}))
+    chunks = list(client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Reply with one short word: usage"}], max_tokens=OUTPUT_TOKENS, stream=True, stream_options={"include_usage": True}))
     require(any(chunk.usage and chunk.usage.total_tokens is not None for chunk in chunks), "include_usage stream had no usage chunk")
 
 
@@ -383,7 +393,7 @@ def compact_case(client: OpenAI) -> None:
     compacted = compact(client)
     item = next((entry for entry in compacted.output if entry.type == "compaction"), None)
     require(item and item.encrypted_content, "compact response had no encrypted compaction item")
-    followup = client.responses.create(model=MODEL, input=[*compacted.output, {"role": "user", "content": [{"type": "input_text", "text": "What color was the fact? One word."}]}], max_output_tokens=4)
+    followup = client.responses.create(model=MODEL, input=[*compacted.output, {"role": "user", "content": [{"type": "input_text", "text": "What color was the fact? One word."}]}], max_output_tokens=OUTPUT_TOKENS)
     require(bool(output_text(followup)), "compaction follow-up was empty")
 
 
@@ -400,7 +410,8 @@ def images_generate(client: OpenAI) -> None:
     require(bool(response.data and response.data[0].b64_json), "images.generate had no b64_json")
     streamed = client.images.generate(model=MODEL, prompt="A tiny red dot", n=1, size="1024x1024", quality="low", response_format="b64_json", stream=True)
     events = list(streamed) if hasattr(streamed, "__iter__") and not hasattr(streamed, "data") else [streamed]
-    require(any(getattr(event, "data", None) and event.data[0].b64_json for event in events), "images stream had no b64_json event")
+    # Public image stream events carry `b64_json` at the top level.
+    require(any(getattr(event, "type", None) == "image_generation.completed" and getattr(event, "b64_json", None) for event in events), "images stream had no b64_json event")
 
 
 def images_edit(client: OpenAI) -> None:

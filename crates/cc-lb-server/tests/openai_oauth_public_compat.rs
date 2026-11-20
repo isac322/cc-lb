@@ -79,7 +79,8 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
             "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello world\",\"annotations\":[]}]}}\n\n",
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":2,\"total_tokens\":4},\"output\":[]}}\n\n"
         );
-        return ([(header::CONTENT_TYPE, "text/event-stream")], Body::from(s)).into_response();
+        // Like the real Codex backend, the SSE body carries no Content-Type.
+        return Body::from(s).into_response();
     }
     (StatusCode::NOT_FOUND, Json(json!({"detail":"not found"}))).into_response()
 }
@@ -205,11 +206,30 @@ async fn openai_oauth_public_responses_and_models() {
     let r = c
         .get(format!("http://{}/openai/v1/models", s.proxy_addr))
         .bearer_auth(key)
+        // SDKs advertise compression; the converted catalog must still parse.
+        .header("accept-encoding", "gzip, deflate, br")
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
     assert!(r.text().await.unwrap().contains("gpt-test"));
+    let catalog_request = f
+        .state
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(path, _, _)| path == "/codex/models")
+        .cloned()
+        .expect("catalog request reached the backend");
+    assert!(
+        !catalog_request
+            .1
+            .iter()
+            .any(|(name, _)| name == "accept-encoding"),
+        "a converted response is requested uncompressed"
+    );
     let r = c
         .get(format!("http://{}/openai/v1/models/gpt-test", s.proxy_addr))
         .bearer_auth(key)

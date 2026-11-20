@@ -8207,6 +8207,13 @@ impl Lifecycle {
                     true,
                 );
             }
+            // A converted response is parsed by cc-lb, so ask the backend for an
+            // uncompressed body instead of the client's accepted encodings.
+            if compat_response_plan.is_some() {
+                shaped_ctx
+                    .downstream_headers
+                    .remove(http::header::ACCEPT_ENCODING);
+            }
             if realtime_conversion {
                 shaped_ctx
                     .downstream_headers
@@ -8390,6 +8397,27 @@ impl Lifecycle {
                     error_codes::UPSTREAM_5XX
                 },
             );
+        }
+        let mut response = response;
+        // The Codex backend streams every Responses-backed call as SSE but may
+        // omit Content-Type. Converted plans always requested a stream upstream,
+        // so label the body once here for every buffered and streamed converter.
+        if upstream_kind == StorageUpstreamKind::OpenaiOauth
+            && response.status().is_success()
+            && !response.headers().contains_key(CONTENT_TYPE)
+            && compat_response_plan.as_ref().is_some_and(|plan| {
+                matches!(
+                    plan.kind,
+                    CompatResponseKind::ResponsesAggregate { .. }
+                        | CompatResponseKind::ResponsesStream { .. }
+                        | CompatResponseKind::Compact { .. }
+                        | CompatResponseKind::Chat { .. }
+                )
+            })
+        {
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         }
         Ok(AttemptResponse {
             response,
