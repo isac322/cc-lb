@@ -149,7 +149,7 @@ async fn setup(s: &common::TestServer, f: &Fake, c: &reqwest::Client) -> String 
         .await;
         assert!(d.is_object());
     }
-    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":f.base.clone(),"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","never_refresh":true},"skip_preflight":true});
+    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":f.base.clone(),"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"skip_preflight":true});
     let (st, v, _) = admin(c, s, Method::POST, "/admin/v1/upstreams", Some(body), None).await;
     assert_eq!(st, 201, "{v}");
     v["id"].as_str().unwrap().to_owned()

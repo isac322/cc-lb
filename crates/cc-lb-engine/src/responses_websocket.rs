@@ -166,6 +166,9 @@ pub(crate) struct PreparedWebSocketTurn {
     pub principal_id: String,
     pub key_id: String,
     pub model: String,
+    pub oauth_transport: bool,
+    /// The client frame needed a public-shape transform; provider frames are
+    /// filtered for this turn. Codex-shaped turns keep this false.
     pub oauth_compat: bool,
     pub store: bool,
     pub span: Span,
@@ -177,6 +180,7 @@ pub(crate) struct WebSocketPluginRequest {
     pub frame: Bytes,
     pub headers: HeaderMap,
     pub context: ResponseTransformContext,
+    pub oauth_compat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -966,6 +970,7 @@ impl ResponsesWebSocketGateway {
             .charged_bytes
             .saturating_sub(old_charge)
             .saturating_add(new_charge);
+        turn.prepared.oauth_compat = request.as_ref().is_some_and(|request| request.oauth_compat);
         turn.plugin_request = request.map(|request| (upstream_id, request));
         Ok(())
     }
@@ -1354,14 +1359,36 @@ impl ResponsesWebSocketGateway {
     }
 
     fn oauth_public_frame(&self, connection_id: u64, frame: &Bytes) -> Option<Bytes> {
-        let mut value: Value = sonic_rs::from_slice(frame).ok()?;
         let lane = self.connection_lanes.get(&connection_id)?.clone();
         let turn = self.turns.values().find(|turn| {
             turn.connection_id == Some(connection_id) && turn.sent && turn.lane == lane
         })?;
-        if !turn.prepared.oauth_compat {
+        if !turn.prepared.oauth_transport {
             return None;
         }
+        if !turn.prepared.oauth_compat {
+            return lane
+                .as_deref()
+                .filter(|_| !frame.windows(11).any(|w| w == b"\"stream_id\""))
+                .map(|lane| {
+                    let encoded = serde_json::to_vec(lane).expect("lane is JSON");
+                    let mut output = Vec::with_capacity(frame.len() + encoded.len() + 14);
+                    if frame.first() == Some(&b'{') {
+                        output.extend_from_slice(b"{\"stream_id\":");
+                        output.extend_from_slice(&encoded);
+                        if frame.len() > 1 {
+                            output.push(b',');
+                            output.extend_from_slice(&frame[1..]);
+                        } else {
+                            output.push(b'}');
+                        }
+                        Bytes::from(output)
+                    } else {
+                        frame.clone()
+                    }
+                });
+        }
+        let mut value: Value = sonic_rs::from_slice(frame).ok()?;
         if value.get("type").and_then(Value::as_str) == Some("response.metadata") {
             return Some(Bytes::new());
         }
@@ -2745,6 +2772,7 @@ pub(crate) mod tests {
                 prepared_signers: HashMap::new(),
                 prepared: PreparedWebSocketTurn {
                     oauth_compat: false,
+                    oauth_transport: false,
                     candidates: Vec::new(),
                     observer,
                     completion_observer: Arc::new(
@@ -3335,6 +3363,7 @@ pub(crate) mod tests {
                     prepared_signers: HashMap::new(),
                     prepared: PreparedWebSocketTurn {
                         oauth_compat: false,
+                        oauth_transport: false,
                         candidates: Vec::new(),
                         observer: None,
                         completion_observer: Arc::new(

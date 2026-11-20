@@ -93,18 +93,22 @@ pub(crate) fn response_plan_for_request(
                 policy,
                 transport: Transport::Http,
             })?;
-            Some(CompatResponsePlan {
-                kind: if normalized.aggregate_to_json {
-                    CompatResponseKind::ResponsesAggregate {
-                        echo_metadata: normalized.echo_metadata,
-                    }
-                } else {
-                    CompatResponseKind::ResponsesStream {
-                        echo_metadata: normalized.echo_metadata,
-                    }
-                },
-                truncation_emulate: normalized.truncation_emulate,
-            })
+            if normalized.body.is_none() && !normalized.aggregate_to_json {
+                None
+            } else {
+                Some(CompatResponsePlan {
+                    kind: if normalized.aggregate_to_json {
+                        CompatResponseKind::ResponsesAggregate {
+                            echo_metadata: normalized.echo_metadata,
+                        }
+                    } else {
+                        CompatResponseKind::ResponsesStream {
+                            echo_metadata: normalized.echo_metadata,
+                        }
+                    },
+                    truncation_emulate: normalized.truncation_emulate,
+                })
+            }
         }
         ProviderCapability::OpenaiResponsesCompact => Some(CompatResponsePlan {
             kind: CompatResponseKind::Compact {
@@ -122,7 +126,9 @@ pub(crate) fn response_plan_for_request(
             })
         }
         ProviderCapability::OpenaiModels => {
-            if ctx.path == "/v1/models" {
+            if openai_compat::models::is_codex_catalog_query(ctx.query.as_deref()) {
+                None
+            } else if ctx.path == "/v1/models" {
                 Some(CompatResponsePlan {
                     kind: CompatResponseKind::ModelsList,
                     truncation_emulate: false,
@@ -137,25 +143,25 @@ pub(crate) fn response_plan_for_request(
             }
         }
         ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {
-            Some(CompatResponsePlan {
-                kind: CompatResponseKind::ImagesStream {
-                    kind: ImageStreamKind::Generation,
+            (body.get("stream").and_then(Value::as_bool) == Some(true)).then_some(
+                CompatResponsePlan {
+                    kind: CompatResponseKind::ImagesStream {
+                        kind: ImageStreamKind::Generation,
+                    },
+                    truncation_emulate: false,
                 },
-                truncation_emulate: false,
-            })
+            )
         }
         ProviderCapability::OpenaiImages if ctx.path == "/v1/images/edits" => {
-            Some(CompatResponsePlan {
-                kind: CompatResponseKind::ImagesStream {
-                    kind: ImageStreamKind::Edit,
+            (body.get("stream").and_then(Value::as_bool) == Some(true)).then_some(
+                CompatResponsePlan {
+                    kind: CompatResponseKind::ImagesStream {
+                        kind: ImageStreamKind::Edit,
+                    },
+                    truncation_emulate: false,
                 },
-                truncation_emulate: false,
-            })
+            )
         }
-        ProviderCapability::OpenaiAudio => Some(CompatResponsePlan {
-            kind: CompatResponseKind::PassthroughNormalizeErrors,
-            truncation_emulate: false,
-        }),
         _ => None,
     };
     Ok(plan)
@@ -167,7 +173,7 @@ pub(crate) async fn prepare_request(
     capability: ProviderCapability,
     upstream_kind: StorageUpstreamKind,
     policy: &OpenaiOauthCompatPolicy,
-    response_plan: Option<CompatResponsePlan>,
+    _response_plan: Option<CompatResponsePlan>,
 ) -> Result<PreparedCompatRequest, CompatReject> {
     if upstream_kind != StorageUpstreamKind::OpenaiOauth {
         return Ok(PreparedCompatRequest {
@@ -180,16 +186,18 @@ pub(crate) async fn prepare_request(
     let mut path = ctx.path.clone();
     let mut query = ctx.query.clone();
     let mut body = ctx.body_bytes.clone();
-    let mut plan = response_plan;
+    let mut plan = None;
     match capability {
         ProviderCapability::OpenaiResponses => {
             if let Some(value) = sonic_rs::from_slice::<Value>(&ctx.body_bytes).ok() {
                 let features = api_key_only_features(Some(&value), capability);
-                let value = if features.is_empty() {
-                    value
-                } else {
+                let degraded = !features.is_empty();
+                let value = if degraded {
                     openai_compat::request::degrade_without_api_key(&value, &features, policy)?
+                } else {
+                    value
                 };
+                plan = response_plan_for_request(ctx, capability, policy, Some(&value))?;
                 let normalized =
                     openai_compat::request::normalize_responses_request(NormalizeInput {
                         body: &value,
@@ -198,6 +206,10 @@ pub(crate) async fn prepare_request(
                     })?;
                 if let Some(next) = normalized.body {
                     body = serde_json::to_vec(&next)
+                        .map(Bytes::from)
+                        .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+                } else if degraded {
+                    body = serde_json::to_vec(&value)
                         .map(Bytes::from)
                         .map_err(|_| CompatReject::unsupported_parameter("body"))?;
                 }
@@ -215,6 +227,12 @@ pub(crate) async fn prepare_request(
             .map(Bytes::from)
             .map_err(|_| CompatReject::unsupported_parameter("body"))?;
             path = "/v1/responses".to_owned();
+            plan = Some(CompatResponsePlan {
+                kind: CompatResponseKind::Compact {
+                    original_request: value,
+                },
+                truncation_emulate: false,
+            });
         }
         ProviderCapability::OpenaiChatCompletions => {
             let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
@@ -234,6 +252,16 @@ pub(crate) async fn prepare_request(
         ProviderCapability::OpenaiModels => {
             let public = !openai_compat::models::is_codex_catalog_query(ctx.query.as_deref());
             if public {
+                plan = Some(CompatResponsePlan {
+                    kind: if ctx.path == "/v1/models" {
+                        CompatResponseKind::ModelsList
+                    } else {
+                        CompatResponseKind::ModelsGet {
+                            id: ctx.path.rsplit('/').next().unwrap_or_default().to_owned(),
+                        }
+                    },
+                    truncation_emulate: false,
+                });
                 query = Some(openai_compat::models::catalog_query_for_public(
                     ctx.query.as_deref(),
                 ));
@@ -270,10 +298,25 @@ pub(crate) async fn prepare_request(
             body = serde_json::to_vec(&converted.body)
                 .map(Bytes::from)
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            if let Some(p) = &mut plan {
-                p.kind = CompatResponseKind::ImagesStream {
-                    kind: ImageStreamKind::Edit,
-                };
+            if converted.stream {
+                plan = Some(CompatResponsePlan {
+                    kind: CompatResponseKind::ImagesStream {
+                        kind: ImageStreamKind::Edit,
+                    },
+                    truncation_emulate: false,
+                });
+            }
+        }
+        ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {
+            let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
+                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+            if value.get("stream").and_then(Value::as_bool) == Some(true) {
+                plan = Some(CompatResponsePlan {
+                    kind: CompatResponseKind::ImagesStream {
+                        kind: ImageStreamKind::Generation,
+                    },
+                    truncation_emulate: false,
+                });
             }
         }
         ProviderCapability::OpenaiResponsesInputTokens => {

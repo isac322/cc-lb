@@ -6734,33 +6734,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_oauth_codex_frames_preserve_lanes_and_filter_public_metadata() {
+    async fn websocket_oauth_codex_frames_preserve_lanes_and_metadata() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener binds");
         let address = listener.local_addr().expect("address available");
         let provider = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.expect("provider accepts");
-            let mut ws = tokio_tungstenite::accept_async(socket)
-                .await
-                .expect("provider handshake");
             for expected in ["a", "b"] {
+                let (socket, _) = listener.accept().await.expect("provider accepts");
+                let mut ws = tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("provider handshake");
                 let frame = ws
                     .next()
                     .await
                     .expect("provider frame")
                     .expect("frame decodes");
                 let value: Value = serde_json::from_slice(&frame.into_data()).expect("JSON frame");
-                assert_eq!(value["stream_id"], expected);
+                assert!(value.get("stream_id").is_none());
                 ws.send(UpstreamMessage::Text(
-                    format!(r#"{{"type":"response.output_text.delta","stream_id":"{expected}","delta":"ok"}}"#).into(),
-                )).await.expect("provider response sends");
+                    format!(r#"{{"type":"response.output_text.delta","delta":"ok"}}"#).into(),
+                ))
+                .await
+                .expect("provider response sends");
                 ws.send(UpstreamMessage::Text(
-                    format!(r#"{{"type":"response.metadata","stream_id":"{expected}","x":1}}"#)
-                        .into(),
+                    r#"{"type":"response.metadata","x":1}"#.into(),
                 ))
                 .await
                 .expect("provider metadata sends");
+                let _ = expected;
             }
         });
         let mut record = websocket_upstream(
@@ -6871,6 +6873,12 @@ mod tests {
                 .expect("provider frame")
                 .expect("frame ok");
             let _ = frame_tx.send(frame.into_data());
+            websocket
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.metadata","x":1}"#.into(),
+                ))
+                .await
+                .expect("provider metadata sends");
         });
         let mut record = websocket_upstream(
             1,
@@ -6897,6 +6905,11 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&frame).expect("JSON frame");
         assert_eq!(body["store"], false);
         assert!(body.get("stream_id").is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), client.next())
+                .await
+                .is_err()
+        );
         provider_task.await.expect("provider task");
         let _ = client.close(None).await;
         proxy_task.abort();

@@ -85,6 +85,8 @@ mod openai_cache_keepalive;
 mod openai_cache_keepalive_support;
 #[path = "openai_oauth_public_compat.rs"]
 mod openai_oauth_public_compat;
+#[path = "openai_oauth_public_media.rs"]
+mod openai_oauth_public_media;
 #[path = "postgres_tls.rs"]
 mod postgres_tls;
 #[path = "preflight.rs"]

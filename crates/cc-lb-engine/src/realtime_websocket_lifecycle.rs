@@ -162,7 +162,8 @@ impl Lifecycle {
                     };
                     match self.resolve_request_affinities(&[key]).await {
                         Ok(Some(resolution)) => Some(resolution.target_upstream_id),
-                        Ok(None) | Err(_) => {
+                        Ok(None) => None,
+                        Err(_) => {
                             return Err(WebSocketError::new(
                                 404,
                                 "realtime_call_not_found",

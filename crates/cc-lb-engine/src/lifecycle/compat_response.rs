@@ -4,6 +4,7 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, Response, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::convert::Infallible;
 
 use crate::lifecycle::compat_request::{CompatResponseKind, CompatResponsePlan};
 use crate::openai_compat;
@@ -81,36 +82,74 @@ pub(crate) async fn aggregate_response(
         openai_compat::response::AggregateOutcome::Truncated => Err(CollectError::BodyRead),
     }
 }
-/// Buffer a truncation-emulation response so the caller can decide whether a
-/// context overflow occurred before any output event. The original response
-/// is rebuilt byte-for-byte when no retry is needed.
+/// Inspect only the prefix before the first output event. Once output starts,
+/// the held prefix and all remaining upstream frames are relayed incrementally.
 pub(crate) async fn inspect_truncation_response(
     response: Response<Body>,
     cap: usize,
 ) -> Result<(Response<Body>, bool), CollectError> {
+    if !is_sse_content_type(response.headers()) {
+        return Ok((response, false));
+    }
     let (parts, body) = response.into_parts();
-    let body = collect_body(body, cap).await?;
-    let mut overflow = false;
-    let mut output_started = false;
-    for payload in sse_payloads(&body) {
-        if payload == b"[DONE]" {
-            continue;
-        }
-        let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
+    let mut body = body;
+    let mut held = Vec::new();
+    let mut scan = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| CollectError::BodyRead)?;
+        let Ok(data) = frame.into_data() else {
             continue;
         };
-        match openai_compat::response::classify_early_event(&event) {
-            openai_compat::response::EarlyEvent::Output => output_started = true,
-            openai_compat::response::EarlyEvent::ContextOverflow if !output_started => {
-                overflow = true;
-                break;
+        held.extend_from_slice(&data);
+        scan.extend_from_slice(&data);
+        let mut output_started = false;
+        while let Some(end) = sse_event_end(&scan) {
+            let event = scan.drain(..end).collect::<Vec<_>>();
+            let Some(payload) = sse_data(&event) else {
+                continue;
+            };
+            if payload == b"[DONE]" {
+                continue;
             }
-            openai_compat::response::EarlyEvent::OtherTerminal
-            | openai_compat::response::EarlyEvent::Pending
-            | openai_compat::response::EarlyEvent::ContextOverflow => {}
+            let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
+                continue;
+            };
+            match openai_compat::response::classify_early_event(&event) {
+                openai_compat::response::EarlyEvent::Output => {
+                    output_started = true;
+                    break;
+                }
+                openai_compat::response::EarlyEvent::ContextOverflow => {
+                    return Ok((Response::from_parts(parts, Body::from(held)), true));
+                }
+                openai_compat::response::EarlyEvent::OtherTerminal
+                | openai_compat::response::EarlyEvent::Pending => {}
+            }
+        }
+        if output_started {
+            let prefix = std::mem::take(&mut held);
+            let stream = async_stream::stream! {
+                if !prefix.is_empty() {
+                    yield Ok::<Bytes, Infallible>(Bytes::from(prefix));
+                }
+                while let Some(frame) = body.frame().await {
+                    let Ok(frame) = frame else { break };
+                    let Ok(data) = frame.into_data() else { continue };
+                    if !data.is_empty() {
+                        yield Ok::<Bytes, Infallible>(data);
+                    }
+                }
+            };
+            return Ok((
+                Response::from_parts(parts, Body::from_stream(stream)),
+                false,
+            ));
+        }
+        if held.len() > cap {
+            return Ok((Response::from_parts(parts, Body::from(held)), true));
         }
     }
-    Ok((Response::from_parts(parts, Body::from(body)), overflow))
+    Ok((Response::from_parts(parts, Body::from(held)), false))
 }
 
 fn chat_from_sse(
@@ -417,6 +456,19 @@ fn is_sse_content_type(headers: &HeaderMap) -> bool {
             v.split(';')
                 .next()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+        })
+}
+
+fn sse_event_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| index + 2)
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
         })
 }
 

@@ -102,6 +102,16 @@ pub(crate) fn extract_request_affinity_keys_with_scope(
     let mut collector = KeyCollector::new(capability, principal_id);
     collector.response_scope = response_scope;
     match capability {
+        ProviderCapability::OpenaiRealtimeHangup => {
+            if let Some(object) = value.as_object() {
+                collector.reference(
+                    UpstreamAffinityKind::OpenaiRealtimeCall,
+                    object.get("call_id").or_else(|| object.get("id")),
+                )?;
+            } else {
+                collector.reference(UpstreamAffinityKind::OpenaiRealtimeCall, Some(value))?;
+            }
+        }
         ProviderCapability::AnthropicMessages | ProviderCapability::AnthropicCountTokens => {
             collector.anthropic_message(value)?
         }
@@ -123,6 +133,24 @@ pub(crate) fn extract_request_affinity_keys_with_scope(
         _ => {}
     }
     Ok(collector.keys)
+}
+/// Build the affinity key for a realtime call `Location` header.
+pub(crate) fn realtime_call_affinity_key(
+    principal_id: &str,
+    location: &str,
+) -> Option<UpstreamAffinityKey> {
+    let call_id = location
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|id| !id.is_empty())?;
+    let value_sha256: [u8; 32] = Sha256::digest(call_id.as_bytes()).into();
+    Some(UpstreamAffinityKey {
+        principal_id: principal_id.to_owned(),
+        provider: OPENAI_PROVIDER.to_owned(),
+        kind: UpstreamAffinityKind::OpenaiRealtimeCall,
+        value_sha256,
+    })
 }
 
 /// Extracts the provider-owned state a buffered successful response creates.
