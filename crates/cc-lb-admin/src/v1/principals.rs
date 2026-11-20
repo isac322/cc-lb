@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use cc_lb_control::AuditPayload;
-use cc_lb_domain::TerminalStrategy;
+use cc_lb_domain::{OpenaiOauthCompatOverride, TerminalStrategy};
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
     CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,
@@ -71,6 +71,8 @@ struct CreatePrincipalBody {
     default_limits: Vec<Limit>,
     #[serde(default)]
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    #[serde(default)]
+    openai_oauth_compat: Option<OpenaiOauthCompatOverride>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +87,12 @@ struct UpdatePrincipalBody {
         skip_serializing_if = "Option::is_none"
     )]
     cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    openai_oauth_compat: Option<Option<OpenaiOauthCompatOverride>>,
 }
 
 fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -118,6 +126,8 @@ struct PrincipalResponse {
     default_limits: Vec<Limit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openai_oauth_compat: Option<OpenaiOauthCompatOverride>,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,6 +176,7 @@ async fn create_principal(
         allowed_upstreams: body.allowed_upstreams,
         default_limits: body.default_limits,
         cache_keepalive: body.cache_keepalive,
+        openai_oauth_compat: body.openai_oauth_compat,
     };
 
     match PrincipalStore::create(storage, input, cc_lb_clock::unix_secs(state.clock.now())).await {
@@ -283,6 +294,7 @@ async fn update_principal(
             default_limits: body.default_limits,
             router_terminal_strategy: None,
             cache_keepalive: body.cache_keepalive,
+            openai_oauth_compat: body.openai_oauth_compat,
         },
         fields_changed,
         identity,
@@ -672,6 +684,7 @@ fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
         allowed_upstreams: record.allowed_upstreams,
         default_limits: record.default_limits,
         cache_keepalive: record.cache_keepalive,
+        openai_oauth_compat: record.openai_oauth_compat,
     }
 }
 
@@ -701,6 +714,9 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     }
     if body.cache_keepalive.is_some() {
         fields.push("cache_keepalive");
+    }
+    if body.openai_oauth_compat.is_some() {
+        fields.push("openai_oauth_compat");
     }
     fields
 }

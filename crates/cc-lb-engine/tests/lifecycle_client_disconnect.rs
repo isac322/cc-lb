@@ -1743,6 +1743,7 @@ fn prompt_cache_transform_lifecycle(
         updated_at_unix_secs: 0,
         router_terminal_strategy: TerminalStrategy::FirstPick,
         cache_keepalive: None,
+        openai_oauth_compat: None,
     };
     let authn = TestAuthn::with_principal_view(
         state,

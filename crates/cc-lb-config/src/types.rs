@@ -1,3 +1,4 @@
+use cc_lb_domain::OpenaiOauthCompatPolicy;
 use cc_lb_oauth_protocol::{
     ANTIGRAVITY_OAUTH_AUTH_URL, ANTIGRAVITY_OAUTH_CODE_ASSIST_URL, ANTIGRAVITY_OAUTH_REDIRECT_URI,
     ANTIGRAVITY_OAUTH_SCOPES, ANTIGRAVITY_OAUTH_TOKEN_URL, ANTIGRAVITY_OAUTH_USER_AGENT,
@@ -58,6 +59,13 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
+    /// Restart-only defaults for public `/v1` requests served by
+    /// ChatGPT-subscription (`openai_oauth`) upstreams. Each principal may
+    /// override individual fields through the admin API.
+    #[serde(default)]
+    pub openai_oauth_compat: OpenaiOauthCompatPolicy,
+    #[serde(default)]
+    pub openai_public_api: OpenaiPublicApiConfig,
     #[serde(default)]
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
@@ -85,8 +93,24 @@ impl Default for Config {
             runtime: RuntimeConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             bulkhead: BulkheadConfig::default(),
+            openai_oauth_compat: OpenaiOauthCompatPolicy::default(),
+            openai_public_api: OpenaiPublicApiConfig::default(),
             prompt_cache_shadow: PromptCacheShadowConfig::default(),
             limit_reservation_ttl: LimitReservationTtlConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenaiPublicApiConfig {
+    pub realtime_origin: Url,
+}
+
+impl Default for OpenaiPublicApiConfig {
+    fn default() -> Self {
+        Self {
+            realtime_origin: Url::parse("https://api.openai.com/").expect("valid URL"),
         }
     }
 }

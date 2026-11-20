@@ -127,6 +127,27 @@ export interface PrincipalDefaultLimit {
   window_secs: number;
   cap_micros: number;
 }
+export type OpenaiOauthCompatPolicy = {
+  store_true: 'coerce' | 'reject';
+  sampling: 'drop' | 'reject';
+  logprobs: 'drop' | 'reject';
+  truncation_auto: 'emulate' | 'drop' | 'reject';
+  prompt_cache_in_memory: 'drop' | 'reject';
+  service_tier: 'coerce' | 'reject';
+  web_search_preview: 'coerce' | 'reject';
+  metadata: 'drop_echo' | 'drop' | 'reject';
+  max_tool_calls: 'drop' | 'reject';
+  background: 'drop' | 'reject';
+  hosted_tools: 'drop_tool' | 'reject';
+  compact: 'emulate' | 'reject';
+  chat_n: 'emulate' | 'reject';
+  chat_stop: 'emulate' | 'drop' | 'reject';
+  chat_seed_penalties: 'drop' | 'reject';
+  transcription: 'disabled' | 'enabled';
+};
+
+export type OpenaiOauthCompatOverride = Partial<OpenaiOauthCompatPolicy>;
+
 export interface Principal {
   id: string;
   name: string;
@@ -151,6 +172,7 @@ export interface Principal {
       llm_judge?: unknown;
     };
   } | null;
+  openai_oauth_compat?: OpenaiOauthCompatOverride | null;
 }
 interface PrincipalListResp {
   principals: Principal[];
@@ -1652,6 +1674,32 @@ export function useUpdatePrincipalCacheKeepalive() {
       patchJson<Principal, { cache_keepalive: Principal['cache_keepalive'] }>(
         `/admin/v1/principals/${id}`,
         { cache_keepalive },
+        { ifMatch: expected_revision },
+      ),
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
+    },
+  });
+}
+export function useUpdatePrincipalOpenaiOauthCompat() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
+    mutationFn: ({
+      id,
+      openai_oauth_compat,
+      expected_revision,
+    }: {
+      id: string;
+      openai_oauth_compat: OpenaiOauthCompatOverride | null;
+      expected_revision: number;
+    }) =>
+      patchJson<
+        Principal,
+        { openai_oauth_compat: OpenaiOauthCompatOverride | null }
+      >(
+        `/admin/v1/principals/${id}`,
+        { openai_oauth_compat },
         { ifMatch: expected_revision },
       ),
     onSuccess: async (_data, vars) => {

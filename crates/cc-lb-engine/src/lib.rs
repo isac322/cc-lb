@@ -56,6 +56,8 @@ pub mod metrics_labels;
 #[cfg(not(loom))]
 pub mod model_resolution;
 #[cfg(not(loom))]
+pub mod openai_compat;
+#[cfg(not(loom))]
 pub mod pg_notify_fanout;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;

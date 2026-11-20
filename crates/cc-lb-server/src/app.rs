@@ -814,6 +814,7 @@ pub async fn seed_app_testing_storage(
             allowed_models: vec!["*".to_owned()],
             allowed_upstreams: vec![],
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         now,
     )
@@ -2227,6 +2228,8 @@ fn lifecycle_config_from_config(
         replica_identity,
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
         upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
+        openai_oauth_compat: config.openai_oauth_compat,
+        openai_realtime_origin: config.openai_public_api.realtime_origin.clone(),
     }
 }
 
@@ -2924,6 +2927,8 @@ async fn proxy_timeout_middleware(
     }
 }
 
+#[path = "input_tokens_ws.rs"]
+mod input_tokens_ws;
 #[path = "app_realtime_websocket.rs"]
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
@@ -2997,6 +3002,7 @@ struct WsProviderConnection {
     upstream_name: String,
     sink: WsProviderSink,
     task: JoinHandle<()>,
+    lane: Option<String>,
     _bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
 }
 
@@ -3119,6 +3125,7 @@ struct ResponsesProviderParams<'a> {
     request: http::Request<()>,
     connection_id: u64,
     upstream_id: uuid::Uuid,
+    lane: Option<String>,
     upstream_name: String,
     bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
     events: tokio::sync::mpsc::Sender<WsProviderEvent>,
@@ -3133,6 +3140,7 @@ async fn start_responses_provider(
         connection_id,
         upstream_id,
         upstream_name,
+        lane,
         bulkhead_guard,
         events,
     } = params;
@@ -3178,6 +3186,7 @@ async fn start_responses_provider(
     Ok(WsProviderConnection {
         upstream_id,
         upstream_name,
+        lane,
         sink,
         task,
         _bulkhead_guard: bulkhead_guard,
@@ -3292,7 +3301,9 @@ async fn dispatch_responses_websocket(
     let mut last_error = None;
     for candidate in &dispatch.candidates {
         let existing = connections.iter().find_map(|(id, connection)| {
-            (connection.upstream_id == candidate.upstream_id).then_some(*id)
+            (connection.upstream_id == candidate.upstream_id
+                && (!candidate.socket_per_lane || connection.lane == dispatch.stream_id))
+                .then_some(*id)
         });
         if let Some(connection_id) = existing {
             return send_responses_dispatch(gateway, dispatch, connection_id, connections).await;
@@ -3354,6 +3365,7 @@ async fn dispatch_responses_websocket(
             request,
             connection_id,
             upstream_id: candidate.upstream_id,
+            lane: dispatch.stream_id.clone(),
             upstream_name: candidate.upstream_name.clone(),
             bulkhead_guard,
             events: events.clone(),
@@ -4246,6 +4258,7 @@ fn dispatcher(
     let breaker_clock = clock;
     let dispatcher_factory = Arc::new(move |max_idle_per_host| {
         let base = make_default_dispatcher(max_idle_per_host);
+        let base = Arc::new(input_tokens_ws::InputTokensWebsocketDispatch::new(base));
         Arc::new(CircuitBreakerDispatch::new(
             base,
             breaker_registry_for_dispatcher.clone(),
@@ -6719,6 +6732,199 @@ mod tests {
             let _ = client.close(None).await;
             proxy_task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_oauth_codex_frames_preserve_lanes_and_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("address available");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let provider = tokio::spawn(async move {
+            // Keep every lane socket open until the client is done, so a
+            // provider hang-up cannot interleave close notices with lane frames.
+            let mut sockets = Vec::new();
+            for _lane in ["a", "b"] {
+                let (socket, _) = listener.accept().await.expect("provider accepts");
+                let mut ws = tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("provider handshake");
+                let frame = ws
+                    .next()
+                    .await
+                    .expect("provider frame")
+                    .expect("frame decodes");
+                let value: Value = serde_json::from_slice(&frame.into_data()).expect("JSON frame");
+                assert!(value.get("stream_id").is_none());
+                ws.send(UpstreamMessage::Text(
+                    r#"{"type":"response.output_text.delta","delta":"ok"}"#.into(),
+                ))
+                .await
+                .expect("provider response sends");
+                ws.send(UpstreamMessage::Text(
+                    r#"{"type":"response.metadata","x":1}"#.into(),
+                ))
+                .await
+                .expect("provider metadata sends");
+                sockets.push(ws);
+            }
+            let _ = done_rx.await;
+            drop(sockets);
+        });
+        let mut record = websocket_upstream(
+            1,
+            "oauth",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        );
+        record.kind = UpstreamKind::OpenaiOauth;
+        let router = websocket_test_router(vec![record], TerminalStrategy::FirstPick).await;
+        let (proxy, task) = spawn_proxy_router(router).await;
+        let mut request = websocket_request(proxy);
+        *request.uri_mut() = format!("ws://{proxy}/openai/v1/responses").parse().unwrap();
+        let (mut client, _) = connect_async(request).await.expect("client handshake");
+        for lane in ["a", "b"] {
+            client.send(UpstreamMessage::Text(
+                format!(r#"{{"type":"response.create","stream_id":"{lane}","model":"gpt-4.1","input":[],"store":false,"stream":true}}"#).into(),
+            )).await.expect("client frame sends");
+            let response = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("response arrives")
+                .expect("response exists")
+                .expect("response decodes");
+            let value: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+            assert_eq!(value["stream_id"], lane);
+            assert_eq!(value["type"], "response.output_text.delta");
+            let metadata = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("metadata arrives")
+                .expect("metadata exists")
+                .expect("metadata decodes");
+            let metadata: Value = serde_json::from_str(metadata.to_text().unwrap()).unwrap();
+            assert_eq!(metadata["type"], "response.metadata");
+        }
+        let _ = done_tx.send(());
+        provider.await.expect("provider task");
+        let _ = client.close(None).await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_oauth_cross_lane_previous_response_is_rejected_without_provider_contact() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("address available");
+        let provider = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("provider accepts");
+            let mut ws = tokio_tungstenite::accept_async(socket)
+                .await
+                .expect("provider handshake");
+            let first = ws
+                .next()
+                .await
+                .expect("first frame")
+                .expect("first frame decodes");
+            assert!(!first.to_text().unwrap().contains("stream_id"));
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(
+                ws.next().now_or_never().is_none(),
+                "rejected frame reaches no provider"
+            );
+        });
+        let mut record = websocket_upstream(
+            1,
+            "oauth",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        );
+        record.kind = UpstreamKind::OpenaiOauth;
+        let router = websocket_test_router(vec![record], TerminalStrategy::FirstPick).await;
+        let (proxy, task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(websocket_request(proxy)).await.unwrap();
+        client
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.create","stream_id":"a","model":"gpt-4.1","input":[]}"#.into(),
+            ))
+            .await
+            .unwrap();
+        client.send(UpstreamMessage::Text(
+            r#"{"type":"response.create","stream_id":"b","previous_response_id":"a","model":"gpt-4.1","input":[]}"#.into(),
+        )).await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let error: Value = serde_json::from_str(error.to_text().unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "previous_response_not_found");
+        assert_eq!(error["status"], 400);
+        provider.await.unwrap();
+        let _ = client.close(None).await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_oauth_public_create_adds_store_false_and_strips_lane() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("address available");
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let provider_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("provider accepts");
+            let mut websocket = tokio_tungstenite::accept_async(socket)
+                .await
+                .expect("provider handshake");
+            let frame = websocket
+                .next()
+                .await
+                .expect("provider frame")
+                .expect("frame ok");
+            let _ = frame_tx.send(frame.into_data());
+            websocket
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.metadata","x":1}"#.into(),
+                ))
+                .await
+                .expect("provider metadata sends");
+        });
+        let mut record = websocket_upstream(
+            1,
+            "oauth",
+            Url::parse(&format!("http://{address}/")).expect("provider URL"),
+        );
+        record.kind = UpstreamKind::OpenaiOauth;
+        let router = websocket_test_router(vec![record], TerminalStrategy::FirstPick).await;
+        let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+        let (mut client, _) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("downstream handshake");
+        client
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.create","model":"gpt-4.1","input":"hello","stream_id":"lane"}"#
+                    .into(),
+            ))
+            .await
+            .expect("create sends");
+        let frame = tokio::time::timeout(Duration::from_secs(5), frame_rx)
+            .await
+            .expect("provider receives frame")
+            .expect("frame channel");
+        let body: serde_json::Value = serde_json::from_slice(&frame).expect("JSON frame");
+        assert_eq!(body["store"], false);
+        assert!(body.get("stream_id").is_none());
+        // The provider's response.metadata frame is not delivered to a
+        // public-shape client; any frame that does arrive (for example the
+        // close notice when the fake provider hangs up) must not be it.
+        if let Ok(Some(Ok(message))) =
+            tokio::time::timeout(Duration::from_millis(250), client.next()).await
+            && let Ok(text) = message.to_text()
+        {
+            assert!(!text.contains("response.metadata"), "{text}");
+        }
+        provider_task.await.expect("provider task");
+        let _ = client.close(None).await;
+        proxy_task.abort();
     }
 
     #[tokio::test]

@@ -147,6 +147,51 @@ async fn realtime_requires_an_allowed_model_before_provider_selection() {
 }
 
 #[tokio::test]
+async fn realtime_sideband_without_affinity_fails_closed_before_provider_connect() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener");
+    let address = listener.local_addr().expect("provider address");
+    let router = websocket_test_router(
+        vec![websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).expect("provider URL"),
+        )],
+        TerminalStrategy::FirstPick,
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(router).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(
+            proxy,
+            "/openai/v1/realtime?call_id=rtc_unbound",
+        )),
+    )
+    .await
+    .expect("sideband rejection arrives")
+    .expect_err("unbound sideband call must not upgrade");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("HTTP sideband rejection expected");
+    };
+    // This router has no affinity store, so ownership cannot be checked at all:
+    // the call fails closed as unavailable rather than as an unknown call.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_slice(response.body().as_ref().expect("error body"))
+            .expect("JSON error body");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert_eq!(
+        body["error"]["message"],
+        "upstream affinity is unavailable for opaque request content"
+    );
+    assert!(listener.accept().now_or_never().is_none());
+    task.abort();
+}
+
+#[tokio::test]
 async fn gemini_live_rejects_unsupported_operation_before_upgrade() {
     use cc_lb_request_log::{RequestEventKind, RequestEventUpdate};
     use cc_lb_storage_api::RequestEventStreamFilters;

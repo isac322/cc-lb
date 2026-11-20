@@ -919,6 +919,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
       <li><b>terminal strategy는 단순 선택만 담당</b> — 가중치, 연결 수, 외부 상태 기반 정책은 filter plugin으로 후보를 줄인 뒤 적용해야 합니다. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
       <li><b>지원하지 않는 provider 경로</b> — Bedrock, Vertex, SigV4, ADC 자격증명 경로는 지원하지 않습니다.</li>
       <li><b>지원하는 native route</b> — Anthropic Messages는 POST <code>/v1/messages</code> 및 <code>/v1/messages/count_tokens</code>, OpenAI Responses HTTP는 POST <code>/v1/responses</code> 및 GET <code>/v1/responses</code> WebSocket, Gemini는 POST <code>/v1beta/models/{model}:generateContent</code>, <code>:streamGenerateContent</code>, <code>:countTokens</code>를 지원합니다.</li>
+      <li><b>OpenAI OAuth public v1</b> — ChatGPT-subscription upstreams translate public Responses and Chat Completions requests, emulate compaction, model and image conversions, WebSocket lanes, realtime forwarding, and optional transcription. Codex-shaped requests remain unchanged; provider-owned operations route to an OpenAI API-key upstream or reject.</li>
       <li><b>cross-provider 변환 없음</b> — Anthropic, OpenAI, Gemini 요청·응답 형식 사이의 변환은 지원하지 않습니다.</li>
       <li><b>스트리밍 ↔ 비스트리밍 변환 없음</b> — 요청 그대로 forwarding.</li>
       <li><b>응답 캐싱 없음</b> — 매 요청마다 upstream 호출.</li>

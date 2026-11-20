@@ -174,6 +174,7 @@ impl ProxyHarness {
                 allowed_upstreams: upstreams.iter().map(|upstream| upstream.id).collect(),
                 default_limits: Vec::new(),
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             1,
         )
@@ -564,6 +565,7 @@ async fn readyz(harness: &ProxyHarness) -> (StatusCode, Value) {
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         1,
     )

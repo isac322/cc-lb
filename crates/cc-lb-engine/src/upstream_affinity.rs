@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::provider_capability::ProviderCapability;
+use crate::provider_capability::{ProviderCapability, safe_openai_resource_path};
 use crate::usage_parser::ParsedSseEvent;
 use cc_lb_storage_api::{UpstreamAffinityKey, UpstreamAffinityKind};
 use serde_json::{Map, Value};
@@ -123,6 +123,55 @@ pub(crate) fn extract_request_affinity_keys_with_scope(
         _ => {}
     }
     Ok(collector.keys)
+}
+/// Build the affinity key for a realtime call `Location` header.
+pub(crate) fn realtime_call_affinity_key(
+    principal_id: &str,
+    location: &str,
+) -> Option<UpstreamAffinityKey> {
+    let call_id = location
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|id| !id.is_empty())?;
+    let value_sha256: [u8; 32] = Sha256::digest(call_id.as_bytes()).into();
+    Some(UpstreamAffinityKey {
+        principal_id: principal_id.to_owned(),
+        provider: OPENAI_PROVIDER.to_owned(),
+        kind: UpstreamAffinityKind::OpenaiRealtimeCall,
+        value_sha256,
+    })
+}
+
+/// Build the affinity key a resource path names: the realtime call a hangup
+/// targets, or the response a stored-response operation reads. Returns `None`
+/// for every other operation or for a malformed id segment.
+pub(crate) fn path_affinity_key(
+    capability: ProviderCapability,
+    path: &str,
+    principal_id: &str,
+) -> Option<UpstreamAffinityKey> {
+    let (kind, id) = match capability {
+        ProviderCapability::OpenaiRealtimeHangup => (
+            UpstreamAffinityKind::OpenaiRealtimeCall,
+            path.strip_prefix("/v1/realtime/calls/")?
+                .strip_suffix("/hangup")?,
+        ),
+        ProviderCapability::OpenaiStoredResponse => (
+            UpstreamAffinityKind::OpenaiResponseId,
+            path.strip_prefix("/v1/responses/")?.split('/').next()?,
+        ),
+        _ => return None,
+    };
+    if !safe_openai_resource_path(path) || id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(UpstreamAffinityKey {
+        principal_id: principal_id.to_owned(),
+        provider: OPENAI_PROVIDER.to_owned(),
+        kind,
+        value_sha256: Sha256::digest(id.as_bytes()).into(),
+    })
 }
 
 /// Extracts the provider-owned state a buffered successful response creates.
@@ -456,6 +505,34 @@ mod tests {
             event,
             principal_id,
         )
+    }
+
+    #[test]
+    fn stored_response_path_operations_share_response_affinity_key() {
+        let principal = "principal";
+        let paths = [
+            "/v1/responses/resp_1",
+            "/v1/responses/resp_1/input_items",
+            "/v1/responses/resp_1/cancel",
+        ];
+        let keys = paths
+            .iter()
+            .map(|path| {
+                path_affinity_key(ProviderCapability::OpenaiStoredResponse, path, principal)
+                    .expect("valid stored response path")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys[0], keys[1]);
+        assert_eq!(keys[0], keys[2]);
+        assert_eq!(
+            path_affinity_key(
+                ProviderCapability::OpenaiStoredResponse,
+                "/v1/responses/../x",
+                principal,
+            ),
+            None
+        );
     }
 
     #[test]

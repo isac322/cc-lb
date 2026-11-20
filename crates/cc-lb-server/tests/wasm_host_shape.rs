@@ -318,6 +318,7 @@ async fn openai_transform_response_wasm_plugin_relays_chunked_binary_stream_with
             allowed_upstreams: vec![upstream_id],
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         1,
     )

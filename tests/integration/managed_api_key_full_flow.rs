@@ -1003,6 +1003,7 @@ async fn seed_runtime_state(
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
+            openai_oauth_compat: None,
             name: principal_name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
@@ -1077,6 +1078,7 @@ async fn seed_qa1005_keys(
         PrincipalStore::create(
             storage.as_ref(),
             PrincipalCreate {
+                openai_oauth_compat: None,
                 name: spec.principal.to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],

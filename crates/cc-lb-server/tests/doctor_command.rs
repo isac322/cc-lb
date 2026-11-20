@@ -113,6 +113,7 @@ async fn create_principal(storage: &SqliteStorage, name: &str) -> anyhow::Result
                     cap_micros: 1_000_000,
                 }],
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             1_800_000_000,
         )

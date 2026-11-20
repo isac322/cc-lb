@@ -149,6 +149,7 @@ fn ticket(sequence: u64) -> CacheKeepaliveCompletionTicket {
 
 fn principal_record() -> StoragePrincipalRecord {
     StoragePrincipalRecord {
+        openai_oauth_compat: None,
         id: Uuid::from_u128(72),
         name: "completed-not-renewable".to_owned(),
         kind: StoragePrincipalKind::Machine,

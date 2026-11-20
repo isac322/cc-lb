@@ -125,6 +125,7 @@ where
                 default_limits: None,
                 router_terminal_strategy: None,
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             BASE_TS + 1,
         )
@@ -589,6 +590,7 @@ fn principal_create(index: usize) -> PrincipalCreate {
         allowed_upstreams: vec![],
         default_limits: limits(),
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

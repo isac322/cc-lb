@@ -83,6 +83,34 @@
         "user_prompt_redaction": false
       }
     },
+    "openai_oauth_compat": {
+      "description": "Restart-only defaults for public `/v1` requests served by\nChatGPT-subscription (`openai_oauth`) upstreams. Each principal may\noverride individual fields through the admin API.",
+      "$ref": "#/$defs/OpenaiOauthCompatPolicy",
+      "default": {
+        "background": "drop",
+        "chat_n": "emulate",
+        "chat_seed_penalties": "drop",
+        "chat_stop": "emulate",
+        "compact": "emulate",
+        "hosted_tools": "drop_tool",
+        "logprobs": "drop",
+        "max_tool_calls": "drop",
+        "metadata": "drop_echo",
+        "prompt_cache_in_memory": "drop",
+        "sampling": "drop",
+        "service_tier": "coerce",
+        "store_true": "coerce",
+        "transcription": "disabled",
+        "truncation_auto": "emulate",
+        "web_search_preview": "coerce"
+      }
+    },
+    "openai_public_api": {
+      "$ref": "#/$defs/OpenaiPublicApiConfig",
+      "default": {
+        "realtime_origin": "https://api.openai.com/"
+      }
+    },
     "price_catalog": {
       "$ref": "#/$defs/PriceCatalogConfig",
       "default": {
@@ -490,6 +518,86 @@
       },
       "additionalProperties": false
     },
+    "CoerceOrReject": {
+      "description": "A value the backend does not accept: send the nearest supported value, or\nreject the request.",
+      "oneOf": [
+        {
+          "description": "Replace the value with the nearest supported one.",
+          "type": "string",
+          "const": "coerce"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the parameter.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    },
+    "DropOrReject": {
+      "description": "A parameter the backend does not accept: drop it, or reject the request.",
+      "oneOf": [
+        {
+          "description": "Remove the parameter and serve the request.",
+          "type": "string",
+          "const": "drop"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the parameter.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    },
+    "EmulateDropOrReject": {
+      "description": "A feature cc-lb can emulate, ignore, or reject.",
+      "oneOf": [
+        {
+          "description": "Emulate the feature.",
+          "type": "string",
+          "const": "emulate"
+        },
+        {
+          "description": "Remove the parameter and serve the request without the feature.",
+          "type": "string",
+          "const": "drop"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the parameter.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    },
+    "EmulateOrReject": {
+      "description": "A feature cc-lb can emulate on top of the backend, or reject.",
+      "oneOf": [
+        {
+          "description": "Emulate the feature.",
+          "type": "string",
+          "const": "emulate"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the parameter.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    },
+    "EnabledOrDisabled": {
+      "description": "Whether an optional subscription-backed operation is served.",
+      "oneOf": [
+        {
+          "description": "The operation is not served by subscription upstreams.",
+          "type": "string",
+          "const": "disabled"
+        },
+        {
+          "description": "The operation is served by subscription upstreams.",
+          "type": "string",
+          "const": "enabled"
+        }
+      ]
+    },
     "EventBusConfig": {
       "type": "object",
       "properties": {
@@ -562,6 +670,21 @@
         }
       }
     },
+    "HostedToolHandling": {
+      "description": "Handling of hosted tools that only an API-key account can run\n(`file_search`, `code_interpreter`) when no `openai_api_key` upstream can\nserve the request.",
+      "oneOf": [
+        {
+          "description": "Remove the tool, and release a `tool_choice` that forces it.",
+          "type": "string",
+          "const": "drop_tool"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the tool.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    },
     "LimitReservationTtlConfig": {
       "description": "Background TTL sweeper for stale limit reservations. The LimitEngine\nperiodically walks its reservation map and full-refunds any reservation\nolder than `ttl_secs`; the sweeper runs unconditionally because the\nsubscriber path is authoritative.",
       "type": "object",
@@ -607,6 +730,26 @@
         }
       },
       "additionalProperties": false
+    },
+    "MetadataHandling": {
+      "description": "Handling of request `metadata`.",
+      "oneOf": [
+        {
+          "description": "Remove it upstream and copy the client's value into the response object.",
+          "type": "string",
+          "const": "drop_echo"
+        },
+        {
+          "description": "Remove it upstream; the response carries no client metadata.",
+          "type": "string",
+          "const": "drop"
+        },
+        {
+          "description": "Answer 400 `invalid_request_error` naming the parameter.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
     },
     "OAuthConfig": {
       "type": "object",
@@ -729,6 +872,104 @@
           "default": "https://auth.openai.com/oauth/token"
         }
       }
+    },
+    "OpenaiOauthCompatPolicy": {
+      "description": "Effective compatibility policy. Every field is concrete.",
+      "type": "object",
+      "properties": {
+        "background": {
+          "description": "`background: true` when no API-key upstream can serve it.",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "chat_n": {
+          "description": "Chat Completions `n > 1`: fan out `n` requests, or reject.",
+          "$ref": "#/$defs/EmulateOrReject",
+          "default": "emulate"
+        },
+        "chat_seed_penalties": {
+          "description": "Chat Completions `seed`, `frequency_penalty`, `presence_penalty`.",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "chat_stop": {
+          "description": "Chat Completions `stop`.",
+          "$ref": "#/$defs/EmulateDropOrReject",
+          "default": "emulate"
+        },
+        "compact": {
+          "description": "`POST /v1/responses/compact`.",
+          "$ref": "#/$defs/EmulateOrReject",
+          "default": "emulate"
+        },
+        "hosted_tools": {
+          "description": "`file_search` / `code_interpreter` when no API-key upstream can serve it.",
+          "$ref": "#/$defs/HostedToolHandling",
+          "default": "drop_tool"
+        },
+        "logprobs": {
+          "description": "`top_logprobs` and `include: [\"message.output_text.logprobs\"]`.",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "max_tool_calls": {
+          "description": "`max_tool_calls`.",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "metadata": {
+          "description": "`metadata`, `user`, `safety_identifier`.",
+          "$ref": "#/$defs/MetadataHandling",
+          "default": "drop_echo"
+        },
+        "prompt_cache_in_memory": {
+          "description": "`prompt_cache_retention: \"in_memory\"` (the backend retains up to 24h).",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "sampling": {
+          "description": "`temperature`, `top_p`.",
+          "$ref": "#/$defs/DropOrReject",
+          "default": "drop"
+        },
+        "service_tier": {
+          "description": "`service_tier` `auto` or `flex`: coerce to `default`, or reject.",
+          "$ref": "#/$defs/CoerceOrReject",
+          "default": "coerce"
+        },
+        "store_true": {
+          "description": "`store: true`: coerce to `false`, or reject.",
+          "$ref": "#/$defs/CoerceOrReject",
+          "default": "coerce"
+        },
+        "transcription": {
+          "description": "`POST /v1/audio/transcriptions` through the subscription dictation\nendpoint. The upstream retains submitted audio for 30 days.",
+          "$ref": "#/$defs/EnabledOrDisabled",
+          "default": "disabled"
+        },
+        "truncation_auto": {
+          "description": "`truncation: \"auto\"`: emulate by trimming the oldest items and\nretrying on `context_length_exceeded`, drop, or reject.",
+          "$ref": "#/$defs/EmulateDropOrReject",
+          "default": "emulate"
+        },
+        "web_search_preview": {
+          "description": "`web_search_preview` tool: coerce to `web_search`, or reject.",
+          "$ref": "#/$defs/CoerceOrReject",
+          "default": "coerce"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OpenaiPublicApiConfig": {
+      "type": "object",
+      "properties": {
+        "realtime_origin": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://api.openai.com/"
+        }
+      },
+      "additionalProperties": false
     },
     "PluginWireBounds": {
       "description": "Upper bounds enforced on plugin wire I/O. Defaults match current\nunbounded-ish behaviour by tracking the request body cap already\nenforced at the HTTP layer, so enabling this struct with defaults\nis a no-op. Tightening any field is opt-in.",

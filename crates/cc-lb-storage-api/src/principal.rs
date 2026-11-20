@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use cc_lb_domain::OpenaiOauthCompatOverride;
+
 use crate::CacheKeepaliveConfig;
 use crate::StorageResult;
 pub use crate::limits::{Limit, LimitKind};
@@ -31,6 +33,8 @@ pub struct PrincipalRecord {
     pub router_terminal_strategy: cc_lb_domain::TerminalStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<CacheKeepaliveConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_oauth_compat: Option<OpenaiOauthCompatOverride>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +47,8 @@ pub struct PrincipalCreate {
     pub default_limits: Vec<Limit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<CacheKeepaliveConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_oauth_compat: Option<OpenaiOauthCompatOverride>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -58,6 +64,11 @@ pub struct PrincipalUpdate {
     /// value is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
+    /// When `Some`, replaces the principal's public `/v1` compatibility
+    /// override (including `Some(None)` to clear it). When `None`, the
+    /// existing value is preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_oauth_compat: Option<Option<OpenaiOauthCompatOverride>>,
 }
 
 #[async_trait]

@@ -29,6 +29,27 @@ path = "./data/cc-lb.sqlite"
 # Retain learned upstream affinity bindings for 7 days from their last successful binding.
 [upstream_affinity]
 ttl_days = 7
+# ChatGPT-subscription compatibility policy; applies only to `openai_oauth`
+# upstreams (Codex-shaped requests are untouched). Each principal can override
+# these via the admin API; changes take effect after a restart.
+# [openai_oauth_compat]
+# store_true = "coerce"                 # default: coerce; allowed: coerce, reject
+# sampling = "drop"                     # default: drop; allowed: drop, reject
+# logprobs = "drop"                     # default: drop; allowed: drop, reject
+# truncation_auto = "emulate"           # default: emulate; allowed: emulate, drop, reject
+# prompt_cache_in_memory = "drop"       # default: drop; allowed: drop, reject
+# service_tier = "coerce"               # default: coerce; allowed: coerce, reject
+# web_search_preview = "coerce"         # default: coerce; allowed: coerce, reject
+# metadata = "drop_echo"                # default: drop_echo; allowed: drop_echo, drop, reject
+# max_tool_calls = "drop"               # default: drop; allowed: drop, reject
+# background = "drop"                   # default: drop; allowed: drop, reject
+# hosted_tools = "drop_tool"            # default: drop_tool; allowed: drop_tool, reject
+# compact = "emulate"                   # default: emulate; allowed: emulate, reject
+# chat_n = "emulate"                    # default: emulate; allowed: emulate, reject
+# chat_stop = "emulate"                 # default: emulate; allowed: emulate, drop, reject
+# chat_seed_penalties = "drop"          # default: drop; allowed: drop, reject
+# transcription = "disabled"             # default: disabled; allowed: disabled, enabled (upstream keeps submitted audio 30 days)
+
 
 # Tracing and metrics. The server binds Prometheus to listener.metrics_addr at startup.
 # Set otlp_endpoint to export traces to an OTLP gRPC collector such as the

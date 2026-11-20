@@ -66,6 +66,8 @@ mod principal_keys;
 mod principal_post_commit;
 #[path = "principals_cache_keepalive_roundtrip.rs"]
 mod principals_cache_keepalive_roundtrip;
+#[path = "principals_openai_oauth_compat_roundtrip.rs"]
+mod principals_openai_oauth_compat_roundtrip;
 #[path = "reorder_rebalance_revalidates_slot.rs"]
 mod reorder_rebalance_revalidates_slot;
 #[path = "scheduler_admin.rs"]

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use cc_lb_domain::OpenaiOauthCompatOverride;
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
@@ -35,9 +36,15 @@ impl PrincipalStore for PostgresStorage {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
+        let openai_oauth_compat = input
+            .openai_oauth_compat
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(serde_json::to_value)
+            .transpose()?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
-            "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at, cache_keepalive) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7, $8) RETURNING *",
+            "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at, cache_keepalive, openai_oauth_compat) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7, $8, $9) RETURNING *",
         )
         .bind(id)
         .bind(input.name)
@@ -47,6 +54,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(default_limits)
         .bind(now)
         .bind(cache_keepalive)
+        .bind(openai_oauth_compat)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -67,7 +75,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, openai_oauth_compat FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -76,7 +84,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, openai_oauth_compat FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -94,7 +102,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, openai_oauth_compat FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -142,10 +150,19 @@ impl PrincipalStore for PostgresStorage {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
+        let openai_oauth_compat = match update.openai_oauth_compat {
+            Some(next) => next,
+            None => current.openai_oauth_compat,
+        };
+        let openai_oauth_compat_value = openai_oauth_compat
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(serde_json::to_value)
+            .transpose()?;
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, revision = revision + 1, updated_at = $8 WHERE id = $1 AND revision = $9 RETURNING *",
+            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, openai_oauth_compat = $8, revision = revision + 1, updated_at = $9 WHERE id = $1 AND revision = $10 RETURNING *",
         )
         .bind(id)
         .bind(name)
@@ -154,6 +171,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(serde_json::to_value(default_limits)?)
         .bind(router_terminal_strategy)
         .bind(cache_keepalive_value)
+        .bind(openai_oauth_compat_value)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
         .fetch_one(&mut *tx)
@@ -346,6 +364,11 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
     let cache_keepalive = cache_keepalive_value
         .map(serde_json::from_value::<CacheKeepaliveConfig>)
         .transpose()?;
+    let openai_oauth_compat_value: Option<Value> =
+        row.try_get("openai_oauth_compat").map_err(map_sqlx_error)?;
+    let openai_oauth_compat = openai_oauth_compat_value
+        .map(serde_json::from_value::<OpenaiOauthCompatOverride>)
+        .transpose()?;
     Ok(PrincipalRecord {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
@@ -369,6 +392,7 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
         router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy)?,
         cache_keepalive,
+        openai_oauth_compat,
     })
 }
 

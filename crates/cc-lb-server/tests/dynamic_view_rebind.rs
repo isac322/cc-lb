@@ -58,6 +58,7 @@ async fn create_principal(
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         1,
     )

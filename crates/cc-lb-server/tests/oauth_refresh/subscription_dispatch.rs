@@ -360,6 +360,7 @@ async fn make_key(fixture: &Fixture, upstream_id: Uuid) -> (Arc<KeyStore>, Strin
             allowed_upstreams: vec![upstream_id],
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         now_secs(fixture.clock.as_ref()),
     )
@@ -469,6 +470,7 @@ async fn antigravity_dispatch_qualifies_tiered_model_and_omits_request_type() {
                 allowed_upstreams: vec![upstream_id],
                 default_limits: Vec::new(),
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             now_secs(fixture.clock.as_ref()),
         )
@@ -1072,6 +1074,7 @@ async fn make_key_for_upstreams(
             allowed_upstreams,
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         now_secs(fixture.clock.as_ref()),
     )

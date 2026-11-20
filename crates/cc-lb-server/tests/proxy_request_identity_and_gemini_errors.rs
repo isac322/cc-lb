@@ -210,6 +210,7 @@ impl Harness {
                 allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             cc_lb_clock::unix_secs(SystemTime::now()),
         )

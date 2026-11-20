@@ -554,6 +554,7 @@ impl Fixture {
                 allowed_upstreams,
                 default_limits: Vec::new(),
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             now_secs(),
         )

@@ -277,6 +277,7 @@ impl Harness {
                     min_cache_tokens: options.keepalive.min_cache_tokens,
                     classifier: Default::default(),
                 }),
+                openai_oauth_compat: None,
             },
             now,
         )

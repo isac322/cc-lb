@@ -18,6 +18,11 @@ pub(crate) enum ProviderCapability {
     OpenaiResponsesInputTokens,
     OpenaiResponsesCompact,
     OpenaiChatCompletions,
+    OpenaiAudioTranscriptions,
+    OpenaiRealtimeCall,
+    OpenaiRealtimeHangup,
+    OpenaiAccountOwned,
+    OpenaiStoredResponse,
     OpenaiCompletions,
     OpenaiEmbeddings,
     OpenaiModerations,
@@ -60,6 +65,11 @@ impl ProviderCapability {
             | Self::OpenaiResponsesInputTokens
             | Self::OpenaiResponsesCompact
             | Self::OpenaiChatCompletions
+            | Self::OpenaiAudioTranscriptions
+            | Self::OpenaiRealtimeCall
+            | Self::OpenaiRealtimeHangup
+            | Self::OpenaiAccountOwned
+            | Self::OpenaiStoredResponse
             | Self::OpenaiCompletions
             | Self::OpenaiEmbeddings
             | Self::OpenaiModerations
@@ -89,7 +99,7 @@ impl ProviderCapability {
             }
             Self::OpenaiCompletions => UsageShape::OpenaiCompletions,
             Self::OpenaiEmbeddings | Self::GeminiOpenaiEmbeddings => UsageShape::OpenaiEmbeddings,
-            Self::OpenaiAudio => UsageShape::OpenaiAudio,
+            Self::OpenaiAudioTranscriptions | Self::OpenaiAudio => UsageShape::OpenaiAudio,
             Self::OpenaiImages => UsageShape::OpenaiImages,
             Self::GeminiGenerateContent => UsageShape::GeminiGenerateContent,
             Self::GeminiEmbedContent => UsageShape::GeminiEmbed,
@@ -100,6 +110,10 @@ impl ProviderCapability {
             | Self::OpenaiModerations
             | Self::OpenaiModels
             | Self::OpenaiCodexAuxiliary
+            | Self::OpenaiRealtimeCall
+            | Self::OpenaiRealtimeHangup
+            | Self::OpenaiAccountOwned
+            | Self::OpenaiStoredResponse
             | Self::GeminiCountTokens
             | Self::GeminiCachedContentsCreate
             | Self::GeminiPredict
@@ -154,10 +168,8 @@ pub(crate) fn classify(
             (&Method::POST, "/v1/completions") => Some(C::OpenaiCompletions),
             (&Method::POST, "/v1/embeddings") => Some(C::OpenaiEmbeddings),
             (&Method::POST, "/v1/moderations") => Some(C::OpenaiModerations),
-            (
-                &Method::POST,
-                "/v1/audio/speech" | "/v1/audio/transcriptions" | "/v1/audio/translations",
-            ) => Some(C::OpenaiAudio),
+            (&Method::POST, "/v1/audio/transcriptions") => Some(C::OpenaiAudioTranscriptions),
+            (&Method::POST, "/v1/audio/speech" | "/v1/audio/translations") => Some(C::OpenaiAudio),
             (
                 &Method::POST,
                 "/v1/images/generations" | "/v1/images/edits" | "/v1/images/variations",
@@ -165,8 +177,25 @@ pub(crate) fn classify(
             (&Method::GET, path) if model_catalog(path, "/v1/models", false) => {
                 Some(C::OpenaiModels)
             }
-            (&Method::POST, "/v1/alpha/search" | "/v1/memories/trace_summarize") => {
-                Some(C::OpenaiCodexAuxiliary)
+            (&Method::POST, "/v1/alpha/search") => Some(C::OpenaiCodexAuxiliary),
+            (&Method::POST, "/v1/realtime/calls") => Some(C::OpenaiRealtimeCall),
+            (&Method::POST, path)
+                if safe_openai_resource_path(path)
+                    && path.starts_with("/v1/realtime/calls/")
+                    && path.ends_with("/hangup")
+                    && path
+                        .strip_prefix("/v1/realtime/calls/")
+                        .and_then(|rest| rest.strip_suffix("/hangup"))
+                        .is_some_and(|id| !id.is_empty() && !id.contains('/')) =>
+            {
+                Some(C::OpenaiRealtimeHangup)
+            }
+            (method, path) if openai_stored_or_account_owned(method, path) => {
+                Some(if path.starts_with("/v1/responses/") {
+                    C::OpenaiStoredResponse
+                } else {
+                    C::OpenaiAccountOwned
+                })
             }
             _ => None,
         },
@@ -198,9 +227,72 @@ pub(crate) fn classify(
     }
 }
 
+/// Validates OpenAI resource paths before they participate in capability or
+/// affinity routing: every segment after the leading `/` is non-empty, not a
+/// dot-segment, and limited to `[A-Za-z0-9_.:-]`, so URL normalization can never
+/// turn a classified path into a different operation.
+pub(crate) fn safe_openai_resource_path(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+        })
+    })
+}
+
 /// Returns whether an HTTP route supports Gemini without an explicit provider scope.
 pub fn is_unscoped_gemini_http_route(method: &Method, path: &str) -> bool {
     classify(method, path, None).is_some_and(|capability| capability.provider() == Provider::Gemini)
+}
+
+fn openai_stored_or_account_owned(method: &Method, path: &str) -> bool {
+    if !safe_openai_resource_path(path) || path == "/v1/responses" {
+        return false;
+    }
+    if let Some(rest) = path.strip_prefix("/v1/responses/") {
+        return match rest.split_once('/') {
+            None => {
+                !matches!(rest, "" | "input_tokens" | "compact")
+                    && matches!(*method, Method::GET | Method::DELETE)
+            }
+            Some((id, "cancel")) => !id.is_empty() && method == Method::POST,
+            Some((id, "input_items")) => !id.is_empty() && method == Method::GET,
+            Some(_) => false,
+        };
+    }
+    const ROOTS: &[&str] = &[
+        "/v1/files",
+        "/v1/uploads",
+        "/v1/batches",
+        "/v1/vector_stores",
+        "/v1/conversations",
+        "/v1/containers",
+        "/v1/videos",
+        "/v1/evals",
+        "/v1/fine_tuning",
+        "/v1/assistants",
+        "/v1/threads",
+        "/v1/skills",
+        "/v1/chatkit",
+        "/v1/audio/voices",
+    ];
+    if path == "/v1/chat/completions" {
+        return method == Method::GET;
+    }
+    if let Some(rest) = path.strip_prefix("/v1/chat/completions/") {
+        return match rest.split_once('/') {
+            None => matches!(*method, Method::GET | Method::POST | Method::DELETE),
+            Some((id, "messages")) => !id.is_empty() && method == Method::GET,
+            Some(_) => false,
+        };
+    }
+    ROOTS
+        .iter()
+        .any(|root| path == *root || path.starts_with(&format!("{root}/")))
 }
 
 fn model_catalog(path: &str, root: &str, reject_colon: bool) -> bool {
@@ -423,7 +515,11 @@ mod tests {
             (Method::POST, "/v1/embeddings", C::OpenaiEmbeddings),
             (Method::POST, "/v1/moderations", C::OpenaiModerations),
             (Method::POST, "/v1/audio/speech", C::OpenaiAudio),
-            (Method::POST, "/v1/audio/transcriptions", C::OpenaiAudio),
+            (
+                Method::POST,
+                "/v1/audio/transcriptions",
+                C::OpenaiAudioTranscriptions,
+            ),
             (Method::POST, "/v1/audio/translations", C::OpenaiAudio),
             (Method::POST, "/v1/images/generations", C::OpenaiImages),
             (Method::POST, "/v1/images/edits", C::OpenaiImages),
@@ -431,11 +527,6 @@ mod tests {
             (Method::GET, "/v1/models", C::OpenaiModels),
             (Method::GET, "/v1/models/gpt", C::OpenaiModels),
             (Method::POST, "/v1/alpha/search", C::OpenaiCodexAuxiliary),
-            (
-                Method::POST,
-                "/v1/memories/trace_summarize",
-                C::OpenaiCodexAuxiliary,
-            ),
             (
                 Method::POST,
                 "/v1beta/cachedContents",
@@ -546,6 +637,66 @@ mod tests {
     }
 
     #[test]
+    fn openai_account_owned_and_stored_response_operations_are_classified() {
+        use ProviderCapability as C;
+        use cc_lb_domain::Provider;
+        for (method, path, expected) in [
+            (Method::POST, "/v1/files", C::OpenaiAccountOwned),
+            (
+                Method::GET,
+                "/v1/files/file_1/content",
+                C::OpenaiAccountOwned,
+            ),
+            (Method::POST, "/v1/uploads", C::OpenaiAccountOwned),
+            (Method::POST, "/v1/batches", C::OpenaiAccountOwned),
+            (Method::POST, "/v1/vector_stores", C::OpenaiAccountOwned),
+            (Method::POST, "/v1/conversations", C::OpenaiAccountOwned),
+            (Method::POST, "/v1/containers", C::OpenaiAccountOwned),
+            (Method::POST, "/v1/videos", C::OpenaiAccountOwned),
+            (Method::GET, "/v1/audio/voices", C::OpenaiAccountOwned),
+            (
+                Method::GET,
+                "/v1/chat/completions/chat_1",
+                C::OpenaiAccountOwned,
+            ),
+            (
+                Method::DELETE,
+                "/v1/chat/completions/chat_1",
+                C::OpenaiAccountOwned,
+            ),
+            (Method::GET, "/v1/responses/resp_1", C::OpenaiStoredResponse),
+            (
+                Method::DELETE,
+                "/v1/responses/resp_1",
+                C::OpenaiStoredResponse,
+            ),
+            (
+                Method::POST,
+                "/v1/responses/resp_1/cancel",
+                C::OpenaiStoredResponse,
+            ),
+            (
+                Method::GET,
+                "/v1/responses/resp_1/input_items",
+                C::OpenaiStoredResponse,
+            ),
+        ] {
+            assert_eq!(
+                classify(&method, path, Some(Provider::Openai)),
+                Some(expected),
+                "{method} {path}"
+            );
+            for provider in [Provider::Anthropic, Provider::Gemini] {
+                assert_eq!(
+                    classify(&method, path, Some(provider)),
+                    None,
+                    "{provider:?} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rejects_account_bound_unknown_and_malformed_operations() {
         use cc_lb_domain::Provider;
         for (provider, method, path) in [
@@ -554,43 +705,25 @@ mod tests {
             (Provider::Anthropic, Method::GET, "/v1/skills"),
             (Provider::Anthropic, Method::GET, "/v1/agents"),
             (Provider::Anthropic, Method::GET, "/v1/sessions"),
-            (Provider::Openai, Method::POST, "/v1/files"),
-            (Provider::Openai, Method::POST, "/v1/uploads"),
-            (Provider::Openai, Method::POST, "/v1/batches"),
-            (Provider::Openai, Method::POST, "/v1/vector_stores"),
-            (Provider::Openai, Method::POST, "/v1/conversations"),
-            (Provider::Openai, Method::POST, "/v1/containers"),
-            (Provider::Openai, Method::GET, "/v1/chat/completions/chat_1"),
-            (
-                Provider::Openai,
-                Method::POST,
-                "/v1/chat/completions/chat_1",
-            ),
-            (
-                Provider::Openai,
-                Method::DELETE,
-                "/v1/chat/completions/chat_1",
-            ),
-            (Provider::Openai, Method::GET, "/v1/responses/resp_1"),
-            (Provider::Openai, Method::DELETE, "/v1/responses/resp_1"),
-            (
-                Provider::Openai,
-                Method::POST,
-                "/v1/responses/resp_1/cancel",
-            ),
-            (
-                Provider::Openai,
-                Method::GET,
-                "/v1/responses/resp_1/input_items",
-            ),
-            (Provider::Openai, Method::POST, "/v1/realtime/calls"),
             (
                 Provider::Openai,
                 Method::POST,
                 "/v1/realtime/client_secrets",
             ),
-            (Provider::Openai, Method::POST, "/v1/videos"),
-            (Provider::Openai, Method::GET, "/v1/audio/voices"),
+            (
+                Provider::Openai,
+                Method::DELETE,
+                "/v1/responses/input_tokens",
+            ),
+            (Provider::Openai, Method::GET, "/v1/responses/compact"),
+            (Provider::Openai, Method::GET, "/v1/responses/"),
+            (Provider::Openai, Method::POST, "/v1/responses/resp_1"),
+            (
+                Provider::Openai,
+                Method::POST,
+                "/v1/responses/resp_1/unknown",
+            ),
+            (Provider::Openai, Method::GET, "/v1/responses/resp_1/cancel"),
             (Provider::Gemini, Method::POST, "/upload/v1beta/files"),
             (Provider::Gemini, Method::GET, "/v1beta/files"),
             (Provider::Gemini, Method::GET, "/download/v1beta/files/file"),

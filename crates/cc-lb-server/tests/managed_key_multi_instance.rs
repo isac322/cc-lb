@@ -320,6 +320,7 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
             allowed_upstreams: vec![],
             default_limits: vec![],
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         now,
     )
