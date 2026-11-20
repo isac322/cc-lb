@@ -762,5 +762,9 @@ describe('Vertex admin web QA', () => {
         'Replace the credential → get requests routing again.',
       ),
     ).toBeNull();
+    // A healthy or warning credential can still be rotated from its section.
+    expect(
+      screen.getAllByRole('button', { name: 'Replace credential' }),
+    ).toHaveLength(1);
   });
 });

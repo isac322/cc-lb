@@ -2701,16 +2701,29 @@ export function DetailView({
               title="Credential"
               description="Google credential stored encrypted; never shown again"
               action={
-                vertexCredentialHealth === 'rejected' ? (
-                  <StatusBadge tone="danger" label="Credential rejected" />
-                ) : vertexCredentialHealth === 'warning' ? (
-                  <StatusBadge tone="warn" label="Warning" />
-                ) : (
-                  <StatusBadge
-                    tone={keyAccess?.verified ? 'ok' : 'neutral'}
-                    label={keyAccess?.verified ? 'Verified' : 'Unverified'}
-                  />
-                )
+                <div className="flex flex-wrap items-center gap-2">
+                  <span role="status">
+                    {vertexCredentialHealth === 'rejected' ? (
+                      <StatusBadge tone="danger" label="Credential rejected" />
+                    ) : vertexCredentialHealth === 'warning' ? (
+                      <StatusBadge tone="warn" label="Warning" />
+                    ) : (
+                      <StatusBadge
+                        tone={keyAccess?.verified ? 'ok' : 'neutral'}
+                        label={keyAccess?.verified ? 'Verified' : 'Unverified'}
+                      />
+                    )}
+                  </span>
+                  {vertexCredentialHealth === 'rejected' ? null : (
+                    <Button
+                      size="sm"
+                      iconLeft={<KeyRound />}
+                      onClick={() => setReplaceOpen(true)}
+                    >
+                      Replace credential
+                    </Button>
+                  )}
+                </div>
               }
             >
               <DetailFacts>
