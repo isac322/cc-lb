@@ -56,7 +56,9 @@ runs:
           echo "save_paths<<__EOF__"
           echo "$TARGET_DIR_INPUT"
           if [ -n "$EXTRA_PATHS_INPUT" ]; then
-            printf '%s\n' "$EXTRA_PATHS_INPUT"
+            while IFS= read -r extra_path; do
+              [ -n "$extra_path" ] && [ -e "$extra_path" ] && printf '%s\n' "$extra_path"
+            done <<<"$EXTRA_PATHS_INPUT"
           fi
           echo "__EOF__"
         } >> "$GITHUB_OUTPUT"

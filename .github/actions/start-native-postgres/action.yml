@@ -36,11 +36,11 @@ runs:
         done
         pg_isready -h 127.0.0.1 -p 5432 -U postgres
 
+        psql -h 127.0.0.1 -p 5432 -U postgres -d template1 -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
         psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
         ALTER USER postgres WITH PASSWORD 'testpw';
         CREATE DATABASE cc_lb_app_template;
         SQL
-        psql -h 127.0.0.1 -p 5432 -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
 
         app_template_url="postgres://postgres:testpw@127.0.0.1:5432/cc_lb_app_template"
         sqlx migrate run --source crates/cc-lb-storage-postgres/migrations --database-url "$app_template_url"
