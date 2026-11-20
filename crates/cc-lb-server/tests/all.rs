@@ -87,6 +87,8 @@ mod openai_cache_keepalive_support;
 mod openai_oauth_public_compat;
 #[path = "openai_oauth_public_media.rs"]
 mod openai_oauth_public_media;
+#[path = "openai_single_owner_routing.rs"]
+mod openai_single_owner_routing;
 #[path = "postgres_tls.rs"]
 mod postgres_tls;
 #[path = "preflight.rs"]

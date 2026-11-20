@@ -125,7 +125,8 @@ use crate::upstream_affinity::{
     OpenaiResponseReferenceScope, UpstreamAffinityExtractionError, extract_request_affinity_keys,
     extract_request_affinity_keys_with_scope, extract_response_affinity_keys,
     extract_response_affinity_keys_from_sse_event, extract_websocket_response_affinity_keys,
-    gemini_cached_content_expiry, realtime_call_affinity_key, request_observes_response_affinity,
+    gemini_cached_content_expiry, path_affinity_key, realtime_call_affinity_key,
+    request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -184,6 +185,10 @@ const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
 const UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE: &str = "too many upstream affinity keys in request";
 const UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE: &str =
     "the upstream that owns the referenced provider state is not eligible for this request";
+const UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE: &str =
+    "upstream affinity is not established for opaque request content";
+const SINGLE_OWNER_AMBIGUOUS_MESSAGE: &str = "this OpenAI resource belongs to one API account, but \
+     more than one OpenAI API-key upstream is eligible; restrict the API key to one";
 const UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE: &str =
     "upstream SSE response could not be safely processed";
 const UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE: &str = "upstream response body could not be read";
@@ -4294,7 +4299,7 @@ impl Lifecycle {
             return Err(RequestAffinityFailure {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error_type: "api_error",
-                message: "upstream affinity is not established for opaque request content",
+                message: UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE,
             });
         };
         let pending_keys = keys
@@ -5706,7 +5711,15 @@ impl Lifecycle {
             .map(|value| extract_request_affinity_keys(request_capability, value, &principal.id))
             .transpose()
         {
-            Ok(keys) => keys.unwrap_or_default(),
+            Ok(keys) => {
+                let mut keys = keys.unwrap_or_default();
+                keys.extend(path_affinity_key(
+                    request_capability,
+                    &ctx.path,
+                    &principal.id,
+                ));
+                keys
+            }
             Err(_) => {
                 if let Some(o) = observer.as_ref() {
                     o.terminate_failure(InternalFailure {
@@ -5733,10 +5746,27 @@ impl Lifecycle {
             .await
         {
             Ok(resolution) => resolution,
+            // A response cc-lb never saw (or one past the affinity TTL) has no
+            // recorded owner; the single-owner rule below still places it safely.
+            Err(failure)
+                if request_capability == ProviderCapability::OpenaiStoredResponse
+                    && failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE =>
+            {
+                None
+            }
             Err(failure) => {
+                // An unknown or foreign call id owns nothing; never guess an account.
+                let realtime_call_missing = request_capability
+                    == ProviderCapability::OpenaiRealtimeHangup
+                    && failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE;
+                let status = if realtime_call_missing {
+                    StatusCode::NOT_FOUND
+                } else {
+                    failure.status
+                };
                 if let Some(o) = observer.as_ref() {
                     o.terminate_failure(InternalFailure {
-                        status: failure.status,
+                        status,
                         error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                         error: InternalError {
                             stage: InternalErrorStage::Storage,
@@ -5744,6 +5774,15 @@ impl Lifecycle {
                             message: Some(failure.message.to_owned()),
                         },
                     });
+                }
+                if realtime_call_missing {
+                    return Ok(provider_error_response(
+                        request_capability,
+                        StatusCode::NOT_FOUND,
+                        "realtime_call_not_found",
+                        "No realtime call with this id belongs to this API key",
+                        None,
+                    ));
                 }
                 return Ok(failure.response(request_capability));
             }
@@ -5843,6 +5882,24 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
+        // Account-owned OpenAI resources (files, batches, stored responses with no
+        // recorded owner, …) live in one API account. Route them only when exactly
+        // one OpenAI API-key upstream can own them; never guess between accounts.
+        let single_owner = request_affinity.is_none()
+            && matches!(
+                request_kind,
+                RequestKind::OpenaiAccountOwned | RequestKind::OpenaiStoredResponse
+            );
+        if single_owner && candidates.is_empty() {
+            if let Some(o) = observer.as_ref() {
+                o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
+            }
+            return Ok(unsupported_operation_response(
+                ctx.provider_scope,
+                &ctx.method,
+                &ctx.path,
+            ));
+        }
         let mut pipeline_result = execute_filter_pipeline(
             router_pipeline.filters_for(request_kind.provider()),
             &ctx,
@@ -5863,6 +5920,34 @@ impl Lifecycle {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
             }
+        }
+        if single_owner && pipeline_result.candidates.len() > 1 {
+            route_span.record("cc_lb.route.outcome", "error");
+            route_span.record("otel.status_code", "ERROR");
+            route_span.record("error.type", error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+            if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                    routing_trace: None,
+                });
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    error: InternalError {
+                        stage: InternalErrorStage::RouterFilter,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some(SINGLE_OWNER_AMBIGUOUS_MESSAGE.to_owned()),
+                    },
+                });
+            }
+            return Ok(provider_error_response(
+                request_capability,
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                SINGLE_OWNER_AMBIGUOUS_MESSAGE,
+                None,
+            ));
         }
         let terminal_decision = self.select_terminal_upstream(
             router_pipeline.terminal.clone(),
@@ -6042,7 +6127,7 @@ impl Lifecycle {
                 }),
             observer: observer.as_ref(),
             handle_span: &handle_span,
-            enabled: request_affinity.is_none(),
+            enabled: request_affinity.is_none() && !single_owner,
             excluded: Vec::new(),
             upstream_attempts: 1,
         };
@@ -20150,7 +20235,7 @@ mod tests {
         use cc_lb_domain::Provider;
         for (provider, path) in [
             (Provider::Anthropic, "/v1/files"),
-            (Provider::Openai, "/v1/responses/resp_1/cancel"),
+            (Provider::Openai, "/v1/realtime/client_secrets"),
             (Provider::Gemini, "/v1beta/cachedContents/unknown"),
             (Provider::Anthropic, "/v1/responses"),
         ] {

@@ -102,16 +102,6 @@ pub(crate) fn extract_request_affinity_keys_with_scope(
     let mut collector = KeyCollector::new(capability, principal_id);
     collector.response_scope = response_scope;
     match capability {
-        ProviderCapability::OpenaiRealtimeHangup => {
-            if let Some(object) = value.as_object() {
-                collector.reference(
-                    UpstreamAffinityKind::OpenaiRealtimeCall,
-                    object.get("call_id").or_else(|| object.get("id")),
-                )?;
-            } else {
-                collector.reference(UpstreamAffinityKind::OpenaiRealtimeCall, Some(value))?;
-            }
-        }
         ProviderCapability::AnthropicMessages | ProviderCapability::AnthropicCountTokens => {
             collector.anthropic_message(value)?
         }
@@ -150,6 +140,37 @@ pub(crate) fn realtime_call_affinity_key(
         provider: OPENAI_PROVIDER.to_owned(),
         kind: UpstreamAffinityKind::OpenaiRealtimeCall,
         value_sha256,
+    })
+}
+
+/// Build the affinity key a resource path names: the realtime call a hangup
+/// targets, or the response a stored-response operation reads. Returns `None`
+/// for every other operation or for a malformed id segment.
+pub(crate) fn path_affinity_key(
+    capability: ProviderCapability,
+    path: &str,
+    principal_id: &str,
+) -> Option<UpstreamAffinityKey> {
+    let (kind, id) = match capability {
+        ProviderCapability::OpenaiRealtimeHangup => (
+            UpstreamAffinityKind::OpenaiRealtimeCall,
+            path.strip_prefix("/v1/realtime/calls/")?
+                .strip_suffix("/hangup")?,
+        ),
+        ProviderCapability::OpenaiStoredResponse => (
+            UpstreamAffinityKind::OpenaiResponseId,
+            path.strip_prefix("/v1/responses/")?.split('/').next()?,
+        ),
+        _ => return None,
+    };
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(UpstreamAffinityKey {
+        principal_id: principal_id.to_owned(),
+        provider: OPENAI_PROVIDER.to_owned(),
+        kind,
+        value_sha256: Sha256::digest(id.as_bytes()).into(),
     })
 }
 
