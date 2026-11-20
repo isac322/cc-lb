@@ -13,16 +13,18 @@ pub enum UpstreamAffinityKind {
     AnthropicContainerId,
     OpenaiResponseId,
     OpenaiConversationId,
+    OpenaiRealtimeCall,
     GeminiCachedContent,
 }
 
 impl UpstreamAffinityKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::AnthropicWebSearchEncryptedContent,
         Self::AnthropicFileId,
         Self::AnthropicContainerId,
         Self::OpenaiResponseId,
         Self::OpenaiConversationId,
+        Self::OpenaiRealtimeCall,
         Self::GeminiCachedContent,
     ];
 
@@ -33,6 +35,7 @@ impl UpstreamAffinityKind {
             Self::AnthropicContainerId => "anthropic_container_id",
             Self::OpenaiResponseId => "openai_response_id",
             Self::OpenaiConversationId => "openai_conversation_id",
+            Self::OpenaiRealtimeCall => "openai_realtime_call",
             Self::GeminiCachedContent => "gemini_cached_content",
         }
     }

@@ -142,3 +142,31 @@ request_diagnostics_log = true
 ```
 
 The setting is fixed at startup. `observability.log_redaction` and `observability.user_prompt_redaction` do not apply to diagnostics lines; producers redact internal error text and cap routing traces before persistence. See the [observability guide](/docs/operations/observability/#request-diagnostics-log) and the [request diagnostics runbook](https://github.com/isac322/cc-lb/blob/master/docs/runbook/request-diagnostics.md) for delivery and reconciliation boundaries.
+
+## OpenAI OAuth public compatibility
+
+The optional `[openai_oauth_compat]` section controls how public OpenAI requests are adapted for ChatGPT-subscription upstreams. Defaults apply server-wide and are read at startup; changing `cc-lb.toml` requires a process restart. Each key can override these settings through the admin API.
+
+```toml
+[openai_oauth_compat]
+store_true = "coerce"
+sampling = "drop"
+logprobs = "drop"
+truncation_auto = "emulate"
+prompt_cache_in_memory = "drop"
+service_tier = "coerce"
+web_search_preview = "coerce"
+metadata = "drop_echo"
+max_tool_calls = "drop"
+background = "drop"
+hosted_tools = "drop_tool"
+compact = "emulate"
+chat_n = "emulate"
+chat_stop = "emulate"
+chat_seed_penalties = "drop"
+transcription = "disabled"
+```
+
+The alternatives are `coerce`/`reject` for `store_true`, `service_tier`, and `web_search_preview`; `drop`/`reject` for `sampling`, `logprobs`, `prompt_cache_in_memory`, `max_tool_calls`, `background`, and `chat_seed_penalties`; `emulate`/`drop`/`reject` for `truncation_auto` and `chat_stop`; `drop_echo`/`drop`/`reject` for `metadata`; `drop_tool`/`reject` for `hosted_tools`; `emulate`/`reject` for `compact` and `chat_n`; and `enabled`/`disabled` for `transcription`. Transcription is disabled by default because the upstream retains submitted audio for 30 days.
+
+The separate `[openai_public_api]` section sets the realtime public API origin. `realtime_origin` defaults to `https://api.openai.com/v1` and is restart-only.

@@ -2772,6 +2772,7 @@ mod tests {
     async fn changed_identity_gets_fresh_local_order_and_yields_to_newer_completion() {
         for newer_completion in [false, true] {
             let record = StoragePrincipalRecord {
+                openai_oauth_compat: None,
                 id: Uuid::from_u128(99),
                 name: "identity-order".to_owned(),
                 kind: StoragePrincipalKind::Machine,
@@ -3102,6 +3103,7 @@ mod tests {
         let principal_record = cc_lb_storage_api::PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::principal::PrincipalCreate {
+                openai_oauth_compat: None,
                 name: "request-fence".to_owned(),
                 kind: StoragePrincipalKind::Machine,
                 allowed_models: vec!["*".to_owned()],
@@ -3308,6 +3310,7 @@ mod tests {
         }
 
         let principal_record = StoragePrincipalRecord {
+            openai_oauth_compat: None,
             id: Uuid::new_v4(),
             name: "stale-test".to_owned(),
             kind: StoragePrincipalKind::Machine,

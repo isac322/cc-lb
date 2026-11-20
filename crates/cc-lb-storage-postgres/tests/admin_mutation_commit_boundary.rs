@@ -539,6 +539,7 @@ fn principal_create(name: &str) -> PrincipalCreate {
             cap_micros: 100,
         }],
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

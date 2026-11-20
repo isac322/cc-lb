@@ -2072,6 +2072,7 @@ async fn seed_runtime_state_full_v2(
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
+            openai_oauth_compat: None,
             name: principal_name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models,

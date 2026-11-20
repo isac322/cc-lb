@@ -36,6 +36,7 @@ pub struct WebSocketError {
     pub native_code: Option<String>,
     pub message: String,
     pub stream_id: Option<String>,
+    pub param: Option<String>,
     provider_headers: Vec<(String, String)>,
 }
 
@@ -44,6 +45,7 @@ impl WebSocketError {
         Self {
             status,
             code,
+            param: None,
             native_code: None,
             message: message.into(),
             stream_id: None,
@@ -53,6 +55,11 @@ impl WebSocketError {
 
     pub fn with_native_code(mut self, code: impl Into<String>) -> Self {
         self.native_code = Some(code.into());
+        self
+    }
+
+    pub fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
         self
     }
 
@@ -98,7 +105,7 @@ impl WebSocketError {
                     else { "server_error" },
                 "code": code,
                 "message": self.message,
-                "param": null,
+                "param": self.param,
             },
         });
         if let Some(stream_id) = self.stream_id.as_ref() {
@@ -159,6 +166,7 @@ pub(crate) struct PreparedWebSocketTurn {
     pub principal_id: String,
     pub key_id: String,
     pub model: String,
+    pub oauth_compat: bool,
     pub store: bool,
     pub span: Span,
     pub route_info: cc_lb_lifecycle::RouteInfo,
@@ -323,6 +331,9 @@ pub struct ResponsesWebSocketGateway {
     owners: HashMap<String, ResponseOwner>,
     recent: HashMap<(u64, Option<String>), String>,
     connections: HashMap<u64, Uuid>,
+    connection_lanes: HashMap<u64, Option<String>>,
+    session_upstream: Option<Uuid>,
+    session_oauth: bool,
     connection_signers: HashMap<u64, Arc<dyn Signer>>,
     successors: HashMap<String, u64>,
 }
@@ -348,6 +359,9 @@ impl ResponsesWebSocketGateway {
             turns: HashMap::new(),
             owners: HashMap::new(),
             recent: HashMap::new(),
+            connection_lanes: HashMap::new(),
+            session_upstream: None,
+            session_oauth: false,
             connections: HashMap::new(),
             connection_signers: HashMap::new(),
             successors: HashMap::new(),
@@ -495,6 +509,25 @@ impl ResponsesWebSocketGateway {
             .as_ref()
             .and_then(|id| self.owners.get(id))
             .cloned();
+        if self.session_oauth
+            && let Some(owner) = owner.as_ref()
+            && owner.lane.as_deref() != lane.as_deref()
+        {
+            return Err(WebSocketError::new(
+                400,
+                "previous_response_not_found",
+                "The previous response belongs to another WebSocket lane",
+            )
+            .with_stream(lane.clone()));
+        }
+        if owner.is_none() && self.session_oauth && previous.is_some() {
+            return Err(WebSocketError::new(
+                400,
+                "previous_response_not_found",
+                "The previous response is not available on this connection",
+            )
+            .with_stream(lane.clone()));
+        }
         if owner
             .as_ref()
             .is_some_and(|owner| owner.principal_id != auth.principal_id())
@@ -534,6 +567,11 @@ impl ResponsesWebSocketGateway {
             self.finish_turn(successor, Some(&error));
         }
         let body = Arc::new(body);
+        let routing_owner = owner.as_ref().map(|owner| owner.upstream_id).or_else(|| {
+            self.session_oauth
+                .then_some(self.session_upstream)
+                .flatten()
+        });
         let prepared = self
             .lifecycle
             .prepare_websocket_turn(
@@ -544,7 +582,7 @@ impl ResponsesWebSocketGateway {
                     query: self.query.as_deref(),
                 },
                 body.clone(),
-                owner.as_ref().map(|owner| owner.upstream_id),
+                routing_owner,
                 observer,
                 request_id,
             )
@@ -978,6 +1016,17 @@ impl ResponsesWebSocketGateway {
         upstream_id: Uuid,
         upstream_name: &str,
     ) {
+        self.connection_lanes
+            .entry(connection_id)
+            .or_insert_with(|| self.turns.get(&turn_id).and_then(|turn| turn.lane.clone()));
+        self.session_upstream.get_or_insert(upstream_id);
+        if self
+            .turns
+            .get(&turn_id)
+            .is_some_and(|turn| turn.prepared.oauth_compat)
+        {
+            self.session_oauth = true;
+        }
         self.connections.entry(connection_id).or_insert(upstream_id);
         if let Some(turn) = self.turns.get_mut(&turn_id) {
             if let Some(signer) = turn.prepared_signers.remove(&upstream_id) {
@@ -1270,6 +1319,11 @@ impl ResponsesWebSocketGateway {
         frame: &Bytes,
     ) -> Result<WebSocketEventResult, WebSocketError> {
         let quota_turn = self.observe_provider_metrics(connection_id, frame);
+        let public_frame = self.oauth_public_frame(connection_id, frame);
+        if public_frame.as_ref().is_some_and(Bytes::is_empty) {
+            return Ok(WebSocketEventResult::default());
+        }
+        let frame = public_frame.as_ref().unwrap_or(frame);
         let transformed = self.transform_provider_frame(connection_id, frame);
         let mut result = self
             .observe_provider_message(connection_id, frame, transformed.as_ref().err(), quota_turn)
@@ -1297,6 +1351,37 @@ impl ResponsesWebSocketGateway {
             }
         }
         Ok(result)
+    }
+
+    fn oauth_public_frame(&self, connection_id: u64, frame: &Bytes) -> Option<Bytes> {
+        let mut value: Value = sonic_rs::from_slice(frame).ok()?;
+        let lane = self.connection_lanes.get(&connection_id)?.clone();
+        let turn = self.turns.values().find(|turn| {
+            turn.connection_id == Some(connection_id) && turn.sent && turn.lane == lane
+        })?;
+        if !turn.prepared.oauth_compat {
+            return None;
+        }
+        if value.get("type").and_then(Value::as_str) == Some("response.metadata") {
+            return Some(Bytes::new());
+        }
+        let mut changed = false;
+        if let Some(lane) = turn.lane.as_ref()
+            && value.get("stream_id").is_none()
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("stream_id".to_owned(), Value::String(lane.clone()));
+            changed = true;
+        }
+        if let Some(metadata) = turn.body.get("metadata")
+            && value.get("response").is_some_and(Value::is_object)
+        {
+            crate::openai_compat::response::echo_metadata_into(&mut value, metadata);
+            changed = true;
+        }
+        changed
+            .then(|| serde_json::to_vec(&value).ok().map(Bytes::from))
+            .flatten()
     }
 
     fn transform_provider_frame(
@@ -2329,8 +2414,13 @@ fn native_terminal_error(value: &Value, lane: &Option<String>) -> WebSocketError
         .pointer("/response/error/message")
         .and_then(Value::as_str)
         .unwrap_or("The provider response did not complete successfully");
-    let mut error =
-        WebSocketError::new(status, "upstream_stream_error", message).with_stream(lane.clone());
+    let mut error = if native_code == Some("previous_response_not_found")
+        || message.contains("Invalid `previous_response_id`")
+    {
+        WebSocketError::new(400, "previous_response_not_found", message).with_stream(lane.clone())
+    } else {
+        WebSocketError::new(status, "upstream_stream_error", message).with_stream(lane.clone())
+    };
     if let Some(code) = native_code {
         error = error.with_native_code(code.to_owned());
     }
@@ -2654,6 +2744,7 @@ pub(crate) mod tests {
                 auth: fixture.auth.clone(),
                 prepared_signers: HashMap::new(),
                 prepared: PreparedWebSocketTurn {
+                    oauth_compat: false,
                     candidates: Vec::new(),
                     observer,
                     completion_observer: Arc::new(
@@ -3243,6 +3334,7 @@ pub(crate) mod tests {
                     auth: fixture.auth.clone(),
                     prepared_signers: HashMap::new(),
                     prepared: PreparedWebSocketTurn {
+                        oauth_compat: false,
                         candidates: Vec::new(),
                         observer: None,
                         completion_observer: Arc::new(
@@ -3559,6 +3651,7 @@ pub(crate) mod tests {
                 canonical_models,
             }),
             gemini_oauth: false,
+            compat_response_plan: None,
         }
     }
 

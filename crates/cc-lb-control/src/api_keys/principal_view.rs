@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_domain::{Provider, TerminalStrategy};
+use cc_lb_domain::{OpenaiOauthCompatOverride, Provider, TerminalStrategy};
 use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
@@ -103,6 +103,7 @@ pub struct PrincipalSpecCached {
     default_router_pipeline: Arc<RouterPipelineCache>,
     dialect: DialectCache,
     cache_keepalive: Option<Arc<CacheKeepaliveConfig>>,
+    openai_oauth_compat: Option<OpenaiOauthCompatOverride>,
 }
 
 impl PrincipalView {
@@ -127,6 +128,7 @@ impl PrincipalView {
             updated_at_unix_secs: 0,
             router_terminal_strategy: Default::default(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         };
         principal_chains
             .entry(principal_id.to_owned())
@@ -192,6 +194,7 @@ impl PrincipalView {
                     default_router_pipeline,
                     dialect,
                     cache_keepalive,
+                    openai_oauth_compat: principal.openai_oauth_compat.clone(),
                 };
 
                 (principal_id, cached)
@@ -298,6 +301,10 @@ impl PrincipalSpecCached {
     pub fn cache_keepalive(&self) -> Option<&Arc<CacheKeepaliveConfig>> {
         self.cache_keepalive.as_ref()
     }
+
+    pub fn openai_oauth_compat(&self) -> Option<&OpenaiOauthCompatOverride> {
+        self.openai_oauth_compat.as_ref()
+    }
 }
 
 fn is_glob_pattern(model: &str) -> bool {
@@ -345,6 +352,7 @@ mod tests {
             )),
             dialect: DialectCache::Inherit,
             cache_keepalive: None,
+            openai_oauth_compat: None,
         }
     }
 

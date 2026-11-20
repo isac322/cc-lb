@@ -1,0 +1,221 @@
+use super::*;
+
+const INPUT_TOKENS_MARKER: &str = "x-cc-lb-emulate";
+const INPUT_TOKENS_MARKER_VALUE: &str = "input-tokens-ws";
+
+pub(crate) struct InputTokensWebsocketDispatch {
+    inner: Arc<dyn UpstreamDispatch>,
+}
+
+impl InputTokensWebsocketDispatch {
+    pub(crate) fn new(inner: Arc<dyn UpstreamDispatch>) -> Self {
+        Self { inner }
+    }
+}
+
+fn dispatch_error(message: impl Into<String>) -> cc_lb_engine::DispatchError {
+    cc_lb_engine::DispatchError::Transport {
+        source: Box::new(io::Error::other(message.into())),
+    }
+}
+
+fn json_response(status: StatusCode, value: serde_json::Value) -> Response<Body> {
+    let body = serde_json::to_vec(&value)
+        .unwrap_or_else(|_| b"{\"error\":{\"type\":\"server_error\"}}".to_vec());
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("valid JSON response")
+}
+
+fn provider_error_response(status: StatusCode, value: serde_json::Value) -> Response<Body> {
+    let value = if value.get("error").is_some() {
+        value
+    } else {
+        serde_json::json!({
+            "error": {
+                "type": "server_error",
+                "message": value.to_string(),
+            }
+        })
+    };
+    json_response(status, value)
+}
+
+async fn emulate_input_tokens(
+    request: SignedRequest,
+) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
+    let mut url = request.url().clone();
+    let path = url
+        .path()
+        .strip_suffix("/input_tokens")
+        .ok_or_else(|| dispatch_error("input_tokens emulation marker used on an unexpected URL"))?
+        .to_owned();
+    if path.is_empty() {
+        return Err(dispatch_error(
+            "input_tokens emulation URL has no responses path",
+        ));
+    }
+    url.set_path(&path);
+    let scheme = match url.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => {
+            return Err(dispatch_error(
+                "unsupported input_tokens WebSocket URL scheme",
+            ));
+        }
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| dispatch_error("invalid input_tokens WebSocket URL"))?;
+
+    let mut body: serde_json::Value = sonic_rs::from_slice(request.body())
+        .map_err(|_| dispatch_error("input_tokens request body is not valid JSON"))?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| dispatch_error("input_tokens request body must be an object"))?;
+    object.remove("stream");
+    object.insert("generate".to_owned(), serde_json::Value::Bool(false));
+    object.insert("store".to_owned(), serde_json::Value::Bool(false));
+    let mut frame = serde_json::Map::new();
+    frame.insert(
+        "type".to_owned(),
+        serde_json::Value::String("response.create".to_owned()),
+    );
+    for (key, value) in object.iter() {
+        frame.insert(key.clone(), value.clone());
+    }
+    let frame = serde_json::to_string(&serde_json::Value::Object(frame))
+        .map_err(|_| dispatch_error("could not encode input_tokens WebSocket frame"))?;
+
+    let mut ws_request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|_| dispatch_error("could not build input_tokens WebSocket request"))?;
+    for name in [
+        http::header::AUTHORIZATION.as_str(),
+        "chatgpt-account-id",
+        "originator",
+        "version",
+        "user-agent",
+        "session_id",
+    ] {
+        if let Some(value) = request.headers().get(name) {
+            ws_request.headers_mut().insert(
+                HeaderName::from_bytes(name.as_bytes()).expect("static header name"),
+                value.clone(),
+            );
+        }
+    }
+    ws_request.headers_mut().insert(
+        HeaderName::from_static("openai-beta"),
+        HeaderValue::from_static("responses_websockets=2026-02-06"),
+    );
+    let connection = tokio::time::timeout(
+        Duration::from_secs(30),
+        connect_async_with_config(ws_request, None, false),
+    )
+    .await
+    .map_err(|_| dispatch_error("input_tokens WebSocket handshake timed out"))?;
+    let (mut ws, _) = match connection {
+        Ok(connection) => connection,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let status = response.status();
+            let body = response.body().as_ref().map_or_else(
+                || serde_json::json!({"error":{"type":"upstream_unavailable","message":"provider WebSocket handshake rejected"}}),
+                |bytes| sonic_rs::from_slice(bytes).unwrap_or_else(|_| serde_json::json!({"error":{"type":"upstream_unavailable","message":"provider WebSocket handshake rejected"}})),
+            );
+            return Ok(provider_error_response(status, body));
+        }
+        Err(error) => {
+            return Err(dispatch_error(format!(
+                "input_tokens WebSocket connection failed: {error}"
+            )));
+        }
+    };
+    ws.send(UpstreamMessage::Text(frame.into()))
+        .await
+        .map_err(|error| dispatch_error(format!("input_tokens WebSocket send failed: {error}")))?;
+
+    while let Some(message) = ws.next().await {
+        let message = message.map_err(|error| {
+            dispatch_error(format!("input_tokens WebSocket receive failed: {error}"))
+        })?;
+        let payload = match message {
+            UpstreamMessage::Text(value) => Bytes::from(value.as_bytes().to_vec()),
+            UpstreamMessage::Binary(value) => value,
+            UpstreamMessage::Ping(value) => {
+                ws.send(UpstreamMessage::Pong(value))
+                    .await
+                    .map_err(|error| {
+                        dispatch_error(format!("input_tokens WebSocket pong failed: {error}"))
+                    })?;
+                continue;
+            }
+            UpstreamMessage::Pong(_) => continue,
+            UpstreamMessage::Close(_) => break,
+            _ => continue,
+        };
+        let value: serde_json::Value = match sonic_rs::from_slice(&payload) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("response.completed") => {
+                let input_tokens = value
+                    .pointer("/response/usage/input_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| dispatch_error("input_tokens provider response had no usage"))?;
+                let response = json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"object":"response.input_tokens","input_tokens":input_tokens}),
+                );
+                let _ = ws.close(None).await;
+                return Ok(response);
+            }
+            Some("response.failed") | Some("error") => {
+                let status = value
+                    .pointer("/response/error/status")
+                    .or_else(|| value.pointer("/error/status"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|status| StatusCode::from_u16(status as u16).ok())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let _ = ws.close(None).await;
+                return Ok(provider_error_response(status, value));
+            }
+            _ => {}
+        }
+    }
+    Err(dispatch_error(
+        "input_tokens WebSocket ended before response.completed",
+    ))
+}
+
+#[async_trait]
+impl UpstreamDispatch for InputTokensWebsocketDispatch {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
+        let emulate = request
+            .headers()
+            .get(INPUT_TOKENS_MARKER)
+            .and_then(|value| value.to_str().ok())
+            == Some(INPUT_TOKENS_MARKER_VALUE);
+        if emulate {
+            emulate_input_tokens(request).await
+        } else {
+            self.inner.dispatch(request).await
+        }
+    }
+
+    async fn dispatch_before(
+        &self,
+        request: SignedRequest,
+        deadline: &cc_lb_engine::attempt_rail::DispatchDeadline,
+    ) -> Result<Response<Body>, cc_lb_engine::attempt_rail::DispatchBeforeError> {
+        deadline.check()?;
+        self.dispatch(request).await.map_err(Into::into)
+    }
+}

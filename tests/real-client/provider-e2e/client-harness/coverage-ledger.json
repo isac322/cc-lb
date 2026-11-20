@@ -24651,10 +24651,9 @@
       },
       "dependencies": [],
       "disposition": {
-        "nextProof": "Owning issue supplies authorized real-client reachability, entitlement, owner isolation, and consumer-decoded terminal evidence.",
         "owner": "C-AUX",
-        "reason": "Source/descriptor or limited local capture is not successful provider or consumer evidence.",
-        "state": "deferred-reachability"
+        "reason": "Removed from cc-lb OAuth route mapping; the upstream returns 404 and Codex has no caller.",
+        "state": "removed"
       },
       "featureIssue": {
         "assignment": "C-AUX",

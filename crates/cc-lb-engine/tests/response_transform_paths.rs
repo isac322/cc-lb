@@ -4618,6 +4618,7 @@ fn lifecycle_with_options_and_keepalive(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive,
+        openai_oauth_compat: None,
     };
     let mut authn = TestAuthn::with_principal_view(
         state,

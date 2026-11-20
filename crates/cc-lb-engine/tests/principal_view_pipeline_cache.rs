@@ -143,6 +143,7 @@ fn principal(terminal: TerminalStrategy) -> PrincipalRecord {
         updated_at_unix_secs: 0,
         router_terminal_strategy: terminal,
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

@@ -272,6 +272,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             cap_micros: 1000,
         }],
         cache_keepalive: None,
+        openai_oauth_compat: None,
     });
 
     assert_json_roundtrip(CacheKeepaliveConfig {
