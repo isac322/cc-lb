@@ -11,10 +11,7 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{Value, json};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 /// One fake OpenAI account: its name and the request paths it served.
@@ -151,8 +148,6 @@ async fn add_api_key_upstream(c: &reqwest::Client, s: &common::TestServer, fake:
     let (status, value, _) =
         admin(c, s, Method::POST, "/admin/v1/upstreams", Some(body), None).await;
     assert_eq!(status, 201, "{value}");
-    // The proxy picks up the new upstream on its next dynamic-view reload.
-    tokio::time::sleep(Duration::from_millis(350)).await;
 }
 
 async fn proxy(

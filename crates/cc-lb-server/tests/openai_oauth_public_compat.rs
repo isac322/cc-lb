@@ -202,7 +202,6 @@ async fn openai_oauth_public_responses_and_models() {
     let f = spawn().await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
     let key = &s.managed_key.plaintext;
     let r = c
         .post(format!("http://{}/openai/v1/responses", s.proxy_addr))
@@ -297,7 +296,6 @@ async fn openai_oauth_chat_completions_usage_contract() {
     let f = spawn().await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
     let key = &s.managed_key.plaintext;
     let cases = [
         ("stream:false n=1", false, 1_u64, 2_i64, 2_i64),

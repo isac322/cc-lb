@@ -12,10 +12,7 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{Value, json};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 /// One recorded upstream call: path, transport, headers, body.
@@ -152,7 +149,6 @@ async fn openai_oauth_public_media_and_realtime_contract() {
     .await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
     let key = &s.managed_key.plaintext;
     let r = c
         .post(format!(
@@ -227,7 +223,6 @@ async fn openai_oauth_public_transcription_compatibility() {
     let s = common::spawn_test_server_with_openai_budget("").await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
     let key = &s.managed_key.plaintext;
     let form = reqwest::multipart::Form::new()
         .text("model", "whisper-1")
