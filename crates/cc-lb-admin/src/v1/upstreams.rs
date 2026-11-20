@@ -1047,14 +1047,10 @@ async fn create_upstream(
         None
     };
     let effective_project_id = body.project_id.clone().or_else(|| {
-        vertex_credential.as_ref().and_then(|credential| {
-            serde_json::to_value(credential).ok().and_then(|value| {
-                value
-                    .get("project_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            })
-        })
+        vertex_credential
+            .as_ref()
+            .and_then(CanonicalCredential::project_id)
+            .map(str::to_owned)
     });
     let vertex = validate_vertex_fields(
         kind,

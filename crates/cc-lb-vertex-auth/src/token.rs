@@ -808,10 +808,14 @@ mod tests {
             }]),
         });
         let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-
+        let source = TokenSource::new(credential, transport, clock);
         assert!(matches!(
-            mint_once(&credential, transport, clock).await,
-            Err(MintError::Unauthorized)
+            source.bearer().await,
+            Err(MintError::InvalidClient)
         ));
+        assert_eq!(
+            source.terminal_reason(),
+            Some(VERTEX_CREDENTIAL_INVALID_CLIENT)
+        );
     }
 }

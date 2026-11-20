@@ -160,6 +160,12 @@ impl CanonicalCredential {
             Self::ImpersonatedServiceAccount(v) => v.quota_project_id.as_deref(),
         }
     }
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::ServiceAccount(v) => v.project_id.as_deref(),
+            Self::AuthorizedUser(_) | Self::ImpersonatedServiceAccount(_) => None,
+        }
+    }
     pub(crate) fn service_account(&self) -> Option<&ServiceAccountCredential> {
         match self {
             Self::ServiceAccount(v) => Some(v),

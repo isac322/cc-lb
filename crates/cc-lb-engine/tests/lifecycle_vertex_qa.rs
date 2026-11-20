@@ -566,6 +566,54 @@ async fn qa_err_3_hintless_vertex_429_excludes_only_its_regional_scope() {
 }
 
 #[tokio::test]
+async fn qa_err_4_vertex_429_scope_exclusions_accumulate_before_express() {
+    let dispatch = Arc::new(Dispatch {
+        replies: Mutex::new(VecDeque::from([
+            Reply::Json(StatusCode::TOO_MANY_REQUESTS, br#"{"error":"quota"}"#),
+            Reply::Json(StatusCode::TOO_MANY_REQUESTS, br#"{"error":"quota"}"#),
+            Reply::Json(StatusCode::TOO_MANY_REQUESTS, br#"{"error":"quota"}"#),
+        ])),
+        ..Dispatch::default()
+    });
+    let mut europe = record(21, UpstreamKind::VertexApiKey, true);
+    europe.vertex = Some(VertexUpstreamConfig {
+        target: VertexTarget::Regional {
+            project_id: "europe-project-123".to_owned().into(),
+            location: "europe-west4".to_owned().into(),
+        },
+        api_version: Default::default(),
+    });
+    let mut express = record(22, UpstreamKind::VertexApiKey, false);
+    express.vertex = Some(VertexUpstreamConfig {
+        target: VertexTarget::Express,
+        api_version: Default::default(),
+    });
+    let lifecycle = lifecycle(
+        vec![
+            record(20, UpstreamKind::VertexApiKey, true),
+            europe,
+            express,
+        ],
+        dispatch.clone(),
+        false,
+    );
+
+    let (status, _headers, _body) = send(
+        &lifecycle,
+        gemini_request(
+            Method::POST,
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            br#"{"contents":[]}"#,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let requests = dispatch.requests.lock().expect("request lock");
+    assert_eq!(requests.len(), 3);
+}
+
+#[tokio::test]
 async fn qa_reg_1_existing_gemini_api_key_wire_shape_is_unchanged() {
     let dispatch = Arc::new(Dispatch {
         replies: Mutex::new(VecDeque::from([Reply::Json(

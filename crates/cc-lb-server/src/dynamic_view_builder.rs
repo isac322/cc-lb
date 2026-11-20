@@ -3277,6 +3277,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vertex_apply_clears_nonterminal_error_but_keeps_terminal_marker() {
+        let (_dir, storage) = storage_fixture(63).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let aead = AeadService::from_master_key([19; 32]);
+        let plaintext =
+            br#"{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#;
+        let mut upstream = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                vertex: Some(cc_lb_domain::VertexUpstreamConfig {
+                    target: cc_lb_domain::VertexTarget::Regional {
+                        project_id: "project-123".into(),
+                        location: "us-central1".into(),
+                    },
+                    api_version: cc_lb_domain::VertexApiVersion::V1Beta1,
+                }),
+                vertex_credential_type: Some(cc_lb_domain::VertexCredentialType::AuthorizedUser),
+                vertex_quota_project_id: None,
+                id: Uuid::new_v4(),
+                name: "vertex-apply-qa".to_owned(),
+                kind: UpstreamKind::VertexCredential,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("vertex upstream created");
+        let ciphertext = aead
+            .encrypt(plaintext, &vertex_credential_aad(&upstream.id.to_string()))
+            .expect("credential encrypts");
+        upstream =
+            UpstreamStore::update_api_key_secret(storage.as_ref(), upstream.id, Some(ciphertext))
+                .await
+                .expect("credential stored");
+
+        for marker in [
+            "stale_validation_error",
+            cc_lb_domain::VERTEX_CREDENTIAL_INVALID_GRANT,
+        ] {
+            UpstreamStore::set_status(
+                storage.as_ref(),
+                upstream.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some(marker.to_owned())),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await
+            .expect("apply marker stored");
+            let current = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+                .await
+                .expect("load upstream")
+                .expect("upstream exists");
+            let statuses = apply_upstreams(&stores, &[current], &aead, 9)
+                .await
+                .expect("apply completes");
+            let stored = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+                .await
+                .expect("reload upstream")
+                .expect("upstream exists");
+            if marker == "stale_validation_error" {
+                assert_eq!(statuses["vertex-apply-qa"].status, ApplyStatus::Active);
+                assert_eq!(stored.last_apply_error, None);
+            } else {
+                assert_eq!(statuses["vertex-apply-qa"].status, ApplyStatus::Error);
+                assert_eq!(stored.last_apply_error.as_deref(), Some(marker));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn applying_stale_oauth_snapshot_cannot_clear_later_terminal_refresh_failure() {
         let (_dir, storage) = storage_fixture(18).await;
         let stores = stores(

@@ -1101,9 +1101,19 @@ mod tests {
     fn qa_live_4_setup_rewrite_is_single_attempt_and_deterministic() {
         let cfg = regional();
         let frame = br#"{"setup":{"model":"models/gemini"}}"#;
+        let expected =
+            br#"{"setup":{"model":"projects/demo-project/locations/us-central1/publishers/google/models/gemini"}}"#;
         assert_eq!(
-            rewrite_live_setup_model(frame, &cfg).unwrap(),
-            rewrite_live_setup_model(frame, &cfg).unwrap()
+            rewrite_live_setup_model(frame, &cfg).unwrap().as_deref(),
+            Some(expected.as_slice())
+        );
+        assert_eq!(
+            rewrite_live_setup_model(br#"{"toolCall":{"id":"call-1"}}"#, &cfg).unwrap(),
+            None
+        );
+        assert_eq!(
+            rewrite_live_setup_model(frame, &cfg).unwrap().as_deref(),
+            Some(expected.as_slice())
         );
     }
 

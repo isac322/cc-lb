@@ -10,6 +10,7 @@ use axum::{
     http::{Request, StatusCode},
     routing::any,
 };
+use cc_lb_domain::VERTEX_CREDENTIAL_INVALID_GRANT;
 use cc_lb_storage_api::{UpstreamStatusUpdate, UpstreamStore};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -236,7 +237,7 @@ async fn qa_adm_5_replacement_clears_terminal_and_stale_if_match_conflicts() {
         &*harness.storage,
         id.parse().unwrap(),
         UpstreamStatusUpdate {
-            last_apply_error: Some(Some("invalid_grant".to_owned())),
+            last_apply_error: Some(Some(VERTEX_CREDENTIAL_INVALID_GRANT.to_owned())),
             ..Default::default()
         },
     )
@@ -286,6 +287,50 @@ async fn qa_adm_5_replacement_clears_terminal_and_stale_if_match_conflicts() {
     assert_eq!(persisted["base_url"], probe_url);
     assert_eq!(persisted["spec_revision"], 2);
     assert_eq!(persisted["last_apply_error"], Value::Null);
+}
+
+#[tokio::test]
+async fn qa_adm_vertex_api_key_replacement_skip_preflight_updates_access_and_hint() {
+    let harness = spawn_api_key_harness().await;
+    let (status, created, _) = request(
+        &harness.app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "qa-adm-api-key-replacement",
+            "kind": "vertex_api_key",
+            "express": true,
+            "api_key_value": "AIza-old-vertex-key-1234",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let (_, _, headers) = request(
+        &harness.app,
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_owned();
+    let (status, replacement, _) = request(
+        &harness.app,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "api_key_value": "AIza-new-vertex-key-5678",
+            "skip_preflight": true
+        })),
+        Some(&etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replacement}");
+    assert_eq!(replacement["api_key_access"]["verified"], false);
+    assert_eq!(replacement["key_hint"], "...5678");
 }
 
 #[tokio::test]

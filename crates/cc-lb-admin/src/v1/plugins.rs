@@ -1614,4 +1614,29 @@ mod provider_capability_tests {
         assert!(!providers.contains_key("openai"));
         assert!(!providers.contains_key("gemini"));
     }
+
+    #[test]
+    fn provider_hook_credential_kinds_include_vertex_kinds_for_gemini_hooks() {
+        let hooks = std::collections::BTreeMap::from([(
+            "gemini".to_owned(),
+            vec![
+                "shape_envelope_gemini".to_owned(),
+                "transform_response_gemini".to_owned(),
+            ],
+        )]);
+        let kinds = provider_hook_credential_kinds(&hooks);
+        assert_eq!(
+            kinds["gemini"]["shape_envelope_gemini"],
+            vec!["gemini_oauth".to_owned()]
+        );
+        assert_eq!(
+            kinds["gemini"]["transform_response_gemini"],
+            vec![
+                "gemini_api_key".to_owned(),
+                "gemini_oauth".to_owned(),
+                "vertex_api_key".to_owned(),
+                "vertex_credential".to_owned(),
+            ]
+        );
+    }
 }
