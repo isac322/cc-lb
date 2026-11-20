@@ -1246,7 +1246,7 @@ mod tests {
             let mut body = base.clone();
             body["n"] = bad.clone();
             let error = translate_chat_request(&body, &policy()).expect_err("rejects invalid n");
-            assert_eq!(error.param.as_deref(), Some("n"), "{bad}");
+            assert_eq!(error.param, "n", "{bad}");
         }
         for (value, expected) in [(Value::Null, 1), (json!(1), 1), (json!(3), 3)] {
             let mut body = base.clone();
