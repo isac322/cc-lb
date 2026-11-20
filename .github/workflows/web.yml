@@ -5,116 +5,30 @@ on:
     paths:
       - 'crates/cc-lb-admin/web/**'
       - '.github/workflows/web.yml'
+      - '.github/actions/setup-web/**'
   push:
     branches:
       - master
     paths:
       - 'crates/cc-lb-admin/web/**'
       - '.github/workflows/web.yml'
+      - '.github/actions/setup-web/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  bun-checks:
-    # vitest runs one worker, but the bun runtime, GC, and jsdom timers still
-    # want more than a single core.
+  web-unit:
     runs-on: ubuntu-26.04
-    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
-    # and shared libraries are baked in; CI must not depend on apt mirrors.
-    container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
-      options: --ipc=host
     defaults:
       run:
         shell: bash
         working-directory: crates/cc-lb-admin/web
     steps:
       - uses: actions/checkout@v7
-      - name: Configure container workspace
-        id: container-setup
-        working-directory: .
-        run: |
-          # The mounted workspace belongs to the host runner, not container root.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          # runner.temp in action inputs is the host path; publish the actual
-          # container path used by the capture commands instead.
-          echo "visual-root=$RUNNER_TEMP/codex-credit-visuals" >> "$GITHUB_OUTPUT"
-          echo "issue-1282-visual-root=$RUNNER_TEMP/issue-1282-visuals" >> "$GITHUB_OUTPUT"
-          echo "issue-1280-visual-root=$RUNNER_TEMP/issue-1280-visuals" >> "$GITHUB_OUTPUT"
-      - name: Install bun 1.4.4
-        working-directory: .
-        run: |
-          set -euo pipefail
-          arch=$(uname -m)
-          os=$(uname -s)
-          case "$os-$arch" in
-            Linux-aarch64|Linux-arm64) asset=bun-linux-aarch64.zip ;;
-            Linux-x86_64) asset=bun-linux-x64.zip ;;
-            Darwin-arm64) asset=bun-darwin-aarch64.zip ;;
-            Darwin-x86_64) asset=bun-darwin-x64.zip ;;
-            *)
-              echo "::error::unsupported $os $arch for bun"
-              exit 1
-              ;;
-          esac
-          dest="$HOME/.local/bin"
-          mkdir -p "$dest"
-          python3 - "$asset" "$dest" <<'PY'
-          import io, os, stat, sys, tarfile, urllib.error, urllib.request, zipfile
-          asset, dest = sys.argv[1], sys.argv[2]
-          pkg = asset.removesuffix(".zip")
-          gh_url = f"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/{asset}"
-          npm_url = f"https://registry.npmjs.org/@oven/{pkg}/-/{pkg}-1.4.4.tgz"
-          target = os.path.join(dest, "bun")
-          try:
-              req = urllib.request.Request(gh_url, headers={"User-Agent": "cc-lb-ci"})
-              data = urllib.request.urlopen(req, timeout=15).read()
-              zf = zipfile.ZipFile(io.BytesIO(data))
-              for info in zf.infolist():
-                  name = info.filename.rsplit("/", 1)[-1]
-                  if name == "bun" and not info.is_dir():
-                      with zf.open(info) as src, open(target, "wb") as out:
-                          out.write(src.read())
-                      print(f"installed {target} from {info.filename}")
-                      break
-              else:
-                  raise SystemExit(f"bun binary not in {asset}: {zf.namelist()}")
-          except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-              print(f"GitHub release download failed ({exc}); falling back to {npm_url}")
-              req = urllib.request.Request(npm_url, headers={"User-Agent": "cc-lb-ci"})
-              data = urllib.request.urlopen(req, timeout=30).read()
-              with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-                  for member in tf.getmembers():
-                      if member.name.endswith("/bin/bun") and member.isfile():
-                          src = tf.extractfile(member)
-                          assert src is not None
-                          with src, open(target, "wb") as out:
-                              out.write(src.read())
-                          print(f"installed {target} from {member.name}")
-                          break
-                  else:
-                      raise SystemExit(f"bun binary not in {pkg}.tgz: {[m.name for m in tf.getmembers()]}")
-          os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-          PY
-          ln -sfn "$dest/bun" "$dest/bunx"
-          echo "$dest" >> "$GITHUB_PATH"
-          "$dest/bun" --version
-          "$dest/bunx" --version
-      - name: Cache Bun install store
-        uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('crates/cc-lb-admin/web/bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Verify Playwright image version
-        run: |
-          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
-      - name: Run web validations
+      - uses: ./.github/actions/setup-web
+      - name: Build bundle and check CSP / routeTree / preview guards
         run: |
           set -euo pipefail
 
@@ -175,62 +89,99 @@ jobs:
 
           # PRE-01: the production bundle carries no preview transport or
           # scenario fixtures (src/preview/ was removed; nothing may return).
-          # `if` rather than `! grep`: `set -e` ignores an inverted status.
           if grep -rnE 'preview-scenario-key|apiKeyScenarios|registerPreviewTransport|wrkspc_01Preview' dist/; then
             echo '::error::preview code found in dist/ (PRE-01)'
             exit 1
           fi
-
-          bun run --shell=bun lint
-          bun run --shell=bun typecheck
-          bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
-      - name: Verify and capture credit and provider pool views
+      - name: Run lint and typecheck in parallel
         run: |
-          bun run e2e e2e/codex-credits.spec.ts e2e/provider-pool-freshness.spec.ts e2e/upstream-quota-settled-states.spec.ts e2e/overview-shared-quota-columns.spec.ts --retries=0 \
+          set -euo pipefail
+          bun run --shell=bun lint &
+          pid_lint=$!
+          bun run --shell=bun typecheck &
+          pid_tc=$!
+          rc=0
+          wait "$pid_lint" || rc=1
+          wait "$pid_tc" || rc=1
+          exit "$rc"
+      - name: Run Vitest suite
+        run: bunx --bun vitest run --passWithNoTests --maxWorkers=4
+
+  web-e2e-visuals:
+    runs-on: ubuntu-26.04
+    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
+    # and shared libraries are baked in; CI must not depend on apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          {
+            echo "visual-root=$RUNNER_TEMP/codex-credit-visuals"
+            echo "issue-1282-visual-root=$RUNNER_TEMP/issue-1282-visuals"
+          } >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-web
+      - name: Verify Playwright image version
+        run: |
+          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
+      - name: Build static web bundle
+        run: bun run --shell=bun build
+      - name: Verify and capture credit and provider pool views
+        env:
+          PW_USE_PREVIEW: "1"
+        run: |
+          set -euo pipefail
+          bun run e2e \
+            e2e/codex-credits.spec.ts \
+            e2e/provider-pool-freshness.spec.ts \
+            e2e/upstream-quota-settled-states.spec.ts \
+            e2e/overview-shared-quota-columns.spec.ts \
+            --retries=0 \
             --output="$RUNNER_TEMP/codex-credit-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
       - name: Run keepalive and plugin catalog Playwright E2E
+        env:
+          PW_USE_PREVIEW: "1"
         run: |
+          set -euo pipefail
           bun run e2e e2e/issue-1282-keepalive-plugins.spec.ts --retries=0 \
             --output="$RUNNER_TEMP/issue-1282-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/issue-1282-visuals/after-source.txt"
-      - name: Verify and capture pricing completeness views
-        env:
-          CI_MERGE_SHA: ${{ github.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          bun run e2e e2e/overview-cost-completeness.spec.ts --retries=0 \
-            --output="$RUNNER_TEMP/issue-1280-visuals/after"
-          served_sha="$(git rev-parse HEAD)"
-          bun qa/capture-issue-1280-baseline.ts \
-            . "$RUNNER_TEMP/issue-1280-visuals/after" "$served_sha" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
-          printf '%s\n' "$served_sha" > "$RUNNER_TEMP/issue-1280-visuals/after-source.txt"
-      - name: Capture matching base-branch credit views
+      - name: Capture matching base-branch credit and plugin views
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CI_MERGE_SHA: ${{ github.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           base_root="$RUNNER_TEMP/codex-credit-base"
-          cleanup() {
-            git worktree remove --force "$base_root"
-          }
+          trap 'git worktree remove --force "$base_root" >/dev/null 2>&1 || true' EXIT
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
-          trap cleanup EXIT
+          git config --global --add safe.directory "$base_root"
           bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+          bun --cwd "$base_root/crates/cc-lb-admin/web" run --shell=bun build
+
           bun qa/capture-codex-credit-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
-            "$RUNNER_TEMP/codex-credit-visuals/before" "$BASE_SHA"
+            "$RUNNER_TEMP/codex-credit-visuals/before" "$BASE_SHA" 5174 &
+          pid_1=$!
           bun qa/capture-issue-1282-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
-            "$RUNNER_TEMP/issue-1282-visuals/before" "$BASE_SHA"
-          bun qa/capture-issue-1280-baseline.ts \
-            "$base_root/crates/cc-lb-admin/web" \
-            "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
+            "$RUNNER_TEMP/issue-1282-visuals/before" "$BASE_SHA" 5175 &
+          pid_2=$!
+          rc=0
+          wait "$pid_1" || rc=1
+          wait "$pid_2" || rc=1
+          exit "$rc"
       - name: Publish Codex credit visual evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -284,6 +235,63 @@ jobs:
             ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
+
+  web-pricing-visuals:
+    runs-on: ubuntu-26.04
+    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
+    # and shared libraries are baked in; CI must not depend on apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "issue-1280-visual-root=$RUNNER_TEMP/issue-1280-visuals" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-web
+      - name: Verify Playwright image version
+        run: |
+          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
+      - name: Build static web bundle
+        run: bun run --shell=bun build
+      - name: Verify and capture pricing completeness views
+        env:
+          PW_USE_PREVIEW: "1"
+          CI_MERGE_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          bun run e2e e2e/overview-cost-completeness.spec.ts --retries=0 \
+            --output="$RUNNER_TEMP/issue-1280-visuals/after"
+          served_sha="$(git rev-parse HEAD)"
+          bun qa/capture-issue-1280-baseline.ts \
+            . "$RUNNER_TEMP/issue-1280-visuals/after" "$served_sha" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
+          printf '%s\n' "$served_sha" > "$RUNNER_TEMP/issue-1280-visuals/after-source.txt"
+      - name: Capture matching base-branch pricing views
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_MERGE_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          base_root="$RUNNER_TEMP/issue-1280-base"
+          trap 'git worktree remove --force "$base_root" >/dev/null 2>&1 || true' EXIT
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git worktree add --detach "$base_root" "$BASE_SHA"
+          git config --global --add safe.directory "$base_root"
+          bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+          bun --cwd "$base_root/crates/cc-lb-admin/web" run --shell=bun build
+          bun qa/capture-issue-1280-baseline.ts \
+            "$base_root/crates/cc-lb-admin/web" \
+            "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
       - name: Publish pricing completeness visual evidence
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
@@ -301,3 +309,28 @@ jobs:
             ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/source-sha.txt
           retention-days: 14
           if-no-files-found: error
+
+  bun-checks:
+    name: bun-checks
+    needs:
+      - web-unit
+      - web-e2e-visuals
+      - web-pricing-visuals
+    if: ${{ always() }}
+    runs-on: ubuntu-26.04
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Check web jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          for job in web-unit web-e2e-visuals web-pricing-visuals; do
+            result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
+            echo "$job: $result"
+            if [[ "$result" != "success" ]]; then
+              echo "::error::$job finished with result '$result'"
+              exit 1
+            fi
+          done
