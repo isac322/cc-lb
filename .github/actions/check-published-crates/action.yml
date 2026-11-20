@@ -10,20 +10,17 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/setup-rustup-home
-
-    - uses: dtolnay/rust-toolchain@master
+    - uses: ./.github/actions/setup-rust-tools
       with:
-        toolchain: 1.99.1
+        profile: semver
 
-    - uses: ./.github/actions/setup-rust-cache
+    - uses: ./.github/actions/setup-rust-target-cache
+      id: rust-cache
       with:
+        cache-job-key: publish-check
+        sccache-scope: semver
+        extra-cache-paths: target/semver-checks
         stable-build-metadata: ${{ inputs.stable-build-metadata }}
-
-    - name: Install cargo-semver-checks
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-semver-checks@0.51.0
 
     - name: Check published crates
       shell: bash
@@ -85,12 +82,13 @@ runs:
 
         exit "$status"
 
-    - name: Show sccache stats
-      if: always()
-      shell: bash
-      run: |
-        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-          "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-        elif command -v sccache >/dev/null 2>&1; then
-          sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-        fi
+    - name: Show sccache stats and save caches
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/save-rust-target-cache
+      with:
+        extra-cache-paths: target/semver-checks
+        target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+        target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+        save-sccache: "true"
+        sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
+        sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
