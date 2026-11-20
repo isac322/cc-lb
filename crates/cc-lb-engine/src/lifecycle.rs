@@ -6585,7 +6585,13 @@ impl Lifecycle {
             )
             .await
             {
-                Ok(body) => bodies.push(body),
+                Ok(body) => {
+                    let body_refs = [body.as_ref()];
+                    precomputed_usage =
+                        crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
+                            .map(|usage| responses_usage_value_to_counts(&usage));
+                    bodies.push(body);
+                }
                 Err(_) => {
                     response = provider_error_response(
                         request_capability,
@@ -6617,6 +6623,11 @@ impl Lifecycle {
                     {
                         Ok(attempt) => attempt,
                         Err(failure) => {
+                            if let Some(usage) = precomputed_usage.as_ref()
+                                && let Some(observer) = observer.as_ref()
+                            {
+                                observer.set_usage_counts(usage, false);
+                            }
                             return Ok(self.relay_attempt_failure(
                                 failure,
                                 request_capability,
@@ -6635,6 +6646,11 @@ impl Lifecycle {
                         )
                         .await
                         .unwrap_or_default();
+                        bodies.push(body.clone());
+                        let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
+                        precomputed_usage =
+                            crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
+                                .map(|usage| responses_usage_value_to_counts(&usage));
                         let converted = match compat_response_plan.as_ref() {
                             Some(error_plan) => compat_response::convert_buffered_plan(
                                 error_plan,
@@ -8702,7 +8718,11 @@ impl Lifecycle {
             let mut upstream_diagnostics = upstream_diagnostics;
             let mut batch_index = 0_u64;
             let mut buffer = BytesMut::new();
-            let mut usage = UsageCounts::default();
+            let precomputed_usage_present = response_affinity_context.precomputed_usage.is_some();
+            let mut usage = response_affinity_context
+                .precomputed_usage
+                .clone()
+                .unwrap_or_default();
             let mut responses_error_context = ResponsesSseErrorContext::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
@@ -9128,11 +9148,15 @@ impl Lifecycle {
                                 let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                     &parsed_event,
                                     &mut usage,
-                                    response_affinity_context
-                                        .usage_shape
-                                        .unwrap_or_else(|| {
-                                            response_affinity_context.capability.usage_shape()
-                                        }),
+                                    if precomputed_usage_present {
+                                        crate::provider_capability::UsageShape::None
+                                    } else {
+                                        response_affinity_context
+                                            .usage_shape
+                                            .unwrap_or_else(|| {
+                                                response_affinity_context.capability.usage_shape()
+                                            })
+                                    },
                                 );
                                 downstream_drop_guard.set_keepalive_cached_tokens(
                                     usage
@@ -10084,11 +10108,15 @@ impl Lifecycle {
                             let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                 &parsed_event,
                                 &mut usage,
-                                response_affinity_context
-                                    .usage_shape
-                                    .unwrap_or_else(|| {
-                                        response_affinity_context.capability.usage_shape()
-                                    }),
+                                if precomputed_usage_present {
+                                    crate::provider_capability::UsageShape::None
+                                } else {
+                                    response_affinity_context
+                                        .usage_shape
+                                        .unwrap_or_else(|| {
+                                            response_affinity_context.capability.usage_shape()
+                                        })
+                                },
                             );
                             downstream_drop_guard.set_keepalive_cached_tokens(
                                 usage

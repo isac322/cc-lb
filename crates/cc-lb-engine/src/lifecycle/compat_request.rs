@@ -114,12 +114,6 @@ pub(crate) fn response_plan_for_request(
                 })
             }
         }
-        ProviderCapability::OpenaiResponsesCompact => Some(CompatResponsePlan {
-            kind: CompatResponseKind::Compact {
-                original_request: body.clone(),
-            },
-            truncation_emulate: false,
-        }),
         _ => None,
     };
     Ok(plan)

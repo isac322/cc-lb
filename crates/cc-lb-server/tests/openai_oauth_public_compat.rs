@@ -9,6 +9,7 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{Value, json};
+use sqlx::{Row, sqlite::SqlitePoolOptions};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -123,6 +124,45 @@ async fn admin(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     (st, x.json().await.unwrap(), e)
+}
+async fn chat_usage_rows(s: &common::TestServer) -> Vec<(Option<i64>, Option<i64>)> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", s.sqlite_path.display()))
+        .await
+        .expect("open request event database");
+    sqlx::query(
+        "SELECT input_tokens, output_tokens
+         FROM request_events_v1
+         WHERE upstream_name = 'oauth-test' AND list_status = 200
+         ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("query chat request events")
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<Option<i64>, _>("input_tokens"),
+            row.get::<Option<i64>, _>("output_tokens"),
+        )
+    })
+    .collect()
+}
+async fn wait_for_chat_usage_rows(s: &common::TestServer, expected: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = chat_usage_rows(s).await;
+        if rows.len() >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} chat request events; got {}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 async fn setup(s: &common::TestServer, f: &Fake, c: &reqwest::Client) -> String {
     let (st, ups, _) = admin(c, s, Method::GET, "/admin/v1/upstreams", None, None).await;
@@ -251,7 +291,7 @@ async fn openai_oauth_public_responses_and_models() {
 }
 
 #[tokio::test]
-async fn openai_oauth_chat_completions_public_contract() {
+async fn openai_oauth_chat_completions_usage_contract() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let s = common::spawn_test_server_with_openai_budget("").await;
     let f = spawn().await;
@@ -259,18 +299,37 @@ async fn openai_oauth_chat_completions_public_contract() {
     setup(&s, &f, &c).await;
     tokio::time::sleep(Duration::from_millis(350)).await;
     let key = &s.managed_key.plaintext;
-    let r = c
-        .post(format!(
-            "http://{}/openai/v1/chat/completions",
-            s.proxy_addr
-        ))
-        .bearer_auth(key)
-        .json(
-            &json!({"model":"gpt-test","messages":[{"role":"user","content":"hi"}],"stream":false}),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 200);
-    assert!(r.text().await.unwrap().contains("hello world"));
+    let cases = [
+        ("stream:false n=1", false, 1_u64, 2_i64, 2_i64),
+        ("stream:true n=1", true, 1, 2, 2),
+        ("stream:false n=2", false, 2, 4, 4),
+        ("stream:true n=2", true, 2, 4, 4),
+    ];
+    for (name, stream, n, expected_input, expected_output) in cases {
+        let before = chat_usage_rows(&s).await.len();
+        let response = c
+            .post(format!(
+                "http://{}/openai/v1/chat/completions",
+                s.proxy_addr
+            ))
+            .bearer_auth(key)
+            .json(&json!({
+                "model": "gpt-test",
+                "messages": [{"role":"user","content":"hi"}],
+                "stream": stream,
+                "n": n,
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, 200, "{name}: {body}");
+        assert!(body.contains("hello"), "{name}: {body}");
+        wait_for_chat_usage_rows(&s, before + 1).await;
+        let rows = chat_usage_rows(&s).await;
+        let (input, output) = rows.last().copied().expect("chat usage row");
+        assert_eq!(input, Some(expected_input), "{name}: {rows:?}");
+        assert_eq!(output, Some(expected_output), "{name}: {rows:?}");
+    }
 }
