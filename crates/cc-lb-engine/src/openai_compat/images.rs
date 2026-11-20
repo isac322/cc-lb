@@ -20,10 +20,10 @@ fn boundary(content_type: &str) -> Result<String, CompatReject> {
 pub async fn multipart_edit_to_json(
     content_type: &str,
     body: Bytes,
+    files_body_cap: usize,
 ) -> Result<ImageEditJson, CompatReject> {
     let b = boundary(content_type)?;
-    let input = body.clone();
-    let s = stream! { yield Ok::<Bytes, std::convert::Infallible>(input); };
+    let s = stream! { yield Ok::<Bytes, std::convert::Infallible>(body); };
     let mut mp = Multipart::new(s, b);
     let mut out = serde_json::Map::new();
     let mut images = Vec::new();
@@ -69,8 +69,14 @@ pub async fn multipart_edit_to_json(
         }
     }
     out.insert("images".into(), Value::Array(images));
+    let body = Value::Object(out);
+    let encoded =
+        serde_json::to_vec(&body).map_err(|_| CompatReject::unsupported_parameter("body"))?;
+    if encoded.len() > files_body_cap {
+        return Err(CompatReject::unsupported_parameter("body"));
+    }
     Ok(ImageEditJson {
-        body: Value::Object(out),
+        body,
         stream: stream_flag,
     })
 }
@@ -135,6 +141,7 @@ mod tests {
         let result = multipart_edit_to_json(
             &format!("multipart/form-data; boundary={boundary}"),
             Bytes::from(body),
+            1 << 20,
         )
         .await
         .unwrap();

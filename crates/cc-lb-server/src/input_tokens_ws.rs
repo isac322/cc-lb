@@ -138,7 +138,10 @@ async fn emulate_input_tokens(
         .await
         .map_err(|error| dispatch_error(format!("input_tokens WebSocket send failed: {error}")))?;
 
-    while let Some(message) = ws.next().await {
+    while let Some(message) = tokio::time::timeout(Duration::from_secs(30), ws.next())
+        .await
+        .map_err(|_| dispatch_error("input_tokens WebSocket read timed out"))?
+    {
         let message = message.map_err(|error| {
             dispatch_error(format!("input_tokens WebSocket receive failed: {error}"))
         })?;
@@ -174,15 +177,34 @@ async fn emulate_input_tokens(
                 let _ = ws.close(None).await;
                 return Ok(response);
             }
-            Some("response.failed") | Some("error") => {
-                let status = value
-                    .pointer("/response/error/status")
-                    .or_else(|| value.pointer("/error/status"))
+            Some("response.failed") => {
+                let error = value.pointer("/response/error").cloned().unwrap_or_else(|| {
+                    serde_json::json!({"type":"server_error","message":"provider response failed"})
+                });
+                let status = error
+                    .get("status")
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|status| StatusCode::from_u16(status as u16).ok())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
+                let public = serde_json::json!({"error": {
+                    "type": error.get("type").and_then(serde_json::Value::as_str).unwrap_or("server_error"),
+                    "code": error.get("code"),
+                    "message": error.get("message").and_then(serde_json::Value::as_str).unwrap_or("provider response failed")
+                }});
                 let _ = ws.close(None).await;
-                return Ok(provider_error_response(status, value));
+                return Ok(json_response(status, public));
+            }
+            Some("error") => {
+                let status = value
+                    .get("status")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|status| StatusCode::from_u16(status as u16).ok())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let public = value.get("error").cloned().unwrap_or_else(|| {
+                    serde_json::json!({"type":"server_error","message":"provider WebSocket error"})
+                });
+                let _ = ws.close(None).await;
+                return Ok(json_response(status, serde_json::json!({"error": public})));
             }
             _ => {}
         }

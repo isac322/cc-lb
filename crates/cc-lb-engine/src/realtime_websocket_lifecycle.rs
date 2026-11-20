@@ -163,11 +163,21 @@ impl Lifecycle {
                     match self.resolve_request_affinities(&[key]).await {
                         Ok(Some(resolution)) => Some(resolution.target_upstream_id),
                         Ok(None) => None,
-                        Err(_) => {
+                        Err(error)
+                            if error.error_type == "api_error"
+                                && error.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE =>
+                        {
                             return Err(WebSocketError::new(
                                 404,
                                 "realtime_call_not_found",
                                 "realtime call is not bound to an available upstream",
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(WebSocketError::new(
+                                error.status.as_u16(),
+                                error.error_type,
+                                error.message,
                             ));
                         }
                     }
@@ -437,6 +447,7 @@ impl Lifecycle {
                 candidate: WebSocketCandidate {
                     upstream_id: id,
                     upstream_name: record.name.clone(),
+                    socket_per_lane: false,
                 },
                 url,
                 headers: signed_headers,

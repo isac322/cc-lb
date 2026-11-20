@@ -180,7 +180,13 @@ pub(crate) fn classify(
             (&Method::POST, "/v1/alpha/search") => Some(C::OpenaiCodexAuxiliary),
             (&Method::POST, "/v1/realtime/calls") => Some(C::OpenaiRealtimeCall),
             (&Method::POST, path)
-                if path.starts_with("/v1/realtime/calls/") && path.ends_with("/hangup") =>
+                if safe_openai_resource_path(path)
+                    && path.starts_with("/v1/realtime/calls/")
+                    && path.ends_with("/hangup")
+                    && path
+                        .strip_prefix("/v1/realtime/calls/")
+                        .and_then(|rest| rest.strip_suffix("/hangup"))
+                        .is_some_and(|id| !id.is_empty() && !id.contains('/')) =>
             {
                 Some(C::OpenaiRealtimeHangup)
             }
@@ -221,21 +227,37 @@ pub(crate) fn classify(
     }
 }
 
+/// Validates OpenAI resource paths before they participate in capability or
+/// affinity routing: every segment after the leading `/` is non-empty, not a
+/// dot-segment, and limited to `[A-Za-z0-9_.:-]`, so URL normalization can never
+/// turn a classified path into a different operation.
+pub(crate) fn safe_openai_resource_path(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+        })
+    })
+}
+
 /// Returns whether an HTTP route supports Gemini without an explicit provider scope.
 pub fn is_unscoped_gemini_http_route(method: &Method, path: &str) -> bool {
     classify(method, path, None).is_some_and(|capability| capability.provider() == Provider::Gemini)
 }
 
 fn openai_stored_or_account_owned(method: &Method, path: &str) -> bool {
-    if path == "/v1/responses" {
+    if !safe_openai_resource_path(path) || path == "/v1/responses" {
         return false;
     }
     if let Some(rest) = path.strip_prefix("/v1/responses/") {
-        // `input_tokens` and `compact` are operations, not response ids.
         return match rest.split_once('/') {
             None => {
                 !matches!(rest, "" | "input_tokens" | "compact")
-                    && (method == Method::GET || method == Method::DELETE)
+                    && matches!(*method, Method::GET | Method::DELETE)
             }
             Some((id, "cancel")) => !id.is_empty() && method == Method::POST,
             Some((id, "input_items")) => !id.is_empty() && method == Method::GET,
@@ -258,12 +280,15 @@ fn openai_stored_or_account_owned(method: &Method, path: &str) -> bool {
         "/v1/chatkit",
         "/v1/audio/voices",
     ];
-    // Stored chat completions: list them, or read/update/delete one by id.
     if path == "/v1/chat/completions" {
         return method == Method::GET;
     }
-    if path.starts_with("/v1/chat/completions/") {
-        return true;
+    if let Some(rest) = path.strip_prefix("/v1/chat/completions/") {
+        return match rest.split_once('/') {
+            None => matches!(*method, Method::GET | Method::POST | Method::DELETE),
+            Some((id, "messages")) => !id.is_empty() && method == Method::GET,
+            Some(_) => false,
+        };
     }
     ROOTS
         .iter()

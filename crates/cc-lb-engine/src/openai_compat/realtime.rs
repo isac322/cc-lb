@@ -2,7 +2,6 @@ use async_stream::stream;
 use bytes::Bytes;
 use multer::Multipart;
 use serde_json::Value;
-use url::Url;
 
 use super::CompatReject;
 
@@ -42,7 +41,7 @@ pub async fn call_request_to_backend_json(
         match name.as_str() {
             "sdp" => sdp = Some(String::from_utf8_lossy(&bytes).into_owned()),
             "session" => {
-                session = serde_json::from_slice(&bytes)
+                session = sonic_rs::from_slice(&bytes)
                     .map_err(|_| CompatReject::unsupported_value("session", "invalid JSON"))?
             }
             _ => {}
@@ -62,22 +61,6 @@ pub async fn call_request_to_backend_json(
             .to_string()
             .into_bytes(),
     )
-}
-
-pub fn public_api_origin(codex_base: &Url) -> Url {
-    let is_chatgpt = codex_base
-        .host_str()
-        .map(|h| h == "chatgpt.com" || h.ends_with(".chatgpt.com"))
-        .unwrap_or(false);
-    if is_chatgpt {
-        Url::parse("https://api.openai.com/").unwrap()
-    } else {
-        let mut u = codex_base.clone();
-        u.set_path("/");
-        u.set_query(None);
-        u.set_fragment(None);
-        u
-    }
 }
 
 #[cfg(test)]
@@ -131,18 +114,5 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "unsupported_value");
-    }
-
-    #[test]
-    fn origin_maps_chatgpt_and_fake_hosts() {
-        assert_eq!(
-            public_api_origin(&Url::parse("https://chatgpt.com/backend-api/codex").unwrap())
-                .as_str(),
-            "https://api.openai.com/"
-        );
-        assert_eq!(
-            public_api_origin(&Url::parse("http://127.0.0.1:8080/codex").unwrap()).as_str(),
-            "http://127.0.0.1:8080/"
-        );
     }
 }

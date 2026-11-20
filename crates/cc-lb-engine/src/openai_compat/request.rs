@@ -40,13 +40,18 @@ fn drop_or_reject(
     key: &str,
     p: DropOrReject,
 ) -> Result<bool, super::CompatReject> {
-    if v.remove(key).is_some() {
+    if v.get(key).is_some_and(|value| !value.is_null()) {
+        v.remove(key);
         if p == DropOrReject::Reject {
             return Err(reject(key));
         }
         return Ok(true);
     }
     Ok(false)
+}
+
+fn has_non_null(v: &Map<String, Value>, key: &str) -> bool {
+    v.get(key).is_some_and(|value| !value.is_null())
 }
 
 pub fn normalize_responses_request(
@@ -100,7 +105,7 @@ pub fn normalize_responses_request(
             changed = true;
         }
     }
-    if obj.contains_key("top_logprobs") {
+    if has_non_null(obj, "top_logprobs") {
         if input.policy.logprobs == DropOrReject::Reject {
             return Err(reject("top_logprobs"));
         }
@@ -187,6 +192,7 @@ pub fn normalize_responses_request(
                 "local_shell",
             ]
             .contains(&typ)
+                && changed
             {
                 return Err(super::CompatReject::unsupported_value(
                     format!("tools[{i}].type"),
@@ -215,15 +221,15 @@ pub fn normalize_responses_request(
             }
         }
     }
-    if obj.contains_key("metadata")
-        || obj.contains_key("user")
-        || obj.contains_key("safety_identifier")
+    if has_non_null(obj, "metadata")
+        || has_non_null(obj, "user")
+        || has_non_null(obj, "safety_identifier")
     {
         match input.policy.metadata {
             MetadataHandling::Reject => {
-                return Err(reject(if obj.contains_key("metadata") {
+                return Err(reject(if has_non_null(obj, "metadata") {
                     "metadata"
-                } else if obj.contains_key("user") {
+                } else if has_non_null(obj, "user") {
                     "user"
                 } else {
                     "safety_identifier"
@@ -231,15 +237,20 @@ pub fn normalize_responses_request(
             }
             MetadataHandling::Drop => {
                 for k in ["metadata", "user", "safety_identifier"] {
-                    if obj.remove(k).is_some() {
+                    if has_non_null(obj, k) {
+                        obj.remove(k);
                         changed = true
                     }
                 }
             }
             MetadataHandling::DropEcho => {
-                echo = obj.remove("metadata");
-                for k in ["user", "safety_identifier"] {
-                    if obj.remove(k).is_some() {
+                echo = obj
+                    .get("metadata")
+                    .filter(|value| !value.is_null())
+                    .cloned();
+                for k in ["metadata", "user", "safety_identifier"] {
+                    if has_non_null(obj, k) {
+                        obj.remove(k);
                         changed = true
                     }
                 }
@@ -300,25 +311,36 @@ pub fn degrade_without_api_key(
         return Err(reject("tools"));
     }
     if hosted {
-        if let Some(a) = b.get_mut("tools").and_then(Value::as_array_mut) {
+        let tools_removed = if let Some(a) = b.get_mut("tools").and_then(Value::as_array_mut) {
             a.retain(|t| {
                 !matches!(
                     t.get("type").and_then(Value::as_str),
                     Some("file_search") | Some("code_interpreter")
                 )
             });
-        }
+            a.is_empty()
+        } else {
+            false
+        };
         let forced = match b.get("tool_choice") {
-            Some(Value::String(s)) if s == "required" => true,
+            Some(Value::String(s)) if s == "required" => false,
             Some(v) => matches!(
                 v.get("type").and_then(Value::as_str),
                 Some("file_search") | Some("code_interpreter")
             ),
             None => false,
         };
-        if forced {
+        if tools_removed {
+            let object = b.as_object_mut().expect("request body is an object");
+            object.remove("tools");
+            if forced
+                || matches!(object.get("tool_choice"), Some(Value::String(s)) if s == "required")
+            {
+                object.remove("tool_choice");
+            }
+        } else if forced {
             b.as_object_mut()
-                .unwrap()
+                .expect("request body is an object")
                 .insert("tool_choice".into(), json!("auto"));
         }
     }
@@ -400,7 +422,7 @@ pub fn api_key_only_features(body: &Value, _transport: Transport) -> Vec<ApiKeyO
         ),
         ("conversation", ApiKeyOnlyFeature::Conversation),
     ] {
-        if body.get(k).is_some() {
+        if body.get(k).is_some_and(|value| !value.is_null()) {
             r.push(f)
         }
     }
@@ -458,8 +480,9 @@ mod tests {
             &OpenaiOauthCompatPolicy::default(),
         )
         .unwrap();
-        assert_eq!(out["tool_choice"], "auto");
-        assert!(out["tools"].as_array().unwrap().is_empty());
+        // A choice that forced a removed hosted tool goes away with the tools.
+        assert!(out.get("tool_choice").is_none());
+        assert!(out.get("tools").is_none());
     }
 
     #[test]

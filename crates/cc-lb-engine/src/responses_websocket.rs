@@ -149,6 +149,9 @@ impl std::error::Error for WebSocketError {}
 pub struct WebSocketCandidate {
     pub upstream_id: Uuid,
     pub upstream_name: String,
+    /// Codex subscription sockets carry one `stream_id` lane each, so a lane
+    /// needs its own provider socket. Native sockets multiplex lanes.
+    pub socket_per_lane: bool,
 }
 
 /// Borrowed transport inputs shared by one parsed logical turn.
@@ -2234,6 +2237,7 @@ impl ResponsesWebSocketGateway {
 
     pub fn connection_closed(&mut self, connection_id: u64, reason: &str) -> WebSocketEventResult {
         self.connections.remove(&connection_id);
+        self.connection_lanes.remove(&connection_id);
         let turn_ids: Vec<_> = self
             .turns
             .iter()

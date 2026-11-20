@@ -5,11 +5,13 @@
 //! backend's Responses SSE stream is translated back into
 //! `chat.completion.chunk` events or one `chat.completion` object.
 
+use bytes::Bytes;
 use cc_lb_domain::{
     CoerceOrReject, DropOrReject, EmulateDropOrReject, EmulateOrReject, MetadataHandling,
     OpenaiOauthCompatPolicy,
 };
 use serde_json::{Map, Value, json};
+use std::sync::Mutex;
 
 use super::CompatReject;
 
@@ -454,6 +456,7 @@ pub struct ChatStreamTranslator {
     refusal: String,
     tool_calls: Vec<ToolCall>,
     stopped: bool,
+    terminal_seen: bool,
     finish_reason: Option<&'static str>,
     usage: Option<Value>,
     failure: Option<Value>,
@@ -474,6 +477,7 @@ impl ChatStreamTranslator {
             refusal: String::new(),
             tool_calls: Vec::new(),
             stopped: false,
+            terminal_seen: false,
             finish_reason: None,
             usage: None,
             failure: None,
@@ -482,6 +486,9 @@ impl ChatStreamTranslator {
 
     /// Feed one backend SSE event; returns the chunks to emit.
     pub fn push(&mut self, event: &Value) -> Vec<Value> {
+        if self.stopped || self.terminal_seen {
+            return Vec::new();
+        }
         let kind = event
             .get("type")
             .and_then(Value::as_str)
@@ -494,7 +501,7 @@ impl ChatStreamTranslator {
                     .unwrap_or_default();
                 self.push_text(delta)
             }
-            "response.refusal.delta" if !self.stopped => {
+            "response.refusal.delta" => {
                 let delta = event
                     .get("delta")
                     .and_then(Value::as_str)
@@ -502,18 +509,21 @@ impl ChatStreamTranslator {
                 self.refusal.push_str(delta);
                 self.delta_chunk(json!({"refusal": delta}))
             }
-            "response.output_item.added" if !self.stopped => self.push_tool_start(event),
-            "response.function_call_arguments.delta" if !self.stopped => self.push_tool_args(event),
+            "response.output_item.added" => self.push_tool_start(event),
+            "response.function_call_arguments.delta" => self.push_tool_args(event),
             "response.completed" | "response.incomplete" => {
+                self.terminal_seen = true;
                 self.record_terminal(event);
                 Vec::new()
             }
             "response.failed" | "error" => {
+                self.terminal_seen = true;
                 self.failure = event
                     .get("response")
                     .and_then(|response| response.get("error"))
                     .or_else(|| event.get("error"))
-                    .cloned();
+                    .cloned()
+                    .or_else(|| Some(Value::Object(Map::new())));
                 Vec::new()
             }
             _ => Vec::new(),
@@ -529,10 +539,17 @@ impl ChatStreamTranslator {
     pub fn failure(&self) -> Option<&Value> {
         self.failure.as_ref()
     }
+    /// Whether the backend supplied a terminal event.
+    pub fn terminal_seen(&self) -> bool {
+        self.terminal_seen
+    }
 
     /// Flush held text and emit the final chunk with `finish_reason`.
     pub fn finish(&mut self) -> Vec<Value> {
         let mut chunks = Vec::new();
+        if !self.role_sent {
+            chunks.extend(self.delta_chunk(json!({})));
+        }
         if !self.held.is_empty() {
             let text = std::mem::take(&mut self.held);
             chunks.extend(self.emit_text(&text));
@@ -818,6 +835,303 @@ pub fn usage_chunk(completion_id: &str, created: i64, model: &str, usage: &Value
     })
 }
 
+/// Stateful per-request Responses-to-Chat SSE translator.
+pub(crate) struct ChatSseTransformHook {
+    state: Mutex<ChatHookState>,
+}
+
+struct ChatHookState {
+    plan: ChatPlan,
+    translator: ChatStreamTranslator,
+    finalized: bool,
+}
+
+impl ChatSseTransformHook {
+    /// Creates a streaming translator for one chat choice.
+    pub(crate) fn new(plan: ChatPlan) -> Self {
+        let translator = ChatStreamTranslator::new(&plan, "chatcmpl-compat".to_owned(), 0, 0);
+        Self {
+            state: Mutex::new(ChatHookState {
+                plan,
+                translator,
+                finalized: false,
+            }),
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ChatHookState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether the upstream body can be closed after the latest event.
+    pub(crate) fn should_stop_upstream(&self) -> bool {
+        self.lock_state().finalized
+    }
+
+    /// Emits a public error event when upstream EOF preceded a terminal event.
+    pub(crate) fn truncated_error_event(&self) -> Option<cc_lb_upstream::SseEvent> {
+        let mut state = self.lock_state();
+        if state.finalized || state.translator.terminal_seen() {
+            return None;
+        }
+        state.finalized = true;
+        Some(json_sse_event(&json!({
+            "error": {
+                "message": "upstream response ended before a terminal event",
+                "type": "server_error",
+                "param": null,
+                "code": "server_error"
+            }
+        })))
+    }
+}
+
+impl cc_lb_upstream::SseEventTransformHook for ChatSseTransformHook {
+    fn transform_sse_event(
+        &self,
+        request: cc_lb_upstream::TransformSseEventRequest,
+    ) -> Result<cc_lb_upstream::TransformSseEventResult, cc_lb_upstream::ResponseTransformError>
+    {
+        let mut state = self.lock_state();
+        if state.finalized {
+            return Ok(cc_lb_upstream::TransformSseEventResult::Drop);
+        }
+        if request.event.data == Bytes::from_static(b"[DONE]") {
+            return Ok(cc_lb_upstream::TransformSseEventResult::Drop);
+        }
+        let event = sonic_rs::from_slice::<Value>(&request.event.data).map_err(|error| {
+            cc_lb_upstream::ResponseTransformError::Runtime {
+                reason: format!("invalid Responses SSE event: {error}"),
+            }
+        })?;
+        let chunks = state.translator.push(&event);
+        if state.translator.failure().is_some() {
+            state.finalized = true;
+            return Ok(cc_lb_upstream::TransformSseEventResult::Replace {
+                events: vec![failure_sse_event(&event)],
+            });
+        }
+
+        let terminal = state.translator.terminal_seen();
+        let stopped = state.translator.stopped();
+        let mut output = chunks
+            .into_iter()
+            .map(|chunk| json_sse_event(&chunk))
+            .collect::<Vec<_>>();
+        if terminal || stopped {
+            output.extend(
+                state
+                    .translator
+                    .finish()
+                    .into_iter()
+                    .map(|chunk| json_sse_event(&chunk)),
+            );
+            if terminal
+                && state.plan.include_usage
+                && let Some(usage) = state.translator.usage()
+            {
+                output.push(json_sse_event(&usage_chunk(
+                    "chatcmpl-compat",
+                    0,
+                    &state.plan.model,
+                    &usage,
+                )));
+            }
+            output.push(cc_lb_upstream::SseEvent {
+                event: String::new(),
+                data: Bytes::from_static(b"[DONE]"),
+            });
+            state.finalized = true;
+        }
+        if output.is_empty() {
+            Ok(cc_lb_upstream::TransformSseEventResult::Drop)
+        } else {
+            Ok(cc_lb_upstream::TransformSseEventResult::Replace { events: output })
+        }
+    }
+}
+
+fn json_sse_event(value: &Value) -> cc_lb_upstream::SseEvent {
+    cc_lb_upstream::SseEvent {
+        event: String::new(),
+        data: Bytes::from(serde_json::to_vec(value).unwrap_or_default()),
+    }
+}
+
+fn failure_sse_event(event: &Value) -> cc_lb_upstream::SseEvent {
+    let mut aggregator = crate::openai_compat::response::SseAggregator::new(None);
+    aggregator.push(event);
+    let body = match aggregator.finish() {
+        crate::openai_compat::response::AggregateOutcome::Error { body, .. } => body,
+        _ => serde_json::to_vec(&json!({
+            "error": {
+                "message": "The upstream request failed.",
+                "type": "server_error",
+                "param": null,
+                "code": "server_error"
+            }
+        }))
+        .unwrap_or_default(),
+    };
+    cc_lb_upstream::SseEvent {
+        event: String::new(),
+        data: Bytes::from(body),
+    }
+}
+/// Formats one unnamed compatibility SSE event for EOF error delivery.
+pub(crate) fn sse_event_bytes(event: &cc_lb_upstream::SseEvent) -> Bytes {
+    let mut output = Vec::new();
+    if !event.event.is_empty() {
+        output.extend_from_slice(b"event: ");
+        output.extend_from_slice(event.event.as_bytes());
+        output.extend_from_slice(b"\n");
+    }
+    for line in event.data.split(|byte| *byte == b'\n') {
+        output.extend_from_slice(b"data: ");
+        output.extend_from_slice(line);
+        output.extend_from_slice(b"\n");
+    }
+    output.extend_from_slice(b"\n");
+    Bytes::from(output)
+}
+/// Error encountered while merging buffered chat fan-out responses.
+#[derive(Debug)]
+pub(crate) enum ChatSseMergeError {
+    /// A provider emitted a failure event.
+    Failed(Value),
+    /// A provider body ended without a terminal event.
+    Truncated,
+}
+
+/// Merges one buffered Responses SSE body per chat choice.
+pub(crate) fn chat_completions_from_sse_bodies(
+    plan: &ChatPlan,
+    bodies: &[&[u8]],
+) -> Result<Vec<u8>, ChatSseMergeError> {
+    let id = "chatcmpl-compat".to_owned();
+    let mut choices = Vec::with_capacity(bodies.len());
+    let mut stream_chunks = Vec::new();
+    let mut usage = None;
+    let mut stopped = false;
+
+    for (index, body) in bodies.iter().enumerate() {
+        let mut translator = ChatStreamTranslator::new(plan, id.clone(), 0, index as u32);
+        for payload in sse_payloads(body) {
+            if payload == b"[DONE]" {
+                continue;
+            }
+            let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
+                continue;
+            };
+            if translator.failure().is_none() {
+                stream_chunks.extend(translator.push(&event));
+            }
+            if translator.failure().is_some() {
+                return Err(ChatSseMergeError::Failed(event));
+            }
+        }
+        if !translator.terminal_seen() && !translator.stopped() {
+            return Err(ChatSseMergeError::Truncated);
+        }
+        stopped |= translator.stopped();
+        if let Some(choice_usage) = translator.usage() {
+            match usage.as_mut() {
+                Some(total) => add_usage(total, &choice_usage),
+                None => usage = Some(choice_usage),
+            }
+        }
+        stream_chunks.extend(translator.finish());
+        choices.push(translator);
+    }
+
+    if !plan.stream {
+        let completion = chat_completion_from_streams(plan, id, 0, choices);
+        return serde_json::to_vec(&completion).map_err(|_| ChatSseMergeError::Truncated);
+    }
+
+    let mut output = Vec::new();
+    for chunk in stream_chunks {
+        let data = serde_json::to_vec(&chunk).map_err(|_| ChatSseMergeError::Truncated)?;
+        output.extend_from_slice(b"data: ");
+        output.extend_from_slice(&data);
+        output.extend_from_slice(b"\n\n");
+    }
+    if plan.include_usage
+        && !stopped
+        && let Some(usage) = usage
+    {
+        let chunk = usage_chunk(&id, 0, &plan.model, &usage);
+        let data = serde_json::to_vec(&chunk).map_err(|_| ChatSseMergeError::Truncated)?;
+        output.extend_from_slice(b"data: ");
+        output.extend_from_slice(&data);
+        output.extend_from_slice(b"\n\n");
+    }
+    output.extend_from_slice(b"data: [DONE]\n\n");
+    Ok(output)
+}
+
+fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
+    let mut payloads = Vec::new();
+    let mut start = 0;
+    while start < body.len() {
+        let Some(end) = sse_event_end(&body[start..]) else {
+            break;
+        };
+        let frame_end = start + end;
+        if let Some(payload) = sse_data(&body[start..frame_end]) {
+            payloads.push(payload);
+        }
+        start = frame_end;
+    }
+    if start < body.len()
+        && let Some(payload) = sse_data(&body[start..])
+    {
+        payloads.push(payload);
+    }
+    payloads
+}
+
+fn sse_event_end(buffer: &[u8]) -> Option<usize> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+    let (index, width) = match (lf, crlf) {
+        (Some(left), Some(right)) => {
+            if left.0 <= right.0 {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => return None,
+    };
+    Some(index + width)
+}
+
+fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(frame).ok()?;
+    let mut data = Vec::new();
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let Some(value) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if !data.is_empty() {
+            data.push(b'\n');
+        }
+        data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
+    }
+    (!data.is_empty()).then_some(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,5 +1402,68 @@ mod tests {
         let chunk = usage_chunk("id", 1, "m", &json!({"total_tokens": 3}));
         assert_eq!(chunk["choices"], json!([]));
         assert_eq!(chunk["usage"]["total_tokens"], 3);
+    }
+    #[test]
+    fn failure_is_terminal_and_later_output_is_ignored() {
+        let mut translator = ChatStreamTranslator::new(&plan(&[]), "id".into(), 0, 0);
+        translator.push(&json!({
+            "type": "response.failed",
+            "response": {"error": {"code": "context_length_exceeded"}}
+        }));
+        assert!(translator.terminal_seen());
+        assert!(translator.failure().is_some());
+        assert!(translator.push(&delta("ignored")).is_empty());
+    }
+
+    #[test]
+    fn fanout_merge_keeps_choice_indices_and_sums_usage() {
+        let plan = ChatPlan {
+            n: 2,
+            stream: false,
+            ..plan(&[])
+        };
+        let body_a = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n";
+        let body_b = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"b\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n";
+        let output =
+            chat_completions_from_sse_bodies(&plan, &[body_a.as_slice(), body_b.as_slice()])
+                .expect("fanout merge");
+        let value: Value = sonic_rs::from_slice(&output).expect("chat JSON");
+        assert_eq!(value["choices"][0]["index"], 0);
+        assert_eq!(value["choices"][1]["index"], 1);
+        assert_eq!(value["usage"]["prompt_tokens"], 5);
+        assert_eq!(value["choices"][1]["message"]["content"], "b");
+    }
+
+    #[test]
+    fn chat_hook_reports_truncated_stream() {
+        let hook = ChatSseTransformHook::new(plan(&[]));
+        let event = hook.truncated_error_event().expect("truncated event");
+        assert!(event.event.is_empty());
+        assert_eq!(
+            sonic_rs::from_slice::<Value>(&event.data).expect("error JSON")["error"]["type"],
+            "server_error"
+        );
+        assert!(hook.should_stop_upstream());
+        assert!(hook.truncated_error_event().is_none());
+    }
+    #[test]
+    fn fanout_stream_emits_usage_then_done() {
+        let plan = ChatPlan {
+            n: 2,
+            stream: true,
+            include_usage: true,
+            ..plan(&[])
+        };
+        let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
+        let output = chat_completions_from_sse_bodies(&plan, &[body.as_slice(), body.as_slice()])
+            .expect("stream merge");
+        let text = String::from_utf8(output).expect("SSE");
+        assert!(text.contains("\"index\":0"));
+        assert!(text.contains("\"index\":1"));
+        assert!(text.contains("\"choices\":[]"));
+        assert!(text.ends_with("data: [DONE]\n\n"));
     }
 }

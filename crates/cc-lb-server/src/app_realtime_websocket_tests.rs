@@ -176,12 +176,17 @@ async fn realtime_sideband_without_affinity_fails_closed_before_provider_connect
     let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
         panic!("HTTP sideband rejection expected");
     };
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // This router has no affinity store, so ownership cannot be checked at all:
+    // the call fails closed as unavailable rather than as an unknown call.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value =
         serde_json::from_slice(response.body().as_ref().expect("error body"))
             .expect("JSON error body");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert_eq!(body["error"]["code"], "realtime_call_not_found");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert_eq!(
+        body["error"]["message"],
+        "upstream affinity is unavailable for opaque request content"
+    );
     assert!(listener.accept().now_or_never().is_none());
     task.abort();
 }

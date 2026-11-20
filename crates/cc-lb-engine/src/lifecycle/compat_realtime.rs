@@ -20,13 +20,29 @@ pub(super) async fn prepare_realtime_call(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/sdp");
-    let body =
-        openai_compat::realtime::call_request_to_backend_json(content_type, ctx.body_bytes.clone())
-            .await
-            .map(Bytes::from)?;
+    let is_sdp = content_type
+        .to_ascii_lowercase()
+        .starts_with("application/sdp");
+    let is_multipart = content_type
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data");
+    let (query, body) = if is_sdp || is_multipart {
+        (
+            Some(openai_compat::realtime::REALTIME_CALL_QUERY.to_owned()),
+            Bytes::from(
+                openai_compat::realtime::call_request_to_backend_json(
+                    content_type,
+                    ctx.body_bytes.clone(),
+                )
+                .await?,
+            ),
+        )
+    } else {
+        (ctx.query.clone(), ctx.body_bytes.clone())
+    };
     Ok(PreparedCompatRequest {
         path: ctx.path.clone(),
-        query: Some(openai_compat::realtime::REALTIME_CALL_QUERY.to_owned()),
+        query,
         body,
         response_plan: None,
     })

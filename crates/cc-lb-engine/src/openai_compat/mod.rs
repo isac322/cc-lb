@@ -42,9 +42,18 @@ pub struct CompatReject {
 }
 
 impl CompatReject {
+    fn bounded(value: impl Into<String>) -> String {
+        value
+            .into()
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(64)
+            .collect()
+    }
+
     /// `unsupported_parameter` for a field the subscription backend rejects.
     pub fn unsupported_parameter(param: impl Into<String>) -> Self {
-        let param = param.into();
+        let param = Self::bounded(param);
         let message = format!(
             "Unsupported parameter: '{param}' is not supported by ChatGPT-subscription upstreams."
         );
@@ -57,7 +66,8 @@ impl CompatReject {
 
     /// `unsupported_value` for a field whose value the backend rejects.
     pub fn unsupported_value(param: impl Into<String>, value: &str) -> Self {
-        let param = param.into();
+        let param = Self::bounded(param);
+        let value = Self::bounded(value);
         let message = format!(
             "Unsupported value: '{value}' for '{param}' is not supported by ChatGPT-subscription upstreams."
         );

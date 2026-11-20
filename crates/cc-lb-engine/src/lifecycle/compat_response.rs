@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, Response, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::convert::Infallible;
 
 use crate::lifecycle::compat_request::{CompatResponseKind, CompatResponsePlan};
@@ -157,34 +157,36 @@ pub(crate) async fn inspect_truncation_response(
             ));
         }
         if held.len() > cap {
-            return Ok((Response::from_parts(parts, Body::from(held)), true));
+            return Err(CollectError::BodyTooLarge);
         }
     }
     Ok((Response::from_parts(parts, Body::from(held)), false))
 }
 
+#[derive(Debug)]
+enum ChatConversionError {
+    Collect(CollectError),
+    Public { status: StatusCode, body: Vec<u8> },
+}
+
+fn chat_failure(error_event: &Value) -> Option<(StatusCode, Vec<u8>)> {
+    let mut aggregator = openai_compat::response::SseAggregator::new(None);
+    aggregator.push(error_event);
+    match aggregator.finish() {
+        openai_compat::response::AggregateOutcome::Error { status, body } => Some((
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        )),
+        _ => None,
+    }
+}
+
 fn chat_from_sse(
     plan: &crate::openai_compat::chat::ChatPlan,
     body: &[u8],
-) -> Result<Vec<u8>, CollectError> {
-    let mut id = "chatcmpl-compat".to_owned();
-    let mut created = 0_i64;
-    for payload in sse_payloads(body) {
-        if payload == b"[DONE]" {
-            continue;
-        }
-        let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
-            continue;
-        };
-        if let Some(response) = event.get("response") {
-            if let Some(value) = response.get("id").and_then(Value::as_str) {
-                id = value.to_owned();
-            }
-            if let Some(value) = response.get("created_at").and_then(Value::as_i64) {
-                created = value;
-            }
-        }
-    }
+) -> Result<Vec<u8>, ChatConversionError> {
+    let id = "chatcmpl-compat".to_owned();
+    let created = 0_i64;
     let mut translator =
         crate::openai_compat::chat::ChatStreamTranslator::new(plan, id.clone(), created, 0);
     let mut stream_chunks = Vec::new();
@@ -195,23 +197,41 @@ fn chat_from_sse(
         let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
             continue;
         };
-        for chunk in translator.push(&event) {
-            stream_chunks.push(chunk);
+        stream_chunks.extend(translator.push(&event));
+        if translator.failure().is_some() {
+            let (status, body) = chat_failure(&event).unwrap_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::to_vec(&json!({
+                    "error": {
+                        "message": "The upstream request failed.",
+                        "type": "server_error",
+                        "param": null,
+                        "code": "server_error"
+                    }
+                }))
+                .unwrap_or_default(),
+            ));
+            return Err(ChatConversionError::Public { status, body });
         }
     }
+    if !translator.terminal_seen() && !translator.stopped() {
+        return Err(ChatConversionError::Collect(CollectError::IncompleteStream));
+    }
     if !plan.stream {
-        let _ = translator.finish();
+        translator.finish();
         let output = crate::openai_compat::chat::chat_completion_from_streams(
             plan,
             id,
             created,
             vec![translator],
         );
-        return serde_json::to_vec(&output).map_err(|_| CollectError::BodyRead);
+        return serde_json::to_vec(&output)
+            .map_err(|_| ChatConversionError::Collect(CollectError::BodyRead));
     }
     let usage = translator.usage();
     stream_chunks.extend(translator.finish());
     if plan.include_usage
+        && !translator.stopped()
         && let Some(usage) = usage
     {
         stream_chunks.push(crate::openai_compat::chat::usage_chunk(
@@ -223,7 +243,8 @@ fn chat_from_sse(
     }
     let mut output = Vec::new();
     for chunk in stream_chunks {
-        let data = serde_json::to_vec(&chunk).map_err(|_| CollectError::BodyRead)?;
+        let data = serde_json::to_vec(&chunk)
+            .map_err(|_| ChatConversionError::Collect(CollectError::BodyRead))?;
         output.extend_from_slice(b"data: ");
         output.extend_from_slice(&data);
         output.extend_from_slice(b"\n\n");
@@ -240,6 +261,7 @@ pub(crate) fn convert_buffered_plan(
     status: StatusCode,
     headers: HeaderMap,
     body: Bytes,
+    is_model_allowed: &dyn Fn(&str) -> bool,
 ) -> Result<Response<Body>, CollectError> {
     let (status, body, content_type) = match &plan.kind {
         CompatResponseKind::ModelsList => {
@@ -250,7 +272,8 @@ pub(crate) fn convert_buffered_plan(
                 return Ok(response_with_headers(status, headers, converted, None));
             }
             let value = sonic_rs::from_slice::<Value>(&body).map_err(|_| CollectError::BodyRead)?;
-            let Some(public) = openai_compat::models::public_model_list(&value) else {
+            let Some(public) = openai_compat::models::public_model_list(&value, is_model_allowed)
+            else {
                 return Err(CollectError::BodyRead);
             };
             (
@@ -266,8 +289,18 @@ pub(crate) fn convert_buffered_plan(
                         .unwrap_or_else(|| body.to_vec());
                 return Ok(response_with_headers(status, headers, converted, None));
             }
+            if !is_model_allowed(id) {
+                let body = openai_compat::models::model_not_found_body(id);
+                return Ok(response_with_headers(
+                    StatusCode::NOT_FOUND,
+                    headers,
+                    body,
+                    None,
+                ));
+            }
             let value = sonic_rs::from_slice::<Value>(&body).map_err(|_| CollectError::BodyRead)?;
-            let Some(public) = openai_compat::models::public_model(&value, id) else {
+            let Some(public) = openai_compat::models::public_model(&value, id, is_model_allowed)
+            else {
                 let body = openai_compat::models::model_not_found_body(id);
                 return Ok(response_with_headers(
                     StatusCode::NOT_FOUND,
@@ -289,7 +322,13 @@ pub(crate) fn convert_buffered_plan(
                         .unwrap_or_else(|| body.to_vec());
                 return Ok(response_with_headers(status, headers, body, None));
             }
-            let body = chat_from_sse(plan, &body)?;
+            let body = match chat_from_sse(plan, &body) {
+                Ok(body) => body,
+                Err(ChatConversionError::Public { status, body }) => {
+                    return Ok(response_with_headers(status, headers, body, None));
+                }
+                Err(ChatConversionError::Collect(error)) => return Err(error),
+            };
             let content_type = if plan.stream {
                 "text/event-stream"
             } else {
@@ -312,6 +351,12 @@ pub(crate) fn convert_buffered_plan(
             )
         }
         CompatResponseKind::Transcription { format } => {
+            if !status.is_success() {
+                let body =
+                    openai_compat::response::public_error_from_detail(status.as_u16(), &body)
+                        .unwrap_or_else(|| body.to_vec());
+                return Ok(response_with_headers(status, headers, body, None));
+            }
             let Some((content_type, body)) =
                 openai_compat::transcription::transcription_response(*format, &body)
             else {
@@ -374,16 +419,16 @@ pub(crate) fn compact_response_body(
 }
 
 pub(crate) fn requires_buffered_response(plan: &CompatResponsePlan) -> bool {
-    matches!(
-        &plan.kind,
+    match &plan.kind {
         CompatResponseKind::ResponsesAggregate { .. }
-            | CompatResponseKind::Compact { .. }
-            | CompatResponseKind::Chat { .. }
-            | CompatResponseKind::ModelsList
-            | CompatResponseKind::ModelsGet { .. }
-            | CompatResponseKind::ImagesStream { .. }
-            | CompatResponseKind::Transcription { .. }
-    )
+        | CompatResponseKind::Compact { .. }
+        | CompatResponseKind::ModelsList
+        | CompatResponseKind::ModelsGet { .. }
+        | CompatResponseKind::ImagesStream { .. }
+        | CompatResponseKind::Transcription { .. } => true,
+        CompatResponseKind::Chat { plan } => !plan.stream || plan.n > 1,
+        CompatResponseKind::ResponsesStream { .. } => false,
+    }
 }
 
 pub(crate) fn stream_echo_metadata(plan: &CompatResponsePlan) -> Option<&Value> {
@@ -443,28 +488,40 @@ fn is_sse_content_type(headers: &HeaderMap) -> bool {
 }
 
 fn sse_event_end(buffer: &[u8]) -> Option<usize> {
-    buffer
+    let lf = buffer
         .windows(2)
         .position(|window| window == b"\n\n")
-        .map(|index| index + 2)
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|index| index + 4)
-        })
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+    let (index, width) = match (lf, crlf) {
+        (Some(left), Some(right)) => {
+            if left.0 <= right.0 {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => return None,
+    };
+    Some(index + width)
 }
 
 fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
     let mut payloads = Vec::new();
     let mut start = 0;
-    for (index, window) in body.windows(2).enumerate() {
-        if window == b"\n\n" {
-            if let Some(payload) = sse_data(&body[start..index]) {
-                payloads.push(payload);
-            }
-            start = index + 2;
+    while start < body.len() {
+        let Some(end) = sse_event_end(&body[start..]) else {
+            break;
+        };
+        let frame_end = start + end;
+        if let Some(payload) = sse_data(&body[start..frame_end]) {
+            payloads.push(payload);
         }
+        start = frame_end;
     }
     if start < body.len()
         && let Some(payload) = sse_data(&body[start..])
@@ -488,4 +545,94 @@ fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
         data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
     }
     (!data.is_empty()).then_some(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chat_plan(stream: bool) -> crate::openai_compat::chat::ChatPlan {
+        crate::openai_compat::chat::ChatPlan {
+            n: 1,
+            stop: Vec::new(),
+            stream,
+            include_usage: false,
+            model: "m".to_owned(),
+        }
+    }
+
+    #[test]
+    fn sse_payloads_accept_crlf_delimiters() {
+        let body = b"data: {\"type\":\"response.completed\"}\r\n\r\n\
+data: [DONE]\r\n\r\n";
+        let payloads = sse_payloads(body);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], br#"{"type":"response.completed"}"#);
+        assert_eq!(payloads[1], b"[DONE]");
+    }
+
+    #[test]
+    fn buffered_chat_failure_maps_context_overflow_to_400() {
+        let body = br#"data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too long"}}}
+
+"#;
+        let error = chat_from_sse(&chat_plan(false), body).expect_err("failure");
+        let ChatConversionError::Public { status, body } = error else {
+            panic!("expected public error");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let value: Value = sonic_rs::from_slice(&body).expect("error JSON");
+        assert_eq!(value["error"]["code"], "context_length_exceeded");
+    }
+
+    #[test]
+    fn buffered_chat_truncation_is_not_a_partial_success() {
+        let body = br#"data: {"type":"response.output_text.delta","delta":"partial"}
+
+"#;
+        let error = chat_from_sse(&chat_plan(false), body).expect_err("truncated");
+        assert!(matches!(
+            error,
+            ChatConversionError::Collect(CollectError::IncompleteStream)
+        ));
+    }
+
+    #[tokio::test]
+    async fn truncation_prefix_over_cap_is_body_error_not_retryable_overflow() {
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(
+                "data: {\"type\":\"response.created\",\"response\":{}}\n\n",
+            ))
+            .expect("response");
+        let error = inspect_truncation_response(response, 8)
+            .await
+            .expect_err("cap");
+        assert_eq!(error, CollectError::BodyTooLarge);
+    }
+
+    #[tokio::test]
+    async fn disallowed_model_get_returns_model_not_found() {
+        let plan = CompatResponsePlan {
+            kind: CompatResponseKind::ModelsGet { id: "gpt-x".into() },
+            truncation_emulate: false,
+        };
+        let response = convert_buffered_plan(
+            &plan,
+            StatusCode::OK,
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"models":[{"slug":"gpt-x"}]}"#),
+            &|_| false,
+        )
+        .expect("model response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: Value = sonic_rs::from_slice(&body).expect("error JSON");
+        assert_eq!(value["error"]["code"], "model_not_found");
+    }
 }

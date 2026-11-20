@@ -1056,7 +1056,9 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
                 handle_authenticated(&lifecycle, binary_response_request(path)),
             )
             .await
-            .expect("binary response headers do not await upstream EOF")
+            .unwrap_or_else(|_| {
+                panic!("{path} {content_type:?} hooks={with_hooks}: headers awaited upstream EOF")
+            })
             .expect("lifecycle handles binary response");
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(

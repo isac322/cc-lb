@@ -23,8 +23,10 @@ pub fn catalog_query_for_public(query: Option<&str>) -> String {
     }
 }
 
-/// Convert a Codex catalog response to the public model-list shape.
-pub fn public_model_list(catalog: &Value) -> Option<Value> {
+pub fn public_model_list(
+    catalog: &Value,
+    is_model_allowed: &dyn Fn(&str) -> bool,
+) -> Option<Value> {
     let models = catalog.get("models")?.as_array()?;
     let mut data = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -32,15 +34,22 @@ pub fn public_model_list(catalog: &Value) -> Option<Value> {
         let Some(slug) = model.get("slug").and_then(Value::as_str) else {
             continue;
         };
-        if seen.insert(slug) {
+        if is_model_allowed(slug) && seen.insert(slug) {
             data.push(json!({"id": slug, "object": "model", "created": 0, "owned_by": "openai"}));
         }
     }
     Some(json!({"object": "list", "data": data}))
 }
 
-/// Convert one catalog entry to the public model shape.
-pub fn public_model(catalog: &Value, id: &str) -> Option<Value> {
+/// Convert one catalog entry to the public model shape when allowed.
+pub fn public_model(
+    catalog: &Value,
+    id: &str,
+    is_model_allowed: &dyn Fn(&str) -> bool,
+) -> Option<Value> {
+    if !is_model_allowed(id) {
+        return None;
+    }
     let models = catalog.get("models")?.as_array()?;
     models
         .iter()
@@ -69,12 +78,25 @@ mod tests {
     fn list_dedupes_and_skips_missing() {
         let c = json!({"models":[{"slug":"a"},{"x":1},{"slug":"a"},{"slug":"b"}]});
         assert_eq!(
-            public_model_list(&c).unwrap()["data"]
+            public_model_list(&c, &|_| true).unwrap()["data"]
                 .as_array()
                 .unwrap()
                 .len(),
             2
         );
+    }
+    #[test]
+    fn filters_disallowed_models() {
+        let c = json!({"models":[{"slug":"allowed"},{"slug":"blocked"}]});
+        let allowed = |id: &str| id == "allowed";
+        assert_eq!(
+            public_model_list(&c, &allowed).unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(public_model(&c, "blocked", &allowed).is_none());
     }
     #[test]
     fn not_found_body_is_public_envelope() {

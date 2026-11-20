@@ -12,7 +12,7 @@ use crate::openai_compat::{
 };
 use crate::provider_capability::ProviderCapability;
 use crate::request_context::RequestContext;
-use cc_lb_domain::OpenaiOauthCompatPolicy;
+use cc_lb_domain::{EmulateOrReject, OpenaiOauthCompatPolicy};
 use cc_lb_storage_api::upstream::UpstreamKind as StorageUpstreamKind;
 
 #[derive(Clone, Debug)]
@@ -173,6 +173,7 @@ pub(crate) async fn prepare_request(
     upstream_kind: StorageUpstreamKind,
     policy: &OpenaiOauthCompatPolicy,
     _response_plan: Option<CompatResponsePlan>,
+    files_body_cap: usize,
 ) -> Result<PreparedCompatRequest, CompatReject> {
     if upstream_kind != StorageUpstreamKind::OpenaiOauth {
         return Ok(PreparedCompatRequest {
@@ -218,6 +219,9 @@ pub(crate) async fn prepare_request(
             }
         }
         ProviderCapability::OpenaiResponsesCompact => {
+            if policy.compact == EmulateOrReject::Reject {
+                return Err(CompatReject::unsupported_parameter("compact"));
+            }
             let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
             body = serde_json::to_vec(&openai_compat::compact::compact_request_to_responses(
@@ -291,19 +295,27 @@ pub(crate) async fn prepare_request(
                 .get(CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let converted =
-                openai_compat::images::multipart_edit_to_json(content_type, ctx.body_bytes.clone())
-                    .await?;
-            body = serde_json::to_vec(&converted.body)
-                .map(Bytes::from)
-                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            if converted.stream {
-                plan = Some(CompatResponsePlan {
-                    kind: CompatResponseKind::ImagesStream {
-                        kind: ImageStreamKind::Edit,
-                    },
-                    truncation_emulate: false,
-                });
+            if content_type
+                .to_ascii_lowercase()
+                .starts_with("multipart/form-data")
+            {
+                let converted = openai_compat::images::multipart_edit_to_json(
+                    content_type,
+                    ctx.body_bytes.clone(),
+                    files_body_cap,
+                )
+                .await?;
+                body = serde_json::to_vec(&converted.body)
+                    .map(Bytes::from)
+                    .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+                if converted.stream {
+                    plan = Some(CompatResponsePlan {
+                        kind: CompatResponseKind::ImagesStream {
+                            kind: ImageStreamKind::Edit,
+                        },
+                        truncation_emulate: false,
+                    });
+                }
             }
         }
         ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {

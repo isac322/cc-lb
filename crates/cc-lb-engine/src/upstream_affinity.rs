@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::provider_capability::ProviderCapability;
+use crate::provider_capability::{ProviderCapability, safe_openai_resource_path};
 use crate::usage_parser::ParsedSseEvent;
 use cc_lb_storage_api::{UpstreamAffinityKey, UpstreamAffinityKind};
 use serde_json::{Map, Value};
@@ -159,11 +159,11 @@ pub(crate) fn path_affinity_key(
         ),
         ProviderCapability::OpenaiStoredResponse => (
             UpstreamAffinityKind::OpenaiResponseId,
-            path.strip_prefix("/v1/responses/")?.split('/').next()?,
+            path.strip_prefix("/v1/responses/")?,
         ),
         _ => return None,
     };
-    if id.is_empty() || id.contains('/') {
+    if !safe_openai_resource_path(path) || id.is_empty() || id.contains('/') {
         return None;
     }
     Some(UpstreamAffinityKey {

@@ -814,6 +814,7 @@ pub async fn seed_app_testing_storage(
             allowed_models: vec!["*".to_owned()],
             allowed_upstreams: vec![],
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         now,
     )
@@ -3301,7 +3302,7 @@ async fn dispatch_responses_websocket(
     for candidate in &dispatch.candidates {
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
-                && connection.lane == dispatch.stream_id)
+                && (!candidate.socket_per_lane || connection.lane == dispatch.stream_id))
                 .then_some(*id)
         });
         if let Some(connection_id) = existing {
