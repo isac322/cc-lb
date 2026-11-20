@@ -1,0 +1,93 @@
+name: Save Rust target and sccache caches
+description: Prune workspace artifacts and save Layer 1 target dependencies and Layer 2 sccache on misses.
+
+inputs:
+  target-dir:
+    description: Cargo target directory path to prune and save.
+    required: false
+    default: "target"
+  extra-cache-paths:
+    description: Optional newline-separated extra paths to save alongside target-dir.
+    required: false
+    default: ""
+  target-cache-hit:
+    description: Value of setup-rust-target-cache.outputs.target-cache-hit
+    required: true
+  target-cache-key:
+    description: Value of setup-rust-target-cache.outputs.target-cache-key
+    required: true
+  save-sccache:
+    description: Whether this job should save sccache Layer 2 on cache miss.
+    required: false
+    default: "true"
+  sccache-exact-hit:
+    description: Value of setup-rust-target-cache.outputs.sccache-exact-hit
+    required: true
+  sccache-key:
+    description: Value of setup-rust-target-cache.outputs.sccache-key
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Show sccache stats
+      if: always()
+      shell: bash
+      run: |
+        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+          "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable"
+        elif command -v sccache >/dev/null 2>&1; then
+          sccache --show-stats || echo "::warning::sccache stats unavailable"
+        fi
+
+    - name: Prune workspace artifacts from Layer 1 target directory
+      if: success() && inputs.target-cache-hit != 'true'
+      id: prune
+      shell: bash
+      env:
+        TARGET_DIR_INPUT: ${{ inputs.target-dir }}
+        EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
+      run: |
+        set -euo pipefail
+        if [ -d "$TARGET_DIR_INPUT" ]; then
+          node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT"
+        fi
+        {
+          echo "save_paths<<__EOF__"
+          echo "$TARGET_DIR_INPUT"
+          if [ -n "$EXTRA_PATHS_INPUT" ]; then
+            printf '%s\n' "$EXTRA_PATHS_INPUT"
+          fi
+          echo "__EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Save Layer 1 pruned Cargo target dependencies
+      if: success() && inputs.target-cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.prune.outputs.save_paths }}
+        key: ${{ inputs.target-cache-key }}
+
+    - name: Stop sccache before saving Layer 2 cache
+      if: success() && inputs.save-sccache == 'true' && inputs.sccache-exact-hit != 'true'
+      id: sccache-prep
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+          "$SCCACHE_PATH" --stop-server >/dev/null 2>&1 || true
+        elif command -v sccache >/dev/null 2>&1; then
+          sccache --stop-server >/dev/null 2>&1 || true
+        fi
+        if [ -d "${RUNNER_TEMP}/sccache" ] && [ -n "$(ls -A "${RUNNER_TEMP}/sccache" 2>/dev/null)" ]; then
+          echo "has_files=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_files=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save Layer 2 sccache directory
+      if: success() && inputs.save-sccache == 'true' && inputs.sccache-exact-hit != 'true' && steps.sccache-prep.outputs.has_files == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: ${{ inputs.sccache-key }}

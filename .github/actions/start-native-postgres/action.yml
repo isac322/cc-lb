@@ -1,0 +1,59 @@
+name: Start native PostgreSQL on /dev/shm
+description: Initialize and start PostgreSQL in RAM (/dev/shm/pgdata), apply migrations to template DB, and export test env vars.
+
+runs:
+  using: composite
+  steps:
+    - name: Start native PostgreSQL and seed migrated template database
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v sqlx >/dev/null 2>&1; then
+          echo "::error::sqlx CLI is required before starting native PostgreSQL" >&2
+          exit 1
+        fi
+        pg_bin="$(dirname "$(find /usr/lib/postgresql -maxdepth 3 -name initdb 2>/dev/null | sort -V | tail -n 1)")"
+        if [ -z "$pg_bin" ] || [ ! -x "$pg_bin/initdb" ] || [ ! -x "$pg_bin/pg_ctl" ]; then
+          echo "::error::PostgreSQL server binaries (initdb/pg_ctl) not found under /usr/lib/postgresql" >&2
+          exit 1
+        fi
+
+        pgdata="/dev/shm/pgdata"
+        rm -rf "$pgdata"
+        mkdir -p "$pgdata"
+        chmod 700 "$pgdata"
+
+        "$pg_bin/initdb" -D "$pgdata" -U postgres --auth=trust --encoding=UTF8 --locale=C.UTF-8 --no-sync
+        "$pg_bin/pg_ctl" -D "$pgdata" -l /dev/shm/postgres.log \
+          -o "-k /dev/shm -p 5432 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200 -c shared_buffers=256MB -c checkpoint_timeout=1h" \
+          start
+
+        for _ in $(seq 1 60); do
+          if pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1; then
+            break
+          fi
+          sleep 0.1
+        done
+        pg_isready -h 127.0.0.1 -p 5432 -U postgres
+
+        psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+        ALTER USER postgres WITH PASSWORD 'testpw';
+        CREATE DATABASE cc_lb_app_template;
+        SQL
+        psql -h 127.0.0.1 -p 5432 -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+
+        app_template_url="postgres://postgres:testpw@127.0.0.1:5432/cc_lb_app_template"
+        sqlx migrate run --source crates/cc-lb-storage-postgres/migrations --database-url "$app_template_url"
+
+        psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+        UPDATE pg_database SET datistemplate = true WHERE datname = 'cc_lb_app_template';
+        CREATE DATABASE cc_lb_test TEMPLATE cc_lb_app_template;
+        SQL
+
+        test_url="postgres://postgres:testpw@localhost:5432/cc_lb_test"
+        {
+          echo "CI_POSTGRES_URL=$test_url"
+          echo "DATABASE_URL=$test_url"
+          echo "DATABASE_URL_TEST=$test_url"
+          echo "CC_LB_PG_APP_TEMPLATE=cc_lb_app_template"
+        } >> "$GITHUB_ENV"

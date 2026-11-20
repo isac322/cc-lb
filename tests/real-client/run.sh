@@ -25,25 +25,48 @@ fail() {
   exit 1
 }
 
-cleanup_pid_tree() {
-  pid=$1
-  [ -n "$pid" ] || return 0
-  if kill -0 "$pid" 2>/dev/null; then
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    pkill -KILL -P "$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-  wait "$pid" 2>/dev/null || true
+signal_pid_tree() {
+  sig=$1
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill "-$sig" -P "$pid" 2>/dev/null || true
+      kill "-$sig" "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+any_pid_alive() {
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 cleanup() {
-  cleanup_pid_tree "$CLIENT_PID"
-  cleanup_pid_tree "$PROXY_PID"
-  cleanup_pid_tree "$FAKE_PID"
+  pids=()
+  [ -n "${CLIENT_PID:-}" ] && pids+=("$CLIENT_PID")
+  [ -n "${PROXY_PID:-}" ] && pids+=("$PROXY_PID")
+  [ -n "${FAKE_PID:-}" ] && pids+=("$FAKE_PID")
+  if [ "${#pids[@]}" -gt 0 ]; then
+    signal_pid_tree TERM "${pids[@]}"
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      if ! any_pid_alive "${pids[@]}"; then
+        break
+      fi
+      sleep 0.05
+    done
+    if any_pid_alive "${pids[@]}"; then
+      signal_pid_tree KILL "${pids[@]}"
+    fi
+    for pid in "${pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     rm -rf "$TMP_DIR"
   fi
@@ -126,7 +149,7 @@ while time.time() < deadline:
             sys.exit(0)
     except OSError as exc:
         last = exc
-        time.sleep(0.1)
+        time.sleep(0.05)
 print(f'{name} did not accept tcp on 127.0.0.1:{port}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
@@ -159,7 +182,7 @@ while time.time() < deadline:
             last = response.splitlines()[0].decode(errors='replace') if response else 'empty response'
     except OSError as exc:
         last = exc
-    time.sleep(0.1)
+    time.sleep(0.05)
 print(f'{name} did not become ready on http://127.0.0.1:{port}{path}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
@@ -223,10 +246,13 @@ detect_skip_reason() {
 }
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-real-client.XXXXXX")
-# Allocate 5 distinct ports atomically: hold all sockets open during reservation
-# so the kernel cannot hand the same ephemeral port to two sockets, then close
-# them just before binding. Avoids race collisions seen on busy CI runners.
-read -r proxy_port admin_port metrics_port fake_port client_port <<EOF
+if [ -n "${CC_LB_REAL_CLIENT_PORTS:-}" ]; then
+  read -r proxy_port admin_port metrics_port fake_port client_port <<<"$CC_LB_REAL_CLIENT_PORTS"
+else
+  # Allocate 5 distinct ports atomically: hold all sockets open during reservation
+  # so the kernel cannot hand the same ephemeral port to two sockets, then close
+  # them just before binding. Avoids race collisions seen on busy CI runners.
+  read -r proxy_port admin_port metrics_port fake_port client_port <<EOF
 $(python3 - <<'PY'
 import socket
 socks = []
@@ -241,11 +267,13 @@ print(' '.join(str(p) for p in ports))
 PY
 )
 EOF
+fi
 config_path="$TMP_DIR/cc-lb.toml"
 gcp_credentials="$TMP_DIR/gcp-adc.json"
 stdout_file="$TMP_DIR/client.stdout"
 stderr_file="$TMP_DIR/client.stderr"
 mkdir -p \
+  "$TMP_DIR/data" \
   "$TMP_DIR/home" \
   "$TMP_DIR/xdg-config" \
   "$TMP_DIR/xdg-data" \
@@ -361,6 +389,7 @@ fi
 
 cc_lb_bin="${CC_LB_BIN:-$ROOT_DIR/target/debug/cc-lb}"
 if [ -x "$cc_lb_bin" ]; then
+  CC_LB_DATA_DIR="$TMP_DIR/data" \
   CC_LB_ADMIN_TOKEN=admin-token \
   CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
   AWS_ACCESS_KEY_ID=AKIATEST \
@@ -371,6 +400,7 @@ if [ -x "$cc_lb_bin" ]; then
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
   "$cc_lb_bin" serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
 else
+  CC_LB_DATA_DIR="$TMP_DIR/data" \
   CC_LB_ADMIN_TOKEN=admin-token \
   CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
   AWS_ACCESS_KEY_ID=AKIATEST \
@@ -451,6 +481,8 @@ case "$client" in
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+      XDG_STATE_HOME="$TMP_DIR/xdg-state" \
       ANTHROPIC_API_KEY="$API_KEY" \
       ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port" \
       ANTHROPIC_MODEL=claude-3-5-sonnet-20241022 \
@@ -524,6 +556,8 @@ PY
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+      XDG_STATE_HOME="$TMP_DIR/xdg-state" \
       PI_CODING_AGENT_DIR="$TMP_DIR/pi-agent" \
       PI_CODING_AGENT_SESSION_DIR="$TMP_DIR/pi-sessions" \
       ANTHROPIC_API_KEY="$API_KEY" \
@@ -538,6 +572,8 @@ PY
       USERPROFILE="$TMP_DIR/home"
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config"
       XDG_DATA_HOME="$TMP_DIR/xdg-data"
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache"
+      XDG_STATE_HOME="$TMP_DIR/xdg-state"
       SENPI_CODING_AGENT_DIR="$TMP_DIR/senpi-agent"
       SENPI_CODING_AGENT_SESSION_DIR="$TMP_DIR/senpi-sessions"
       ANTHROPIC_BASE_URL="$senpi_anthropic_base_url"

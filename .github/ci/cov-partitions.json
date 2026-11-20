@@ -1,0 +1,140 @@
+{
+  "excluded": [
+    "cc-lb-loadgen",
+    "cc-lb-stress-suite",
+    "cc-lb-workspace-hack"
+  ],
+  "partitions": [
+    {
+      "name": "server-integ",
+      "needs_postgres": true,
+      "needs_wasm": true,
+      "save_sccache": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server",
+            "cc-lb-tls-tests",
+            "tests-integration",
+            "tests-multi-replica"
+          ],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server-unit-sched",
+      "needs_postgres": true,
+      "needs_wasm": false,
+      "save_sccache": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--lib",
+            "--bins"
+          ]
+        },
+        {
+          "packages": [
+            "cc-lb-scheduler"
+          ],
+          "cargo_args": []
+        }
+      ]
+    },
+    {
+      "name": "engine",
+      "needs_postgres": false,
+      "needs_wasm": false,
+      "save_sccache": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-engine",
+            "cc-lb-property-tests"
+          ],
+          "cargo_args": [],
+          "filter_expr": "not test(authn_rail_typestate_contracts)"
+        }
+      ]
+    },
+    {
+      "name": "admin",
+      "needs_postgres": true,
+      "needs_wasm": false,
+      "save_sccache": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-admin"
+          ],
+          "cargo_args": []
+        }
+      ]
+    },
+    {
+      "name": "storage-pg",
+      "needs_postgres": true,
+      "needs_wasm": false,
+      "save_sccache": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-storage-postgres",
+            "cc-lb-storage-conformance"
+          ],
+          "cargo_args": []
+        }
+      ]
+    },
+    {
+      "name": "sqlite-and-rest",
+      "needs_postgres": false,
+      "needs_wasm": true,
+      "save_sccache": false,
+      "runs": [
+        {
+          "packages": [
+            "cache-aware-wasmtime",
+            "cc-lb-aead",
+            "cc-lb-clock",
+            "cc-lb-config",
+            "cc-lb-control",
+            "cc-lb-domain",
+            "cc-lb-lifecycle",
+            "cc-lb-oauth-protocol",
+            "cc-lb-observability",
+            "cc-lb-pdk-wasmtime",
+            "cc-lb-pdk-wasmtime-macros",
+            "cc-lb-plugin-conformance",
+            "cc-lb-plugin-wire",
+            "cc-lb-pricing",
+            "cc-lb-quota",
+            "cc-lb-request-log",
+            "cc-lb-routing",
+            "cc-lb-runtime-wasmtime",
+            "cc-lb-signer-anthropic-key",
+            "cc-lb-signer-anthropic-oauth",
+            "cc-lb-storage-api",
+            "cc-lb-storage-sqlite",
+            "cc-lb-upstream",
+            "fake-anthropic",
+            "mock-anthropic-oauth-server",
+            "tests-loom",
+            "wasmtime-dual-slot",
+            "wasmtime-filter-openai",
+            "wasmtime-filter-service-tier",
+            "wasmtime-shape-passthrough"
+          ],
+          "cargo_args": []
+        }
+      ]
+    }
+  ]
+}

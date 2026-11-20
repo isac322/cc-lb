@@ -74,7 +74,7 @@ for (const [mode, marker] of [
   ['report', 'INJECTED_REPORT_WRITE_FAILURE'],
   ['ledger-child', 'INJECTED_CHILD_LEDGER_FAILURE'],
 ]) {
-  test(`${mode} failure exits nonzero and closes owned child/provider`, async t => {
+  test(`${mode} failure exits nonzero and closes owned child/provider`, { concurrency: true }, async t => {
     const result = await runHarness(t, mode);
     assert.equal(result.code, 1, result.stderr);
     assert.ok(result.stderr.includes(marker), result.stderr);
@@ -88,7 +88,7 @@ for (const [mode, marker] of [
   });
 }
 
-test('successful harness records literal shell-quoted cleanup paths', async t => {
+test('successful harness records literal shell-quoted cleanup paths', { concurrency: true }, async t => {
   const result = await runHarness(t, 'normal');
   assert.equal(result.code, 0, result.stderr);
   const evidence = JSON.parse(await readFile(path.join(result.output, 'results.json'), 'utf8'));
@@ -113,7 +113,7 @@ test('successful harness records literal shell-quoted cleanup paths', async t =>
 });
 
 for (const target of ['metadata', 'ledger']) {
-  test(`observer ${target} failure terminates child before ownership transfer`, async t => {
+  test(`observer ${target} failure terminates child before ownership transfer`, { concurrency: true }, async t => {
     const blocked = path.join(root, `observer-${target}-directory`);
     await mkdir(blocked);
     const program = `
@@ -150,7 +150,7 @@ for (const target of ['metadata', 'ledger']) {
     `;
     const child = spawn(process.execPath, ['--input-type=module', '-e', program], {
       env: { ...process.env, OWNER_LEDGER: ledger,
-        CC_LB_QA_FAULT_METADATA: target === 'metadata' ? blocked : path.join(root, 'observer-child.json'),
+        CC_LB_QA_FAULT_METADATA: target === 'metadata' ? blocked : path.join(root, `observer-${target}-child.json`),
         CC_LB_QA_LEDGER: target === 'ledger' ? blocked : ledger },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

@@ -1,0 +1,36 @@
+name: Setup WASM plugin test fixtures
+description: Restore or build prebuilt wasm32-unknown-unknown fixture plugins.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache prebuilt WASM plugin fixtures
+      id: wasm-cache
+      uses: actions/cache@v6
+      with:
+        path: target/wasm32-unknown-unknown/release/*.wasm
+        key: wasm-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('plugins/**', 'crates/cc-lb-pdk-wasmtime/**', 'crates/cc-lb-pdk-wasmtime-macros/**', 'crates/cc-lb-plugin-wire/**', 'Cargo.lock') }}
+
+    - name: Build WASM plugin fixtures on cache miss
+      if: steps.wasm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        RUSTFLAGS="" CARGO_ENCODED_RUSTFLAGS="" \
+          cargo build --locked --target wasm32-unknown-unknown --release \
+          -p wasmtime-shape-passthrough \
+          -p wasmtime-filter-service-tier \
+          -p wasmtime-dual-slot \
+          -p cache-aware-wasmtime
+
+    - name: Verify WASM plugin fixtures exist
+      shell: bash
+      run: |
+        set -euo pipefail
+        for fixture in \
+          wasmtime_shape_passthrough.wasm \
+          wasmtime_filter_service_tier.wasm \
+          wasmtime_dual_slot.wasm \
+          cache_aware_wasmtime.wasm; do
+          test -s "target/wasm32-unknown-unknown/release/$fixture"
+        done
