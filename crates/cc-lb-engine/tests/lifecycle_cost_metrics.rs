@@ -189,7 +189,7 @@ async fn run_case(
             .unwrap(),
     );
     storage.initialize().await.unwrap();
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn Storage>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn Storage>);
     let mut updates = bus.bus.subscribe();
     let mut events = bus.bus.subscribe_lifecycle();
     let pricing = cc_lb_pricing::spawn_lifecycle_pricing_subscriber(
@@ -282,6 +282,7 @@ async fn run_case(
         wire.as_bytes(),
         "provider bytes preserved"
     );
+    bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while !matches!(updates.recv().await.unwrap(), RequestEventUpdate::Final(_)) {}
     })

@@ -21,10 +21,10 @@ use cc_lb_engine::{
     RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
 };
 use cc_lb_observability::NoopMetricsHook;
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, RequestEvent, StoredApiKeyRecord};
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -227,11 +227,9 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     let authn = TestAuthn::new(state);
     let dir = tempfile::tempdir().expect("request event storage tempdir");
     let path = dir.path().join("latency-stages.sqlite");
-    let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+    let storage = common::templated_sqlite_storage(&path, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("request event storage opens");
-    storage.initialize().await.expect("initialize");
     let storage = Arc::new(storage);
     let bus = Arc::new(InMemoryBus::new());
     let assembler_rx = bus.attach_lifecycle_assembler(DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
@@ -359,7 +357,7 @@ async fn wait_for_events(storage: &SqliteStorage, expected: usize) -> Vec<Reques
                 events.len()
             );
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 

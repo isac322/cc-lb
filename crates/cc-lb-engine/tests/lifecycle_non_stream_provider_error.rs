@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
 use cc_lb_storage_api::RequestEvent;
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
@@ -245,7 +245,8 @@ async fn observe_429(
 ) -> Result<ObservedErrorResponse, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut event_updates = test_bus.bus.subscribe();
     let state = TestState::default();
     let mut headers = HeaderMap::new();
@@ -274,6 +275,7 @@ async fn observe_429(
         .expect("test request authenticates");
     let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, body) = collect_body(response).await;
+    test_bus.shutdown().await;
     let event = timeout(Duration::from_secs(1), async {
         loop {
             match event_updates
@@ -298,13 +300,9 @@ async fn observe_429(
 async fn sqlite_storage(
     dir: &tempfile::TempDir,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("provider-error.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(common::templated_sqlite_storage(
+        &dir.path().join("provider-error.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }

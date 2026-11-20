@@ -25,7 +25,7 @@ use cc_lb_engine::{
     DispatchError, Lifecycle, LifecycleConfig, ProviderScope, ProxyError, UpstreamDispatch,
 };
 use cc_lb_storage_api::{
-    MetaStore, StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
+    StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
     UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
     upstream::UpstreamKind,
 };
@@ -1246,6 +1246,7 @@ async fn provider_affinity_store_failures_use_native_503() -> Result<(), Box<dyn
         let storage = Arc::new(sqlite_storage(&dir).await?);
         let bus = TestLifecycleBus::new()
             .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut bus = bus;
         let mut events = lifecycle_receiver(&bus);
         let mut updates = bus.bus.subscribe();
         let store = Arc::new(MemoryAffinityStore::default());
@@ -1320,6 +1321,7 @@ async fn provider_affinity_store_failures_use_native_503() -> Result<(), Box<dyn
             )
             .await;
         }
+        bus.shutdown().await;
         assert_one_final(&mut updates).await;
         let rows = crate::common::stored_request_events(storage.as_ref()).await?;
         assert_eq!(rows.len(), 1);
@@ -1343,6 +1345,7 @@ async fn buffered_response_affinity_extraction_failure_uses_native_503_and_one_f
         let storage = Arc::new(sqlite_storage(&dir).await?);
         let bus = TestLifecycleBus::new()
             .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut bus = bus;
         let mut events = lifecycle_receiver(&bus);
         let mut updates = bus.bus.subscribe();
         let owner = Uuid::from_u128(2);
@@ -1405,6 +1408,7 @@ async fn buffered_response_affinity_extraction_failure_uses_native_503_and_one_f
             "upstream_affinity_unavailable",
         )
         .await;
+        bus.shutdown().await;
         assert_one_final(&mut updates).await;
         let rows = crate::common::stored_request_events(storage.as_ref()).await?;
         assert_eq!(rows.len(), 1);
@@ -1422,7 +1426,7 @@ async fn responses_sse_bind_failure_emits_native_failed_without_binding_pending_
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new()
+    let mut bus = TestLifecycleBus::new()
         .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
     let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
@@ -1483,6 +1487,7 @@ async fn responses_sse_bind_failure_emits_native_failed_without_binding_pending_
         "upstream_stream_error",
     )
     .await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = crate::common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -2217,22 +2222,14 @@ async fn gemini_cached_contents_body_collection_failure_returns_native_error_wit
 #[tokio::test]
 async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
     let temp_dir = tempfile::tempdir().expect("create sqlite tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        temp_dir.path().join("affinity.sqlite").display()
-    );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(
-            &database_url,
+        crate::common::templated_sqlite_storage(
+            &temp_dir.path().join("affinity.sqlite"),
             Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
         )
         .await
         .expect("open sqlite affinity storage"),
     );
-    storage
-        .initialize()
-        .await
-        .expect("initialize sqlite affinity storage");
     let old_record = storage
         .create(UpstreamCreate {
             id: Uuid::new_v4(),

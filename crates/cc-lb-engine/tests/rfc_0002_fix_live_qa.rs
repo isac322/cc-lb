@@ -13,7 +13,7 @@ use cc_lb_domain::{
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::StatusCode;
 use serde_json::Value;
@@ -33,7 +33,8 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
     let state = TestState::default();
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "rfc-0002-live-qa.sqlite").await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_pipeline(
         vec![Arc::new(KeepFilter {
             kept_upstream_ids: Vec::new(),
@@ -63,6 +64,7 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
         &[vec![upstream_id]]
     );
 
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     let event = &events[0];
     assert_eq!(event.status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
@@ -97,7 +99,7 @@ async fn wait_for_events(
         if std::time::Instant::now() >= deadline {
             panic!("expected {expected} request event(s), got {}", events.len());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
@@ -105,12 +107,11 @@ async fn sqlite_storage(
     dir: &tempfile::TempDir,
     file_name: &str,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(common::templated_sqlite_storage(
+        &dir.path().join(file_name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }
 
 fn lifecycle_with_pipeline(

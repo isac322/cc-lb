@@ -753,7 +753,7 @@ async fn observe_catalog(recorder: Arc<Recorder>, raw: Value) -> CatalogObservat
             .unwrap(),
     );
     storage.initialize().await.unwrap();
-    let bus = TestLifecycleBus::new().with_assembler(storage as Arc<dyn Storage>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage as Arc<dyn Storage>);
     let mut events_rx = bus.bus.subscribe_lifecycle();
     let mut updates_rx = bus.bus.subscribe();
     let lifecycle = lifecycle(recorder, Some("stored-project"), StatusCode::OK, raw)
@@ -762,7 +762,7 @@ async fn observe_catalog(recorder: Arc<Recorder>, raw: Value) -> CatalogObservat
     let auth = lifecycle.authenticate(request.headers()).await.unwrap();
     let (status, headers, body) =
         collect_body(lifecycle.handle(request, &auth).await.unwrap()).await;
-    let (events, recorded) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut events = Vec::new();
         loop {
             let event = events_rx.recv().await.expect("catalog lifecycle event");
@@ -772,17 +772,22 @@ async fn observe_catalog(recorder: Arc<Recorder>, raw: Value) -> CatalogObservat
                 break;
             }
         }
-        let recorded = loop {
+        events
+    })
+    .await
+    .expect("catalog termination is delivered");
+    bus.shutdown().await;
+    let recorded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
             if let RequestEventUpdate::Final(update) =
                 updates_rx.recv().await.expect("catalog request log update")
             {
                 break update.event;
             }
-        };
-        (events, recorded)
+        }
     })
     .await
-    .expect("catalog termination and final request log are delivered");
+    .expect("catalog final request log is delivered");
     CatalogObservation {
         status,
         headers,

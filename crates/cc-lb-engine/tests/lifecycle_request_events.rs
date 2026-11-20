@@ -20,7 +20,7 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind as StorageUpstreamKind, UpstreamRecord,
 };
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait, UpstreamStore};
+use cc_lb_storage_api::{Storage as StorageTrait, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -119,13 +119,33 @@ where
     (result, warnings)
 }
 
+async fn wait_for_terminated(
+    events: &mut tokio::sync::broadcast::Receiver<cc_lb_lifecycle::LifecycleEvent>,
+    expected: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut seen = 0;
+        while seen < expected {
+            if matches!(
+                events.recv().await.expect("lifecycle channel open"),
+                cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+            ) {
+                seen += 1;
+            }
+        }
+    })
+    .await
+    .expect("request terminates");
+}
+
 #[tokio::test]
 async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut update_rx = test_bus.bus.subscribe();
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let authn = TestAuthn::new(TestState::default());
     let upstream_id = uuid::Uuid::from_u128(1_204_001);
     let upstream = storage
@@ -198,19 +218,9 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
         let response = lifecycle.handle(request, &auth).await?;
         assert_eq!(response.status(), StatusCode::OK, "{path} response");
         response.into_body().collect().await?;
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if matches!(
-                    update_rx.recv().await.expect("request update delivered"),
-                    cc_lb_request_log::RequestEventUpdate::Final(_)
-                ) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("Gemini final request event arrives");
+        wait_for_terminated(&mut lifecycle_rx, 1).await;
     }
+    test_bus.shutdown().await;
 
     assert_eq!(
         dispatcher
@@ -240,8 +250,9 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut update_rx = test_bus.bus.subscribe();
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let state = TestState::default();
     let authn = TestAuthn::new(state);
     let upstream_id = uuid::Uuid::from_u128(1_093_001);
@@ -303,20 +314,9 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
         let response = lifecycle.handle(request, &auth).await?;
         assert_eq!(response.status(), StatusCode::OK, "{path} response");
         response.into_body().collect().await?;
-
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if matches!(
-                    update_rx.recv().await.expect("request update delivered"),
-                    cc_lb_request_log::RequestEventUpdate::Final(_)
-                ) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("OpenAI final request event arrives");
+        wait_for_terminated(&mut lifecycle_rx, 1).await;
     }
+    test_bus.shutdown().await;
 
     let events = crate::common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(events.len(), 2);
@@ -1342,7 +1342,9 @@ async fn responses_websocket_upstream_label_covers_unassigned_queued_and_failove
     let _guard = metrics::set_default_local_recorder(&recorder);
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut updates = test_bus.bus.subscribe();
     let mut gateway = responses_matrix_gateway(&test_bus).await;
     let unassigned = responses_matrix_admit(&mut gateway).await.unwrap();
@@ -1367,6 +1369,8 @@ async fn responses_websocket_upstream_label_covers_unassigned_queued_and_failove
         br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp_failover","usage":{"input_tokens":12,"output_tokens":16}}}"#
     );
     gateway.provider_message(1131, &terminal).await?;
+    wait_for_terminated(&mut lifecycle_rx, 4).await;
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut finals = 0;
         while finals < 4 {
@@ -1466,10 +1470,6 @@ async fn responses_websocket_incomplete_records_completed_metric_and_durable_war
     let _subscriber = tracing::dispatcher::set_default(&dispatch);
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut events = test_bus.bus.subscribe_lifecycle();
-    let mut updates = test_bus.bus.subscribe();
-    let mut gateway = responses_matrix_gateway(&test_bus).await;
     for (kind, id, expected_order) in [
         (
             "response.incomplete",
@@ -1482,6 +1482,11 @@ async fn responses_websocket_incomplete_records_completed_metric_and_durable_war
             vec!["usage", "stream", "terminated"],
         ),
     ] {
+        let mut test_bus =
+            TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+        let mut events = test_bus.bus.subscribe_lifecycle();
+        let mut updates = test_bus.bus.subscribe();
+        let mut gateway = responses_matrix_gateway(&test_bus).await;
         let turn = responses_matrix_admit(&mut gateway).await.unwrap();
         responses_matrix_send(&mut gateway, &turn, 0, id).await;
         let frame = Bytes::from(serde_json::to_vec(&serde_json::json!({
@@ -1526,6 +1531,7 @@ async fn responses_websocket_incomplete_records_completed_metric_and_durable_war
         .await
         .expect("terminal lifecycle arrives");
         assert_eq!(order, expected_order);
+        test_bus.shutdown().await;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if matches!(
@@ -1603,7 +1609,9 @@ async fn responses_websocket_incomplete_reason_scrubs_assigned_signer_credential
     const SECRET: &str = "custom-unprefixed-credential-7f9a2b";
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut updates = test_bus.bus.subscribe();
     let mut gateway = responses_matrix_gateway_with_signer_secret(&test_bus, Some(SECRET)).await;
     let turn = responses_matrix_admit(&mut gateway)
@@ -1646,6 +1654,8 @@ async fn responses_websocket_incomplete_reason_scrubs_assigned_signer_credential
     );
     gateway.close();
 
+    wait_for_terminated(&mut lifecycle_rx, 1).await;
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if matches!(
@@ -1682,7 +1692,9 @@ async fn responses_websocket_reused_connection_after_credential_rotation_scrubs_
     const NEW_SECRET: &str = "rotated-new-credential-beta-222";
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut updates = test_bus.bus.subscribe();
     let authn = TestAuthn::new(TestState::default());
     let upstream = UpstreamRecord {
@@ -1758,6 +1770,8 @@ async fn responses_websocket_reused_connection_after_credential_rotation_scrubs_
     assert!(std::str::from_utf8(&frame)?.contains(OLD_SECRET));
     gateway.close();
 
+    wait_for_terminated(&mut lifecycle_rx, 2).await;
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut final_count = 0;
         while final_count < 2 {
@@ -1797,7 +1811,9 @@ async fn responses_websocket_incomplete_with_error_records_provider_error()
     let _guard = metrics::set_default_local_recorder(&recorder);
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut updates = test_bus.bus.subscribe();
     let mut gateway = responses_matrix_gateway(&test_bus).await;
     let turn = responses_matrix_admit(&mut gateway).await.unwrap();
@@ -1807,6 +1823,8 @@ async fn responses_websocket_incomplete_with_error_records_provider_error()
     );
     assert!(gateway.provider_message(1131, &frame).await?.forward);
     gateway.close();
+    wait_for_terminated(&mut lifecycle_rx, 1).await;
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if matches!(
@@ -1854,7 +1872,9 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     );
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut update_rx = test_bus.bus.subscribe();
     let dispatcher = CapturingDispatch::default();
     let lifecycle = lifecycle_with_parts(
@@ -1873,6 +1893,8 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await?;
 
+    wait_for_terminated(&mut lifecycle_rx, 1).await;
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if matches!(
@@ -1915,14 +1937,6 @@ async fn aside_main_worker_and_title_identities_persist() -> Result<(), Box<dyn 
 {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut update_rx = test_bus.bus.subscribe();
-    let lifecycle = lifecycle_with_parts(
-        TestAuthn::new(TestState::default()),
-        Arc::new(CapturingDispatch::default()),
-        LifecycleConfig::default(),
-    )
-    .with_event_bus(test_bus.bus_arc());
 
     for (session_id, system, request_kind, parent_session_id) in [
         (
@@ -1944,6 +1958,16 @@ async fn aside_main_worker_and_title_identities_persist() -> Result<(), Box<dyn 
             None,
         ),
     ] {
+        let mut test_bus =
+            TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+        let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+        let mut update_rx = test_bus.bus.subscribe();
+        let lifecycle = lifecycle_with_parts(
+            TestAuthn::new(TestState::default()),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+        )
+        .with_event_bus(test_bus.bus_arc());
         let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
             "model": "claude-test",
             "system": system,
@@ -1961,6 +1985,8 @@ async fn aside_main_worker_and_title_identities_persist() -> Result<(), Box<dyn 
         let response = lifecycle.handle(request, &auth).await?;
         assert_eq!(response.status(), StatusCode::OK);
         response.into_body().collect().await?;
+        wait_for_terminated(&mut lifecycle_rx, 1).await;
+        test_bus.shutdown().await;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if matches!(
@@ -2107,13 +2133,9 @@ impl FilterPlugin for ResponsesRecordingModelFilter {
 async fn sqlite_storage(
     dir: &tempfile::TempDir,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("hermes-request-events.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(crate::common::templated_sqlite_storage(
+        &dir.path().join("hermes-request-events.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }

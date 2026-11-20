@@ -26,7 +26,7 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -70,7 +70,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let _dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-terminal.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_terminal(
         TerminalStrategy::FirstPick,
@@ -106,6 +106,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         choices.lock().expect("choices lock").as_slice(),
         &["second".to_owned()]
     );
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     let diag_records = test_bus.diagnostics_records();
     let trace = diag_records
@@ -131,7 +132,7 @@ async fn signer_build_failure_preserves_request_setup_timings()
     let choices = Arc::new(Mutex::new(Vec::new()));
     let _dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-signer-failure.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_terminal_and_signer_failure(
         TerminalStrategy::FirstPick,
@@ -152,6 +153,7 @@ async fn signer_build_failure_preserves_request_setup_timings()
     let response = lifecycle.handle(request, &auth).await?;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     let event = events.first().expect("signer failure event");
     assert_eq!(event.error_code.as_deref(), Some("signer_failed"));
@@ -311,7 +313,7 @@ async fn responses_semantic_sse_eof_native_failure_yield_preserves_upstream_erro
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "responses-eof-yield-drop.sqlite").await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut rx = lifecycle_receiver(&bus);
     let exhausted = Arc::new(AtomicBool::new(false));
     let prefix = Bytes::from_static(
@@ -404,6 +406,7 @@ event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\
     );
     assert!(upstream_body_ms.is_some());
     assert!(finalize_ms.is_some());
+    bus.shutdown().await;
     let rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1, "one durable request outcome");
     assert_eq!(rows[0].status, 200);
@@ -463,12 +466,11 @@ async fn sqlite_storage(
     dir: &tempfile::TempDir,
     file_name: &str,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(common::templated_sqlite_storage(
+        &dir.path().join(file_name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }
 
 async fn wait_for_events(

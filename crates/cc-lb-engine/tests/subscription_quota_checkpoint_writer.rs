@@ -5,9 +5,8 @@ use cc_lb_engine::{
     SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{
-    MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaStore,
+    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use sqlx::Row;
@@ -182,14 +181,12 @@ async fn latest_checkpoints(
 async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path()
-            .join("subscription-quota-checkpoint-writer.sqlite")
-            .display()
-    );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
-    storage.initialize().await?;
+    let storage = crate::common::templated_sqlite_storage(
+        &dir.path()
+            .join("subscription-quota-checkpoint-writer.sqlite"),
+        Arc::new(SystemClock),
+    )
+    .await?;
     Ok((dir, Arc::new(storage)))
 }
 
