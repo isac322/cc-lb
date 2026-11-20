@@ -236,7 +236,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  web-pricing-visuals:
+  web-pricing-after:
     runs-on: ubuntu-26.04
     # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
     # and shared libraries are baked in; CI must not depend on apt mirrors.
@@ -274,8 +274,45 @@ jobs:
           bun qa/capture-issue-1280-baseline.ts \
             . "$RUNNER_TEMP/issue-1280-visuals/after" "$served_sha" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
           printf '%s\n' "$served_sha" > "$RUNNER_TEMP/issue-1280-visuals/after-source.txt"
+      - name: Stage pricing after visuals for bun-checks bundle
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pricing-visuals-after-tmp-${{ github.sha }}
+          path: |
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/**/*.png
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/capture.json
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/provenance.json
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/source-sha.txt
+            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after-source.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  web-pricing-before:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
+    # and shared libraries are baked in; CI must not depend on apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "issue-1280-visual-root=$RUNNER_TEMP/issue-1280-visuals" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-web
+      - name: Verify Playwright image version
+        run: |
+          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
       - name: Capture matching base-branch pricing views
-        if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_MERGE_SHA: ${{ github.sha }}
@@ -292,22 +329,17 @@ jobs:
           bun qa/capture-issue-1280-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
             "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
-      - name: Publish pricing completeness visual evidence
-        if: always() && github.event_name == 'pull_request'
+      - name: Stage pricing before visuals for bun-checks bundle
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pricing-completeness-visuals-${{ github.sha }}
+          name: pricing-visuals-before-tmp-${{ github.sha }}
           path: |
-            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/**/*.png
-            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/capture.json
-            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/provenance.json
-            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after/source-sha.txt
-            ${{ steps.container-setup.outputs.issue-1280-visual-root }}/after-source.txt
             ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/*.png
             ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/capture.json
             ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/provenance.json
             ${{ steps.container-setup.outputs.issue-1280-visual-root }}/before/source-sha.txt
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
 
   bun-checks:
@@ -315,18 +347,40 @@ jobs:
     needs:
       - web-unit
       - web-e2e-visuals
-      - web-pricing-visuals
+      - web-pricing-after
+      - web-pricing-before
     if: ${{ always() }}
     runs-on: ubuntu-26.04
     permissions: {}
     timeout-minutes: 5
     steps:
+      - name: Download staged pricing after visuals
+        if: ${{ always() && github.event_name == 'pull_request' && needs.web-pricing-after.result == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: pricing-visuals-after-tmp-${{ github.sha }}
+          path: ${{ runner.temp }}/pricing-bundle
+      - name: Download staged pricing before visuals
+        if: ${{ always() && github.event_name == 'pull_request' && needs.web-pricing-before.result == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: pricing-visuals-before-tmp-${{ github.sha }}
+          path: ${{ runner.temp }}/pricing-bundle/before
+      - name: Publish pricing completeness visual evidence
+        if: ${{ always() && github.event_name == 'pull_request' && (needs.web-pricing-after.result == 'success' || needs.web-pricing-before.result == 'success') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pricing-completeness-visuals-${{ github.sha }}
+          path: ${{ runner.temp }}/pricing-bundle/**
+          retention-days: 14
+          if-no-files-found: error
       - name: Check web jobs passed
         env:
           RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          for job in web-unit web-e2e-visuals web-pricing-visuals; do
+          for job in web-unit web-e2e-visuals web-pricing-after; do
             result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
             echo "$job: $result"
             if [[ "$result" != "success" ]]; then
@@ -334,3 +388,14 @@ jobs:
               exit 1
             fi
           done
+          before_result=$(jq -er '.["web-pricing-before"].result // "missing"' <<<"$RESULTS")
+          echo "web-pricing-before: $before_result"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$before_result" != "success" ]]; then
+              echo "::error::web-pricing-before finished with result '$before_result'"
+              exit 1
+            fi
+          elif [[ "$before_result" != "skipped" ]]; then
+            echo "::error::web-pricing-before finished with unexpected result '$before_result'"
+            exit 1
+          fi

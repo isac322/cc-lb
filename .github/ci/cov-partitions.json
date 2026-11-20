@@ -50,7 +50,7 @@
     },
     {
       "name": "engine",
-      "needs_postgres": false,
+      "needs_postgres": true,
       "needs_wasm": false,
       "save_sccache": false,
       "runs": [

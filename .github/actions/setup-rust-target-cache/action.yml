@@ -12,7 +12,7 @@ inputs:
   target-dir:
     description: Cargo target directory path to restore.
     required: false
-    default: "target"
+    default: "target/debug"
   extra-cache-paths:
     description: Optional newline-separated extra paths to restore with target-dir.
     required: false
@@ -58,9 +58,9 @@ runs:
         set -euo pipefail
         rustc_hash="$(rustc -vV | tr '\n' ';' | sha256sum | cut -c1-16)"
         sccache_scope="${SCCACHE_SCOPE_INPUT:-$JOB_KEY}"
-        target_prefix="target-deps-v1-${RUNNER_OS}-${RUNNER_ARCH}-${JOB_KEY}-${rustc_hash}"
+        target_prefix="target-deps-v2-${RUNNER_OS}-${RUNNER_ARCH}-${JOB_KEY}-${rustc_hash}"
         target_key="${target_prefix}-${LOCK_HASH}"
-        sccache_prefix="sccache-v1-${RUNNER_OS}-${RUNNER_ARCH}-${sccache_scope}-${rustc_hash}"
+        sccache_prefix="sccache-v2-${RUNNER_OS}-${RUNNER_ARCH}-${sccache_scope}-${rustc_hash}"
         sccache_key="${sccache_prefix}-${LOCK_HASH}"
 
         {

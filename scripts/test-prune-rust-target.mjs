@@ -70,6 +70,15 @@ test('pruneTargetDir removes workspace artifacts paired with fingerprints and pr
     assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'tokio-0123456789abcdef', 'lib-tokio')), true);
     assert.equal(existsSync(path.join(debugDir, 'build', 'ring-0123456789abcdef', 'out', 'libring.a')), true);
     assert.equal(existsSync(path.join(debugDir, 'build', 'tokio', '0123456789abcdef', 'fingerprint', 'lib-tokio')), true);
+
+    // Direct profile dir invocation (e.g. target/debug or target/llvm-cov-target/debug).
+    touch(path.join(debugDir, 'deps', 'libcc_lb_server-aaaaaaaaaaaaaaaa.rlib'));
+    touch(path.join(debugDir, '.fingerprint', 'cc-lb-server-aaaaaaaaaaaaaaaa', 'lib-cc_lb_server'));
+    const directRes = pruneTargetDir(debugDir, SAMPLE_METADATA);
+    assert.equal(directRes.removedEntries, 2);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-aaaaaaaaaaaaaaaa.rlib')), false);
+    assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'cc-lb-server-aaaaaaaaaaaaaaaa')), false);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'libtokio-0123456789abcdef.rlib')), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

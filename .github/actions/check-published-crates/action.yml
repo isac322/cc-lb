@@ -18,7 +18,8 @@ runs:
       id: rust-cache
       with:
         cache-job-key: publish-check
-        sccache-scope: semver
+        sccache-scope: std
+        target-dir: target/debug
         extra-cache-paths: target/semver-checks
         stable-build-metadata: ${{ inputs.stable-build-metadata }}
 
@@ -86,9 +87,11 @@ runs:
       if: ${{ !cancelled() }}
       uses: ./.github/actions/save-rust-target-cache
       with:
+        target-dir: target/debug
         extra-cache-paths: target/semver-checks
         target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
         target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
-        save-sccache: "true"
+        save-target: "true"
+        save-sccache: "false"
         sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
         sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}

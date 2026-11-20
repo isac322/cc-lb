@@ -13,8 +13,8 @@ export default defineConfig({
   reporter: 'line',
   use: {
     baseURL: 'http://localhost:5173',
-    trace: 'on',
-    screenshot: 'on',
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   webServer: {
     command:

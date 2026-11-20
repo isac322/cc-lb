@@ -1,86 +1,47 @@
 name: Setup Rust tools
-description: Restore or install pinned Rust 1.99.1 toolchain and Cargo CLI tools with actions/cache.
+description: Restore or install pinned Rust 1.99.1 toolchain and shared Cargo CLI tools with a single unified cache.
 
 inputs:
   profile:
-    description: Tooling profile (fmt, clippy, deny, e2e, cov, semver)
-    required: true
+    description: Optional compatibility profile label (ignored; unified toolchain + tools cache is used).
+    required: false
+    default: "all"
 
 runs:
   using: composite
   steps:
-    - name: Resolve toolchain profile and RUSTUP_HOME
+    - name: Prepare RUSTUP_HOME
       id: spec
       shell: bash
-      env:
-        PROFILE: ${{ inputs.profile }}
       run: |
         set -euo pipefail
         rustup_home="${RUNNER_TEMP}/rustup"
         mkdir -p "$rustup_home" "${CARGO_HOME:-$HOME/.cargo}/bin"
         echo "RUSTUP_HOME=$rustup_home" >> "$GITHUB_ENV"
+        echo "rustup_home=$rustup_home" >> "$GITHUB_OUTPUT"
 
-        components=""
-        targets=""
-        tools=""
-        case "$PROFILE" in
-          fmt)
-            components="rustfmt"
-            ;;
-          clippy)
-            components="clippy"
-            tools="sccache"
-            ;;
-          deny)
-            tools="cargo-deny@0.20.2"
-            ;;
-          e2e)
-            targets="wasm32-unknown-unknown"
-            tools="sccache"
-            ;;
-          cov)
-            components="llvm-tools-preview"
-            targets="wasm32-unknown-unknown"
-            tools="cargo-llvm-cov,cargo-nextest,sccache,sqlx-cli@0.9.0"
-            ;;
-          semver)
-            tools="cargo-semver-checks@0.51.0,sccache"
-            ;;
-          *)
-            echo "::error::Unsupported setup-rust-tools profile: $PROFILE" >&2
-            exit 1
-            ;;
-        esac
-
-        {
-          echo "rustup_home=$rustup_home"
-          echo "components=$components"
-          echo "targets=$targets"
-          echo "tools=$tools"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Cache Rust toolchain and Cargo CLI binaries
+    - name: Cache unified Rust toolchain and Cargo CLI tools
       id: tools-cache
       uses: actions/cache@v6
       with:
         path: |
           ${{ steps.spec.outputs.rustup_home }}
           ~/.cargo/bin
-        key: rust-tools-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-${{ inputs.profile }}
+        key: rust-tools-v2-${{ runner.os }}-${{ runner.arch }}-1.99.1
 
     - name: Install Rust 1.99.1 toolchain
       if: steps.tools-cache.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.99.1
-        components: ${{ steps.spec.outputs.components }}
-        targets: ${{ steps.spec.outputs.targets }}
+        components: rustfmt,clippy,llvm-tools-preview
+        targets: wasm32-unknown-unknown
 
     - name: Install Cargo CLI tools
-      if: steps.tools-cache.outputs.cache-hit != 'true' && steps.spec.outputs.tools != ''
+      if: steps.tools-cache.outputs.cache-hit != 'true'
       uses: taiki-e/install-action@v2
       with:
-        tool: ${{ steps.spec.outputs.tools }}
+        tool: cargo-llvm-cov,cargo-nextest,sccache,sqlx-cli@0.9.0,cargo-deny@0.20.2,cargo-semver-checks@0.51.0
 
     - name: Export Cargo bin and verify Rust toolchain
       shell: bash

@@ -5,7 +5,7 @@ inputs:
   target-dir:
     description: Cargo target directory path to prune and save.
     required: false
-    default: "target"
+    default: "target/debug"
   extra-cache-paths:
     description: Optional newline-separated extra paths to save alongside target-dir.
     required: false
@@ -16,6 +16,10 @@ inputs:
   target-cache-key:
     description: Value of setup-rust-target-cache.outputs.target-cache-key
     required: true
+  save-target:
+    description: Whether this job should prune and save Layer 1 target cache on miss.
+    required: false
+    default: "true"
   save-sccache:
     description: Whether this job should save sccache Layer 2 on cache miss.
     required: false
@@ -41,7 +45,7 @@ runs:
         fi
 
     - name: Prune workspace artifacts from Layer 1 target directory
-      if: success() && inputs.target-cache-hit != 'true'
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true'
       id: prune
       shell: bash
       env:
@@ -54,7 +58,9 @@ runs:
         fi
         {
           echo "save_paths<<__EOF__"
-          echo "$TARGET_DIR_INPUT"
+          if [ -e "$TARGET_DIR_INPUT" ]; then
+            echo "$TARGET_DIR_INPUT"
+          fi
           if [ -n "$EXTRA_PATHS_INPUT" ]; then
             while IFS= read -r extra_path; do
               [ -n "$extra_path" ] && [ -e "$extra_path" ] && printf '%s\n' "$extra_path"
@@ -64,7 +70,7 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Save Layer 1 pruned Cargo target dependencies
-      if: success() && inputs.target-cache-hit != 'true'
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: ${{ steps.prune.outputs.save_paths }}

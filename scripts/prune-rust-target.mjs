@@ -131,6 +131,10 @@ export function pruneTargetDir(targetDir, metadata) {
   let removedEntries = removeCoverageFilesInDir(targetDir);
 
   const visited = new Set();
+  if (isProfileDir(targetDir)) {
+    const res = pruneProfileDir(targetDir, pkgPrefixes, targetPrefixes);
+    return { removedEntries: removedEntries + res.removedEntries };
+  }
   const queue = [targetDir];
   while (queue.length > 0) {
     const dir = queue.shift();

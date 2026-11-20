@@ -372,16 +372,19 @@ jobs:
         id: rust-cache
         with:
           cache-job-key: clippy-${{ matrix.features }}
-          sccache-scope: clippy-${{ matrix.features }}
+          sccache-scope: std
+          target-dir: target/debug
           stable-build-metadata: "true"
       - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
       - name: Show sccache stats and save caches
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
+          target-dir: target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
-          save-sccache: "true"
+          save-target: "true"
+          save-sccache: "false"
           sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
           sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
 
@@ -429,7 +432,7 @@ jobs:
             needs_wasm: false
             save_sccache: "false"
           - partition: engine
-            needs_postgres: false
+            needs_postgres: true
             needs_wasm: false
             save_sccache: "false"
           - partition: admin
@@ -457,9 +460,9 @@ jobs:
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
-          cache-job-key: cov-${{ matrix.partition }}
+          cache-job-key: cov
           sccache-scope: cov
-          target-dir: target/llvm-cov-target
+          target-dir: target/llvm-cov-target/debug
           stable-build-metadata: "true"
       - uses: ./.github/actions/setup-wasm-fixtures
         if: ${{ matrix.needs_wasm }}
@@ -477,9 +480,10 @@ jobs:
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
-          target-dir: target/llvm-cov-target
+          target-dir: target/llvm-cov-target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          save-target: ${{ matrix.save_sccache }}
           save-sccache: ${{ matrix.save_sccache }}
           sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
           sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
@@ -501,8 +505,9 @@ jobs:
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
-          cache-job-key: typestate-contracts
-          sccache-scope: typestate-contracts
+          cache-job-key: std
+          sccache-scope: std
+          target-dir: target/debug
           stable-build-metadata: "true"
       - name: Run compile-fail contract tests
         run: >-
@@ -516,9 +521,11 @@ jobs:
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
+          target-dir: target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
-          save-sccache: "true"
+          save-target: "false"
+          save-sccache: "false"
           sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
           sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
 
@@ -590,8 +597,9 @@ jobs:
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
-          cache-job-key: e2e
-          sccache-scope: e2e
+          cache-job-key: std
+          sccache-scope: std
+          target-dir: target/debug
           stable-build-metadata: "true"
       - uses: ./.github/actions/setup-wasm-fixtures
       - name: Cache installed real-client CLIs
@@ -622,8 +630,10 @@ jobs:
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
+          target-dir: target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          save-target: "true"
           save-sccache: "true"
           sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
           sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
