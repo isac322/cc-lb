@@ -506,6 +506,29 @@ Each item reports cc-lb's audit-write time as `recorded_at_unix_millis`, the nor
 }
 ```
 
+Vertex upstreams use the same `UpstreamCreateBody` shape with these additional
+fields:
+
+```json
+{
+  "name": "vertex-regional",
+  "kind": "vertex_api_key",
+  "api_key_value": "<GOOGLE_API_KEY>",
+  "project_id": "my-project",
+  "location": "us-central1",
+  "express": false,
+  "api_version": "v1"
+}
+```
+
+`location`, `express`, `google_credential`, `api_version`, and `project_id`
+are optional on create. They are meaningful only for `vertex_api_key` and
+`vertex_credential`. `google_credential` contains the JSON credential string
+for a regional `vertex_credential` upstream and is never returned. `express`
+selects the Vertex Express API-key target; regional targets require
+`project_id` and `location`. `api_version` is `v1` or `v1beta1`.
+
+
 `api_key_value` carries the literal API key. The API encrypts the credential for database storage and never returns the key; responses carry a masked `key_hint` instead. Keep literal credentials out of saved commands, shell history, and source control.
 
 `anthropic_api_key` creates also accept:
@@ -562,6 +585,26 @@ Any upstream `base_url` must use `http` or `https` and must not contain userinfo
   }
 }
 ```
+
+For Vertex responses, `vertex` is present for `vertex_api_key` and
+`vertex_credential` upstreams:
+
+```json
+"vertex": {
+  "project_id": "my-project",
+  "location": "us-central1",
+  "api_version": "v1",
+  "express": false,
+  "credential_type": "service_account",
+  "principal_hint": null,
+  "quota_project_id": null
+}
+```
+
+The response object contains exactly `project_id`, `location`, optional
+`api_version`, `express`, `credential_type`, `principal_hint`, and
+`quota_project_id`. Credential and principal values are metadata; the
+credential secret is never returned.
 
 `spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `status.last_warmup_at_unix_secs` is the time any warm-up lane last succeeded. `warmup_enabled` defaults to `true` for `anthropic_oauth`, `openai_oauth`, and `gemini_oauth` upstreams created through `POST /admin/v1/upstreams` or the OAuth sign-in flow. For API-key upstreams, omitted or `false` remains disabled and explicit `true` is rejected; see [docs/upstream-warmup.md](./upstream-warmup.md).
 

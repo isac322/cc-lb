@@ -71,7 +71,7 @@ const SECRET_PATTERNS: [&str; 16] = [
     r"api-key:\s*\S+",
     r"AIza[0-9A-Za-z_-]{20,}",
     r"\bya29\.[a-zA-Z0-9._~\-/+]+",
-    r"\bAQ[A-Za-z0-9_-]+",
+    r"\bAQ\.[A-Za-z0-9_-]{20,}",
     r"eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+",
     r#"[?&][kK][eE][yY]=[^&#\s"']+"#,
     r"AKIA[A-Z0-9]{16}",

@@ -10,6 +10,7 @@ use axum::{
     http::{Request, StatusCode},
     routing::any,
 };
+use cc_lb_storage_api::{UpstreamStatusUpdate, UpstreamStore};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -165,7 +166,7 @@ async fn qa_adm_4_update_without_replacement_rechecks_and_skip_is_honored() {
         &harness.app,
         "PATCH",
         &format!("/admin/v1/upstreams/{id}"),
-        Some(json!({"base_url":probe_url})),
+        Some(json!({"base_url":probe_url,"skip_preflight":true})),
         Some(&etag),
     )
     .await;
@@ -228,9 +229,19 @@ async fn qa_adm_7_vertex_api_key_update_rejects_credential_json() {
 #[tokio::test]
 async fn qa_adm_5_replacement_clears_terminal_and_stale_if_match_conflicts() {
     let harness = spawn_api_key_harness().await;
-    let (status, created, _) = request(&harness.app, "POST", "/admin/v1/upstreams", Some(json!({"name":"qa-adm-5","kind":"vertex_api_key","express":true,"api_key_value":"AIza-qa-adm-5","skip_preflight":true})), None).await;
+    let (status, created, _) = request(&harness.app, "POST", "/admin/v1/upstreams", Some(json!({"name":"qa-adm-5","kind":"vertex_credential","project_id":"project-qa-adm-5","location":"us-central1","google_credential":"{\"type\":\"authorized_user\",\"client_id\":\"client-id\",\"client_secret\":\"CLIENT-SECRET-VALUE\",\"refresh_token\":\"REFRESH-TOKEN-VALUE\"}","skip_preflight":true})), None).await;
     assert_eq!(status, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap();
+    UpstreamStore::set_status(
+        &*harness.storage,
+        id.parse().unwrap(),
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("invalid_grant".to_owned())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let (status, _, headers) = request(
         &harness.app,
         "GET",
@@ -256,7 +267,7 @@ async fn qa_adm_5_replacement_clears_terminal_and_stale_if_match_conflicts() {
         &harness.app,
         "PATCH",
         &format!("/admin/v1/upstreams/{id}"),
-        Some(json!({"api_key_value":"AIza-qa-adm-5","base_url":probe_url})),
+        Some(json!({"google_credential":"{\"type\":\"authorized_user\",\"client_id\":\"client-id-new\",\"client_secret\":\"CLIENT-SECRET-VALUE\",\"refresh_token\":\"REFRESH-TOKEN-VALUE\"}","base_url":probe_url,"skip_preflight":true})),
         Some(&etag),
     )
     .await;
@@ -274,6 +285,7 @@ async fn qa_adm_5_replacement_clears_terminal_and_stale_if_match_conflicts() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(persisted["base_url"], probe_url);
     assert_eq!(persisted["spec_revision"], 2);
+    assert_eq!(persisted["last_apply_error"], Value::Null);
 }
 
 #[tokio::test]

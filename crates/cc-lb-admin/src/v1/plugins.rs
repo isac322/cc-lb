@@ -1227,7 +1227,12 @@ fn provider_hook_credential_kinds(
                             vec!["anthropic_api_key".to_owned(), "anthropic_oauth".to_owned()]
                         }
                         "openai" => vec!["openai_api_key".to_owned(), "openai_oauth".to_owned()],
-                        "gemini" => vec!["gemini_api_key".to_owned(), "gemini_oauth".to_owned()],
+                        "gemini" => vec![
+                            "gemini_api_key".to_owned(),
+                            "gemini_oauth".to_owned(),
+                            "vertex_api_key".to_owned(),
+                            "vertex_credential".to_owned(),
+                        ],
                         _ => Vec::new(),
                     }
                 };

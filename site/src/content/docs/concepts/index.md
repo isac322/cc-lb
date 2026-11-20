@@ -6,13 +6,11 @@ slug: docs/concepts
 
 cc-lb presents one operator-managed endpoint while keeping upstream and principal state explicit. The request path classifies traffic, builds an eligible candidate set, applies routing filters, and sends the request through the selected upstream.
 
-## The five mechanisms
+## The eight upstream kinds
 
-1. **Upstream pooling** supports `anthropic_api_key`, `anthropic_oauth`, `openai_api_key`, `openai_oauth`, `gemini_api_key`, and `gemini_oauth`, with candidates selected for the request's provider and operation.
-2. **Session cache continuity** uses a best-effort keepalive scheduler within provider-specific eligibility limits.
-3. **Quota pacing** applies cost-first selection and weekly pace constraints to candidate choice.
-4. **Dynamic views** rebind runtime state after database-backed changes.
-5. **Wasmtime hooks** let operators add filter and shape behavior without changing proxy code.
+cc-lb supports `anthropic_api_key`, `anthropic_oauth`, `openai_api_key`, `openai_oauth`, `gemini_api_key`, `gemini_oauth`, `vertex_api_key`, and `vertex_credential`.
+
+The routing model also combines session cache continuity, quota pacing, dynamic views, and Wasmtime hooks.
 
 Read the focused pages for the behavior and its limits:
 

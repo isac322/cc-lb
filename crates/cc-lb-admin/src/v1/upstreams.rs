@@ -1029,30 +1029,6 @@ async fn create_upstream(
     let id = Uuid::new_v4();
     let name = body.name.clone();
     let kind = body.kind;
-    let effective_project_id = body.project_id.clone().or_else(|| {
-        if kind == UpstreamKind::VertexCredential {
-            body.google_credential.as_deref().and_then(|raw| {
-                serde_json::from_str::<serde_json::Value>(raw)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("project_id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    })
-            })
-        } else {
-            None
-        }
-    });
-    let vertex = validate_vertex_fields(
-        kind,
-        effective_project_id.as_deref(),
-        body.location.as_deref(),
-        body.express,
-        body.google_credential.as_deref(),
-        body.api_version,
-    )?;
     let vertex_credential = if kind == UpstreamKind::VertexCredential {
         let raw = body
             .google_credential
@@ -1070,6 +1046,24 @@ async fn create_upstream(
     } else {
         None
     };
+    let effective_project_id = body.project_id.clone().or_else(|| {
+        vertex_credential.as_ref().and_then(|credential| {
+            serde_json::to_value(credential).ok().and_then(|value| {
+                value
+                    .get("project_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+        })
+    });
+    let vertex = validate_vertex_fields(
+        kind,
+        effective_project_id.as_deref(),
+        body.location.as_deref(),
+        body.express,
+        body.google_credential.as_deref(),
+        body.api_version,
+    )?;
     let stored_base_url = if matches!(
         kind,
         UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
@@ -1168,6 +1162,12 @@ async fn create_upstream(
                 detail: "Vertex credential upstreams do not accept api_key_value".to_owned(),
             });
         }
+    }
+    if let Some(existing) = UpstreamStore::get_by_name(storage, &name).await? {
+        return Err(UpstreamError::NameConflict {
+            name: name.clone(),
+            existing_id: existing.id,
+        });
     }
     let mut vertex_preflight_access = None;
     if kind == UpstreamKind::VertexCredential && !body.skip_preflight {
@@ -3013,9 +3013,22 @@ async fn update_upstream(
                         Ok::<_, UpstreamError>(key)
                     })
                     .transpose()?;
+                let check = if body.skip_preflight {
+                    new_key.as_ref().map(|key| {
+                        KeyCheck::unverified(
+                            key,
+                            None,
+                            current.kind,
+                            body.project_id.as_deref(),
+                            cc_lb_clock::unix_secs(state.clock.now()),
+                        )
+                    })
+                } else {
+                    vertex_key_check
+                };
                 PreparedApiKeyUpdate {
                     new_key,
-                    check: vertex_key_check,
+                    check,
                     workspace_id: None,
                     reset_poll_state: body.api_key_value.is_some(),
                 }
@@ -3128,25 +3141,24 @@ async fn update_upstream(
                 .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
                 .transpose()?
         };
-        let vertex_access_update = vertex_replacement.as_ref().map(|credential| {
-            if let Some(access) = vertex_credential_access.take() {
-                return access;
-            }
-            let project_id = vertex_update
-                .as_ref()
-                .and_then(|config| match &config.target {
-                    VertexTarget::Regional { project_id, .. } => Some(project_id.as_ref()),
-                    VertexTarget::Express => None,
-                });
-            vertex_access(
-                false,
-                credential.principal_hint().to_owned(),
-                project_id,
-                None,
-                cc_lb_clock::unix_secs(state.clock.now()),
-                vec![RemediationCode::ProbeUnreachable],
-                None,
-            )
+        let vertex_access_update = vertex_credential_access.take().or_else(|| {
+            vertex_replacement.as_ref().map(|credential| {
+                let project_id = vertex_update
+                    .as_ref()
+                    .and_then(|config| match &config.target {
+                        VertexTarget::Regional { project_id, .. } => Some(project_id.as_ref()),
+                        VertexTarget::Express => None,
+                    });
+                vertex_access(
+                    false,
+                    credential.principal_hint().to_owned(),
+                    project_id,
+                    None,
+                    cc_lb_clock::unix_secs(state.clock.now()),
+                    vec![RemediationCode::ProbeUnreachable],
+                    None,
+                )
+            })
         });
         let base_url_written = body.base_url.is_some() || body.clear_base_url;
         let (old_host, new_host) = if base_url_written {

@@ -438,15 +438,7 @@ async fn mint_credential(
             // the outer two-strike terminal latch instead of being hidden behind a
             // freshly-created inner source's backoff state.
             let mut source_token =
-                Box::pin(mint_credential(&imp.source_credentials, transport, clock))
-                    .await
-                    .map_err(|e| {
-                        if matches!(e, MintError::Unauthorized | MintError::IamUnauthorized) {
-                            MintError::IamUnauthorized
-                        } else {
-                            e
-                        }
-                    })?;
+                Box::pin(mint_credential(&imp.source_credentials, transport, clock)).await?;
             let body = serde_json::to_vec(&json!({ "delegates": imp.delegates, "scope": [CLOUD_PLATFORM_SCOPE], "lifetime": "3600s" })).map_err(|_| MintError::MalformedResponse)?;
             // `BearerToken.header` already carries the `Bearer ` scheme.
             let mut headers = vec![(
@@ -471,15 +463,8 @@ async fn mint_credential(
                 .await
                 .map_err(|_| MintError::Transport)?;
             let response = if first.status == 401 {
-                source_token = Box::pin(mint_credential(&imp.source_credentials, transport, clock))
-                    .await
-                    .map_err(|e| {
-                        if matches!(e, MintError::Unauthorized | MintError::IamUnauthorized) {
-                            MintError::IamUnauthorized
-                        } else {
-                            e
-                        }
-                    })?;
+                source_token =
+                    Box::pin(mint_credential(&imp.source_credentials, transport, clock)).await?;
                 headers[0] = (
                     "authorization".to_owned(),
                     source_token.header.to_str().unwrap_or_default().to_owned(),
@@ -806,5 +791,27 @@ mod tests {
             Err(MintError::InvalidGrantTerminal)
         ));
         assert_eq!(transport.calls.lock().expect("calls").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn qa_tok_impersonated_source_401_is_terminal_invalid_client() {
+        let credential = crate::parse_credential(
+            br#"{"type":"impersonated_service_account","service_account_impersonation_url":"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/target@project.iam.gserviceaccount.com:generateAccessToken","source_credentials":{"type":"authorized_user","client_id":"client-id","client_secret":"CLIENT-SECRET","refresh_token":"REVOKED"}}"#,
+        )
+        .expect("credential");
+        let transport = Arc::new(CaptureTransport {
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![TokenResponse {
+                status: 401,
+                headers: vec![],
+                body: br#"{"error":"invalid_client"}"#.to_vec(),
+            }]),
+        });
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+
+        assert!(matches!(
+            mint_once(&credential, transport, clock).await,
+            Err(MintError::Unauthorized)
+        ));
     }
 }

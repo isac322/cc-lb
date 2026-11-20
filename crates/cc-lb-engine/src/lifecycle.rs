@@ -5910,7 +5910,7 @@ impl Lifecycle {
             handle_span: &handle_span,
             enabled: request_affinity.is_none(),
             excluded: Vec::new(),
-            vertex_rate_limited_scope: None,
+            vertex_rate_limited_scopes: HashSet::new(),
             upstream_attempts: 1,
         };
         let mut attempt_num: u32 = 0;
@@ -13356,6 +13356,18 @@ fn route_for_record(
     let raw_passthrough_base_url = record.base_url.clone().or_else(|| {
         (record.kind == StorageUpstreamKind::GeminiOauth).then(|| default_base_url(record.kind))
     });
+    if matches!(
+        record.kind,
+        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
+    ) && raw_passthrough_base_url.is_none()
+        && record
+            .vertex
+            .as_ref()
+            .and_then(|config| Url::parse(&vertex_origin(&config.target)).ok())
+            .is_none()
+    {
+        return Err("Vertex route has no configured origin".to_owned());
+    }
     let upstream = upstream_for_record(record)?;
     let dialect = cached
         .resolved_dialect(record.id)
@@ -13385,7 +13397,7 @@ pub fn native_route_dialect(record: &UpstreamRecord) -> Arc<dyn UpstreamDialect>
                         .as_ref()
                         .and_then(|config| Url::parse(&vertex_origin(&config.target)).ok())
                 })
-                .expect("Vertex route has a configured origin"),
+                .unwrap_or_else(|| default_base_url(record.kind)),
             _ => record
                 .base_url
                 .clone()
@@ -13492,8 +13504,8 @@ struct FailoverRouter<'a> {
     /// is account-bound).
     enabled: bool,
     excluded: Vec<Uuid>,
-    /// Vertex scope keys excluded after a Vertex rate-limit observation.
-    vertex_rate_limited_scope: Option<(String, String)>,
+    /// Vertex scope keys excluded after Vertex rate-limit observations.
+    vertex_rate_limited_scopes: HashSet<(String, String)>,
     upstream_attempts: u8,
 }
 
@@ -13530,17 +13542,20 @@ impl<'a> FailoverRouter<'a> {
                 failed.record.kind,
                 StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
             )
+            && let Some(scope) = vertex_scope(failed.record)
         {
-            self.vertex_rate_limited_scope = vertex_scope(failed.record);
+            self.vertex_rate_limited_scopes.insert(scope);
         }
-        if let Some(scope) = self.vertex_rate_limited_scope.as_ref() {
+        if !self.vertex_rate_limited_scopes.is_empty() {
             candidates.retain(|candidate| {
                 self.view
                     .upstreams_snapshot()
                     .iter()
                     .find(|record| record.id == candidate.upstream_id)
                     .and_then(vertex_scope)
-                    .is_none_or(|candidate_scope| &candidate_scope != scope)
+                    .is_none_or(|candidate_scope| {
+                        !self.vertex_rate_limited_scopes.contains(&candidate_scope)
+                    })
             });
         }
         // The last allowed attempt goes to an API key when one remains.

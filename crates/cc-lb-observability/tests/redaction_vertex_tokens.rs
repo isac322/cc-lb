@@ -3,11 +3,12 @@ use cc_lb_observability::{REDACTED, RedactionPolicy};
 #[test]
 fn qa_sec_2_redacts_vertex_tokens_and_credentials() {
     let output = RedactionPolicy::default().redact_text(
-        r#"google_credential={"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----"} ya29.access-token AQrefresh eyJheader.eyJpayload.signature"#,
+        r#"google_credential={"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----"} ya29.access-token AQ.Ab8abcdefghijklmnopqrst eyJheader.eyJpayload.signature AQUA"#,
     );
     assert!(!output.contains("ya29.access-token"));
-    assert!(!output.contains("AQrefresh"));
+    assert!(!output.contains("AQ.Ab8abcdefghijklmnopqrst"));
     assert!(!output.contains("eyJheader.eyJpayload.signature"));
+    assert!(output.contains("AQUA"));
     assert!(output.contains(REDACTED));
 }
 

@@ -18,6 +18,46 @@ The [consistency contract](/docs/reference/source/consistency-contract/) lists w
 | Plugins | `GET /admin/v1/plugins/registry`, `POST /admin/v1/plugins/wasm` |
 | Status | `GET /admin/v1/status`, `GET /admin/v1/export` |
 
+
+### Upstream Vertex fields
+
+`POST /admin/v1/upstreams` accepts `UpstreamCreateBody`. `PUT
+/admin/v1/upstreams/{id}` accepts `UpstreamUpdateBody`; update fields are
+optional. Both request bodies expose these Vertex fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `google_credential` | string | Regional Vertex credential JSON. Secret; never returned. |
+| `project_id` | string | Google Cloud project identifier or number. |
+| `location` | string | Regional Vertex location. |
+| `express` | boolean | Selects the Vertex Express API-key target. |
+| `api_version` | `"v1"` \| `"v1beta1"` | Vertex API path version. |
+
+These fields are accepted only for `vertex_api_key` and
+`vertex_credential`. Regional targets require `project_id` and `location`;
+Express targets use an API key and do not use those regional fields.
+
+`UpstreamResponse` includes a `vertex` object for Vertex kinds and `null` or
+omits it for other kinds:
+
+```json
+{
+  "vertex": {
+    "project_id": "my-project",
+    "location": "us-central1",
+    "api_version": "v1",
+    "express": false,
+    "credential_type": "service_account",
+    "principal_hint": null,
+    "quota_project_id": null
+  }
+}
+```
+
+The response object fields are `project_id`, `location`, optional
+`api_version`, `express`, `credential_type`, `principal_hint`, and
+`quota_project_id`. Credential secrets are never included.
+
 Every mutating request should use the current ETag or revision when the endpoint documents one. Handle `409` conflicts by reading the latest resource and presenting the new state to the operator.
 
 ## OAuth flow

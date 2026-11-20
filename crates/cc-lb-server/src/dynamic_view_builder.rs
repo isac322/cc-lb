@@ -996,7 +996,7 @@ async fn apply_upstreams(
                 | UpstreamKind::GeminiOauth
                 | UpstreamKind::VertexCredential
         );
-        let last_apply_error = if is_oauth {
+        let mut last_apply_error = if is_oauth {
             upstream.last_apply_error.clone()
         } else {
             None
@@ -1088,14 +1088,20 @@ async fn apply_upstreams(
             continue;
         }
 
-        // Applying a view cannot prove the refresh token usable. Only a real
-        // OAuth token write clears its renewal error; avoiding a status write
-        // here also preserves a terminal failure arriving during this build.
-        if !is_oauth {
+        // A successful validation clears stale non-terminal Vertex credential
+        // errors, while terminal replacement markers remain authoritative.
+        if !is_oauth
+            || (upstream.kind == UpstreamKind::VertexCredential
+                && last_apply_error.is_some()
+                && !cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                    last_apply_error.as_deref(),
+                ))
+        {
             stores
                 .upstreams
                 .set_last_apply_error(upstream.id, None)
                 .await?;
+            last_apply_error = None;
         }
         statuses.insert(
             upstream.name.clone(),

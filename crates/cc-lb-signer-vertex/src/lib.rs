@@ -252,6 +252,9 @@ fn vertex_path(cfg: &VertexUpstreamConfig, route: Route, model: Option<&str>) ->
             }
             VertexTarget::Express => format!("/{version}/cachedContents"),
         },
+        // The publisher model catalog (`publishers.models.list/get`) is a
+        // projectless resource: Vertex returns 404 for the
+        // `projects/{p}/locations/{l}/publishers/...` form, even on regional hosts.
         Route::Models => format!("/{version}/publishers/google/models"),
         Route::ModelGet => format!(
             "/{version}/publishers/google/models/{}",
@@ -1196,7 +1199,7 @@ mod tests {
 
         let live = deeply_nested(
             br#"{"setup":{"model":"models/gemini","generationConfig":"#,
-            br#"}}}"#,
+            br#"}}"#,
         );
         assert!(rewrite_live_setup_model(&live, &cfg).is_err());
     }
