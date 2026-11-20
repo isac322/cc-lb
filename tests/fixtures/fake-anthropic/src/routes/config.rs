@@ -27,6 +27,9 @@ pub struct AppConfig {
     /// Holds every org usage-report response until released, after the
     /// request is recorded; lets a test keep one poll in flight.
     pub usage_report_pause: Option<OAuthRefreshPause>,
+    /// Holds SSE streaming after yielding the first `content_block_delta`
+    /// until released; lets a test keep an in-flight stream open deterministically.
+    pub stream_pause_after_first_delta: Option<OAuthRefreshPause>,
     pub message_script: Option<MessageScript>,
     pub weather: WeatherConfig,
     /// Per-key scripted answers; keys without a policy keep the default
@@ -44,6 +47,7 @@ impl Default for AppConfig {
             tokens_expire_in: 3600,
             oauth_refresh_pause: None,
             usage_report_pause: None,
+            stream_pause_after_first_delta: None,
             message_script: None,
             weather: WeatherConfig::default(),
             key_policies: KeyPolicies::default(),

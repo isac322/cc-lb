@@ -1,4 +1,9 @@
-use std::{str::FromStr, sync::Arc, time::Instant};
+use std::{
+    path::Path,
+    str::FromStr,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use cc_lb_storage_api::{
     MetaStore, RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore,
@@ -13,22 +18,53 @@ const UPSTREAM: &str = "00000000-0000-0000-0000-000000001300";
 
 type Row = (String, i64, String, i64);
 
+async fn open_templated_v125(path: &Path) -> (String, SqliteConnection) {
+    static V125_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+    let bytes = V125_TEMPLATE.get_or_init(|| {
+        std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build v125 template runtime");
+            rt.block_on(async {
+                let dir = tempfile::tempdir().expect("v125 template dir");
+                let template_path = dir.path().join("v125.sqlite");
+                let url = format!("sqlite://{}", template_path.display());
+                let options = SqliteConnectOptions::from_str(&url)
+                    .unwrap()
+                    .create_if_missing(true);
+                let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+                sqlx::query("PRAGMA synchronous = OFF; PRAGMA journal_mode = DELETE;")
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+                sqlx::migrate!("./migrations")
+                    .run_direct(Some(125), &mut connection, false)
+                    .await
+                    .unwrap();
+                connection.close().await.unwrap();
+                std::fs::read(&template_path).expect("read v125 template bytes")
+            })
+        })
+        .join()
+        .expect("v125 template thread")
+    });
+    std::fs::write(path, bytes).expect("write v125 sqlite template");
+    let url = format!("sqlite://{}", path.display());
+    let options = SqliteConnectOptions::from_str(&url).unwrap();
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::query("PRAGMA synchronous = OFF;")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    (url, connection)
+}
+
 #[tokio::test]
 async fn startup_attribution_resumes_committed_batches_without_double_counting() {
     let dir = tempfile::tempdir().unwrap();
-    let url = format!(
-        "sqlite://{}",
-        dir.path().join("attribution.sqlite").display()
-    );
-    let options = SqliteConnectOptions::from_str(&url)
-        .unwrap()
-        .create_if_missing(true);
-    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    let (url, mut connection) = open_templated_v125(&dir.path().join("attribution.sqlite")).await;
     let migrator = sqlx::migrate!("./migrations");
-    migrator
-        .run_direct(Some(125), &mut connection, false)
-        .await
-        .unwrap();
     sqlx::raw_sql(
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10001)
          INSERT INTO request_events_v1
@@ -156,11 +192,12 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
         .unwrap();
         assert_eq!(total, 10002);
     }
-    let fresh_url = format!("sqlite://{}", dir.path().join("fresh.sqlite").display());
-    let fresh = cc_lb_storage_sqlite::open_sqlite(&fresh_url, Arc::new(cc_lb_clock::SystemClock))
-        .await
-        .unwrap();
-    fresh.initialize().await.unwrap();
+    let fresh = super::common::templated_sqlite_storage(
+        &dir.path().join("fresh.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .unwrap();
     fresh.verify_schema_current().await.unwrap();
     assert_eq!(shape(&storage).await, shape(&fresh).await);
     assert!(snapshot(&fresh).await.is_empty());
@@ -170,18 +207,7 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
 async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkpoint() {
     for prune_history in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!(
-            "sqlite://{}",
-            dir.path().join("identities.sqlite").display()
-        );
-        let options = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-        sqlx::migrate!("./migrations")
-            .run_direct(Some(125), &mut connection, false)
-            .await
-            .unwrap();
+        let (url, connection) = open_templated_v125(&dir.path().join("identities.sqlite")).await;
         connection.close().await.unwrap();
         let storage =
             cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
@@ -400,18 +426,8 @@ async fn shape(storage: &SqliteStorage) -> Vec<(String, String)> {
 async fn startup_attribution_rejects_insufficient_and_exhausted_legacy_totals() {
     for (legacy_count, ambiguous) in [(1_i64, false), (1000, false), (1, true), (1000, true)] {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!(
-            "sqlite://{}",
-            dir.path().join("undercount.sqlite").display()
-        );
-        let options = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-        sqlx::migrate!("./migrations")
-            .run_direct(Some(125), &mut connection, false)
-            .await
-            .unwrap();
+        let (url, mut connection) =
+            open_templated_v125(&dir.path().join("undercount.sqlite")).await;
         sqlx::query(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?)
              INSERT INTO request_events_v1
@@ -517,18 +533,7 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
         "hour-fallback",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!(
-            "sqlite://{}",
-            dir.path().join("name-reuse.sqlite").display()
-        );
-        let options = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-        sqlx::migrate!("./migrations")
-            .run_direct(Some(125), &mut connection, false)
-            .await
-            .unwrap();
+        let (url, connection) = open_templated_v125(&dir.path().join("name-reuse.sqlite")).await;
         connection.close().await.unwrap();
         let storage =
             cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
@@ -748,11 +753,12 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
 #[tokio::test]
 async fn global_only_sentinels_remain_distinct_from_unknown_uuid_and_invalid_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let url = format!("sqlite://{}", dir.path().join("sentinels.sqlite").display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&url, Arc::new(cc_lb_clock::SystemClock))
-        .await
-        .unwrap();
-    storage.initialize().await.unwrap();
+    let storage = super::common::templated_sqlite_storage(
+        &dir.path().join("sentinels.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .unwrap();
     sqlx::raw_sql(
         "INSERT INTO overview_excluded_error_rollups_v1
          (resolution,bucket_start_unix_secs,upstream_id,error_count,updated_at)
@@ -820,18 +826,8 @@ async fn global_only_sentinels_remain_distinct_from_unknown_uuid_and_invalid_ids
 async fn partial_retention_batch_cannot_certify_a_name_only_event_owner() {
     for partial_prune in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!(
-            "sqlite://{}",
-            dir.path().join("partial-retention.sqlite").display()
-        );
-        let options = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-        sqlx::migrate!("./migrations")
-            .run_direct(Some(125), &mut connection, false)
-            .await
-            .unwrap();
+        let (url, mut connection) =
+            open_templated_v125(&dir.path().join("partial-retention.sqlite")).await;
         // The retention cutoff lies inside the current minute. Old raw events
         // expire, but events at +30/+40/+90 seconds remain legitimate history.
         sqlx::raw_sql(

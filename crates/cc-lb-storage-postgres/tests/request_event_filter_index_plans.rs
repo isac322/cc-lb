@@ -390,22 +390,31 @@ async fn run_gate(pool: &PgPool) -> Result<()> {
         );
     }
 
+    sqlx::query("ALTER TABLE request_events_v1 SET UNLOGGED")
+        .execute(pool)
+        .await?;
+
     // Autocommitted batches: the xmin horizon is cluster-wide, so one long
     // 200k-row transaction would hold back xmin-guarded reads (tail cursor,
     // delta, usage rollup) in every concurrently running test process.
     for batch_start in (1..=ROWS).step_by(usize::try_from(SEED_BATCH_ROWS)?) {
         let batch_end = (batch_start + SEED_BATCH_ROWS - 1).min(ROWS);
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL synchronous_commit = off")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(SEED_SQL)
             .bind(ROWS)
             .bind(i64::try_from(BASE_MS)?)
             .bind(i64::try_from(SPAN_DAYS * DAY_MS)?)
             .bind(batch_start)
             .bind(batch_end)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .with_context(|| {
                 format!("seed synthetic request events {batch_start}..={batch_end}")
             })?;
+        tx.commit().await?;
     }
     // (Index builds below are each one short transaction on this schema's
     // private table; nothing here touches another schema.)

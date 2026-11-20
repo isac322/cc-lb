@@ -1,6 +1,10 @@
 #![cfg(feature = "sqlite")]
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use async_trait::async_trait;
 use cc_lb_clock::{ClockHandle, SystemClock, TestClock};
@@ -17,14 +21,66 @@ use cc_lb_storage_conformance::{
         upstream_subscription_quota_store, usage_rollup_principal_costs, warmup_attempts_store,
     },
 };
-use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite, open_sqlite_existing};
+use sqlx::Connection as _;
 use tokio::runtime::Runtime;
 
-struct SqliteConformanceBackend;
+struct SqliteConformanceBackend {
+    use_template: bool,
+}
 
 struct SqliteFixture {
     _dir: tempfile::TempDir,
+    path: PathBuf,
     database_url: String,
+}
+
+async fn templated_sqlite_storage(path: &std::path::Path) -> anyhow::Result<SqliteStorage> {
+    let url = format!("sqlite://{}", path.display());
+    if path.exists() {
+        return Ok(open_sqlite_existing(&url, system_clock()).await?);
+    }
+    static TEMPLATE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    let bytes = TEMPLATE_BYTES.get_or_init(|| {
+        std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build conformance template sqlite runtime");
+            rt.block_on(async {
+                let dir = tempfile::tempdir().expect("conformance template sqlite dir");
+                let template_path = dir.path().join("template.sqlite");
+                let url = format!("sqlite://{}", template_path.display());
+                let storage = open_sqlite(&url, system_clock())
+                    .await
+                    .expect("open conformance template sqlite");
+                storage
+                    .initialize()
+                    .await
+                    .expect("initialize conformance template sqlite");
+                storage.pool().close().await;
+                let mut conn = sqlx::SqliteConnection::connect(&url)
+                    .await
+                    .expect("connect conformance template sqlite for checkpoint");
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut conn)
+                    .await
+                    .expect("checkpoint conformance template sqlite");
+                sqlx::query("PRAGMA journal_mode = DELETE")
+                    .execute(&mut conn)
+                    .await
+                    .expect("switch conformance template sqlite journal mode");
+                conn.close()
+                    .await
+                    .expect("close conformance template sqlite");
+                std::fs::read(&template_path).expect("read conformance template sqlite bytes")
+            })
+        })
+        .join()
+        .expect("conformance template sqlite thread")
+    });
+    std::fs::write(path, bytes)?;
+    Ok(open_sqlite_existing(&url, system_clock()).await?)
 }
 
 #[async_trait]
@@ -38,11 +94,15 @@ impl ConformanceBackend for SqliteConformanceBackend {
         let database_url = format!("sqlite://{}", path.display());
         Ok(SqliteFixture {
             _dir: dir,
+            path,
             database_url,
         })
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
+        if self.use_template {
+            return templated_sqlite_storage(&fixture.path).await;
+        }
         let storage = open_sqlite(&fixture.database_url, system_clock()).await?;
         storage.initialize().await?;
         Ok(storage)
@@ -146,8 +206,11 @@ fn meta_compare_and_put_sqlite() {
 
 #[test]
 fn meta_backend_kind_stamp_sqlite() {
-    run_sqlite_scenario(
+    run_sqlite_scenario_with_backend(
         "meta_backend_kind_stamp",
+        SqliteConformanceBackend {
+            use_template: false,
+        },
         cc_lb_storage_conformance::scenarios::revisioning_meta::meta_backend_kind_stamp,
     );
 }
@@ -762,9 +825,24 @@ where
     F: FnOnce(Arc<SqliteConformanceBackend>) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    run_sqlite_scenario_with_backend(
+        name,
+        SqliteConformanceBackend { use_template: true },
+        scenario,
+    );
+}
+
+fn run_sqlite_scenario_with_backend<F, Fut>(
+    name: &str,
+    backend: SqliteConformanceBackend,
+    scenario: F,
+) where
+    F: FnOnce(Arc<SqliteConformanceBackend>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     Runtime::new()
         .expect("tokio runtime")
-        .block_on(scenario(Arc::new(SqliteConformanceBackend)))
+        .block_on(scenario(Arc::new(backend)))
         .unwrap_or_else(|error| panic!("{name} sqlite: {error}"));
 }
 

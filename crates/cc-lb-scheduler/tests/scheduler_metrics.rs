@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::str::FromStr as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use apalis::prelude::TaskSink;
@@ -29,6 +30,7 @@ use cc_lb_scheduler::worker::{SqliteSchedulerBackend, build_adaptive_worker, bui
 use metrics_exporter_prometheus::PrometheusBuilder;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -87,7 +89,9 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
 async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
     let config = fast_queue_config(ADAPTIVE_QUEUE);
     let mut storage = apalis_sqlite::SqliteStorage::<AdaptiveJob>::new(pool).with_config(config);
-    for job in entity_jobs(Uuid::new_v4()) {
+    let jobs = entity_jobs(Uuid::new_v4());
+    let expected = jobs.len();
+    for job in jobs {
         storage.push(job).await?;
     }
 
@@ -97,15 +101,35 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
     ));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
+    let done = Arc::new(AtomicUsize::new(0));
+    let done_notify = Arc::new(Notify::new());
+    let waiter_notify = Arc::clone(&done_notify);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            () = waiter_notify.notified() => {
+                // Allow Apalis post-handler metric recording and ACK to flush cleanly.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
         stop.cancel();
     });
+    let count_done = Arc::clone(&done);
+    let notify_done = Arc::clone(&done_notify);
     build_adaptive_worker(
         &backend,
         SchedulerCtx::new(
             SchedulerConfig::default(),
-            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(move |_job| {
+                let count_done = Arc::clone(&count_done);
+                let notify_done = Arc::clone(&notify_done);
+                Box::pin(async move {
+                    if count_done.fetch_add(1, Ordering::SeqCst) + 1 >= expected {
+                        notify_done.notify_one();
+                    }
+                    Ok(JobOutcome::Done)
+                })
+            }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
             Arc::new(SystemClock),
         ),
@@ -119,7 +143,9 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
 async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
     let config = fast_queue_config(CRON_QUEUE);
     let mut storage = apalis_sqlite::SqliteStorage::<CronJob>::new(pool).with_config(config);
-    for job in singleton_jobs() {
+    let jobs = singleton_jobs();
+    let expected = jobs.len();
+    for job in jobs {
         storage.push(job).await?;
     }
 
@@ -129,16 +155,36 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
     ));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
+    let done = Arc::new(AtomicUsize::new(0));
+    let done_notify = Arc::new(Notify::new());
+    let waiter_notify = Arc::clone(&done_notify);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            () = waiter_notify.notified() => {
+                // Allow Apalis post-handler metric recording and ACK to flush cleanly.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
         stop.cancel();
     });
+    let count_done = Arc::clone(&done);
+    let notify_done = Arc::clone(&done_notify);
     build_cron_worker(
         &backend,
         SchedulerCtx::new(
             SchedulerConfig::default(),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(move |_job| {
+                let count_done = Arc::clone(&count_done);
+                let notify_done = Arc::clone(&notify_done);
+                Box::pin(async move {
+                    if count_done.fetch_add(1, Ordering::SeqCst) + 1 >= expected {
+                        notify_done.notify_one();
+                    }
+                    Ok(JobOutcome::Done)
+                })
+            }),
             Arc::new(SystemClock),
         ),
     )?

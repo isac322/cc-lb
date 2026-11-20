@@ -1,25 +1,19 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
     RequestEventProjections, RequestEventStore,
 };
 use uuid::Uuid;
 
 async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        temp_dir
-            .path()
-            .join("request-event-projections.sqlite")
-            .display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join("request-event-projections.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("initialize sqlite");
     (temp_dir, storage)
 }
 

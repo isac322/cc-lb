@@ -15,6 +15,6 @@ filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_po
 priority = 90
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-postgres::integration)'
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/crash_recovery::|request_event_filter_index_plans::|usage_rollup_pricing_completeness_migration::|overview_error_attribution_migration::/)'
 threads-required = 4
 priority = 100

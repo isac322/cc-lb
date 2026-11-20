@@ -6,6 +6,8 @@ mod api_key_usage;
 mod audit;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
+#[path = "common/mod.rs"]
+mod common;
 #[path = "migration_versions.rs"]
 mod migration_versions;
 #[path = "name_active_unique_migrations.rs"]

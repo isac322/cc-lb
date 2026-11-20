@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
     RequestEventProjections, RequestEventStore,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -20,11 +20,10 @@ async fn storage() -> (
 ) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = sqlite_url(&temp_dir);
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+    let path = std::path::Path::new(database_url.trim_start_matches("sqlite://"));
+    let storage = super::common::templated_sqlite_storage(path, Arc::new(cc_lb_clock::SystemClock))
+        .await
+        .expect("initialize sqlite");
     (temp_dir, database_url, storage)
 }
 

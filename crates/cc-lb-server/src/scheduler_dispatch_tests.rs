@@ -4228,12 +4228,34 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
         .await
         .expect("connect postgres admin");
     let database_name = format!("cclb_keepalive_qa09_{}", Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE DATABASE \"{database_name}\""
-    )))
-    .execute(&admin_pool)
-    .await
-    .expect("create isolated keepalive database");
+    if let Ok(template) = std::env::var("CC_LB_PG_SCHED_TEMPLATE")
+        && !template.trim().is_empty()
+    {
+        const TEMPLATE_CLONE_LOCK: i64 = 0x4343_4C42_5047_544D;
+        let mut conn = admin_pool.acquire().await.expect("acquire postgres admin");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(TEMPLATE_CLONE_LOCK)
+            .execute(&mut *conn)
+            .await
+            .expect("lock postgres template clone");
+        let created = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database_name}\" TEMPLATE \"{template}\" STRATEGY = WAL_LOG"
+        )))
+        .execute(&mut *conn)
+        .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(TEMPLATE_CLONE_LOCK)
+            .execute(&mut *conn)
+            .await;
+        created.expect("create isolated keepalive database from template");
+    } else {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database_name}\""
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create isolated keepalive database");
+    }
     let pg_pool = PgPoolOptions::new()
         .max_connections(16)
         .acquire_timeout(Duration::from_secs(5))

@@ -174,11 +174,31 @@ pub async fn postgres_fixture()
         .connect_with(options.clone())
         .await?;
     let db = format!("cc_lb_admin_scheduler_{}", uuid::Uuid::new_v4().simple());
-    if sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
-        .execute(&admin)
-        .await
-        .is_err()
+    let created = if let Ok(template) = std::env::var("CC_LB_PG_SCHED_TEMPLATE")
+        && !template.trim().is_empty()
     {
+        const TEMPLATE_CLONE_LOCK: i64 = 0x4343_4C42_5047_544D;
+        let mut conn = admin.acquire().await?;
+        let _ = sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(TEMPLATE_CLONE_LOCK)
+            .execute(&mut *conn)
+            .await;
+        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"CREATE DATABASE "{db}" TEMPLATE "{template}" STRATEGY = WAL_LOG"#
+        )))
+        .execute(&mut *conn)
+        .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(TEMPLATE_CLONE_LOCK)
+            .execute(&mut *conn)
+            .await;
+        res
+    } else {
+        sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
+            .execute(&admin)
+            .await
+    };
+    if created.is_err() {
         admin.close().await;
         return Ok(None);
     }

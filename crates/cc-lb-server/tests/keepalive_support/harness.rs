@@ -1311,10 +1311,9 @@ async fn setup_postgres(
         .connect(&admin_url)
         .await
         .map_err(|error| HarnessError::Setup(error.to_string()))?;
-    let create = format!("CREATE DATABASE \"{database}\"");
-    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create))
-        .execute(&admin_pool)
-        .await
+    if let Err(error) =
+        crate::common::create_postgres_database(&admin_pool, &database, "CC_LB_PG_APP_TEMPLATE")
+            .await
     {
         admin_pool.close().await;
         return Err(HarnessError::Setup(error.to_string()));

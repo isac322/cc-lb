@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_clock::TestClock;
-use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore};
 
 const NOW: u64 = 10_000;
 const AUTHORITY: &str = "https://identity.example";
@@ -9,15 +9,12 @@ const SUBJECT: &str = "alice";
 
 async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     let directory = tempfile::tempdir().expect("tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        directory.path().join("audit.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(TestClock::new_at_secs(NOW)))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("migrate sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &directory.path().join("audit.sqlite"),
+        Arc::new(TestClock::new_at_secs(NOW)),
+    )
+    .await
+    .expect("migrate sqlite");
     (directory, storage)
 }
 

@@ -43,6 +43,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(mock: &MockServer) -> Self {
+        Self::with_base_url(&mock.uri()).await
+    }
+
+    async fn with_base_url(base_url: &str) -> Self {
         let dir = tempfile::tempdir().expect("temporary storage");
         let clock = Arc::new(TestClock::new_at_secs(NOW));
         let clock_handle: ClockHandle = clock.clone();
@@ -55,25 +59,23 @@ impl Fixture {
         let aead = Arc::new(AeadService::from_master_key([7; 32]));
         let mut config = Config::default();
         config.oauth.openai = Some(OpenAiOAuthConfig {
-            device_usercode_url: format!("{}/device/usercode", mock.uri())
-                .parse()
-                .expect("URL"),
-            device_token_url: format!("{}/device/token", mock.uri()).parse().expect("URL"),
-            token_url: format!("{}/openai/token", mock.uri()).parse().expect("URL"),
+            device_usercode_url: format!("{base_url}/device/usercode").parse().expect("URL"),
+            device_token_url: format!("{base_url}/device/token").parse().expect("URL"),
+            token_url: format!("{base_url}/openai/token").parse().expect("URL"),
             ..OpenAiOAuthConfig::default()
         });
         config.oauth.gemini = Some(GeminiOAuthConfig {
-            token_url: format!("{}/gemini/token", mock.uri()).parse().expect("URL"),
-            userinfo_url: format!("{}/userinfo", mock.uri()).parse().expect("URL"),
-            code_assist_url: format!("{}/v1internal", mock.uri()).parse().expect("URL"),
+            token_url: format!("{base_url}/gemini/token").parse().expect("URL"),
+            userinfo_url: format!("{base_url}/userinfo").parse().expect("URL"),
+            code_assist_url: format!("{base_url}/v1internal").parse().expect("URL"),
             ..GeminiOAuthConfig::default()
         });
         config.oauth.antigravity = Some(AntigravityOAuthConfig {
             client_id: ANTIGRAVITY_CLIENT_ID.to_owned(),
             client_secret: ANTIGRAVITY_CLIENT_SECRET.to_owned(),
-            token_url: format!("{}/gemini/token", mock.uri()).parse().expect("URL"),
-            userinfo_url: format!("{}/userinfo", mock.uri()).parse().expect("URL"),
-            code_assist_url: mock.uri().parse().expect("URL"),
+            token_url: format!("{base_url}/gemini/token").parse().expect("URL"),
+            userinfo_url: format!("{base_url}/userinfo").parse().expect("URL"),
+            code_assist_url: base_url.parse().expect("URL"),
             ..AntigravityOAuthConfig::default()
         });
         #[cfg(feature = "sqlite")]
@@ -876,6 +878,22 @@ async fn gemini_complete_missing_project_rejects_without_creating_upstream() {
 
 #[tokio::test]
 async fn gemini_complete_polls_pending_operation_until_done_without_repeated_name() {
+    use axum::{
+        Json, Router,
+        http::HeaderMap,
+        routing::{get, post},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ResumeTimeOnDrop(Arc<AtomicBool>);
+    impl Drop for ResumeTimeOnDrop {
+        fn drop(&mut self) {
+            if self.0.swap(false, Ordering::SeqCst) {
+                tokio::time::resume();
+            }
+        }
+    }
+
     for (initial, operation_path) in [
         (
             json!({"name": "operations/onboard"}),
@@ -889,40 +907,107 @@ async fn gemini_complete_polls_pending_operation_until_done_without_repeated_nam
             "/v1internal/projects/example/locations/global/operations/onboard",
         ),
     ] {
-        let mock = MockServer::start().await;
-        gemini_token(
-            &mock,
-            "alice@example.com",
-            json!({"allowedTiers": [{"id": "free-tier", "isDefault": true}]}),
-            Some(initial),
-        )
-        .await;
-        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed_polls = polls.clone();
-        Mock::given(method("GET"))
-            .and(path(operation_path))
-            .and(header("authorization", "Bearer new-gemini-access"))
-            .respond_with(move |_: &wiremock::Request| {
-                let poll = observed_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ResponseTemplate::new(200).set_body_json(if poll == 0 {
-                    json!({"done": false})
-                } else {
-                    json!({
-                        "done": true,
-                        "response": {"cloudaicompanionProject": {"id": "polled-project"}},
-                    })
-                })
-            })
-            .expect(2)
-            .mount(&mock)
-            .await;
-        let fixture = Fixture::new(&mock).await;
+        let polls = Arc::new(AtomicUsize::new(0));
+        let paused = Arc::new(AtomicBool::new(false));
+        let _resume_guard = ResumeTimeOnDrop(paused.clone());
+        let router = Router::new()
+            .route(
+                "/gemini/token",
+                post(|| async {
+                    Json(json!({
+                        "access_token": "new-gemini-access",
+                        "refresh_token": "new-refresh",
+                        "expires_in": 3600
+                    }))
+                }),
+            )
+            .route(
+                "/userinfo",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(
+                        headers.get("authorization").and_then(|v| v.to_str().ok()),
+                        Some("Bearer new-gemini-access")
+                    );
+                    Json(json!({
+                        "id": "synthetic-private-user",
+                        "email": "alice@example.com",
+                        "verified_email": true,
+                        "name": "Synthetic Member",
+                        "given_name": "Synthetic",
+                        "picture": "https://example.test/private-picture"
+                    }))
+                }),
+            )
+            .route(
+                "/v1internal:loadCodeAssist",
+                post(|| async {
+                    Json(json!({"allowedTiers": [{"id": "free-tier", "isDefault": true}]}))
+                }),
+            )
+            .route(
+                "/v1internal:onboardUser",
+                post({
+                    let initial = initial.clone();
+                    let paused = paused.clone();
+                    move || {
+                        let initial = initial.clone();
+                        let paused = paused.clone();
+                        async move {
+                            if !paused.swap(true, Ordering::SeqCst) {
+                                tokio::time::pause();
+                            }
+                            Json(initial)
+                        }
+                    }
+                }),
+            )
+            .route(
+                operation_path,
+                get({
+                    let polls = polls.clone();
+                    let paused = paused.clone();
+                    move |headers: HeaderMap| {
+                        let polls = polls.clone();
+                        let paused = paused.clone();
+                        async move {
+                            assert_eq!(
+                                headers.get("authorization").and_then(|v| v.to_str().ok()),
+                                Some("Bearer new-gemini-access")
+                            );
+                            let poll = polls.fetch_add(1, Ordering::SeqCst);
+                            if poll == 0 {
+                                Json(json!({"done": false}))
+                            } else {
+                                if paused.swap(false, Ordering::SeqCst) {
+                                    tokio::time::resume();
+                                }
+                                Json(json!({
+                                    "done": true,
+                                    "response": {"cloudaicompanionProject": {"id": "polled-project"}},
+                                }))
+                            }
+                        }
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind in-process gemini oauth mock");
+        let addr = listener.local_addr().expect("gemini mock addr");
+        let mock_task = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let fixture = Fixture::with_base_url(&format!("http://{addr}")).await;
         let start = fixture.start("gemini").await;
         let (status, complete) = fixture.complete(&start, Some("google-code")).await;
+        if paused.swap(false, Ordering::SeqCst) {
+            tokio::time::resume();
+        }
+        mock_task.abort();
         assert_eq!(status, StatusCode::OK, "{complete}");
         assert_eq!(complete["project_id"], "polled-project");
         assert_eq!(complete["plan"], "free-tier");
-        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
     }
 }
 

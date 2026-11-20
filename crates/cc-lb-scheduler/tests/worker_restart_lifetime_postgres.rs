@@ -682,9 +682,7 @@ where
         server_version.starts_with("18."),
         "restart parity tests require PostgreSQL 18, reached {server_version}"
     );
-    let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    sqlx::query(sqlx::AssertSqlSafe(create_database))
-        .execute(&admin_pool)
+    crate::common::create_postgres_database(&admin_pool, &database_name, "CC_LB_PG_SCHED_TEMPLATE")
         .await
         .with_context(|| format!("create isolated database {database_name}"))?;
 
