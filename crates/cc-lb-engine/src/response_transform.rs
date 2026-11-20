@@ -12,7 +12,6 @@ use cc_lb_upstream::{
     TransformSseEventResult, UpstreamDialect,
 };
 
-use crate::lifecycle::CompatResponsePlan;
 use crate::lifecycle::RequestEventContext;
 use crate::provider_capability::ProviderCapability;
 use crate::sse_error_frame::{
@@ -28,7 +27,6 @@ pub(crate) struct ResponseTransformContext {
     pub(crate) request_path: String,
     pub(crate) dialect: Arc<dyn UpstreamDialect>,
     pub(crate) gemini_oauth: bool,
-    pub(crate) compat_response_plan: Option<CompatResponsePlan>,
 }
 
 pub(crate) struct BufferedTransformParts {

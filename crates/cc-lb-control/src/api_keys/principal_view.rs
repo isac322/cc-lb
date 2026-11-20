@@ -194,7 +194,7 @@ impl PrincipalView {
                     default_router_pipeline,
                     dialect,
                     cache_keepalive,
-                    openai_oauth_compat: principal.openai_oauth_compat.clone(),
+                    openai_oauth_compat: principal.openai_oauth_compat,
                 };
 
                 (principal_id, cached)

@@ -7,7 +7,7 @@ use crate::openai_compat::{
     self, CompatReject,
     chat::ChatPlan,
     images::ImageStreamKind,
-    request::{ApiKeyOnlyFeature, NormalizeInput, Normalized, Transport},
+    request::{ApiKeyOnlyFeature, NormalizeInput, Transport},
     transcription::TranscriptFormat,
 };
 use crate::provider_capability::ProviderCapability;
@@ -31,7 +31,6 @@ pub(crate) enum CompatResponseKind {
     ModelsGet { id: String },
     ImagesStream { kind: ImageStreamKind },
     Transcription { format: TranscriptFormat },
-    PassthroughNormalizeErrors,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +188,7 @@ pub(crate) async fn prepare_request(
     let mut plan = None;
     match capability {
         ProviderCapability::OpenaiResponses => {
-            if let Some(value) = sonic_rs::from_slice::<Value>(&ctx.body_bytes).ok() {
+            if let Ok(value) = sonic_rs::from_slice::<Value>(&ctx.body_bytes) {
                 let features = api_key_only_features(Some(&value), capability);
                 let degraded = !features.is_empty();
                 let value = if degraded {

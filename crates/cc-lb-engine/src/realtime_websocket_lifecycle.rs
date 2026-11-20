@@ -39,7 +39,7 @@ impl Lifecycle {
         setup: Bytes,
     ) -> Result<RealtimeWebSocketSession, WebSocketError> {
         let RealtimeWebSocketTarget { path, query, model } = target;
-        let public_query = query.clone().map(str::to_owned);
+        let public_query = query.map(str::to_owned);
         let call_id = query.and_then(|query| {
             url::form_urlencoded::parse(query.as_bytes())
                 .find(|(key, _)| key == "call_id")

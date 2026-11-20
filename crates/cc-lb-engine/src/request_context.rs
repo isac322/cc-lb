@@ -4,8 +4,6 @@ use cc_lb_routing::RoutingContext;
 use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, Method};
 
-use crate::lifecycle::CompatResponsePlan;
-
 /// Provider selected by a provider-prefixed proxy route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderScope(pub Provider);
@@ -37,8 +35,6 @@ pub struct RequestContext {
     pub body_bytes: Bytes,
     /// Effective per-principal OpenAI subscription compatibility policy.
     pub openai_oauth_compat: Option<OpenaiOauthCompatPolicy>,
-    /// Response-side plan selected while parsing the request.
-    pub compat_response_plan: Option<CompatResponsePlan>,
     /// Body-derived features that require an API-key upstream when available.
     pub compat_api_key_only_features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
     /// Cache breakpoints extracted from the request for prompt cache optimization.
@@ -97,7 +93,6 @@ pub struct ParsedRequestBuilder {
     query: Option<String>,
     body_bytes: Bytes,
     openai_oauth_compat: Option<OpenaiOauthCompatPolicy>,
-    compat_response_plan: Option<CompatResponsePlan>,
     compat_api_key_only_features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
     cache_breakpoints: Vec<CacheBreakpoint>,
     canonical_model_id: String,
@@ -118,7 +113,6 @@ impl ParsedRequestBuilder {
             query: None,
             body_bytes: Bytes::new(),
             openai_oauth_compat: None,
-            compat_response_plan: None,
             compat_api_key_only_features: Vec::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
@@ -182,12 +176,6 @@ impl ParsedRequestBuilder {
         self.openai_oauth_compat = policy;
         self
     }
-
-    /// Sets the compatibility response plan.
-    pub fn compat_response_plan(mut self, plan: Option<CompatResponsePlan>) -> Self {
-        self.compat_response_plan = plan;
-        self
-    }
     pub fn compat_api_key_only_features(
         mut self,
         features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
@@ -227,7 +215,6 @@ impl ParsedRequestBuilder {
             query: self.query,
             body_bytes: self.body_bytes,
             openai_oauth_compat: self.openai_oauth_compat,
-            compat_response_plan: self.compat_response_plan,
             compat_api_key_only_features: self.compat_api_key_only_features,
             cache_breakpoints: self.cache_breakpoints,
             canonical_model_id: self.canonical_model_id,

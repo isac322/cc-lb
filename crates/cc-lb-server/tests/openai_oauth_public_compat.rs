@@ -1,5 +1,4 @@
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use axum::{
     Json, Router,
@@ -16,8 +15,11 @@ use std::{
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 
+/// One recorded upstream call: path, headers, body.
+type Recorded = (String, Vec<(String, String)>, Vec<u8>);
+
 #[derive(Clone, Default)]
-struct FakeState(Arc<Mutex<Vec<(String, Vec<(String, String)>, Vec<u8>)>>>);
+struct FakeState(Arc<Mutex<Vec<Recorded>>>);
 struct Fake {
     base: String,
     state: FakeState,
@@ -31,6 +33,11 @@ impl Drop for Fake {
 
 async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
+    let has_client_version = req.uri().query().is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair.starts_with("client_version="))
+    });
     let headers = req
         .headers()
         .iter()
@@ -39,16 +46,8 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     let body = to_bytes(req.into_body(), 2_000_000).await.unwrap().to_vec();
     state.0.lock().unwrap().push((path.clone(), headers, body));
     if path == "/codex/models" {
-        if !state
-            .0
-            .lock()
-            .unwrap()
-            .last()
-            .unwrap()
-            .1
-            .iter()
-            .any(|(k, _)| k == "client_version")
-        {
+        // The real backend rejects a catalog request without `client_version`.
+        if !has_client_version {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"detail":"client_version required"})),
@@ -71,14 +70,14 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
                 .into_response();
         }
         let s = concat!(
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-test\",\"status\":\"in_progress\"}}\n\n",
-            "event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp-test\"}}\n\n",
-            "event: response.metadata\ndata: {\"type\":\"response.metadata\",\"response\":{\"id\":\"resp-test\",\"metadata\":{\"x\":\"y\"}}}\n\n",
-            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
-            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n",
-            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
-            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":2,\"total_tokens\":4},\"output\":[]}}\n\n"
+            "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1,\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.metadata\ndata: {\"type\":\"response.metadata\",\"sequence_number\":2,\"metadata\":{\"x\":\"y\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":4,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello \"}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":5,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"world\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello world\",\"annotations\":[]}]}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":2,\"total_tokens\":4},\"output\":[]}}\n\n"
         );
         return ([(header::CONTENT_TYPE, "text/event-stream")], Body::from(s)).into_response();
     }
@@ -158,7 +157,7 @@ async fn setup(s: &common::TestServer, f: &Fake, c: &reqwest::Client) -> String 
 #[tokio::test]
 async fn openai_oauth_public_responses_and_models() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let s = common::spawn_test_server().await;
+    let s = common::spawn_test_server_with_openai_budget("").await;
     let f = spawn().await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
@@ -173,11 +172,31 @@ async fn openai_oauth_public_responses_and_models() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
+    let status = r.status();
     let text = r.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
     assert!(text.contains("hello world"), "{text}");
-    let rec = f.state.0.lock().unwrap().clone();
-    assert_eq!(rec.len(), 1);
+    // The fake also records the upstream readiness probe and background quota
+    // polls; only the proxied client request matters here.
+    let rec: Vec<_> = f
+        .state
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, headers, _)| {
+            path == "/codex/responses" && headers.iter().any(|(name, _)| name == "request-id")
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        rec.len(),
+        1,
+        "{:?}",
+        rec.iter()
+            .map(|r| (String::from_utf8_lossy(&r.2).into_owned(), r.1.clone()))
+            .collect::<Vec<_>>()
+    );
     let v: Value = serde_json::from_slice(&rec[0].2).unwrap();
     assert!(v["input"].is_array());
     assert_eq!(v["stream"], true);
@@ -214,7 +233,7 @@ async fn openai_oauth_public_responses_and_models() {
 #[tokio::test]
 async fn openai_oauth_chat_completions_public_contract() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let s = common::spawn_test_server().await;
+    let s = common::spawn_test_server_with_openai_budget("").await;
     let f = spawn().await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;

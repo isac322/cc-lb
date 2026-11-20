@@ -15,16 +15,17 @@ CREATE TABLE upstream_affinity_v1_new (
     )),
     value_sha256 BLOB NOT NULL CHECK (length(value_sha256) = 32),
     upstream_id TEXT NOT NULL REFERENCES upstream_spec_v1(id) ON DELETE CASCADE,
+    owner_epoch INTEGER NOT NULL DEFAULT 0 CHECK (owner_epoch >= 0),
     observed_at_unix_secs INTEGER NOT NULL CHECK (observed_at_unix_secs >= 0),
     expires_at_unix_secs INTEGER CHECK (expires_at_unix_secs IS NULL OR expires_at_unix_secs >= 0),
     PRIMARY KEY (principal_id, provider, kind, value_sha256)
 );
 
 INSERT INTO upstream_affinity_v1_new (
-    principal_id, provider, kind, value_sha256, upstream_id,
+    principal_id, provider, kind, value_sha256, upstream_id, owner_epoch,
     observed_at_unix_secs, expires_at_unix_secs
 )
-SELECT principal_id, provider, kind, value_sha256, upstream_id,
+SELECT principal_id, provider, kind, value_sha256, upstream_id, owner_epoch,
        observed_at_unix_secs, expires_at_unix_secs
 FROM upstream_affinity_v1;
 

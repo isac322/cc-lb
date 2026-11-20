@@ -107,17 +107,16 @@ pub fn normalize_responses_request(
         obj.remove("top_logprobs");
         changed = true;
     }
-    if let Some(a) = obj.get_mut("include").and_then(Value::as_array_mut) {
-        if let Some(i) = a
+    if let Some(a) = obj.get_mut("include").and_then(Value::as_array_mut)
+        && let Some(i) = a
             .iter()
             .position(|x| x.as_str() == Some("message.output_text.logprobs"))
-        {
-            if input.policy.logprobs == DropOrReject::Reject {
-                return Err(reject(&format!("include[{i}]")));
-            }
-            a.remove(i);
-            changed = true;
+    {
+        if input.policy.logprobs == DropOrReject::Reject {
+            return Err(reject(&format!("include[{i}]")));
         }
+        a.remove(i);
+        changed = true;
     }
     if let Some(t) = obj
         .get("truncation")
@@ -147,14 +146,14 @@ pub fn normalize_responses_request(
     if obj.get("prompt_cache_retention").and_then(Value::as_str) == Some("24h") {
         obj.remove("prompt_cache_retention");
         changed = true;
-    } else if obj.get("prompt_cache_retention").and_then(Value::as_str) == Some("in_memory") {
-        if drop_or_reject(
+    } else if obj.get("prompt_cache_retention").and_then(Value::as_str) == Some("in_memory")
+        && drop_or_reject(
             obj,
             "prompt_cache_retention",
             input.policy.prompt_cache_in_memory,
-        )? {
-            changed = true;
-        }
+        )?
+    {
+        changed = true;
     }
     if let Some(t) = obj
         .get("service_tier")
@@ -351,18 +350,17 @@ pub fn trim_oldest_input(body: &Value) -> Option<Value> {
         if matches!(typ, "function_call" | "custom_tool_call") {
             let id = a[i].get("call_id").and_then(Value::as_str);
             let mut g = vec![i];
-            if let Some(id) = id {
-                for j in i + 1..a.len() {
-                    if a[j].get("call_id").and_then(Value::as_str) == Some(id)
+            if let Some(id) = id
+                && let Some(output) = a.iter().enumerate().skip(i + 1).find_map(|(j, item)| {
+                    (item.get("call_id").and_then(Value::as_str) == Some(id)
                         && matches!(
-                            a[j].get("type").and_then(Value::as_str),
+                            item.get("type").and_then(Value::as_str),
                             Some("function_call_output") | Some("custom_tool_call_output")
-                        )
-                    {
-                        g.push(j);
-                        break;
-                    }
-                }
+                        ))
+                    .then_some(j)
+                })
+            {
+                g.push(output);
             }
             for j in &g {
                 seen.insert(*j);
@@ -375,13 +373,41 @@ pub fn trim_oldest_input(body: &Value) -> Option<Value> {
     if groups.is_empty() {
         return None;
     }
-    let n = (groups.len() + 1) / 2;
+    let n = groups.len().div_ceil(2);
     let mut remove: Vec<usize> = groups.into_iter().take(n).flatten().collect();
     remove.sort_unstable_by(|x, y| y.cmp(x));
     for i in remove {
         a.remove(i);
     }
     Some(b)
+}
+pub fn api_key_only_features(body: &Value, _transport: Transport) -> Vec<ApiKeyOnlyFeature> {
+    let mut r = Vec::new();
+    if let Some(a) = body.get("tools").and_then(Value::as_array) {
+        for t in a {
+            match t.get("type").and_then(Value::as_str) {
+                Some("file_search") => r.push(ApiKeyOnlyFeature::FileSearchTool),
+                Some("code_interpreter") => r.push(ApiKeyOnlyFeature::CodeInterpreterTool),
+                _ => {}
+            }
+        }
+    }
+    for (k, f) in [
+        ("prompt", ApiKeyOnlyFeature::PromptTemplate),
+        (
+            "previous_response_id",
+            ApiKeyOnlyFeature::PreviousResponseId,
+        ),
+        ("conversation", ApiKeyOnlyFeature::Conversation),
+    ] {
+        if body.get(k).is_some() {
+            r.push(f)
+        }
+    }
+    if body.get("background").and_then(Value::as_bool) == Some(true) {
+        r.push(ApiKeyOnlyFeature::Background)
+    }
+    r
 }
 
 #[cfg(test)]
@@ -446,32 +472,4 @@ mod tests {
                 ^ a.iter().any(|x| x["type"] == "function_call_output"))
         );
     }
-}
-pub fn api_key_only_features(body: &Value, _transport: Transport) -> Vec<ApiKeyOnlyFeature> {
-    let mut r = Vec::new();
-    if let Some(a) = body.get("tools").and_then(Value::as_array) {
-        for t in a {
-            match t.get("type").and_then(Value::as_str) {
-                Some("file_search") => r.push(ApiKeyOnlyFeature::FileSearchTool),
-                Some("code_interpreter") => r.push(ApiKeyOnlyFeature::CodeInterpreterTool),
-                _ => {}
-            }
-        }
-    }
-    for (k, f) in [
-        ("prompt", ApiKeyOnlyFeature::PromptTemplate),
-        (
-            "previous_response_id",
-            ApiKeyOnlyFeature::PreviousResponseId,
-        ),
-        ("conversation", ApiKeyOnlyFeature::Conversation),
-    ] {
-        if body.get(k).is_some() {
-            r.push(f)
-        }
-    }
-    if body.get("background").and_then(Value::as_bool) == Some(true) {
-        r.push(ApiKeyOnlyFeature::Background)
-    }
-    r
 }

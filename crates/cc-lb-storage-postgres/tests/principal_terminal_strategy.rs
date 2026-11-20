@@ -98,8 +98,10 @@ async fn update_strategy_to_random_roundtrips(storage: &PostgresStorage) -> Resu
     Ok(())
 }
 async fn oauth_compat_roundtrips(storage: &PostgresStorage) -> Result<()> {
-    let mut initial = OpenaiOauthCompatOverride::default();
-    initial.store_true = Some(CoerceOrReject::Reject);
+    let initial = OpenaiOauthCompatOverride {
+        store_true: Some(CoerceOrReject::Reject),
+        ..Default::default()
+    };
     let mut create = principal_create("oauth-compat");
     create.openai_oauth_compat = Some(initial);
     let record = PrincipalStore::create(storage, create, 1_900_000_030).await?;
@@ -110,8 +112,10 @@ async fn oauth_compat_roundtrips(storage: &PostgresStorage) -> Result<()> {
         .expect("record should exist");
     assert_eq!(fetched.openai_oauth_compat, Some(initial));
 
-    let mut next = OpenaiOauthCompatOverride::default();
-    next.store_true = Some(CoerceOrReject::Coerce);
+    let next = OpenaiOauthCompatOverride {
+        store_true: Some(CoerceOrReject::Coerce),
+        ..Default::default()
+    };
     let updated = PrincipalStore::update(
         storage,
         record.id,

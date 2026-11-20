@@ -241,6 +241,20 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
     .await
 }
 
+/// Test server whose request budget fits realistic OpenAI request and
+/// response bodies (the default single-topology budget is 256 bytes).
+pub async fn spawn_test_server_with_openai_budget(extra_toml: &str) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        AppConfig::default(),
+        Vec::new(),
+        TestTopology::Single,
+        &[],
+        Some(1 << 20),
+    )
+    .await
+}
+
 /// Like [`spawn_test_server_with_extra_config`], with extra environment variables for the child.
 pub async fn spawn_test_server_with_env(extra_toml: &str, envs: &[(String, String)]) -> TestServer {
     spawn_test_server_with_options(

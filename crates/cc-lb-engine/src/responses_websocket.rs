@@ -33,11 +33,12 @@ use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEve
 pub struct WebSocketError {
     pub status: u16,
     pub code: &'static str,
-    pub native_code: Option<String>,
+    // Rare detail fields are boxed so every `Result<_, WebSocketError>` stays small.
+    pub native_code: Option<Box<str>>,
     pub message: String,
     pub stream_id: Option<String>,
-    pub param: Option<String>,
-    provider_headers: Vec<(String, String)>,
+    pub param: Option<Box<str>>,
+    provider_headers: Box<[(String, String)]>,
 }
 
 impl WebSocketError {
@@ -49,17 +50,17 @@ impl WebSocketError {
             native_code: None,
             message: message.into(),
             stream_id: None,
-            provider_headers: Vec::new(),
+            provider_headers: Box::default(),
         }
     }
 
     pub fn with_native_code(mut self, code: impl Into<String>) -> Self {
-        self.native_code = Some(code.into());
+        self.native_code = Some(code.into().into_boxed_str());
         self
     }
 
     pub fn with_param(mut self, param: impl Into<String>) -> Self {
-        self.param = Some(param.into());
+        self.param = Some(param.into().into_boxed_str());
         self
     }
 
@@ -70,8 +71,9 @@ impl WebSocketError {
 
     /// Retain only bounded, non-sensitive provider response headers.
     pub fn with_provider_headers(mut self, headers: &HeaderMap) -> Self {
+        let mut retained = std::mem::take(&mut self.provider_headers).into_vec();
         for (name, value) in headers {
-            if self.provider_headers.len() >= 32 {
+            if retained.len() >= 32 {
                 break;
             }
             let name = name.as_str().to_ascii_lowercase();
@@ -88,8 +90,9 @@ impl WebSocketError {
             if value.len() > 1024 {
                 continue;
             }
-            self.provider_headers.push((name, value.to_owned()));
+            retained.push((name, value.to_owned()));
         }
+        self.provider_headers = retained.into_boxed_slice();
         self
     }
 
@@ -1008,12 +1011,13 @@ impl ResponsesWebSocketGateway {
             .turns
             .get(&dispatch.turn_id)
             .expect("turn remains admitted");
+        // OpenAI OAuth frames are always shaped (stream_id removed, public
+        // rules applied) by `shape_websocket_frame`.
         Ok(turn.plugin_request.as_ref().map_or_else(
             || dispatch.frame.clone(),
             |(_, request)| request.frame.clone(),
         ))
     }
-
     pub fn assign_connection(
         &mut self,
         turn_id: u64,
@@ -1338,7 +1342,16 @@ impl ResponsesWebSocketGateway {
                 result.forward = false;
                 result.frames = Some(frames);
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Deliver the lane- or public-shape rewrite instead of the raw
+                // provider bytes, unless observation already suppressed it.
+                if result.forward
+                    && let Some(public_frame) = public_frame
+                {
+                    result.forward = false;
+                    result.frames = Some(vec![public_frame]);
+                }
+            }
             Err(error) => {
                 result.forward = false;
                 if let Some(lane) = error.stream_id.as_ref()
@@ -3680,7 +3693,6 @@ pub(crate) mod tests {
                 canonical_models,
             }),
             gemini_oauth: false,
-            compat_response_plan: None,
         }
     }
 

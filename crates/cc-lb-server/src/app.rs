@@ -6739,8 +6739,12 @@ mod tests {
             .await
             .expect("listener binds");
         let address = listener.local_addr().expect("address available");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let provider = tokio::spawn(async move {
-            for expected in ["a", "b"] {
+            // Keep every lane socket open until the client is done, so a
+            // provider hang-up cannot interleave close notices with lane frames.
+            let mut sockets = Vec::new();
+            for _lane in ["a", "b"] {
                 let (socket, _) = listener.accept().await.expect("provider accepts");
                 let mut ws = tokio_tungstenite::accept_async(socket)
                     .await
@@ -6753,7 +6757,7 @@ mod tests {
                 let value: Value = serde_json::from_slice(&frame.into_data()).expect("JSON frame");
                 assert!(value.get("stream_id").is_none());
                 ws.send(UpstreamMessage::Text(
-                    format!(r#"{{"type":"response.output_text.delta","delta":"ok"}}"#).into(),
+                    r#"{"type":"response.output_text.delta","delta":"ok"}"#.into(),
                 ))
                 .await
                 .expect("provider response sends");
@@ -6762,8 +6766,10 @@ mod tests {
                 ))
                 .await
                 .expect("provider metadata sends");
-                let _ = expected;
+                sockets.push(ws);
             }
+            let _ = done_rx.await;
+            drop(sockets);
         });
         let mut record = websocket_upstream(
             1,
@@ -6778,7 +6784,7 @@ mod tests {
         let (mut client, _) = connect_async(request).await.expect("client handshake");
         for lane in ["a", "b"] {
             client.send(UpstreamMessage::Text(
-                format!(r#"{{"type":"response.create","stream_id":"{lane}","model":"gpt-4.1","input":[]}}"#).into(),
+                format!(r#"{{"type":"response.create","stream_id":"{lane}","model":"gpt-4.1","input":[],"store":false,"stream":true}}"#).into(),
             )).await.expect("client frame sends");
             let response = tokio::time::timeout(Duration::from_secs(5), client.next())
                 .await
@@ -6796,6 +6802,7 @@ mod tests {
             let metadata: Value = serde_json::from_str(metadata.to_text().unwrap()).unwrap();
             assert_eq!(metadata["type"], "response.metadata");
         }
+        let _ = done_tx.send(());
         provider.await.expect("provider task");
         let _ = client.close(None).await;
         task.abort();
@@ -6817,7 +6824,7 @@ mod tests {
                 .await
                 .expect("first frame")
                 .expect("first frame decodes");
-            assert!(first.to_text().unwrap().contains(r#""stream_id":"a""#));
+            assert!(!first.to_text().unwrap().contains("stream_id"));
             tokio::time::sleep(Duration::from_millis(250)).await;
             assert!(
                 ws.next().now_or_never().is_none(),
@@ -6849,7 +6856,7 @@ mod tests {
             .unwrap();
         let error: Value = serde_json::from_str(error.to_text().unwrap()).unwrap();
         assert_eq!(error["error"]["code"], "previous_response_not_found");
-        assert_eq!(error["error"]["status"], 400);
+        assert_eq!(error["status"], 400);
         provider.await.unwrap();
         let _ = client.close(None).await;
         task.abort();
@@ -6893,7 +6900,7 @@ mod tests {
             .expect("downstream handshake");
         client
             .send(UpstreamMessage::Text(
-                r#"{"type":"response.create","model":"gpt-4.1","input":[],"stream_id":"lane"}"#
+                r#"{"type":"response.create","model":"gpt-4.1","input":"hello","stream_id":"lane"}"#
                     .into(),
             ))
             .await
@@ -6905,11 +6912,15 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&frame).expect("JSON frame");
         assert_eq!(body["store"], false);
         assert!(body.get("stream_id").is_none());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), client.next())
-                .await
-                .is_err()
-        );
+        // The provider's response.metadata frame is not delivered to a
+        // public-shape client; any frame that does arrive (for example the
+        // close notice when the fake provider hangs up) must not be it.
+        if let Ok(Some(Ok(message))) =
+            tokio::time::timeout(Duration::from_millis(250), client.next()).await
+            && let Ok(text) = message.to_text()
+        {
+            assert!(!text.contains("response.metadata"), "{text}");
+        }
         provider_task.await.expect("provider task");
         let _ = client.close(None).await;
         proxy_task.abort();

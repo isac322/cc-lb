@@ -1,9 +1,8 @@
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::to_bytes,
     extract::{
         Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -19,8 +18,11 @@ use std::{
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 
+/// One recorded upstream call: path, transport, headers, body.
+type Recorded = (String, String, Vec<(String, String)>, Vec<u8>);
+
 #[derive(Clone, Default)]
-struct FakeState(Arc<Mutex<Vec<(String, String, Vec<(String, String)>, Vec<u8>)>>>);
+struct FakeState(Arc<Mutex<Vec<Recorded>>>);
 struct Fake {
     base: String,
     state: FakeState,
@@ -36,12 +38,13 @@ async fn ws_handler(State(state): State<FakeState>, ws: WebSocketUpgrade) -> imp
     ws.on_upgrade(move |mut socket: WebSocket| async move {
         if let Some(Ok(Message::Text(t))) = socket.recv().await {
             state.0.lock().unwrap().push(("/backend-api/codex/responses".into(), "WS".into(), vec![], t.as_bytes().to_vec()));
-            let _ = socket.send(Message::Text(r#"{"type":"response.completed","response":{"object":"response.input_tokens","input_tokens":42}}"#.into())).await;
+            let _ = socket.send(Message::Text(r#"{"type":"response.created","response":{"id":"resp_tok","object":"response","status":"in_progress"}}"#.into())).await;
+            let _ = socket.send(Message::Text(r#"{"type":"response.completed","response":{"id":"resp_tok","object":"response","status":"completed","usage":{"input_tokens":42,"output_tokens":0,"total_tokens":42}}}"#.into())).await;
         }
     })
 }
 async fn fake(State(state): State<FakeState>, req: Request) -> Response {
-    let method = req.method().to_string();
+    let _method = req.method().to_string();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or("").to_owned();
     let headers = req
@@ -63,17 +66,8 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
             axum::Json(json!({"created":1,"data":[{"b64_json":"ZmFrZQ=="}]})).into_response()
         }
         "/backend-api/codex/images/generations" => {
-            if body.windows(15).any(|w| w == br#"\"stream\":true"#) {
-                (
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from(
-                        "event: image_generation.completed\ndata: {\"b64_json\":\"ZmFrZQ==\"}\n\n",
-                    ),
-                )
-                    .into_response()
-            } else {
-                axum::Json(json!({"created":1,"data":[{"b64_json":"ZmFrZQ=="}]})).into_response()
-            }
+            // The backend ignores `stream` and always answers with JSON.
+            axum::Json(json!({"created":1,"data":[{"b64_json":"ZmFrZQ=="}]})).into_response()
         }
         "/backend-api/transcribe" => {
             axum::Json(json!({"text":"hello transcription"})).into_response()
@@ -152,7 +146,7 @@ async fn openai_oauth_public_media_and_realtime_contract() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let f = spawn().await;
     let port = f.base.rsplit(':').next().unwrap();
-    let s = common::spawn_test_server_with_extra_config(&format!(
+    let s = common::spawn_test_server_with_openai_budget(&format!(
         "[openai_public_api]\nrealtime_origin = \"http://127.0.0.1:{port}/\"\n"
     ))
     .await;
@@ -170,8 +164,11 @@ async fn openai_oauth_public_media_and_realtime_contract() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
-    assert_eq!(r.json::<Value>().await.unwrap()["input_tokens"], 42);
+    let status = r.status();
+    let text = r.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    let r_json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r_json["input_tokens"], 42);
     let r = c
         .post(format!(
             "http://{}/openai/v1/images/generations",
@@ -197,10 +194,13 @@ async fn openai_oauth_public_media_and_realtime_contract() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201);
+    let status = r.status();
+    let location = r.headers().get(header::LOCATION).cloned();
+    let text = r.text().await.unwrap();
+    assert_eq!(status, 201, "{text}");
     assert_eq!(
-        r.headers()[header::LOCATION],
-        "/v1/realtime/calls/rtc_test1"
+        location.as_ref().and_then(|v| v.to_str().ok()),
+        Some("/v1/realtime/calls/rtc_test1")
     );
     let r = c
         .post(format!(
@@ -224,7 +224,7 @@ async fn openai_oauth_public_media_and_realtime_contract() {
 async fn openai_oauth_public_transcription_compatibility() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let f = spawn().await;
-    let s = common::spawn_test_server().await;
+    let s = common::spawn_test_server_with_openai_budget("").await;
     let c = reqwest::Client::new();
     setup(&s, &f, &c).await;
     tokio::time::sleep(Duration::from_millis(350)).await;

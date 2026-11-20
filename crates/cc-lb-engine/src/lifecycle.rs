@@ -4879,16 +4879,32 @@ impl Lifecycle {
                 UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
             )
         })?;
-        let affinity = self
-            .resolve_request_affinities(&keys)
-            .await
-            .map_err(|failure| {
-                WebSocketError::new(
+        let affinity = match self.resolve_request_affinities(&keys).await {
+            Ok(affinity) => affinity,
+            Err(failure) => {
+                let has_previous = body
+                    .get("previous_response_id")
+                    .and_then(Value::as_str)
+                    .is_some();
+                let oauth_only = view
+                    .upstreams_snapshot()
+                    .iter()
+                    .filter(|record| record.enabled)
+                    .all(|record| record.kind == StorageUpstreamKind::OpenaiOauth);
+                if has_previous && oauth_only {
+                    return Err(WebSocketError::new(
+                        400,
+                        "previous_response_not_found",
+                        "The previous response is not available on this connection",
+                    ));
+                }
+                return Err(WebSocketError::new(
                     failure.status.as_u16(),
                     error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                     failure.message,
-                )
-            })?;
+                ));
+            }
+        };
         let target = match (
             owner,
             affinity
@@ -5026,9 +5042,6 @@ impl Lifecycle {
                     "authenticated principal is unavailable",
                 )
             })?;
-        let Some(dialect) = cached.resolved_dialect(upstream_id) else {
-            return Ok(None);
-        };
         let record = view
             .upstreams_snapshot()
             .iter()
@@ -5040,79 +5053,50 @@ impl Lifecycle {
                     "upstream is no longer available",
                 )
             })?;
+        let plugin_dialect = cached.resolved_dialect(upstream_id).cloned();
+        let openai_oauth = record.kind == StorageUpstreamKind::OpenaiOauth;
+        if plugin_dialect.is_none() && !openai_oauth {
+            return Ok(None);
+        }
         let upstream = upstream_for_record(record).map_err(|message| {
             WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
         })?;
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
-        let context = DialectShapeContext {
-            request_id: request_id.to_owned(),
-            downstream_headers,
-            method: http::Method::POST,
-            path: "/v1/responses".to_owned(),
-            query: ingress.query.map(str::to_owned),
-            body_bytes: ingress.frame.clone(),
-        };
         // BuiltinAuthn authenticates managed cc-lb keys, not provider keys or
         // OAuth subjects. Human/machine/admin is a separate storage taxonomy.
         let principal = Principal {
             id: auth.principal_id().to_owned(),
             kind: PrincipalKind::InternalKey,
         };
-        let (frame, headers) =
-            match shape_request(dialect.as_ref(), &context, &upstream, &principal) {
-                Ok(shaped) => (shaped.body().clone(), shaped.headers().clone()),
-                Err(error) => {
-                    tracing::warn!(%error, "websocket shape_request failed; forwarding raw frame");
-                    record_shape_internal_error(observer, &error.to_string());
-                    (ingress.frame.clone(), context.downstream_headers)
+        let (mut frame, headers) = match plugin_dialect.as_ref() {
+            Some(dialect) => {
+                let context = DialectShapeContext {
+                    request_id: request_id.to_owned(),
+                    downstream_headers,
+                    method: http::Method::POST,
+                    path: "/v1/responses".to_owned(),
+                    query: ingress.query.map(str::to_owned),
+                    body_bytes: ingress.frame.clone(),
+                };
+                match shape_request(dialect.as_ref(), &context, &upstream, &principal) {
+                    Ok(shaped) => (shaped.body().clone(), shaped.headers().clone()),
+                    Err(error) => {
+                        tracing::warn!(%error, "websocket shape_request failed; forwarding raw frame");
+                        record_shape_internal_error(observer, &error.to_string());
+                        (ingress.frame.clone(), context.downstream_headers)
+                    }
                 }
-            };
-        let (frame, headers, oauth_compat) = if record.kind == StorageUpstreamKind::OpenaiOauth {
-            let body: Value = sonic_rs::from_slice(&frame).map_err(|_| {
-                WebSocketError::new(400, "invalid_request_error", "WebSocket frame must be JSON")
-            })?;
-            let policy = cached
-                .openai_oauth_compat()
-                .map(|override_policy| override_policy.resolve(&self.config.openai_oauth_compat))
-                .unwrap_or_else(|| self.config.openai_oauth_compat.clone());
-            let normalized = crate::openai_compat::request::normalize_responses_request(
-                crate::openai_compat::request::NormalizeInput {
-                    body: &body,
-                    policy: &policy,
-                    transport: crate::openai_compat::request::Transport::WebSocket,
-                },
-            )
-            .map_err(|error| {
-                WebSocketError::new(400, "invalid_request_error", error.message)
-                    .with_native_code(error.code)
-                    .with_param(error.param)
-            })?;
-            let oauth_compat = normalized.body.is_some() || normalized.echo_metadata.is_some();
-            let mut frame = normalized
-                .body
-                .map(|mut body| {
-                    body.as_object_mut()
-                        .and_then(|object| object.remove("stream_id"));
-                    serde_json::to_vec(&body).expect("JSON response frame")
-                })
-                .unwrap_or_else(|| {
-                    let mut body: Value = sonic_rs::from_slice(&frame).expect("normalized JSON");
-                    body.as_object_mut()
-                        .and_then(|object| object.remove("stream_id"));
-                    serde_json::to_vec(&body).expect("JSON response frame")
-                });
-            if body.get("input").is_some_and(Value::is_string) && !body.get("store").is_some() {
-                let mut body: Value = sonic_rs::from_slice(&frame).expect("normalized JSON");
-                body.as_object_mut()
-                    .expect("response frame object")
-                    .insert("store".to_owned(), Value::Bool(false));
-                frame = serde_json::to_vec(&body).expect("JSON response frame");
             }
-            (Bytes::from(frame), headers, oauth_compat)
-        } else {
-            (frame, headers, false)
+            None => (ingress.frame.clone(), downstream_headers),
         };
+        let mut oauth_compat = false;
+        if openai_oauth {
+            let (shaped_frame, public_shape) =
+                self.normalize_oauth_websocket_frame(cached, &frame)?;
+            frame = shaped_frame;
+            oauth_compat = public_shape;
+        }
         Ok(Some(WebSocketPluginRequest {
             frame,
             headers,
@@ -5122,11 +5106,58 @@ impl Lifecycle {
                 upstream,
                 request_method: http::Method::POST,
                 request_path: "/v1/responses".to_owned(),
-                dialect: dialect.clone(),
+                dialect: plugin_dialect.unwrap_or_else(|| native_route_dialect(record)),
                 gemini_oauth: false,
-                compat_response_plan: None,
             },
         }))
+    }
+
+    /// Apply the public `/v1` compatibility rules to one `response.create`
+    /// frame bound for a ChatGPT-subscription upstream. Returns the frame to
+    /// send and whether the client used the public shape (provider frames for
+    /// that turn are then normalized too). `stream_id` never reaches the
+    /// backend: cc-lb emulates lanes with one upstream socket per lane.
+    fn normalize_oauth_websocket_frame(
+        &self,
+        cached: &PrincipalSpecCached,
+        frame: &Bytes,
+    ) -> Result<(Bytes, bool), WebSocketError> {
+        let body: Value = sonic_rs::from_slice(frame).map_err(|_| {
+            WebSocketError::new(400, "invalid_request_error", "WebSocket frame must be JSON")
+        })?;
+        let policy = cached
+            .openai_oauth_compat()
+            .map(|override_policy| override_policy.resolve(&self.config.openai_oauth_compat))
+            .unwrap_or(self.config.openai_oauth_compat);
+        let normalized = crate::openai_compat::request::normalize_responses_request(
+            crate::openai_compat::request::NormalizeInput {
+                body: &body,
+                policy: &policy,
+                transport: crate::openai_compat::request::Transport::WebSocket,
+            },
+        )
+        .map_err(|error| {
+            WebSocketError::new(400, "invalid_request_error", error.message)
+                .with_native_code(error.code)
+                .with_param(error.param)
+        })?;
+        let store_missing = body.get("store").is_none();
+        let public_shape =
+            normalized.body.is_some() || normalized.echo_metadata.is_some() || store_missing;
+        if !public_shape && body.get("stream_id").is_none() {
+            return Ok((frame.clone(), false));
+        }
+        let mut out = normalized.body.unwrap_or(body);
+        if let Some(object) = out.as_object_mut() {
+            object.remove("stream_id");
+            if store_missing {
+                object.insert("store".to_owned(), Value::Bool(false));
+            }
+        }
+        let bytes = serde_json::to_vec(&out).map_err(|_| {
+            WebSocketError::new(500, "server_error", "could not encode WebSocket frame")
+        })?;
+        Ok((Bytes::from(bytes), public_shape))
     }
 
     /// Sign only a newly opened upstream connection, using its current credentials.
@@ -5352,19 +5383,24 @@ impl Lifecycle {
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
+        let content_mime = ctx
+            .downstream_headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
         let multipart = is_multipart_operation(&ctx.path)
-            && ctx
-                .downstream_headers
-                .get(http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| {
-                    value
-                        .split(';')
-                        .next()
-                        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("multipart/form-data"))
-                });
+            && content_mime.is_some_and(|mime| mime.eq_ignore_ascii_case("multipart/form-data"));
+        // A public Realtime call carries an SDP offer, optionally wrapped with its
+        // session config in a multipart form; neither envelope is JSON.
+        let realtime_call_envelope = ctx.path == "/v1/realtime/calls"
+            && content_mime.is_some_and(|mime| {
+                mime.eq_ignore_ascii_case("application/sdp")
+                    || mime.eq_ignore_ascii_case("multipart/form-data")
+            });
+        let non_json_body = multipart || realtime_call_envelope;
         let empty_body = Bytes::new();
-        let body_view = RequestBodyView::new(if multipart {
+        let body_view = RequestBodyView::new(if non_json_body {
             &empty_body
         } else {
             &ctx.body_bytes
@@ -5528,7 +5564,7 @@ impl Lifecycle {
                 None,
             ));
         }
-        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() && !multipart {
+        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() && !non_json_body {
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
@@ -6014,14 +6050,14 @@ impl Lifecycle {
         let mut first_dispatch: Option<(Instant, u64)> = None;
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
-        let mut compat_response_plan: Option<CompatResponsePlan> = None;
+        let mut compat_response_plan: Option<CompatResponsePlan>;
         let mut keepalive_request_dispatched_at = None;
         let affinity_owner_epoch_required = request_capability
             == ProviderCapability::GeminiCachedContentsCreate
             || (request_capability.provider() == cc_lb_domain::Provider::Gemini
                 && request_affinity.is_some());
         let mut routed_owner_epoch;
-        let (mut response, dispatch_started, dispatch_unix_secs, mut signer) = loop {
+        let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
             // response status or timings under the new route.
@@ -6424,17 +6460,17 @@ impl Lifecycle {
             const MAX_TRUNCATION_RETRIES: usize = 3;
             let initial = compat_response::inspect_truncation_response(
                 response,
-                self.config.messages_body_cap_bytes,
+                decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
             )
             .await;
             let (mut inspected, mut overflow) = match initial {
                 Ok(result) => result,
-                Err(_) => {
+                Err(error) => {
                     let failed = provider_error_response(
                         request_capability,
                         StatusCode::BAD_GATEWAY,
                         "server_error",
-                        "upstream response exceeded the compatibility buffer",
+                        error.public_message(),
                         None,
                     );
                     (failed, false)
@@ -6481,7 +6517,7 @@ impl Lifecycle {
                 retry_body = Some(next);
                 (inspected, overflow) = match compat_response::inspect_truncation_response(
                     retry_response,
-                    self.config.messages_body_cap_bytes,
+                    decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
                 )
                 .await
                 {
@@ -6588,7 +6624,6 @@ impl Lifecycle {
                     request_path: ctx.path.clone(),
                     dialect: routed.route.dialect.clone(),
                     gemini_oauth: routed.record.kind == StorageUpstreamKind::GeminiOauth,
-                    compat_response_plan: compat_response_plan.clone(),
                 },
                 compat_response_plan.clone(),
                 prompt_cache_observation_context,
@@ -6773,16 +6808,16 @@ impl Lifecycle {
                     response = match compat_response::aggregate_response(
                         response,
                         echo_metadata.clone(),
-                        self.config.messages_body_cap_bytes,
+                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
                     )
                     .await
                     {
                         Ok(response) => response,
-                        Err(_) => provider_error_response(
+                        Err(error) => provider_error_response(
                             response_affinity_context.capability,
                             StatusCode::BAD_GATEWAY,
                             "server_error",
-                            "upstream response exceeded the compatibility buffer",
+                            error.public_message(),
                             None,
                         ),
                     };
@@ -6791,7 +6826,7 @@ impl Lifecycle {
                     response = match compat_response::aggregate_response(
                         response,
                         None,
-                        self.config.messages_body_cap_bytes,
+                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
                     )
                     .await
                     {
@@ -6799,11 +6834,11 @@ impl Lifecycle {
                             compat_compact_pending = Some(original_request.clone());
                             response
                         }
-                        Err(_) => provider_error_response(
+                        Err(error) => provider_error_response(
                             response_affinity_context.capability,
                             StatusCode::BAD_GATEWAY,
                             "server_error",
-                            "upstream response exceeded the compatibility buffer",
+                            error.public_message(),
                             None,
                         ),
                     };
@@ -6827,9 +6862,11 @@ impl Lifecycle {
         let audio_stream = response_affinity_context.capability == ProviderCapability::OpenaiAudio
             && !response_is_json;
         let stream_response = stream_requested || audio_stream;
+        // A streamed public Responses request still gets a non-SSE error body
+        // (Codex `{detail}`) buffered so it is rewritten to the public error shape.
         let compat_force_buffered = compat_response_plan.as_ref().is_some_and(|plan| {
             compat_response::requires_buffered_response(plan)
-                || (matches!(&plan.kind, CompatResponseKind::PassthroughNormalizeErrors)
+                || (matches!(&plan.kind, CompatResponseKind::ResponsesStream { .. })
                     && !response_is_sse)
         });
         let buffered_transform_required = compat_force_buffered
@@ -7836,66 +7873,78 @@ impl Lifecycle {
         *shaped_body_out = None;
         let mut shaped_ctx = ctx.clone();
         let mut compat_response_plan = None;
-        if upstream_kind == StorageUpstreamKind::OpenaiOauth {
-            if let Some(capability) =
+        if upstream_kind == StorageUpstreamKind::OpenaiOauth
+            && let Some(capability) =
                 classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
-            {
-                let prepared = if capability == ProviderCapability::OpenaiRealtimeCall {
-                    let default_base = default_base_url(StorageUpstreamKind::OpenaiOauth);
-                    compat_realtime::prepare_realtime_call(
-                        ctx,
-                        raw_passthrough_base_url.unwrap_or(&default_base),
-                    )
+        {
+            let prepared = if capability == ProviderCapability::OpenaiRealtimeCall {
+                compat_realtime::prepare_realtime_call(ctx)
                     .await
                     .map_err(AttemptFailure::CompatReject)?
-                } else {
-                    prepare_request(
-                        authenticated,
-                        ctx,
-                        capability,
-                        upstream_kind,
-                        ctx.openai_oauth_compat
-                            .as_ref()
-                            .unwrap_or(&self.config.openai_oauth_compat),
-                        None,
-                    )
-                    .await
-                    .map_err(AttemptFailure::CompatReject)?
-                };
-                compat_response_plan = prepared.response_plan;
-                let changed = prepared.body != ctx.body_bytes
-                    || prepared.path != ctx.path
-                    || prepared.query != ctx.query;
-                shaped_ctx.path = prepared.path;
-                shaped_ctx.query = prepared.query;
-                shaped_ctx.body_bytes = prepared.body;
-                if changed {
-                    shaped_ctx.downstream_headers = compat_request::rewritten_headers(
-                        shaped_ctx.downstream_headers,
-                        shaped_ctx.body_bytes.len(),
-                        true,
-                    );
-                }
-                if capability == ProviderCapability::OpenaiRealtimeCall {
-                    shaped_ctx
-                        .downstream_headers
-                        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                    shaped_ctx.downstream_headers.insert(
-                        HeaderName::from_static("openai-alpha"),
-                        compat_realtime::realtime_call_headers(),
-                    );
-                }
-                if capability == ProviderCapability::OpenaiResponsesInputTokens {
-                    shaped_ctx.downstream_headers.insert(
-                        HeaderName::from_static("x-cc-lb-emulate"),
-                        HeaderValue::from_static("input-tokens-ws"),
-                    );
-                }
+            } else {
+                prepare_request(
+                    authenticated,
+                    ctx,
+                    capability,
+                    upstream_kind,
+                    ctx.openai_oauth_compat
+                        .as_ref()
+                        .unwrap_or(&self.config.openai_oauth_compat),
+                    None,
+                )
+                .await
+                .map_err(AttemptFailure::CompatReject)?
+            };
+            compat_response_plan = prepared.response_plan;
+            let changed = prepared.body != ctx.body_bytes
+                || prepared.path != ctx.path
+                || prepared.query != ctx.query;
+            shaped_ctx.path = prepared.path;
+            shaped_ctx.query = prepared.query;
+            shaped_ctx.body_bytes = prepared.body;
+            if changed {
+                shaped_ctx.downstream_headers = compat_request::rewritten_headers(
+                    shaped_ctx.downstream_headers,
+                    shaped_ctx.body_bytes.len(),
+                    true,
+                );
+            }
+            if capability == ProviderCapability::OpenaiRealtimeCall {
+                shaped_ctx
+                    .downstream_headers
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                shaped_ctx.downstream_headers.insert(
+                    HeaderName::from_static("openai-alpha"),
+                    compat_realtime::realtime_call_headers(),
+                );
+            }
+            if capability == ProviderCapability::OpenaiResponsesInputTokens {
+                shaped_ctx.downstream_headers.insert(
+                    HeaderName::from_static("x-cc-lb-emulate"),
+                    HeaderValue::from_static("input-tokens-ws"),
+                );
             }
         }
         let shape_context = shaped_ctx.dialect_shape_context();
+        // Codex's backend has no hangup route. A public hangup goes to the
+        // public Realtime origin with the OAuth token of the account that
+        // created the call; affinity already pinned this attempt to it.
+        let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
+            && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
+                == Some(ProviderCapability::OpenaiRealtimeHangup);
         let (shaped, capture_shaped_body) = match tracing::info_span!("proxy.shape").in_scope(
             || {
+                if realtime_hangup {
+                    return shape_request(
+                        &RawPassthroughDialect {
+                            base_url: self.config.openai_realtime_origin.clone(),
+                            openai_oauth: false,
+                        },
+                        &shape_context,
+                        &route.upstream,
+                        principal,
+                    );
+                }
                 shape_request(
                     route.dialect.as_ref(),
                     &shape_context,
@@ -8111,7 +8160,7 @@ impl Lifecycle {
             && response_affinity_context.capability == ProviderCapability::AnthropicMessages;
         let compat_transform_requested = compat_response_plan
             .as_ref()
-            .is_some_and(|plan| compat_response::normalize_stream_events(plan));
+            .is_some_and(compat_response::normalize_stream_events);
         let transform_requested = upstream_is_sse
             && (compat_transform_requested
                 || transform_ctx.dialect.sse_event_transform_hook().is_some()
@@ -16876,7 +16925,6 @@ mod tests {
             request_path: "/v1/messages".to_owned(),
             dialect: route.dialect,
             gemini_oauth: false,
-            compat_response_plan: None,
         };
         let affinity_ctx = ResponseAffinityContext {
             capability: ProviderCapability::AnthropicMessages,

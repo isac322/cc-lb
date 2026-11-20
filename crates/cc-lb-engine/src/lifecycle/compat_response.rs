@@ -15,6 +15,18 @@ use crate::openai_compat;
 pub(crate) enum CollectError {
     BodyTooLarge,
     BodyRead,
+    IncompleteStream,
+}
+
+impl CollectError {
+    /// Public error message for a failed compatibility conversion.
+    pub(crate) fn public_message(&self) -> &'static str {
+        match self {
+            Self::BodyTooLarge => "upstream response exceeded the compatibility buffer",
+            Self::BodyRead => "upstream response body could not be read",
+            Self::IncompleteStream => "upstream response ended before a terminal event",
+        }
+    }
 }
 
 /// Collect an upstream body without allowing an unbounded compatibility buffer.
@@ -50,12 +62,11 @@ pub(crate) async fn aggregate_response(
     let body = collect_body(body, cap).await?;
 
     if !is_sse_content_type(&headers) {
-        if !status.is_success() {
-            if let Some(public) =
+        if !status.is_success()
+            && let Some(public) =
                 openai_compat::response::public_error_from_detail(status.as_u16(), &body)
-            {
-                return Ok(json_response(status, public));
-            }
+        {
+            return Ok(json_response(status, public));
         }
         return Ok(json_response(status, body.to_vec()));
     }
@@ -79,7 +90,7 @@ pub(crate) async fn aggregate_response(
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             body,
         )),
-        openai_compat::response::AggregateOutcome::Truncated => Err(CollectError::BodyRead),
+        openai_compat::response::AggregateOutcome::Truncated => Err(CollectError::IncompleteStream),
     }
 }
 /// Inspect only the prefix before the first output event. Once output starts,
@@ -200,15 +211,15 @@ fn chat_from_sse(
     }
     let usage = translator.usage();
     stream_chunks.extend(translator.finish());
-    if plan.include_usage {
-        if let Some(usage) = usage {
-            stream_chunks.push(crate::openai_compat::chat::usage_chunk(
-                &id,
-                created,
-                &plan.model,
-                &usage,
-            ));
-        }
+    if plan.include_usage
+        && let Some(usage) = usage
+    {
+        stream_chunks.push(crate::openai_compat::chat::usage_chunk(
+            &id,
+            created,
+            &plan.model,
+            &usage,
+        ));
     }
     let mut output = Vec::new();
     for chunk in stream_chunks {
@@ -326,30 +337,6 @@ pub(crate) fn convert_buffered_plan(
     ))
 }
 
-/// Apply the stream-side compatibility rewrite to one complete SSE event.
-/// `None` means the event is intentionally suppressed.
-pub(crate) fn transform_sse_event(
-    raw: Bytes,
-    echo_metadata: Option<&Value>,
-    normalize_events: bool,
-) -> Option<Bytes> {
-    let (event_name, data) = parse_sse_event(&raw)?;
-    if normalize_events && openai_compat::response::drop_sse_event(&event_name) {
-        return None;
-    }
-    let Some(metadata) = echo_metadata else {
-        return Some(raw);
-    };
-    let mut value = sonic_rs::from_slice::<Value>(&data).ok()?;
-    openai_compat::response::echo_metadata_into(&mut value, metadata);
-    let encoded = serde_json::to_vec(&value).ok()?;
-    Some(format_sse_event(&event_name, &encoded))
-}
-
-pub(crate) fn normalize_detail_body(status: StatusCode, body: &[u8]) -> Option<Bytes> {
-    openai_compat::response::public_error_from_detail(status.as_u16(), body).map(Bytes::from)
-}
-
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<Body> {
     response_with_headers(status, HeaderMap::new(), body, Some("application/json"))
 }
@@ -396,7 +383,6 @@ pub(crate) fn requires_buffered_response(plan: &CompatResponsePlan) -> bool {
             | CompatResponseKind::ModelsGet { .. }
             | CompatResponseKind::ImagesStream { .. }
             | CompatResponseKind::Transcription { .. }
-            | CompatResponseKind::PassthroughNormalizeErrors
     )
 }
 
@@ -408,10 +394,7 @@ pub(crate) fn stream_echo_metadata(plan: &CompatResponsePlan) -> Option<&Value> 
 }
 
 pub(crate) fn normalize_stream_events(plan: &CompatResponsePlan) -> bool {
-    matches!(
-        &plan.kind,
-        CompatResponseKind::ResponsesStream { .. } | CompatResponseKind::PassthroughNormalizeErrors
-    )
+    matches!(&plan.kind, CompatResponseKind::ResponsesStream { .. })
 }
 pub(crate) struct CompatSseTransformHook {
     pub(crate) echo_metadata: Option<Value>,
@@ -483,10 +466,10 @@ fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
             start = index + 2;
         }
     }
-    if start < body.len() {
-        if let Some(payload) = sse_data(&body[start..]) {
-            payloads.push(payload);
-        }
+    if start < body.len()
+        && let Some(payload) = sse_data(&body[start..])
+    {
+        payloads.push(payload);
     }
     payloads
 }
@@ -505,38 +488,4 @@ fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
         data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
     }
     (!data.is_empty()).then_some(data)
-}
-
-fn parse_sse_event(raw: &[u8]) -> Option<(String, Vec<u8>)> {
-    let text = std::str::from_utf8(raw).ok()?;
-    let mut event = String::new();
-    let mut data = Vec::new();
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(value) = line.strip_prefix("event:") {
-            event = value.trim_start().to_owned();
-        } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push(b'\n');
-            }
-            data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
-        }
-    }
-    Some((event, data))
-}
-
-fn format_sse_event(event: &str, data: &[u8]) -> Bytes {
-    let mut output = Vec::with_capacity(event.len() + data.len() + 16);
-    if !event.is_empty() {
-        output.extend_from_slice(b"event: ");
-        output.extend_from_slice(event.as_bytes());
-        output.extend_from_slice(b"\n");
-    }
-    for line in data.split(|byte| *byte == b'\n') {
-        output.extend_from_slice(b"data: ");
-        output.extend_from_slice(line);
-        output.extend_from_slice(b"\n");
-    }
-    output.extend_from_slice(b"\n");
-    Bytes::from(output)
 }
