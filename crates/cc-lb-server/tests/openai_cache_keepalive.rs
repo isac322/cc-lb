@@ -34,7 +34,7 @@ async fn wait_for_session(pool: &SqlitePool, hash: &str) -> sqlx::sqlite::Sqlite
             {
                 return row;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -55,7 +55,7 @@ async fn wait_for_decision(pool: &SqlitePool, hash: &str) -> sqlx::sqlite::Sqlit
             {
                 return row;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -209,7 +209,7 @@ async fn selected_12h_is_not_tracked_and_reads_never_schedule_or_reanchor_it() {
             if count >= 2 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -301,7 +301,7 @@ async fn native_evidence_and_both_opt_ins_remain_required() {
                 if count > 0 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -353,6 +353,9 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         response.bytes().await.expect("stream completed");
+        fixture
+            .advance_and_dispatch_due_openai(Duration::from_secs(5), &hash, 1)
+            .await;
         fixture.mock.wait_for_requests(2).await;
         tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -363,7 +366,7 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
                 assert_eq!(row.get::<i64, _>("cache_read_input_tokens"), 2048);
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }).await.expect("scheduler native outcome must be durable");
         let requests = fixture.mock.requests();
@@ -395,7 +398,7 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
                 assert_eq!(row.get::<i64, _>("refresh_count"), 0);
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -462,6 +465,10 @@ async fn foreground_and_renewal_roll_up_disjoint_net_input_and_native_write_pres
             .bytes()
             .await
             .expect("foreground response complete");
+        let hash = fixture.session_hash(session);
+        fixture
+            .advance_and_dispatch_due_openai(Duration::from_secs(5), &hash, 1)
+            .await;
         fixture.mock.wait_for_requests(2).await;
         let pool = pool(&fixture).await;
         let rows = tokio::time::timeout(Duration::from_secs(20), async {
@@ -476,7 +483,7 @@ async fn foreground_and_renewal_roll_up_disjoint_net_input_and_native_write_pres
                 if rows.len() == 2 {
                     break rows;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -508,7 +515,7 @@ async fn foreground_and_renewal_roll_up_disjoint_net_input_and_native_write_pres
         }
         let rollup_storage = cc_lb_storage_sqlite::open_sqlite_existing(
             &format!("sqlite://{}", fixture.server.sqlite_path.display()),
-            std::sync::Arc::new(cc_lb_clock::SystemClock),
+            fixture.server.clock.clone(),
         )
         .await
         .expect("open fixture sqlite for rollup");
@@ -670,7 +677,7 @@ async fn run_openai_scope_case(
             {
                 break row;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -705,6 +712,9 @@ async fn run_openai_scope_case(
         );
     }
 
+    fixture
+        .advance_and_dispatch_due_openai(Duration::from_secs(5), &hash, 1)
+        .await;
     fixture.mock.wait_for_requests(2).await;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -724,7 +734,7 @@ async fn run_openai_scope_case(
                 );
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await

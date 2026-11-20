@@ -183,7 +183,7 @@ async fn spawn_fake_upstream() -> FakeUpstream {
 
 async fn admin_request(
     client: &reqwest::Client,
-    server: &common::TestServer,
+    server: &common::InProcessServer,
     method: Method,
     path: &str,
     body: Option<Value>,
@@ -192,7 +192,7 @@ async fn admin_request(
     let url = format!("http://{}{}", server.admin_addr, path);
     let mut request = client
         .request(method, url)
-        .bearer_auth("admin-token")
+        .bearer_auth(server.admin_token)
         .header("accept", "application/json");
     if let Some(if_match) = if_match {
         request = request.header("if-match", if_match);
@@ -211,7 +211,7 @@ async fn admin_request(
     (status, body, etag)
 }
 
-async fn disable_seeded_anthropic(client: &reqwest::Client, server: &common::TestServer) {
+async fn disable_seeded_anthropic(client: &reqwest::Client, server: &common::InProcessServer) {
     let (status, body, _) = admin_request(
         client,
         server,
@@ -255,7 +255,7 @@ async fn disable_seeded_anthropic(client: &reqwest::Client, server: &common::Tes
 
 async fn create_upstream(
     client: &reqwest::Client,
-    server: &common::TestServer,
+    server: &common::InProcessServer,
     body: Value,
 ) -> String {
     let (status, response, _) = admin_request(
@@ -279,7 +279,7 @@ async fn create_upstream(
 }
 
 async fn unauthenticated_post(
-    server: &common::TestServer,
+    server: &common::InProcessServer,
     path: &str,
     body: &str,
 ) -> reqwest::Response {
@@ -292,7 +292,7 @@ async fn unauthenticated_post(
         .expect("unauthenticated proxy request")
 }
 
-async fn wait_for_openai_event(server: &common::TestServer) -> sqlx::sqlite::SqliteRow {
+async fn wait_for_openai_event(server: &common::InProcessServer) -> sqlx::sqlite::SqliteRow {
     let pool = SqlitePoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
@@ -317,14 +317,14 @@ async fn wait_for_openai_event(server: &common::TestServer) -> sqlx::sqlite::Sql
             tokio::time::Instant::now() < deadline,
             "timed out waiting for OpenAI request event"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
 #[tokio::test]
 async fn provider_prefixed_routes_dispatch_and_filter_by_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let fake = spawn_fake_upstream().await;
     let admin = reqwest::Client::new();
 
@@ -581,7 +581,7 @@ async fn provider_prefixed_routes_dispatch_and_filter_by_provider() {
 #[tokio::test]
 async fn output_token_cap_rejects_uncapped_responses_and_gemini_generation() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server_with_principal_limits(
+    let server = common::spawn_inprocess_server_with_principal_limits(
         "",
         vec![Limit {
             kind: LimitKind::OutputTokens,

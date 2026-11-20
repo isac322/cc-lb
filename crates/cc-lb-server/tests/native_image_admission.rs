@@ -1,7 +1,7 @@
 //! Real-binary admission contracts: image encoding size is not visual input quantity.
 
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::to_bytes;
@@ -187,13 +187,14 @@ async fn fixture_handler(State(state): State<FixtureState>, request: Request) ->
 }
 
 struct Harness {
-    server: common::TestServer,
+    server: common::InProcessServer,
     provider: Provider,
     state: FixtureState,
     pool: SqlitePool,
     client: reqwest::Client,
     _catalog_dir: tempfile::TempDir,
     fixture_task: JoinHandle<Result<(), std::io::Error>>,
+    _catalog_guard: common::CustomCatalogGuard,
 }
 
 impl Drop for Harness {
@@ -205,6 +206,7 @@ impl Drop for Harness {
 impl Harness {
     async fn start(provider: Provider) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let catalog_guard = common::lock_custom_catalog().await;
         let state = FixtureState {
             provider,
             catalog: json!({provider.model(): {
@@ -227,34 +229,34 @@ impl Harness {
         let fixture_task = tokio::spawn(async move { axum::serve(listener, router).await });
         let catalog_dir = tempfile::tempdir().expect("image catalog directory");
         let catalog_path = catalog_dir.path().join("catalog.json");
-        std::fs::write(&catalog_path, state.catalog.to_string()).expect("seed image catalog");
+        let catalog_json = state.catalog.to_string();
+        std::fs::write(&catalog_path, &catalog_json).expect("seed image catalog");
         let config = format!(
             "[price_catalog]\nurl = \"{base_url}catalog.json\"\ncache_path = \"{}\"\n",
             catalog_path.display()
         );
-        let server = common::spawn_test_server_with_principal_limits_and_messages_cap(
+        let server = common::spawn_inprocess_server_with_custom_catalog(
             &config,
             Vec::new(),
             fake_anthropic::AppConfig::default(),
             BODY_CAP,
+            &catalog_guard,
         )
         .await;
         let deadline = tokio::time::Instant::now() + DEADLINE;
-        while !String::from_utf8_lossy(&server._process.stdout_snapshot())
-            .contains("installed latest local LiteLLM price catalog")
-        {
+        while cc_lb_pricing::global_catalog().current().raw_json != catalog_json.as_bytes() {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "image catalog installation timed out"
             );
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
         let client = reqwest::Client::builder()
             .timeout(DEADLINE)
             .build()
             .expect("image test HTTP client");
         let response = client.post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
-            .bearer_auth("admin-token")
+            .bearer_auth(server.admin_token)
             .json(&json!({
                 "name": "native-image-admission", "kind": format!("{}_api_key", provider.name()),
                 "base_url": base_url, "api_key_value": "loopback-image-contract", "skip_preflight": true
@@ -279,6 +281,7 @@ impl Harness {
             client,
             _catalog_dir: catalog_dir,
             fixture_task,
+            _catalog_guard: catalog_guard,
         }
     }
 
@@ -294,7 +297,7 @@ impl Harness {
                 "http://{}/admin/v1/principals",
                 self.server.admin_addr
             ))
-            .bearer_auth("admin-token")
+            .bearer_auth(self.server.admin_token)
             .json(&json!({
                 "name": label, "kind": "machine", "allowed_models": [],
                 "default_limits": [limit]
@@ -312,7 +315,7 @@ impl Harness {
                 "http://{}/admin/v1/principals/{id}/keys",
                 self.server.admin_addr
             ))
-            .bearer_auth("admin-token")
+            .bearer_auth(self.server.admin_token)
             .json(&json!({"label": label}))
             .send()
             .await
@@ -385,7 +388,7 @@ impl Harness {
                 tokio::time::Instant::now() < deadline,
                 "image durable settlement timed out"
             );
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -427,7 +430,7 @@ impl Harness {
                 tokio::time::Instant::now() < deadline,
                 "empty-key durable hydration timed out"
             );
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // The writer refreshes registered keys after each flush. Observing the
         // following flush proves a prior refresh completed, so the 10% cold
@@ -454,40 +457,45 @@ fn png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 }
 
 fn png_pair() -> [String; 2] {
-    // Valid 1024x1024 RGB, 8-bit, noninterlaced PNGs. Every scanline uses
-    // filter zero and identical black pixels. Only zlib compression differs.
-    let pixels = vec![0_u8; 1024 * (1 + 1024 * 3)];
-    let pair = [Compression::best(), Compression::none()].map(|compression| {
-        let mut encoder = ZlibEncoder::new(Vec::new(), compression);
-        encoder.write_all(&pixels).expect("compress RGB scanlines");
-        let compressed = encoder.finish().expect("finish RGB zlib stream");
-        let mut decoded = Vec::new();
-        ZlibDecoder::new(compressed.as_slice())
-            .read_to_end(&mut decoded)
-            .expect("decode RGB fixture");
-        assert_eq!(
-            decoded, pixels,
-            "both PNG encodings contain identical RGB pixels"
-        );
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&1024_u32.to_be_bytes());
-        ihdr.extend_from_slice(&1024_u32.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
-        png_chunk(&mut png, b"IHDR", &ihdr);
-        png_chunk(&mut png, b"IDAT", &compressed);
-        png_chunk(&mut png, b"IEND", &[]);
-        base64::engine::general_purpose::STANDARD.encode(png)
-    });
-    assert!(
-        pair[0].len() * 100 < pair[1].len(),
-        "materially different encoded sizes"
-    );
-    assert!(
-        pair[1].len() > 4_000_000,
-        "reproduce encoded-byte overestimation"
-    );
-    pair
+    static PNG_PAIR: OnceLock<[String; 2]> = OnceLock::new();
+    PNG_PAIR
+        .get_or_init(|| {
+            // Valid 1024x1024 RGB, 8-bit, noninterlaced PNGs. Every scanline uses
+            // filter zero and identical black pixels. Only zlib compression differs.
+            let pixels = vec![0_u8; 1024 * (1 + 1024 * 3)];
+            let pair = [Compression::best(), Compression::none()].map(|compression| {
+                let mut encoder = ZlibEncoder::new(Vec::new(), compression);
+                encoder.write_all(&pixels).expect("compress RGB scanlines");
+                let compressed = encoder.finish().expect("finish RGB zlib stream");
+                let mut decoded = Vec::new();
+                ZlibDecoder::new(compressed.as_slice())
+                    .read_to_end(&mut decoded)
+                    .expect("decode RGB fixture");
+                assert_eq!(
+                    decoded, pixels,
+                    "both PNG encodings contain identical RGB pixels"
+                );
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                let mut ihdr = Vec::new();
+                ihdr.extend_from_slice(&1024_u32.to_be_bytes());
+                ihdr.extend_from_slice(&1024_u32.to_be_bytes());
+                ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+                png_chunk(&mut png, b"IHDR", &ihdr);
+                png_chunk(&mut png, b"IDAT", &compressed);
+                png_chunk(&mut png, b"IEND", &[]);
+                base64::engine::general_purpose::STANDARD.encode(png)
+            });
+            assert!(
+                pair[0].len() * 100 < pair[1].len(),
+                "materially different encoded sizes"
+            );
+            assert!(
+                pair[1].len() > 4_000_000,
+                "reproduce encoded-byte overestimation"
+            );
+            pair
+        })
+        .clone()
 }
 
 async fn encoding_contract(provider: Provider) {

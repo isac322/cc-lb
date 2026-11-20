@@ -957,10 +957,13 @@ async fn pf_03_slow_org_probes_stay_in_budget_and_leave_the_proxy_alone() {
         for _ in 0..5 {
             statuses.push(stack.send(0, &[]).await);
         }
-        (statuses, stack.fake().org.in_flight())
+        let in_flight = stack.fake().org.in_flight();
+        tokio::time::pause();
+        (statuses, in_flight)
     };
     let (replies, (proxy_statuses, in_flight_after_proxy)) =
         tokio::join!(preflights, proxy_while_probing);
+    tokio::time::resume();
     let elapsed = started.elapsed();
 
     assert!(elapsed <= BUDGET, "preflights took {elapsed:?}");

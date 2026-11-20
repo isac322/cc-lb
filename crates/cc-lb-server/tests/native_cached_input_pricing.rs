@@ -328,19 +328,22 @@ async fn fixture(provider: Provider, read_rate: Option<f64>) -> Fixture {
 }
 
 struct Harness {
-    server: common::TestServer,
+    server: common::InProcessServer,
     fixture: Fixture,
     pool: SqlitePool,
     _catalog_dir: tempfile::TempDir,
+    _catalog_guard: common::CustomCatalogGuard,
 }
 
 impl Harness {
     async fn start(provider: Provider, read_rate: Option<f64>, cap: i64) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let catalog_guard = common::lock_custom_catalog().await;
         let fixture = fixture(provider, read_rate).await;
         let catalog_dir = tempfile::tempdir().expect("native catalog directory");
         let catalog_path = catalog_dir.path().join("catalog.json");
-        std::fs::write(&catalog_path, fixture.state.catalog.to_string())
+        let catalog_json = fixture.state.catalog.to_string();
+        std::fs::write(&catalog_path, &catalog_json)
             .expect("install synthetic catalog before server startup");
         let config = format!(
             "[price_catalog]\nurl = \"{}catalog.json\"\ncache_path = \"{}\"\n",
@@ -349,7 +352,7 @@ impl Harness {
         );
         // WebSocket admission includes parsed JSON and per-turn bookkeeping,
         // not just frame bytes; the shared 256-byte oversize-test default is too small.
-        let server = common::spawn_test_server_with_principal_limits_and_messages_cap(
+        let server = common::spawn_inprocess_server_with_custom_catalog(
             &config,
             vec![
                 Limit {
@@ -365,27 +368,26 @@ impl Harness {
             ],
             fake_anthropic::AppConfig::default(),
             1_048_576,
+            &catalog_guard,
         )
         .await;
         // Startup exposes listeners while the catalog installer task is finishing.
-        // The observed successful install is a barrier, not an arbitrary startup sleep.
+        // The observed snapshot bytes act as a barrier, not an arbitrary startup sleep.
         let deadline = tokio::time::Instant::now() + DEADLINE;
         loop {
-            if String::from_utf8_lossy(&server._process.stdout_snapshot())
-                .contains("installed latest local LiteLLM price catalog")
-            {
+            if cc_lb_pricing::global_catalog().current().raw_json == catalog_json.as_bytes() {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "catalog installation barrier timed out"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
         let client = reqwest::Client::new();
         let response = client
             .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
-            .bearer_auth("admin-token")
+            .bearer_auth(server.admin_token)
             .json(&json!({
                 "name": "native-cached-input-contract",
                 "kind": format!("{}_api_key", provider.name()),
@@ -414,6 +416,7 @@ impl Harness {
             fixture,
             pool,
             _catalog_dir: catalog_dir,
+            _catalog_guard: catalog_guard,
         }
     }
 
@@ -537,7 +540,7 @@ impl Harness {
                 tokio::time::Instant::now() < deadline,
                 "persisted normalized usage event {ordinal} timed out"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -564,7 +567,7 @@ impl Harness {
                 tokio::time::Instant::now() < deadline,
                 "durable settled request-count {requests} timed out"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -591,7 +594,7 @@ impl Harness {
                 tokio::time::Instant::now() < deadline,
                 "next durable writer flush barrier timed out"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }

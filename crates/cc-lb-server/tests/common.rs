@@ -8,14 +8,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_aead::AeadService;
+use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
-    principal::Limit,
+    ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, Storage,
+    StorageError, StorageResult, UpstreamCreate, UpstreamStore, principal::Limit,
 };
 
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_sqlite::open_sqlite;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite, open_sqlite_existing};
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tempfile::TempDir;
@@ -318,6 +320,258 @@ pub async fn spawn_test_server_with_principal_limits_and_messages_cap(
     .await
 }
 
+pub fn global_catalog_lock() -> &'static tokio::sync::RwLock<()> {
+    static LOCK: OnceLock<tokio::sync::RwLock<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
+/// Exclusive write guard around `cc_lb_pricing::global_catalog()` for tests
+/// that load a synthetic price catalog. Restores the prior snapshot on drop.
+pub struct CustomCatalogGuard {
+    prev: cc_lb_pricing::CatalogSnapshot,
+    _guard: tokio::sync::RwLockWriteGuard<'static, ()>,
+}
+
+impl Drop for CustomCatalogGuard {
+    fn drop(&mut self) {
+        cc_lb_pricing::global_catalog().install_snapshot(self.prev.clone());
+    }
+}
+
+pub async fn lock_custom_catalog() -> CustomCatalogGuard {
+    let _guard = global_catalog_lock().write().await;
+    let prev = (*cc_lb_pricing::global_catalog().current()).clone();
+    CustomCatalogGuard { prev, _guard }
+}
+
+pub struct InProcessServer {
+    pub proxy_addr: SocketAddr,
+    pub admin_addr: SocketAddr,
+    pub sqlite_path: PathBuf,
+    pub admin_token: &'static str,
+    pub managed_key: ManagedTestKey,
+    pub storage: Arc<SqliteStorage>,
+    pub clock: ClockHandle,
+    pub _config_dir: TempDir,
+    app: Option<cc_lb_server::App>,
+    _proxy_task: JoinHandle<Result<(), std::io::Error>>,
+    _admin_task: JoinHandle<Result<(), std::io::Error>>,
+    _fake: JoinHandle<Result<(), std::io::Error>>,
+    // Dropped after `app` and server tasks stop so custom-catalog mutations are already idle.
+    _catalog_read: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
+}
+
+impl Drop for InProcessServer {
+    fn drop(&mut self) {
+        if let Some(app) = self.app.take() {
+            app.signal_handle().start_shutdown();
+        }
+        self._proxy_task.abort();
+        self._admin_task.abort();
+        self._fake.abort();
+    }
+}
+
+pub async fn spawn_inprocess_server() -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        "",
+        AppConfig::default(),
+        Vec::new(),
+        TestTopology::Single,
+        None,
+        Arc::new(SystemClock),
+        true,
+    )
+    .await
+}
+
+pub async fn spawn_inprocess_server_with_fake_config(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        extra_toml,
+        fake_config,
+        Vec::new(),
+        TestTopology::Single,
+        None,
+        Arc::new(SystemClock),
+        true,
+    )
+    .await
+}
+
+pub async fn spawn_inprocess_server_with_principal_limits(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+) -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        extra_toml,
+        fake_config,
+        principal_limits,
+        TestTopology::Single,
+        None,
+        Arc::new(SystemClock),
+        true,
+    )
+    .await
+}
+
+pub async fn spawn_inprocess_server_with_principal_limits_and_messages_cap(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+    messages_cap_bytes: u64,
+) -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        extra_toml,
+        fake_config,
+        principal_limits,
+        TestTopology::Single,
+        Some(messages_cap_bytes),
+        Arc::new(SystemClock),
+        true,
+    )
+    .await
+}
+
+pub async fn spawn_inprocess_server_with_custom_catalog(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+    messages_cap_bytes: u64,
+    _catalog_guard: &CustomCatalogGuard,
+) -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        extra_toml,
+        fake_config,
+        principal_limits,
+        TestTopology::Single,
+        Some(messages_cap_bytes),
+        Arc::new(SystemClock),
+        false,
+    )
+    .await
+}
+
+pub async fn spawn_inprocess_server_with_two_upstreams_and_clock(
+    extra_toml: &str,
+    fake_config: AppConfig,
+    clock: ClockHandle,
+) -> InProcessServer {
+    spawn_inprocess_server_with_options(
+        extra_toml,
+        fake_config,
+        Vec::new(),
+        TestTopology::SubscriptionPreferencePair,
+        None,
+        clock,
+        true,
+    )
+    .await
+}
+
+async fn spawn_inprocess_server_with_options(
+    extra_toml: &str,
+    fake_config: AppConfig,
+    principal_limits: Vec<Limit>,
+    topology: TestTopology,
+    messages_cap_bytes: Option<u64>,
+    clock: ClockHandle,
+    acquire_catalog_read: bool,
+) -> InProcessServer {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let catalog_read = if acquire_catalog_read {
+        Some(global_catalog_lock().read().await)
+    } else {
+        None
+    };
+
+    let fake_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake listener");
+    let fake_addr = fake_listener.local_addr().expect("fake local addr");
+    let fake =
+        tokio::spawn(
+            async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
+        );
+
+    let config_dir = tempfile::tempdir().expect("temp in-process config dir");
+    let config_path = config_dir.path().join("cc-lb.toml");
+    let sqlite_path = config_path.with_file_name("cc-lb.sqlite");
+    let dummy_addr: SocketAddr = "127.0.0.1:0".parse().expect("dummy loopback addr");
+    write_config_with_extra_and_token_env(
+        &config_path,
+        dummy_addr,
+        dummy_addr,
+        dummy_addr,
+        extra_toml,
+        messages_cap_bytes.unwrap_or_else(|| topology.messages_cap_bytes()),
+        TEST_NONEMPTY_ENV,
+    );
+
+    let mut config = Config::load(&config_path).expect("load in-process test config");
+    if !extra_toml.contains("[price_catalog]") {
+        config.price_catalog.url = "http://127.0.0.1:9/price-catalog.json".to_owned();
+        config.price_catalog.cache_path = config_dir.path().join("price-catalog.json");
+    }
+
+    let storage = Arc::new(
+        templated_sqlite_storage(&sqlite_path, clock.clone())
+            .await
+            .expect("in-process templated sqlite storage"),
+    );
+    let managed_key = seed_storage_on(&storage, fake_addr, principal_limits, topology).await;
+    let managed_store: Arc<dyn ManagedKeyStore> = storage.clone();
+    let storage_dyn: Arc<dyn Storage> = storage.clone();
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    let app = cc_lb_server::app::build_app_with_storage(
+        config,
+        Some(&config_path),
+        managed_store,
+        storage_dyn,
+        aead,
+        clock.clone(),
+    )
+    .await
+    .expect("build in-process app");
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind in-process proxy listener");
+    let proxy_addr = proxy_listener.local_addr().expect("in-process proxy addr");
+    let proxy_task = tokio::spawn({
+        let router = app.router.clone();
+        async move { axum::serve(proxy_listener, router).await }
+    });
+
+    let admin_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind in-process admin listener");
+    let admin_addr = admin_listener.local_addr().expect("in-process admin addr");
+    let admin_task = tokio::spawn({
+        let router = app.admin_router.clone();
+        async move { axum::serve(admin_listener, router).await }
+    });
+
+    InProcessServer {
+        proxy_addr,
+        admin_addr,
+        sqlite_path,
+        admin_token: env!("CARGO_PKG_NAME"),
+        managed_key,
+        storage,
+        clock,
+        _config_dir: config_dir,
+        app: Some(app),
+        _proxy_task: proxy_task,
+        _admin_task: admin_task,
+        _fake: fake,
+        _catalog_read: catalog_read,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TestTopology {
     Single,
@@ -467,6 +721,26 @@ fn write_config_with_extra(
     extra_toml: &str,
     messages_cap_bytes: u64,
 ) {
+    write_config_with_extra_and_token_env(
+        path,
+        proxy_addr,
+        admin_addr,
+        metrics_addr,
+        extra_toml,
+        messages_cap_bytes,
+        "CC_LB_ADMIN_TOKEN",
+    );
+}
+
+fn write_config_with_extra_and_token_env(
+    path: &Path,
+    proxy_addr: SocketAddr,
+    admin_addr: SocketAddr,
+    metrics_addr: SocketAddr,
+    extra_toml: &str,
+    messages_cap_bytes: u64,
+    admin_token_env: &str,
+) {
     let storage_path = path.with_file_name("cc-lb.sqlite");
     let data_dir = path.parent().expect("config path has parent");
     let storage_path = storage_path.display();
@@ -537,7 +811,7 @@ key_env = "CC_LB_MASTER_KEY"
 [[admin.auth.providers]]
 kind = "static_token"
 id = "test"
-token_env = "CC_LB_ADMIN_TOKEN"
+token_env = "{admin_token_env}"
 
 [circuit_breaker]
 failures_to_open = 5
@@ -580,24 +854,80 @@ fn extra_observability_options_merge_with_fixture_defaults() {
     assert_eq!(config.upstream_affinity.ttl_days, 2);
 }
 
+/// Clones an initialized blank SQLite database template to `path` and opens it
+/// without re-running the full schema migration sequence per test.
+pub async fn templated_sqlite_storage(
+    path: &Path,
+    clock: ClockHandle,
+) -> StorageResult<SqliteStorage> {
+    static TEMPLATE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    let bytes = TEMPLATE_BYTES.get_or_init(|| {
+        std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build template sqlite runtime");
+            rt.block_on(async {
+                let dir = tempfile::tempdir().expect("template sqlite dir");
+                let template_path = dir.path().join("template.sqlite");
+                let url = format!("sqlite://{}", template_path.display());
+                let storage = open_sqlite(&url, Arc::new(SystemClock))
+                    .await
+                    .expect("open template sqlite");
+                MetaStore::initialize(&storage)
+                    .await
+                    .expect("initialize template sqlite");
+                storage.pool().close().await;
+                use sqlx::Connection as _;
+                let mut conn = sqlx::SqliteConnection::connect(&url)
+                    .await
+                    .expect("connect template sqlite for checkpoint");
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut conn)
+                    .await
+                    .expect("checkpoint template sqlite");
+                sqlx::query("PRAGMA journal_mode = DELETE")
+                    .execute(&mut conn)
+                    .await
+                    .expect("switch template sqlite journal mode");
+                conn.close().await.expect("close template sqlite");
+                std::fs::read(&template_path).expect("read template sqlite bytes")
+            })
+        })
+        .join()
+        .expect("template sqlite thread")
+    });
+    std::fs::write(path, bytes).map_err(|error| StorageError::Fatal {
+        message: format!("write templated sqlite {}: {error}", path.display()),
+    })?;
+    let url = format!("sqlite://{}", path.display());
+    open_sqlite_existing(&url, clock).await
+}
+
 async fn seed_storage(
     storage_path: &Path,
     upstream_addr: SocketAddr,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
 ) -> ManagedTestKey {
-    let database_url = format!("sqlite://{}", storage_path.display());
-    let storage = std::sync::Arc::new(
-        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_clock::SystemClock))
+    let storage = Arc::new(
+        templated_sqlite_storage(storage_path, Arc::new(SystemClock))
             .await
             .expect("test storage opens"),
     );
-    storage
-        .initialize()
-        .await
-        .expect("test storage initializes");
-    // The spawned server reads CC_LB_MASTER_KEY (64 zero hex chars) in
-    // TestProcess::spawn, so the same [0; 32] key encrypts seeded credentials.
+    let key = seed_storage_on(&storage, upstream_addr, principal_limits, topology).await;
+    storage.pool().close().await;
+    key
+}
+
+async fn seed_storage_on(
+    storage: &Arc<SqliteStorage>,
+    upstream_addr: SocketAddr,
+    principal_limits: Vec<Limit>,
+    topology: TestTopology,
+) -> ManagedTestKey {
+    // The spawned/in-process server uses [0; 32] as its AEAD master key, so the
+    // same zero key encrypts seeded credentials.
     let aead = AeadService::from_master_key([0; 32]);
     for name in topology.upstream_names() {
         let upstream = UpstreamStore::create(
@@ -641,7 +971,8 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    let key_store = KeyStore::new(storage.clone());
+    let managed_store: Arc<dyn ManagedKeyStore> = storage.clone();
+    let key_store = KeyStore::new(managed_store);
     let (_record, plaintext) = key_store
         .create(
             "api-key",
@@ -733,7 +1064,7 @@ async fn wait_for_status_with_request_or_exit(
                 address_in_use: false,
             });
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 

@@ -116,11 +116,11 @@ async fn spawn_fake_openai() -> FakeOpenAi {
     }
 }
 
-async fn configure_openai(server: &common::TestServer, fake: &FakeOpenAi) {
+async fn configure_openai(server: &common::InProcessServer, fake: &FakeOpenAi) {
     let client = Client::new();
     let response = client
         .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
-        .bearer_auth("admin-token")
+        .bearer_auth(server.admin_token)
         .json(&json!({
             "name": "codex-zstd-openai",
             "kind": "openai_api_key",
@@ -138,7 +138,7 @@ async fn configure_openai(server: &common::TestServer, fake: &FakeOpenAi) {
         .expect("read create upstream response");
 }
 
-async fn wait_for_malformed_event(server: &common::TestServer) -> (i64, Option<String>) {
+async fn wait_for_malformed_event(server: &common::InProcessServer) -> (i64, Option<String>) {
     let pool = SqlitePoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
@@ -164,7 +164,7 @@ async fn wait_for_malformed_event(server: &common::TestServer) -> (i64, Option<S
             tokio::time::Instant::now() < deadline,
             "timed out waiting for exactly one malformed request event; count={count}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
@@ -173,7 +173,7 @@ fn request_body() -> Vec<u8> {
 }
 
 async fn send_responses(
-    server: &common::TestServer,
+    server: &common::InProcessServer,
     body: Vec<u8>,
     encoding: Option<&str>,
 ) -> reqwest::Response {
@@ -221,7 +221,7 @@ fn assert_client_metadata(record: &RecordedRequest) {
 #[tokio::test]
 async fn authenticated_responses_accepts_uncompressed_and_zstd_requests() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let fake = spawn_fake_openai().await;
     configure_openai(&server, &fake).await;
 
@@ -250,7 +250,7 @@ async fn authenticated_responses_accepts_uncompressed_and_zstd_requests() {
 }
 
 async fn advertised_body_without_auth(
-    server: &common::TestServer,
+    server: &common::InProcessServer,
     api_key: Option<&str>,
 ) -> Vec<u8> {
     let mut stream = TcpStream::connect(server.proxy_addr)
@@ -280,7 +280,7 @@ async fn advertised_body_without_auth(
 #[tokio::test]
 async fn advertised_zstd_body_is_rejected_before_authentication_reads_body() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let fake = spawn_fake_openai().await;
     configure_openai(&server, &fake).await;
     let before = fake.state.snapshot().len();
@@ -295,7 +295,7 @@ async fn advertised_zstd_body_is_rejected_before_authentication_reads_body() {
 #[tokio::test]
 async fn malformed_zstd_body_is_rejected_without_upstream_request() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let fake = spawn_fake_openai().await;
     configure_openai(&server, &fake).await;
     let before = fake.state.snapshot().len();
@@ -316,7 +316,7 @@ async fn malformed_zstd_body_is_rejected_without_upstream_request() {
 #[tokio::test]
 async fn decoded_zstd_body_obeys_messages_cap_without_upstream_request() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server_with_principal_limits_and_messages_cap(
+    let server = common::spawn_inprocess_server_with_principal_limits_and_messages_cap(
         "",
         vec![],
         AppConfig::default(),
@@ -345,7 +345,7 @@ async fn decoded_zstd_body_obeys_messages_cap_without_upstream_request() {
 #[tokio::test]
 async fn valid_large_window_zstd_body_is_accepted_with_small_messages_cap() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let server = common::spawn_test_server_with_principal_limits_and_messages_cap(
+    let server = common::spawn_inprocess_server_with_principal_limits_and_messages_cap(
         "",
         vec![],
         AppConfig::default(),

@@ -9,7 +9,7 @@ use serde_json::json;
 
 const MODEL: &str = "claude-sonnet-4-5-20250929";
 
-async fn persisted_model_event(server: &common::TestServer) -> RequestEvent {
+async fn persisted_model_event(server: &common::InProcessServer) -> RequestEvent {
     let database_url = format!("sqlite://{}", server.sqlite_path.display());
     let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
@@ -38,7 +38,7 @@ async fn persisted_model_event(server: &common::TestServer) -> RequestEvent {
         if let Some(event) = found {
             return event;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     panic!("persisted event for proxied model did not appear within timeout");
 }
@@ -50,7 +50,7 @@ async fn thinking_enabled_and_priority_tier_are_persisted_after_proxy_request() 
     let mut upstream_response = ScriptedMessageResponse::ok();
     upstream_response.body["usage"]["service_tier"] = json!("priority");
     script.push_response(upstream_response);
-    let server = common::spawn_test_server_with_fake_config(
+    let server = common::spawn_inprocess_server_with_fake_config(
         "",
         AppConfig {
             message_script: Some(script.clone()),
@@ -93,7 +93,7 @@ async fn absent_thinking_and_standard_tier_are_persisted_after_proxy_request() {
     let mut upstream_response = ScriptedMessageResponse::ok();
     upstream_response.body["usage"]["service_tier"] = json!("standard");
     script.push_response(upstream_response);
-    let server = common::spawn_test_server_with_fake_config(
+    let server = common::spawn_inprocess_server_with_fake_config(
         "",
         AppConfig {
             message_script: Some(script.clone()),
