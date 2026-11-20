@@ -160,8 +160,16 @@ fn choice_count(
     request: &Map<String, Value>,
     policy: &OpenaiOauthCompatPolicy,
 ) -> Result<u32, CompatReject> {
-    let n = request.get("n").and_then(Value::as_u64).unwrap_or(1);
-    if n <= 1 {
+    // An explicit `n` must be a positive integer, as the public API requires;
+    // only an absent or null `n` defaults to one choice.
+    let n = match request.get("n") {
+        None | Some(Value::Null) => return Ok(1),
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => n,
+            _ => return Err(CompatReject::unsupported_value("n", &value.to_string())),
+        },
+    };
+    if n == 1 {
         return Ok(1);
     }
     if policy.chat_n == EmulateOrReject::Reject || n > u64::from(MAX_CHAT_CHOICES) {
@@ -1229,6 +1237,22 @@ mod tests {
 
     fn delta(text: &str) -> Value {
         json!({"type": "response.output_text.delta", "delta": text})
+    }
+
+    #[test]
+    fn explicit_n_must_be_a_positive_integer() {
+        let base = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        for bad in [json!(0), json!(-1), json!(1.5), json!("2")] {
+            let mut body = base.clone();
+            body["n"] = bad.clone();
+            let error = translate_chat_request(&body, &policy()).expect_err("rejects invalid n");
+            assert_eq!(error.param.as_deref(), Some("n"), "{bad}");
+        }
+        for (value, expected) in [(Value::Null, 1), (json!(1), 1), (json!(3), 3)] {
+            let mut body = base.clone();
+            body["n"] = value;
+            assert_eq!(translate(body).plan.n, expected);
+        }
     }
 
     fn completed(input: u64, output: u64) -> Value {

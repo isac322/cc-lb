@@ -35,7 +35,7 @@ cc-lb does not translate between providers and is not a universal multi-provider
 
 Operations that require provider-owned state or have no subscription equivalent route only to an eligible `openai_api_key` upstream. This includes stored response/chat operations, account-owned resource families, hosted tools, prompts, background requests, and API-key-only families. Exactly one eligible API-key upstream is required for generic account-owned passthrough; cc-lb rejects when ownership cannot be chosen. It never translates requests across providers or fails over across an ownership boundary.
 
-Public realtime forwarding uses `https://api.openai.com/v1` by default and is configurable through the restart-only `openai_public_api.realtime_origin` setting. Subscription transcription is disabled by default; enabling it sends audio to the upstream dictation endpoint, which retains audio for 30 days. cc-lb stores no request or response data.
+Public realtime forwarding uses the origin `https://api.openai.com/` by default and is configurable through the restart-only `openai_public_api.realtime_origin` setting. Subscription transcription is disabled by default; enabling it sends audio to the upstream dictation endpoint, which retains audio for 30 days. cc-lb stores no request or response data.
 
 ## Anthropic HTTP fallback between upstreams
 

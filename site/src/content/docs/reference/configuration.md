@@ -169,4 +169,4 @@ transcription = "disabled"
 
 The alternatives are `coerce`/`reject` for `store_true`, `service_tier`, and `web_search_preview`; `drop`/`reject` for `sampling`, `logprobs`, `prompt_cache_in_memory`, `max_tool_calls`, `background`, and `chat_seed_penalties`; `emulate`/`drop`/`reject` for `truncation_auto` and `chat_stop`; `drop_echo`/`drop`/`reject` for `metadata`; `drop_tool`/`reject` for `hosted_tools`; `emulate`/`reject` for `compact` and `chat_n`; and `enabled`/`disabled` for `transcription`. Transcription is disabled by default because the upstream retains submitted audio for 30 days.
 
-The separate `[openai_public_api]` section sets the realtime public API origin. `realtime_origin` defaults to `https://api.openai.com/v1` and is restart-only.
+The separate `[openai_public_api]` section sets the realtime public API origin. `realtime_origin` defaults to `https://api.openai.com/` and is restart-only; cc-lb appends `/v1/realtime…` paths to it.

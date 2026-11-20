@@ -60,7 +60,9 @@ pub(crate) fn api_key_only_features(
 ) -> Vec<ApiKeyOnlyFeature> {
     if !matches!(
         capability,
-        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiChatCompletions
+        ProviderCapability::OpenaiResponses
+            | ProviderCapability::OpenaiResponsesCompact
+            | ProviderCapability::OpenaiChatCompletions
     ) {
         return Vec::new();
     }
@@ -177,11 +179,20 @@ pub(crate) async fn prepare_request(
             }
             let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            body = serde_json::to_vec(&openai_compat::compact::compact_request_to_responses(
-                &value,
-            )?)
-            .map(Bytes::from)
-            .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+            // Hosted tools (`file_search`, `code_interpreter`, …) follow the same
+            // API-key-or-degrade policy as a Responses request on this account.
+            let features = api_key_only_features(Some(&value), capability);
+            let degraded;
+            let sent = if features.is_empty() {
+                &value
+            } else {
+                degraded =
+                    openai_compat::request::degrade_without_api_key(&value, &features, policy)?;
+                &degraded
+            };
+            body = serde_json::to_vec(&openai_compat::compact::compact_request_to_responses(sent)?)
+                .map(Bytes::from)
+                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
             path = "/v1/responses".to_owned();
             plan = Some(CompatResponsePlan {
                 kind: CompatResponseKind::Compact {

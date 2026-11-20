@@ -187,21 +187,34 @@ export function OpenaiOauthCompatCard({ principal }: { principal: Principal }) {
     setDraft(copyOverride(principal.openai_oauth_compat));
   }, [principal.openai_oauth_compat]);
 
+  const configuredPolicy =
+    configQuery.data?.effective_config?.openai_oauth_compat;
+  // Without the server policy the inherited values are unknown, so the card
+  // must not present defaults as if the server had reported them.
+  const policyUnavailable =
+    !configQuery.isLoading &&
+    (configQuery.isError ||
+      !configuredPolicy ||
+      typeof configuredPolicy !== 'object');
   const serverPolicy = useMemo(() => {
-    const configured = configQuery.data?.effective_config?.openai_oauth_compat;
-    if (!configured || typeof configured !== 'object') return SERVER_DEFAULTS;
+    if (!configuredPolicy || typeof configuredPolicy !== 'object') {
+      return SERVER_DEFAULTS;
+    }
     return {
       ...SERVER_DEFAULTS,
-      ...(configured as Partial<OpenaiOauthCompatPolicy>),
+      ...(configuredPolicy as Partial<OpenaiOauthCompatPolicy>),
     };
-  }, [configQuery.data?.effective_config]);
+  }, [configuredPolicy]);
 
   const changed = !overridesEqual(
     draft,
     copyOverride(principal.openai_oauth_compat),
   );
   const controlsDisabled =
-    updateSettings.isPending || principalWritePending || configQuery.isLoading;
+    updateSettings.isPending ||
+    principalWritePending ||
+    configQuery.isLoading ||
+    policyUnavailable;
 
   const handleSave = () => {
     if (!changed || controlsDisabled) return;
@@ -303,6 +316,16 @@ export function OpenaiOauthCompatCard({ principal }: { principal: Principal }) {
           </div>
         }
       >
+        {policyUnavailable ? (
+          <p
+            role="status"
+            data-testid="openai-oauth-compat-policy-unavailable"
+            className="mb-3 text-caption text-warn-text"
+          >
+            The server compatibility policy could not be loaded, so inherited
+            values are unknown. Settings stay read-only until it loads.
+          </p>
+        ) : null}
         <div className="divide-y divide-row border-y border-row">
           {FIELDS.map((field) => {
             const serverValue = serverPolicy[field.key] as string;
@@ -328,7 +351,9 @@ export function OpenaiOauthCompatCard({ principal }: { principal: Principal }) {
                   <p className="mt-1 text-caption text-text-faint">
                     Effective:{' '}
                     <span className="text-text-muted">
-                      {valueLabel(effectiveValue)}
+                      {overrideValue === undefined && policyUnavailable
+                        ? 'Unknown'
+                        : valueLabel(effectiveValue)}
                     </span>{' '}
                     ·{' '}
                     {overrideValue === undefined
@@ -339,7 +364,11 @@ export function OpenaiOauthCompatCard({ principal }: { principal: Principal }) {
                 <Select
                   value={overrideValue ?? ''}
                   options={options}
-                  allLabel={`Inherit (server: ${valueLabel(serverValue)})`}
+                  allLabel={
+                    policyUnavailable
+                      ? 'Inherit (server value unavailable)'
+                      : `Inherit (server: ${valueLabel(serverValue)})`
+                  }
                   aria-label={field.label}
                   disabled={controlsDisabled}
                   data-testid={`openai-oauth-compat-select-${field.key}`}

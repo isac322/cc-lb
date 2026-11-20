@@ -95,6 +95,32 @@ describe('OpenaiOauthCompatCard', () => {
     ).toBeDefined();
   });
 
+  it('stays read-only and claims no server value when the policy is unavailable', () => {
+    vi.spyOn(queries, 'useConfigEditor').mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as never);
+    renderCard();
+
+    expect(
+      screen.getByTestId('openai-oauth-compat-policy-unavailable').textContent,
+    ).toContain('could not be loaded');
+    const storeRow = screen.getByTestId('openai-oauth-compat-row-store_true');
+    expect(storeRow.textContent).toContain('Effective: Unknown');
+    expect(storeRow.textContent).not.toContain('Coerce to a supported value');
+    expect(
+      screen
+        .getByRole('button', { name: 'Save changes' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      screen
+        .getByRole('button', { name: 'Reset all to server defaults' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+  });
+
   it('confirms the 30-day retention before enabling transcription', async () => {
     renderCard();
     const user = userEvent.setup();
