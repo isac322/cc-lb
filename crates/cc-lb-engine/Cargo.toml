@@ -84,6 +84,7 @@ zstd.workspace = true
 trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }

@@ -22,3 +22,7 @@ cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-routing.workspace = true
 http.workspace = true
 proptest.workspace = true
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

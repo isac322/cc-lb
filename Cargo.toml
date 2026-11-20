@@ -18,6 +18,7 @@ members = [
     "tests/tls",
     "tests/integration",
     "tests/multi-replica",
+    "tools/workspace-hack",
 ]
 exclude = [
     "fuzz",
@@ -45,6 +46,7 @@ cc-lb-plugin-wire = { version = "0.9", path = "crates/cc-lb-plugin-wire" }
 cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.4", path = "crates/cc-lb-plugin-conformance" }
+cc-lb-workspace-hack = { path = "tools/workspace-hack" }
 
 wasmtime = { version = "50.0.2", default-features = false, features = [
     "anyhow",
@@ -139,6 +141,39 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+
+[profile.dev.package.ring]
+opt-level = 2
+
+[profile.dev.package.zstd]
+opt-level = 2
+
+[profile.dev.package.zstd-sys]
+opt-level = 2
+
+[profile.dev.package.flate2]
+opt-level = 2
+
+[profile.dev.package.miniz_oxide]
+opt-level = 2
+
+[profile.dev.package.brotli]
+opt-level = 2
+
+[profile.dev.package.chacha20poly1305]
+opt-level = 2
+
+[profile.dev.package.blake3]
+opt-level = 2
+
+[profile.dev.package."sha2:0.11.1"]
+opt-level = 2
+
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 2
 
 [profile.test]
 debug = "line-tables-only"

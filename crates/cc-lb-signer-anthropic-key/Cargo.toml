@@ -25,6 +25,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 axum.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

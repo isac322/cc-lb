@@ -22,3 +22,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

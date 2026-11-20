@@ -10,3 +10,7 @@ publish = false
 
 [lints.rust]
 unused_must_use = "forbid"
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 insta.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
