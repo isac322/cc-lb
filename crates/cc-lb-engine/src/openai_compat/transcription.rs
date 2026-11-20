@@ -71,7 +71,7 @@ pub fn transcription_response(
     format: TranscriptFormat,
     backend_body: &[u8],
 ) -> Option<(&'static str, Vec<u8>)> {
-    let value: Value = serde_json::from_slice(backend_body).ok()?;
+    let value: Value = sonic_rs::from_slice(backend_body).ok()?;
     let text = value.get("text")?.as_str()?.to_owned();
     match format {
         TranscriptFormat::Json => Some((

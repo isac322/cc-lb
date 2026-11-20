@@ -43,6 +43,35 @@ fn provider_error_response(status: StatusCode, value: serde_json::Value) -> Resp
     json_response(status, value)
 }
 
+fn response_failed_public(value: &serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let error = value.pointer("/response/error").cloned().unwrap_or_else(
+        || serde_json::json!({"type":"server_error","message":"provider response failed"}),
+    );
+    let status = error
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| StatusCode::from_u16(status as u16).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let public = serde_json::json!({"error": {
+        "type": error.get("type").and_then(serde_json::Value::as_str).unwrap_or("server_error"),
+        "code": error.get("code"),
+        "message": error.get("message").and_then(serde_json::Value::as_str).unwrap_or("provider response failed")
+    }});
+    (status, public)
+}
+
+fn top_level_error_public(value: &serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| StatusCode::from_u16(status as u16).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let public = value.get("error").cloned().unwrap_or_else(
+        || serde_json::json!({"type":"server_error","message":"provider WebSocket error"}),
+    );
+    (status, serde_json::json!({"error": public}))
+}
+
 async fn emulate_input_tokens(
     request: SignedRequest,
 ) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
@@ -178,33 +207,14 @@ async fn emulate_input_tokens(
                 return Ok(response);
             }
             Some("response.failed") => {
-                let error = value.pointer("/response/error").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type":"server_error","message":"provider response failed"})
-                });
-                let status = error
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|status| StatusCode::from_u16(status as u16).ok())
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
-                let public = serde_json::json!({"error": {
-                    "type": error.get("type").and_then(serde_json::Value::as_str).unwrap_or("server_error"),
-                    "code": error.get("code"),
-                    "message": error.get("message").and_then(serde_json::Value::as_str).unwrap_or("provider response failed")
-                }});
+                let (status, public) = response_failed_public(&value);
                 let _ = ws.close(None).await;
                 return Ok(json_response(status, public));
             }
             Some("error") => {
-                let status = value
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|status| StatusCode::from_u16(status as u16).ok())
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
-                let public = value.get("error").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type":"server_error","message":"provider WebSocket error"})
-                });
+                let (status, public) = top_level_error_public(&value);
                 let _ = ws.close(None).await;
-                return Ok(json_response(status, serde_json::json!({"error": public})));
+                return Ok(json_response(status, public));
             }
             _ => {}
         }
@@ -239,5 +249,43 @@ impl UpstreamDispatch for InputTokensWebsocketDispatch {
     ) -> Result<Response<Body>, cc_lb_engine::attempt_rail::DispatchBeforeError> {
         deadline.check()?;
         self.dispatch(request).await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_failed_maps_only_public_failure_fields() {
+        let (status, body) = response_failed_public(&serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "status": 422,
+                    "type": "invalid_request_error",
+                    "code": "bad_input",
+                    "message": "invalid input",
+                    "secret": "must not leak"
+                }
+            }
+        }));
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "bad_input");
+        assert_eq!(body["error"]["message"], "invalid input");
+        assert!(body["error"].get("secret").is_none());
+        assert!(body.get("response").is_none());
+    }
+
+    #[test]
+    fn top_level_error_uses_status_and_public_error_object() {
+        let (status, body) = top_level_error_public(&serde_json::json!({
+            "type": "error",
+            "status": 429,
+            "error": {"type": "rate_limit_error", "message": "slow down"}
+        }));
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["message"], "slow down");
     }
 }

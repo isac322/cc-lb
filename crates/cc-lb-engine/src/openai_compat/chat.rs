@@ -12,6 +12,8 @@ use cc_lb_domain::{
 };
 use serde_json::{Map, Value, json};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use super::CompatReject;
 
@@ -441,6 +443,14 @@ struct ToolCall {
     name: String,
     arguments: String,
 }
+/// Generates a public chat completion identity for one request.
+pub(crate) fn new_identity() -> (String, i64) {
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or_default();
+    (format!("chatcmpl-{}", Uuid::new_v4()), created)
+}
 
 /// Translates one backend Responses SSE stream into chat chunks for one choice.
 #[derive(Clone, Debug)]
@@ -849,7 +859,8 @@ struct ChatHookState {
 impl ChatSseTransformHook {
     /// Creates a streaming translator for one chat choice.
     pub(crate) fn new(plan: ChatPlan) -> Self {
-        let translator = ChatStreamTranslator::new(&plan, "chatcmpl-compat".to_owned(), 0, 0);
+        let (completion_id, created) = new_identity();
+        let translator = ChatStreamTranslator::new(&plan, completion_id, created, 0);
         Self {
             state: Mutex::new(ChatHookState {
                 plan,
@@ -933,8 +944,8 @@ impl cc_lb_upstream::SseEventTransformHook for ChatSseTransformHook {
                 && let Some(usage) = state.translator.usage()
             {
                 output.push(json_sse_event(&usage_chunk(
-                    "chatcmpl-compat",
-                    0,
+                    &state.translator.id,
+                    state.translator.created,
                     &state.plan.model,
                     &usage,
                 )));
@@ -1010,14 +1021,14 @@ pub(crate) fn chat_completions_from_sse_bodies(
     plan: &ChatPlan,
     bodies: &[&[u8]],
 ) -> Result<Vec<u8>, ChatSseMergeError> {
-    let id = "chatcmpl-compat".to_owned();
+    let (id, created) = new_identity();
     let mut choices = Vec::with_capacity(bodies.len());
     let mut stream_chunks = Vec::new();
     let mut usage = None;
     let mut stopped = false;
 
     for (index, body) in bodies.iter().enumerate() {
-        let mut translator = ChatStreamTranslator::new(plan, id.clone(), 0, index as u32);
+        let mut translator = ChatStreamTranslator::new(plan, id.clone(), created, index as u32);
         for payload in sse_payloads(body) {
             if payload == b"[DONE]" {
                 continue;
@@ -1047,7 +1058,7 @@ pub(crate) fn chat_completions_from_sse_bodies(
     }
 
     if !plan.stream {
-        let completion = chat_completion_from_streams(plan, id, 0, choices);
+        let completion = chat_completion_from_streams(plan, id, created, choices);
         return serde_json::to_vec(&completion).map_err(|_| ChatSseMergeError::Truncated);
     }
 
@@ -1062,7 +1073,7 @@ pub(crate) fn chat_completions_from_sse_bodies(
         && !stopped
         && let Some(usage) = usage
     {
-        let chunk = usage_chunk(&id, 0, &plan.model, &usage);
+        let chunk = usage_chunk(&id, created, &plan.model, &usage);
         let data = serde_json::to_vec(&chunk).map_err(|_| ChatSseMergeError::Truncated)?;
         output.extend_from_slice(b"data: ");
         output.extend_from_slice(&data);
@@ -1130,6 +1141,68 @@ fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
         data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
     }
     (!data.is_empty()).then_some(data)
+}
+
+/// Extracts and returns Responses-shaped usage from a complete SSE body.
+///
+/// This preserves the provider usage shape so lifecycle accounting can parse it
+/// with the Responses usage parser before chat-shape conversion.
+pub(crate) fn responses_usage_from_sse(body: &[u8]) -> Option<Value> {
+    let mut total = None;
+    for payload in sse_payloads(body) {
+        if payload == b"[DONE]" {
+            continue;
+        }
+        let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
+            continue;
+        };
+        let Some(usage) = event
+            .get("response")
+            .and_then(|response| response.get("usage"))
+        else {
+            continue;
+        };
+        match total.as_mut() {
+            Some(existing) => add_responses_usage(existing, usage),
+            None => total = Some(usage.clone()),
+        }
+    }
+    total
+}
+/// Sums raw Responses usage across fan-out SSE bodies.
+pub(crate) fn responses_usage_from_sse_bodies(bodies: &[&[u8]]) -> Option<Value> {
+    let mut total = None;
+    for body in bodies {
+        let Some(usage) = responses_usage_from_sse(body) else {
+            continue;
+        };
+        match total.as_mut() {
+            Some(existing) => add_responses_usage(existing, &usage),
+            None => total = Some(usage),
+        }
+    }
+    total
+}
+
+fn add_responses_usage(total: &mut Value, usage: &Value) {
+    for path in [
+        &["input_tokens"][..],
+        &["output_tokens"],
+        &["total_tokens"],
+        &["input_tokens_details", "cached_tokens"],
+        &["output_tokens_details", "reasoning_tokens"],
+    ] {
+        let add = path
+            .iter()
+            .try_fold(usage, |value, key| value.get(*key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut slot = &mut *total;
+        for key in path {
+            slot = &mut slot[*key];
+        }
+        *slot = Value::from(slot.as_u64().unwrap_or(0).saturating_add(add));
+    }
 }
 
 #[cfg(test)]
@@ -1465,5 +1538,46 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
         assert!(text.contains("\"index\":1"));
         assert!(text.contains("\"choices\":[]"));
         assert!(text.ends_with("data: [DONE]\n\n"));
+        let ids = text
+            .split("\"id\":\"")
+            .skip(1)
+            .filter_map(|value| value.split('"').next())
+            .collect::<Vec<_>>();
+        assert!(ids.windows(2).all(|window| window[0] == window[1]));
+        let created = text
+            .split("\"created\":")
+            .skip(1)
+            .filter_map(|value| value.split(',').next())
+            .collect::<Vec<_>>();
+        assert!(created.windows(2).all(|window| window[0] == window[1]));
+    }
+
+    #[test]
+    fn responses_usage_extracts_provider_shape() {
+        let body = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n";
+        let usage = responses_usage_from_sse(body).expect("usage");
+        assert_eq!(usage["input_tokens"], 4);
+        assert_eq!(usage["output_tokens"], 3);
+        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 2);
+    }
+    #[test]
+    fn responses_usage_sums_fanout_bodies() {
+        let first = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n";
+        let second = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n";
+        let usage =
+            responses_usage_from_sse_bodies(&[first.as_slice(), second.as_slice()]).expect("usage");
+        assert_eq!(usage["input_tokens"], 5);
+        assert_eq!(usage["output_tokens"], 3);
+        assert_eq!(usage["total_tokens"], 8);
+    }
+
+    #[test]
+    fn chat_identity_is_unique_and_current() {
+        let (first_id, first_created) = new_identity();
+        let (second_id, second_created) = new_identity();
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("chatcmpl-"));
+        assert!(first_created > 0);
+        assert!(second_created >= first_created);
     }
 }

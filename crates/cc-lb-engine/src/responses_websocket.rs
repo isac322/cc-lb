@@ -187,6 +187,7 @@ pub(crate) struct WebSocketPluginRequest {
     pub headers: HeaderMap,
     pub context: ResponseTransformContext,
     pub oauth_compat: bool,
+    pub echo_metadata: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -319,6 +320,7 @@ struct Turn {
     incomplete_reason: Option<Option<String>>,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
     metrics: ResponsesStreamMetrics,
+    echo_metadata: Option<Value>,
     funding_ambiguous: bool,
     response_created: bool,
 }
@@ -637,6 +639,7 @@ impl ResponsesWebSocketGateway {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                echo_metadata: None,
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
                 response_created: false,
@@ -812,6 +815,7 @@ impl ResponsesWebSocketGateway {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                echo_metadata: None,
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
                 response_created: false,
@@ -977,6 +981,9 @@ impl ResponsesWebSocketGateway {
             .saturating_sub(old_charge)
             .saturating_add(new_charge);
         turn.prepared.oauth_compat = request.as_ref().is_some_and(|request| request.oauth_compat);
+        turn.echo_metadata = request
+            .as_ref()
+            .and_then(|request| request.echo_metadata.clone());
         turn.plugin_request = request.map(|request| (upstream_id, request));
         Ok(())
     }
@@ -1416,7 +1423,7 @@ impl ResponsesWebSocketGateway {
             object.insert("stream_id".to_owned(), Value::String(lane.clone()));
             changed = true;
         }
-        if let Some(metadata) = turn.body.get("metadata")
+        if let Some(metadata) = turn.echo_metadata.as_ref()
             && value.get("response").is_some_and(Value::is_object)
         {
             crate::openai_compat::response::echo_metadata_into(&mut value, metadata);
@@ -2828,6 +2835,7 @@ pub(crate) mod tests {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                echo_metadata: None,
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
                 response_created: false,
@@ -2841,6 +2849,38 @@ pub(crate) mod tests {
             },
         );
         gateway
+    }
+
+    #[tokio::test]
+    async fn oauth_public_frame_uses_normalized_echo_metadata() {
+        let fixture = DirectAccountingFixture::new().await;
+        let mut gateway = terminal_fixture_gateway(&fixture, None);
+        gateway.connection_lanes.insert(1, None);
+        let frame = Bytes::from_static(
+            br#"{"type":"response.completed","response":{"id":"resp_fixture"}}"#,
+        );
+        {
+            let turn = gateway.turns.get_mut(&1).expect("fixture turn");
+            turn.prepared.oauth_transport = true;
+            turn.prepared.oauth_compat = true;
+            turn.body = Arc::new(serde_json::json!({"metadata":{"raw":"must not echo"}}));
+            turn.echo_metadata = None;
+        }
+        assert!(gateway.oauth_public_frame(1, &frame).is_none());
+
+        gateway
+            .turns
+            .get_mut(&1)
+            .expect("fixture turn")
+            .echo_metadata = Some(serde_json::json!({"normalized":"echo"}));
+        let output = gateway
+            .oauth_public_frame(1, &frame)
+            .expect("normalized echo frame");
+        let output: Value = sonic_rs::from_slice(&output).expect("JSON frame");
+        assert_eq!(
+            output["response"]["metadata"],
+            serde_json::json!({"normalized":"echo"})
+        );
     }
 
     #[tokio::test]
@@ -3419,6 +3459,7 @@ pub(crate) mod tests {
                     usage_complete,
                     incomplete_reason: None,
                     plugin_request: None,
+                    echo_metadata: None,
                     metrics: ResponsesStreamMetrics::new(),
                     funding_ambiguous: false,
                     response_created: false,

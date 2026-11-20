@@ -46,7 +46,7 @@ impl CompatReject {
         value
             .into()
             .chars()
-            .filter(|ch| !ch.is_control())
+            .flat_map(|ch| ch.escape_default())
             .take(64)
             .collect()
     }
@@ -76,5 +76,20 @@ impl CompatReject {
             code: "unsupported_value",
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompatReject;
+
+    #[test]
+    fn reject_messages_bound_and_filter_client_strings() {
+        let value = "a\n\r\t".repeat(32);
+        let reject = CompatReject::unsupported_value("p\n".repeat(40), &value);
+        assert!(reject.param.len() <= 64);
+        assert!(reject.message.len() < 256);
+        assert!(!reject.param.chars().any(char::is_control));
+        assert!(!reject.message.chars().any(char::is_control));
     }
 }

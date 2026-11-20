@@ -185,8 +185,7 @@ fn chat_from_sse(
     plan: &crate::openai_compat::chat::ChatPlan,
     body: &[u8],
 ) -> Result<Vec<u8>, ChatConversionError> {
-    let id = "chatcmpl-compat".to_owned();
-    let created = 0_i64;
+    let (id, created) = crate::openai_compat::chat::new_identity();
     let mut translator =
         crate::openai_compat::chat::ChatStreamTranslator::new(plan, id.clone(), created, 0);
     let mut stream_chunks = Vec::new();

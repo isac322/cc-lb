@@ -40,6 +40,12 @@ pub(crate) struct PreparedCompatRequest {
     pub body: Bytes,
     pub response_plan: Option<CompatResponsePlan>,
 }
+fn image_stream_plan(body: &Value, kind: ImageStreamKind) -> Option<CompatResponsePlan> {
+    (body.get("stream").and_then(Value::as_bool) == Some(true)).then_some(CompatResponsePlan {
+        kind: CompatResponseKind::ImagesStream { kind },
+        truncation_emulate: false,
+    })
+}
 
 pub(crate) fn effective_policy(
     server: &OpenaiOauthCompatPolicy,
@@ -79,7 +85,6 @@ pub(crate) fn retain_api_key_candidates(
 }
 
 pub(crate) fn response_plan_for_request(
-    ctx: &RequestContext,
     capability: ProviderCapability,
     policy: &OpenaiOauthCompatPolicy,
     body: Option<&Value>,
@@ -115,52 +120,6 @@ pub(crate) fn response_plan_for_request(
             },
             truncation_emulate: false,
         }),
-        ProviderCapability::OpenaiChatCompletions => {
-            let translated = openai_compat::chat::translate_chat_request(body, policy)?;
-            Some(CompatResponsePlan {
-                kind: CompatResponseKind::Chat {
-                    plan: translated.plan,
-                },
-                truncation_emulate: false,
-            })
-        }
-        ProviderCapability::OpenaiModels => {
-            if openai_compat::models::is_codex_catalog_query(ctx.query.as_deref()) {
-                None
-            } else if ctx.path == "/v1/models" {
-                Some(CompatResponsePlan {
-                    kind: CompatResponseKind::ModelsList,
-                    truncation_emulate: false,
-                })
-            } else {
-                Some(CompatResponsePlan {
-                    kind: CompatResponseKind::ModelsGet {
-                        id: ctx.path.rsplit('/').next().unwrap_or_default().to_owned(),
-                    },
-                    truncation_emulate: false,
-                })
-            }
-        }
-        ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {
-            (body.get("stream").and_then(Value::as_bool) == Some(true)).then_some(
-                CompatResponsePlan {
-                    kind: CompatResponseKind::ImagesStream {
-                        kind: ImageStreamKind::Generation,
-                    },
-                    truncation_emulate: false,
-                },
-            )
-        }
-        ProviderCapability::OpenaiImages if ctx.path == "/v1/images/edits" => {
-            (body.get("stream").and_then(Value::as_bool) == Some(true)).then_some(
-                CompatResponsePlan {
-                    kind: CompatResponseKind::ImagesStream {
-                        kind: ImageStreamKind::Edit,
-                    },
-                    truncation_emulate: false,
-                },
-            )
-        }
         _ => None,
     };
     Ok(plan)
@@ -197,7 +156,7 @@ pub(crate) async fn prepare_request(
                 } else {
                     value
                 };
-                plan = response_plan_for_request(ctx, capability, policy, Some(&value))?;
+                plan = response_plan_for_request(capability, policy, Some(&value))?;
                 let normalized =
                     openai_compat::request::normalize_responses_request(NormalizeInput {
                         body: &value,
@@ -316,19 +275,16 @@ pub(crate) async fn prepare_request(
                         truncation_emulate: false,
                     });
                 }
+            } else {
+                let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
+                    .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+                plan = image_stream_plan(&value, ImageStreamKind::Edit);
             }
         }
         ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {
             let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            if value.get("stream").and_then(Value::as_bool) == Some(true) {
-                plan = Some(CompatResponsePlan {
-                    kind: CompatResponseKind::ImagesStream {
-                        kind: ImageStreamKind::Generation,
-                    },
-                    truncation_emulate: false,
-                });
-            }
+            plan = image_stream_plan(&value, ImageStreamKind::Generation);
         }
         ProviderCapability::OpenaiResponsesInputTokens => {
             let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
@@ -369,4 +325,25 @@ pub(crate) fn rewritten_headers(
         headers.insert(CONTENT_LENGTH, value);
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_stream_plan_detects_json_streaming() {
+        let body = serde_json::json!({"stream": true});
+        assert!(matches!(
+            image_stream_plan(&body, ImageStreamKind::Edit),
+            Some(CompatResponsePlan {
+                kind: CompatResponseKind::ImagesStream {
+                    kind: ImageStreamKind::Edit
+                },
+                ..
+            })
+        ));
+        let body = serde_json::json!({"stream": false});
+        assert!(image_stream_plan(&body, ImageStreamKind::Edit).is_none());
+    }
 }

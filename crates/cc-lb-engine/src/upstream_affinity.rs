@@ -159,7 +159,7 @@ pub(crate) fn path_affinity_key(
         ),
         ProviderCapability::OpenaiStoredResponse => (
             UpstreamAffinityKind::OpenaiResponseId,
-            path.strip_prefix("/v1/responses/")?,
+            path.strip_prefix("/v1/responses/")?.split('/').next()?,
         ),
         _ => return None,
     };
@@ -505,6 +505,34 @@ mod tests {
             event,
             principal_id,
         )
+    }
+
+    #[test]
+    fn stored_response_path_operations_share_response_affinity_key() {
+        let principal = "principal";
+        let paths = [
+            "/v1/responses/resp_1",
+            "/v1/responses/resp_1/input_items",
+            "/v1/responses/resp_1/cancel",
+        ];
+        let keys = paths
+            .iter()
+            .map(|path| {
+                path_affinity_key(ProviderCapability::OpenaiStoredResponse, path, principal)
+                    .expect("valid stored response path")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys[0], keys[1]);
+        assert_eq!(keys[0], keys[2]);
+        assert_eq!(
+            path_affinity_key(
+                ProviderCapability::OpenaiStoredResponse,
+                "/v1/responses/../x",
+                principal,
+            ),
+            None
+        );
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub fn normalize_responses_request(
             changed = true;
             aggregate = true;
         }
-        if !obj.contains_key("store") {
+        if !has_non_null(obj, "store") {
             obj.insert("store".into(), Value::Bool(false));
             changed = true;
         }
@@ -184,22 +184,6 @@ pub fn normalize_responses_request(
             let Some(o) = t.as_object_mut() else { continue };
             let typ = o.get("type").and_then(Value::as_str).unwrap_or("");
             if [
-                "computer",
-                "computer_use_preview",
-                "mcp",
-                "shell",
-                "apply_patch",
-                "local_shell",
-            ]
-            .contains(&typ)
-                && changed
-            {
-                return Err(super::CompatReject::unsupported_value(
-                    format!("tools[{i}].type"),
-                    typ,
-                ));
-            }
-            if [
                 "web_search_preview",
                 "web_search_preview_2025_03_11",
                 "web_search_2025_08_26",
@@ -262,6 +246,34 @@ pub fn normalize_responses_request(
     }
     if drop_or_reject(obj, "max_tool_calls", input.policy.max_tool_calls)? {
         changed = true;
+    }
+    if changed {
+        // Public-shaped frames with unsupported hosted tool types are rejected
+        // only when another normalization applies.
+        if let Some((i, typ)) = obj
+            .get("tools")
+            .and_then(Value::as_array)
+            .and_then(|tools| {
+                tools.iter().enumerate().find_map(|(i, tool)| {
+                    let typ = tool.get("type").and_then(Value::as_str)?;
+                    [
+                        "computer",
+                        "computer_use_preview",
+                        "mcp",
+                        "shell",
+                        "apply_patch",
+                        "local_shell",
+                    ]
+                    .contains(&typ)
+                    .then_some((i, typ))
+                })
+            })
+        {
+            return Err(super::CompatReject::unsupported_value(
+                format!("tools[{i}].type"),
+                typ,
+            ));
+        }
     }
     Ok(Normalized {
         body: if changed { Some(b) } else { None },
@@ -483,6 +495,93 @@ mod tests {
         // A choice that forced a removed hosted tool goes away with the tools.
         assert!(out.get("tool_choice").is_none());
         assert!(out.get("tools").is_none());
+    }
+
+    #[test]
+    fn null_optional_fields_are_absent() {
+        let body = json!({
+            "input": [{"type":"message","role":"user"}],
+            "stream": true,
+            "store": null,
+            "temperature": null,
+            "top_p": null,
+            "top_logprobs": null,
+            "metadata": null,
+            "prompt": null,
+            "previous_response_id": null,
+            "conversation": null
+        });
+        let normalized = normalize_responses_request(NormalizeInput {
+            body: &body,
+            policy: &OpenaiOauthCompatPolicy::default(),
+            transport: Transport::WebSocket,
+        })
+        .unwrap();
+        assert!(normalized.body.is_none());
+        let http = normalize_responses_request(NormalizeInput {
+            body: &body,
+            policy: &OpenaiOauthCompatPolicy::default(),
+            transport: Transport::Http,
+        })
+        .unwrap();
+        assert_eq!(
+            http.body.as_ref().expect("HTTP normalizes null store")["store"],
+            false
+        );
+        assert!(api_key_only_features(&body, Transport::WebSocket).is_empty());
+    }
+
+    #[test]
+    fn unsupported_tools_pass_through_codex_shape_but_reject_public_shape() {
+        let codex = json!({
+            "input": [{"type":"message","role":"user"}],
+            "stream": true,
+            "store": false,
+            "tools": [{"type":"local_shell"}]
+        });
+        let policy = OpenaiOauthCompatPolicy::default();
+        assert!(
+            normalize_responses_request(NormalizeInput {
+                body: &codex,
+                policy: &policy,
+                transport: Transport::WebSocket,
+            })
+            .unwrap()
+            .body
+            .is_none()
+        );
+
+        let public = json!({
+            "input": [{"type":"message","role":"user"}],
+            "stream": true,
+            "store": false,
+            "metadata": {"request":"public"},
+            "tools": [{"type":"local_shell"}]
+        });
+        assert!(
+            normalize_responses_request(NormalizeInput {
+                body: &public,
+                policy: &policy,
+                transport: Transport::WebSocket,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hosted_degradation_preserves_required_for_remaining_function_tool() {
+        let body = json!({
+            "tools": [{"type":"file_search"}, {"type":"function","name":"lookup"}],
+            "tool_choice": "required"
+        });
+        let out = degrade_without_api_key(
+            &body,
+            &[ApiKeyOnlyFeature::FileSearchTool],
+            &OpenaiOauthCompatPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(out["tool_choice"], "required");
+        assert_eq!(out["tools"].as_array().map(|tools| tools.len()), Some(1));
     }
 
     #[test]

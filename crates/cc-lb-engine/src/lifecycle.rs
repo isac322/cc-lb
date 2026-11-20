@@ -60,9 +60,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
@@ -3418,6 +3418,8 @@ struct ResponseAffinityContext {
     /// Provider protocol of the routed request; selects which response
     /// shapes create provider-owned state.
     capability: ProviderCapability,
+    usage_shape: Option<crate::provider_capability::UsageShape>,
+    precomputed_usage: Option<UsageCounts>,
     store: Option<Arc<dyn UpstreamAffinityStore>>,
     principal_id: String,
     upstream_id: Uuid,
@@ -5099,13 +5101,16 @@ impl Lifecycle {
             None => (ingress.frame.clone(), downstream_headers),
         };
         let mut oauth_compat = false;
+        let mut echo_metadata = None;
         if openai_oauth {
-            let (shaped_frame, public_shape) =
+            let (shaped_frame, public_shape, normalized_echo_metadata) =
                 self.normalize_oauth_websocket_frame(cached, &frame)?;
             frame = shaped_frame;
             oauth_compat = public_shape;
+            echo_metadata = normalized_echo_metadata;
         }
         Ok(Some(WebSocketPluginRequest {
+            echo_metadata,
             frame,
             headers,
             oauth_compat,
@@ -5129,7 +5134,7 @@ impl Lifecycle {
         &self,
         cached: &PrincipalSpecCached,
         frame: &Bytes,
-    ) -> Result<(Bytes, bool), WebSocketError> {
+    ) -> Result<(Bytes, bool, Option<Value>), WebSocketError> {
         let body: Value = sonic_rs::from_slice(frame).map_err(|_| {
             WebSocketError::new(400, "invalid_request_error", "WebSocket frame must be JSON")
         })?;
@@ -5149,11 +5154,11 @@ impl Lifecycle {
                 .with_native_code(error.code)
                 .with_param(error.param)
         })?;
-        let store_missing = body.get("store").is_none();
+        let store_missing = body.get("store").is_none_or(Value::is_null);
         let public_shape =
             normalized.body.is_some() || normalized.echo_metadata.is_some() || store_missing;
         if !public_shape && body.get("stream_id").is_none() {
-            return Ok((frame.clone(), false));
+            return Ok((frame.clone(), false, None));
         }
         let mut out = normalized.body.unwrap_or(body);
         if let Some(object) = out.as_object_mut() {
@@ -5165,7 +5170,7 @@ impl Lifecycle {
         let bytes = serde_json::to_vec(&out).map_err(|_| {
             WebSocketError::new(500, "server_error", "could not encode WebSocket frame")
         })?;
-        Ok((Bytes::from(bytes), public_shape))
+        Ok((Bytes::from(bytes), public_shape, normalized.echo_metadata))
     }
 
     /// Sign only a newly opened upstream connection, using its current credentials.
@@ -5297,6 +5302,8 @@ impl Lifecycle {
         })?;
         let context = ResponseAffinityContext {
             capability: ProviderCapability::OpenaiResponses,
+            usage_shape: None,
+            precomputed_usage: None,
             store: self.upstream_affinity_store.clone(),
             principal_id: auth.principal_id().to_owned(),
             upstream_id,
@@ -6557,6 +6564,7 @@ impl Lifecycle {
             }
             break (response, dispatch_started, dispatch_unix_secs, signer);
         };
+        let mut precomputed_usage: Option<UsageCounts> = None;
         let chat_fanout_plan = compat_response_plan.as_ref().and_then(|plan| {
             let CompatResponseKind::Chat { plan } = &plan.kind else {
                 return None;
@@ -6672,6 +6680,11 @@ impl Lifecycle {
             }
             if compat_response_plan.is_some() {
                 let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
+                if let Some(raw_usage) =
+                    crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
+                {
+                    precomputed_usage = Some(responses_usage_value_to_counts(&raw_usage));
+                }
                 match crate::openai_compat::chat::chat_completions_from_sse_bodies(
                     &plan, &body_refs,
                 ) {
@@ -6870,6 +6883,10 @@ impl Lifecycle {
             });
         let response_affinity_context = ResponseAffinityContext {
             capability: request_capability,
+            usage_shape: (request_capability == ProviderCapability::OpenaiChatCompletions
+                && routed.record.kind == StorageUpstreamKind::OpenaiOauth)
+                .then_some(crate::provider_capability::UsageShape::OpenaiResponses),
+            precomputed_usage: precomputed_usage.clone(),
             store: self.upstream_affinity_store.clone(),
             principal_id: principal.id.clone(),
             upstream_id: resolved_upstream_id,
@@ -7323,6 +7340,25 @@ impl Lifecycle {
             .map_or_else(usage_parser::NonStreamObservation::default, |value| {
                 usage_parser::observe_non_stream_json_value_for_shape(value, usage_shape)
             });
+        let chat_raw_usage = response_affinity_context
+            .precomputed_usage
+            .clone()
+            .or_else(|| {
+                compat_response_plan
+                    .as_ref()
+                    .filter(|plan| matches!(plan.kind, CompatResponseKind::Chat { .. }))
+                    .and_then(|_| {
+                        crate::openai_compat::chat::responses_usage_from_sse(&body)
+                            .map(|usage| responses_usage_value_to_counts(&usage))
+                    })
+            });
+        let observation = match chat_raw_usage {
+            Some(usage) => usage_parser::NonStreamObservation {
+                usage,
+                canonical_error: observation.canonical_error,
+            },
+            None => observation,
+        };
         let abnormal_stop = response_body_json
             .as_ref()
             .and_then(usage_parser::detect_abnormal_stop_non_stream);
@@ -9092,7 +9128,11 @@ impl Lifecycle {
                                 let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                     &parsed_event,
                                     &mut usage,
-                                    response_affinity_context.capability.usage_shape(),
+                                    response_affinity_context
+                                        .usage_shape
+                                        .unwrap_or_else(|| {
+                                            response_affinity_context.capability.usage_shape()
+                                        }),
                                 );
                                 downstream_drop_guard.set_keepalive_cached_tokens(
                                     usage
@@ -10044,7 +10084,11 @@ impl Lifecycle {
                             let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                 &parsed_event,
                                 &mut usage,
-                                response_affinity_context.capability.usage_shape(),
+                                response_affinity_context
+                                    .usage_shape
+                                    .unwrap_or_else(|| {
+                                        response_affinity_context.capability.usage_shape()
+                                    }),
                             );
                             downstream_drop_guard.set_keepalive_cached_tokens(
                                 usage
@@ -11539,6 +11583,18 @@ fn use_image_rates_for_admission(capability: Option<ProviderCapability>, path: &
         && matches!(path, "/v1/images/edits" | "/v1/images/variations"))
 }
 
+fn responses_usage_value_to_counts(usage: &Value) -> UsageCounts {
+    let mut envelope = Map::new();
+    let mut response = Map::new();
+    response.insert("usage".to_owned(), usage.clone());
+    envelope.insert("response".to_owned(), Value::Object(response));
+    usage_parser::observe_non_stream_json_value_for_shape(
+        &Value::Object(envelope),
+        crate::provider_capability::UsageShape::OpenaiResponses,
+    )
+    .usage
+}
+
 fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
     const ACCOUNT_OWNED_ROOTS: &[&str] = &[
         "/v1/files",
@@ -11894,8 +11950,7 @@ impl LimitRequest {
                 0
             } else {
                 DEFAULT_MAX_INPUT_ESTIMATE
-            })
-            .saturating_mul(i64::from(fanout_multiplier));
+            });
         let local_cache_input = anthropic_input.filter(|_| !breakpoints.is_empty());
         Self {
             model: model.to_owned(),
@@ -12174,7 +12229,7 @@ mod limit_request_estimate_tests {
         assert_eq!(cached.model, "gemini-2.5-flash");
     }
     #[test]
-    fn chat_fanout_reservation_scales_input_and_output_estimates() {
+    fn chat_fanout_reservation_scales_output_not_input_estimates() {
         let single_body = json!({
             "model": "gpt-test",
             "n": 1,
@@ -12201,10 +12256,7 @@ mod limit_request_estimate_tests {
         );
         assert_eq!(single.max_tokens, Some(10));
         assert_eq!(fanout.max_tokens, Some(30));
-        assert_eq!(
-            fanout.input_tokens_estimate,
-            single.input_tokens_estimate.saturating_mul(3)
-        );
+        assert_eq!(fanout.input_tokens_estimate, single.input_tokens_estimate);
     }
 }
 
@@ -17367,6 +17419,8 @@ mod tests {
         };
         let affinity_ctx = ResponseAffinityContext {
             capability: ProviderCapability::AnthropicMessages,
+            usage_shape: None,
+            precomputed_usage: None,
             store: None,
             principal_id: "principal-test".to_owned(),
             upstream_id,
