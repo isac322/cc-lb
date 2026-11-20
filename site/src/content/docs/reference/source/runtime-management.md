@@ -94,6 +94,10 @@ WebSocket `stream_id` lanes are emulated with one upstream socket per lane, all 
 
 The converted model catalog request adds cc-lb's built-in `client_version` only for public clients; a client-supplied value is preserved for Codex-shaped requests. Results are filtered by the principal's allowed models. `memories/trace_summarize` is not mapped.
 
+Not supported: realtime client secrets and provider operations with no safe translation. The [configuration reference](https://github.com/isac322/cc-lb/blob/master/site/src/content/docs/reference/configuration.md) describes policy settings.
+
+#### OpenAI endpoint reference (API-key and OAuth)
+
 | Method | Client path | Credentials |
 |---|---|---|
 | POST / GET WebSocket | `/openai/v1/responses` | API key, OAuth |
@@ -112,8 +116,6 @@ The converted model catalog request adds cc-lb's built-in `client_version` only 
 OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL. The realtime operations use the separate public API origin. The `x-codex-turn-state` response header is forwarded unchanged.
 
 Account-owned resources live in one API account. A response created through cc-lb keeps its recorded owner. Any other account-owned request routes only when exactly one eligible `openai_api_key` upstream exists; with none it returns `404 operation_not_supported`, and with more than one it returns `503 upstream_affinity_unavailable` instead of guessing. These requests never fail over. A realtime hangup for a call cc-lb did not create returns `404 realtime_call_not_found`.
-
-Not supported: realtime client secrets and provider operations with no safe translation. The [configuration reference](../../configuration/) describes policy settings.
 
 #### Gemini endpoint reference
 

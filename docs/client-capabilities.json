@@ -13,8 +13,7 @@
       "status": "pending-feature-evidence",
       "reason": "Feature-specific agy 1.5.9 Gemini API-key execution evidence is recorded below. Rows marked pending still require their own client/provider evidence; Code Assist/OAuth subscription acceptance remains unverified."
     },
-    "limitations": "Family taxonomy is documentation scope, not a reproduced-defect list or wildcard relay policy. Source presence, binary descriptors, synthetic fixtures and recorder traffic do not prove support. Preserve existing shipped API-key and OAuth routes. Subscription Antigravity is not Vertex; TOS and entitlement restrictions remain in force. Background quota polling is not inbound-client acceptance.",
-    "openaiOauthPublicV1": "Issue #1355 ships public Responses and Chat Completions translation, model/image/compaction/input-token conversion, WebSocket lane emulation, realtime forwarding, and optional transcription for openai_oauth. Codex-shaped requests remain unchanged; provider-owned operations use openai_api_key routing or explicit rejection."
+    "limitations": "Family taxonomy is documentation scope, not a reproduced-defect list or wildcard relay policy. Source presence, binary descriptors, synthetic fixtures and recorder traffic do not prove support. Preserve existing shipped API-key and OAuth routes. Subscription Antigravity is not Vertex; TOS and entitlement restrictions remain in force. Background quota polling is not inbound-client acceptance."
   },
   "clients": {
     "codex": {

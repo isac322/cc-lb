@@ -24651,9 +24651,10 @@
       },
       "dependencies": [],
       "disposition": {
+        "nextProof": "A Codex release that calls this route and a backend that serves it, captured through a real client.",
         "owner": "C-AUX",
-        "reason": "Removed from cc-lb OAuth route mapping; the upstream returns 404 and Codex has no caller.",
-        "state": "removed"
+        "reason": "cc-lb no longer maps this OAuth route (#1355): the backend returns 404 and Codex has no caller.",
+        "state": "blocked-contract"
       },
       "featureIssue": {
         "assignment": "C-AUX",
