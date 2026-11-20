@@ -696,6 +696,9 @@ async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
         let record = UpstreamStore::create(
             server.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind,
@@ -1372,6 +1375,9 @@ async fn create_kind_oauth_upstream(
     UpstreamStore::create(
         server.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind,

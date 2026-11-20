@@ -68,10 +68,12 @@ cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
+cc-lb-signer-vertex = { path = "../cc-lb-signer-vertex" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-upstream.workspace = true
+cc-lb-vertex-auth.workspace = true
 clap = { workspace = true, features = ["derive"] }
 futures-util = "0.3"
 http.workspace = true

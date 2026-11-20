@@ -1824,6 +1824,9 @@ fn warmup_upstream(name: &str, wasm_registry_id: Uuid) -> UpstreamCreate {
             wire_version: None,
         }),
         workspace_id: None,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         api_key_access: None,
     }
 }

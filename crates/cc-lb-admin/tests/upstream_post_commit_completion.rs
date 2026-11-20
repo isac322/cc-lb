@@ -608,6 +608,9 @@ async fn seed_warmup_oauth_upstream(storage: &SqliteStorage) -> Uuid {
     let upstream = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "post-commit-fire-now".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

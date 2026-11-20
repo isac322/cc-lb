@@ -824,6 +824,9 @@ async fn access_only_oauth_update_replaces_previous_refresh_secret()
         let original = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("{}-access-update", kind.as_str()),
                 kind,
@@ -1046,6 +1049,9 @@ async fn openai_oauth_update_accepts_bundle_and_does_not_disclose_tokens() {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "openai-update".to_owned(),
             kind: UpstreamKind::OpenaiOauth,
@@ -1111,6 +1117,9 @@ async fn openai_oauth_update_rejects_api_key_value() {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "openai-update-api-key".to_owned(),
             kind: UpstreamKind::OpenaiOauth,
@@ -1855,6 +1864,238 @@ async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updat
         combined.headers.get("etag").and_then(|v| v.to_str().ok()),
         Some("W/\"3\"")
     );
+}
+
+#[tokio::test]
+async fn qa_adm_1_vertex_api_key_create_returns_flat_metadata() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-express",
+            "kind": "vertex_api_key",
+            "api_key_value": "vertex-secret",
+            "express": true,
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::CREATED);
+    assert_eq!(body(&response)["vertex"]["express"], true);
+    assert_eq!(body(&response)["vertex"]["project_id"], Value::Null);
+    assert!(body(&response).get("api_key_value").is_none());
+}
+
+#[tokio::test]
+async fn qa_adm_2_vertex_validation_rejects_incomplete_regional_target() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-invalid",
+            "kind": "vertex_api_key",
+            "api_key_value": "vertex-secret",
+            "project_id": "project-12345",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "invalid_input");
+    assert_eq!(body(&response)["field"], "location");
+}
+
+#[tokio::test]
+async fn qa_adm_3_vertex_reads_return_metadata_without_secret() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage));
+    let created = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-read",
+            "kind": "vertex_api_key",
+            "api_key_value": "vertex-secret",
+            "express": true,
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = body(&created)["id"].as_str().unwrap().to_owned();
+    let fetched = request(app, "GET", &format!("/admin/v1/upstreams/{id}"), None, None).await;
+    assert_eq!(fetched.status, StatusCode::OK);
+    assert_eq!(body(&fetched)["vertex"]["express"], true);
+    assert!(body(&fetched).get("api_key_value").is_none());
+    assert!(body(&fetched)["key_hint"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn vertex_express_is_immutable_on_update() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage));
+    let created = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-immutable",
+            "kind": "vertex_api_key",
+            "api_key_value": "vertex-secret",
+            "express": true,
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    let id = body(&created)["id"].as_str().unwrap().to_owned();
+    let updated = request(
+        app,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({"express": false})),
+        Some("W/\"1\""),
+    )
+    .await;
+    assert_eq!(updated.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&updated)["field"], "express");
+}
+
+#[tokio::test]
+async fn qa_adm_5_vertex_credential_replacement_updates_metadata() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage));
+    let credential = json!({
+        "type": "authorized_user",
+        "client_id": "client-a",
+        "client_secret": "secret-a",
+        "refresh_token": "refresh-a",
+        "quota_project_id": "quota-a"
+    });
+    let created = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-credential",
+            "kind": "vertex_credential",
+            "project_id": "project-12345",
+            "location": "us-central1",
+            "google_credential": credential.to_string(),
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(
+        body(&created)["vertex"]["credential_type"],
+        "authorized_user"
+    );
+    assert_eq!(body(&created)["vertex"]["quota_project_id"], "quota-a");
+    assert!(!body(&created).to_string().contains("secret-a"));
+    assert!(!body(&created).to_string().contains("refresh-a"));
+
+    let id = body(&created)["id"].as_str().unwrap().to_owned();
+    let replacement = json!({
+        "type": "authorized_user",
+        "client_id": "client-b",
+        "client_secret": "secret-b",
+        "refresh_token": "refresh-b",
+        "quota_project_id": "quota-b"
+    });
+    let updated = request(
+        app,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "google_credential": replacement.to_string(),
+            "skip_preflight": true
+        })),
+        Some("W/\"1\""),
+    )
+    .await;
+    assert_eq!(updated.status, StatusCode::OK);
+    assert_eq!(body(&updated)["vertex"]["quota_project_id"], "quota-b");
+    assert!(!body(&updated).to_string().contains("secret-b"));
+}
+
+#[tokio::test]
+async fn legacy_rejects_vertex_only_fields() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "legacy-with-vertex-fields",
+            "kind": "anthropic_api_key",
+            "api_key_value": "sk-ant-test",
+            "project_id": "project-12345",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn qa_sec_admin_secret_fields_are_not_echoed() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage.clone())),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-redacted",
+            "kind": "vertex_api_key",
+            "api_key_value": "DO-NOT-ECHO",
+            "express": true,
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::CREATED);
+    assert!(!body(&response).to_string().contains("DO-NOT-ECHO"));
+    let entries = storage
+        .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 10, false)
+        .await
+        .unwrap();
+    assert!(entries.iter().all(|entry| {
+        !entry
+            .admin_action
+            .as_deref()
+            .unwrap_or_default()
+            .contains("DO-NOT-ECHO")
+    }));
+    let (_rejected_dir, rejected_storage) = new_store().await;
+    let rejected = request(
+        router(test_state(rejected_storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "vertex-invalid-credential",
+            "kind": "vertex_credential",
+            "project_id": "project-12345",
+            "location": "us-central1",
+            "google_credential": "{\"type\":\"external_account\",\"credential_source\":\"PRIVATE\"}"
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&rejected)["field"], "google_credential");
+    assert!(!body(&rejected).to_string().contains("PRIVATE"));
 }
 
 #[tokio::test]

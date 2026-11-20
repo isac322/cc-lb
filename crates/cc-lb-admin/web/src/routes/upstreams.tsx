@@ -153,13 +153,16 @@ import { useEffectiveProviders } from '../lib/previewControls';
 import { providerPlanLabel } from '../lib/providerPlan';
 import {
   capabilitiesOf,
+  classifyVertexCredential,
   PROVIDER_FAMILIES,
   PROVIDER_LABELS,
   type ProviderFamily,
   providerOf,
   requestEventKindsForProvider,
   upstreamAttentionReason,
+  upstreamAuthMode,
   upstreamKindLabel,
+  upstreamMatchesAuthFilter,
   upstreamTypeLabel,
 } from '../lib/providers';
 import {
@@ -204,6 +207,7 @@ const UPSTREAM_FILTERS = [
   'disabled',
   'oauth',
   'api_key',
+  'credential',
 ] as const;
 type UpstreamFilter = (typeof UPSTREAM_FILTERS)[number];
 const UPSTREAM_SORTS = ['attention', 'usage', 'name'] as const;
@@ -239,6 +243,7 @@ const UPSTREAM_FILTER_OPTIONS: readonly {
   { value: 'disabled', label: 'Disabled' },
   { value: 'oauth', label: 'Subscription' },
   { value: 'api_key', label: 'API key' },
+  { value: 'credential', label: 'Credential' },
 ];
 const UPSTREAM_SORT_OPTIONS: readonly {
   value: UpstreamSort;
@@ -506,7 +511,7 @@ function UpstreamsPage() {
   >(
     () => ({
       searchText: ({ upstream }) => {
-        const oauth = upstream.kind.endsWith('_oauth');
+        const oauth = upstreamAuthMode(upstream.kind) === 'subscription';
         // Search and captions share the same provider metadata cache.
         const plan = oauth
           ? providerPlanLabel(
@@ -528,8 +533,11 @@ function UpstreamsPage() {
         all: () => true,
         attention: (row) => needsAttention(row, nowUnixSecs),
         disabled: (row) => !row.upstream.enabled,
-        oauth: (row) => row.upstream.kind.endsWith('_oauth'),
-        api_key: (row) => row.upstream.kind.endsWith('_api_key'),
+        oauth: (row) => upstreamMatchesAuthFilter(row.upstream.kind, 'oauth'),
+        api_key: (row) =>
+          upstreamMatchesAuthFilter(row.upstream.kind, 'api_key'),
+        credential: (row) =>
+          upstreamMatchesAuthFilter(row.upstream.kind, 'credential'),
       },
       sorts: {
         attention: (a, b) =>
@@ -557,7 +565,9 @@ function UpstreamsPage() {
   );
   if (selectedId) mountedMetadataIds.add(selectedId);
   const searchedRows = view.q.trim()
-    ? scopedRows.filter((row) => row.upstream.kind.endsWith('_oauth'))
+    ? scopedRows.filter(
+        (row) => upstreamAuthMode(row.upstream.kind) === 'subscription',
+      )
     : [];
   const pollingSearchRows = searchedRows.filter(
     (row) => !mountedMetadataIds.has(row.upstream.id),
@@ -594,8 +604,8 @@ function UpstreamsPage() {
           (a, b) =>
             PROVIDER_FAMILIES.indexOf(providerOf(a.upstream.kind)) -
               PROVIDER_FAMILIES.indexOf(providerOf(b.upstream.kind)) ||
-            Number(b.upstream.kind.endsWith('_oauth')) -
-              Number(a.upstream.kind.endsWith('_oauth')),
+            Number(upstreamAuthMode(b.upstream.kind) === 'subscription') -
+              Number(upstreamAuthMode(a.upstream.kind) === 'subscription'),
         ),
       }
     : flatListView;
@@ -1235,8 +1245,10 @@ export function DetailView({
 }) {
   const { action } = Route.useSearch();
   const capabilities = capabilitiesOf(upstream.kind);
-  const isSubscription = upstream.kind.endsWith('_oauth');
-  const isApiKey = upstream.kind.endsWith('_api_key');
+  const authMode = upstreamAuthMode(upstream.kind);
+  const isSubscription = authMode === 'subscription';
+  const isApiKey = authMode === 'api_key';
+  const isVertexCredential = authMode === 'google_credential';
   const navigate = useNavigate({ from: Route.fullPath });
   const toggle = useUpdateUpstreamWarmupSettings();
   const del = useDeleteUpstream();
@@ -1545,7 +1557,7 @@ export function DetailView({
   );
   const recheckKey = useRecheckApiKey();
   const keyAccess = apiKeyAccessOf(upstream);
-  const keyNotice = apiKeyNoticeOf(keyAccess);
+  const keyNotice = isApiKey ? apiKeyNoticeOf(keyAccess) : null;
   const apiKeyProvider: ApiKeyProvider | null =
     upstream.kind === 'anthropic_api_key' &&
     isAnthropicBaseUrl(upstream.base_url ?? '')
@@ -1574,11 +1586,26 @@ export function DetailView({
       : 'Disabling...'
     : null;
 
-  const planLabel = isSubscription
-    ? (providerPlanLabel(upstreamProvider, subscriptionMetadataQ.data) ??
-      'Subscription')
-    : upstreamTypeLabel(upstream.kind);
+  const planLabel =
+    upstream.kind === 'vertex_api_key' && upstream.vertex?.express
+      ? 'Express: generate and count only'
+      : isSubscription
+        ? (providerPlanLabel(upstreamProvider, subscriptionMetadataQ.data) ??
+          'Subscription')
+        : upstreamTypeLabel(upstream.kind);
   // The header carries plan, account and organization; the collapsed
+
+  const vertexCredentialHealth = isVertexCredential
+    ? classifyVertexCredential(
+        upstream.status.last_apply_error ??
+          upstreamRuntimeStatus?.last_apply_error,
+      )
+    : null;
+  const vertexCredentialError = isVertexCredential
+    ? (upstream.status.last_apply_error ??
+      upstreamRuntimeStatus?.last_apply_error ??
+      null)
+    : null;
   // metadata section keeps only what the header does not say. API-key
   // endpoint and key status live in Access, where they are edited.
   const accountEmail =
@@ -2164,7 +2191,9 @@ export function DetailView({
     keyNotice != null ||
     !!applyError ||
     !!hasBillingNotice ||
-    usageReportsStopped;
+    usageReportsStopped ||
+    (upstream.kind === 'vertex_api_key' && upstream.vertex?.express === true) ||
+    (vertexCredentialHealth !== null && vertexCredentialHealth !== 'ok');
 
   return (
     <>
@@ -2237,6 +2266,56 @@ export function DetailView({
                   }
                 />
               ) : null}
+              {upstream.kind === 'vertex_api_key' &&
+              upstream.vertex?.express ? (
+                <Notice tone="info" title="Express mode">
+                  Use a project key or a credential → get caching, model list
+                  and Live.
+                </Notice>
+              ) : null}
+              {isVertexCredential && vertexCredentialHealth === 'rejected' ? (
+                <Notice
+                  tone="danger"
+                  title="Credential rejected"
+                  action={
+                    <Button
+                      size="sm"
+                      iconLeft={<KeyRound />}
+                      onClick={() => setReplaceOpen(true)}
+                    >
+                      Replace credential
+                    </Button>
+                  }
+                >
+                  Replace the credential → get requests routing again.
+                </Notice>
+              ) : null}
+              {isVertexCredential && vertexCredentialHealth === 'warning' ? (
+                <Notice
+                  tone="warning"
+                  title="Credential check warning"
+                  action={
+                    <Button
+                      size="sm"
+                      iconLeft={<RefreshCw />}
+                      loading={recheckKey.isPending}
+                      onClick={() => recheckKey.mutate(upstream.id)}
+                    >
+                      {recheckKey.isPending ? 'Checking…' : 'Re-check'}
+                    </Button>
+                  }
+                >
+                  <p>
+                    The credential could not be used for the latest request.
+                    {vertexCredentialError ? ` ${vertexCredentialError}` : ''}
+                  </p>
+                  {recheckKey.error ? (
+                    <p role="alert" className="mt-1 text-danger-text">
+                      Re-check failed: {errorMessage(recheckKey.error)}
+                    </p>
+                  ) : null}
+                </Notice>
+              ) : null}
               {applyError ? (
                 <Notice tone="danger" title="Last apply failed">
                   <span className="break-words">{applyError}</span>
@@ -2284,6 +2363,7 @@ export function DetailView({
                 apiUsageQ.error ? errorMessage(apiUsageQ.error) : null
               }
               usageModeShown={apiKeyUsable(keyAccess)}
+              isVertex={upstream.kind === 'vertex_api_key'}
             />
           ) : (
             <DetailSection title="Usage" description="Selected range">
@@ -2616,6 +2696,77 @@ export function DetailView({
                 />
               ) : null}
             </>
+          ) : isVertexCredential ? (
+            <DetailSection
+              title="Credential"
+              description="Google credential stored encrypted; never shown again"
+              action={
+                vertexCredentialHealth === 'rejected' ? (
+                  <StatusBadge tone="danger" label="Credential rejected" />
+                ) : vertexCredentialHealth === 'warning' ? (
+                  <StatusBadge tone="warn" label="Warning" />
+                ) : (
+                  <StatusBadge
+                    tone={keyAccess?.verified ? 'ok' : 'neutral'}
+                    label={keyAccess?.verified ? 'Verified' : 'Unverified'}
+                  />
+                )
+              }
+            >
+              <DetailFacts>
+                <DetailFact label="Type">
+                  {upstream.vertex?.credential_type ?? 'Unknown'}
+                </DetailFact>
+                <DetailFact label="Principal hint">
+                  {upstream.vertex?.principal_hint ??
+                    keyAccess?.key_hint ??
+                    '—'}
+                </DetailFact>
+                <DetailFact label="Quota project">
+                  {upstream.vertex?.quota_project_id ? (
+                    <span className="font-mono text-data">
+                      {upstream.vertex.quota_project_id}
+                    </span>
+                  ) : (
+                    <span>
+                      Quota project: not set
+                      <span className="mt-0.5 block text-caption text-text-faint">
+                        Add a quota project to the credential file → get
+                        requests billed to your project.
+                      </span>
+                    </span>
+                  )}
+                </DetailFact>
+                <DetailFact label="Verdict">
+                  {keyAccess?.verified ? 'ok' : 'unverified'}
+                </DetailFact>
+                <DetailFact label="Last error">
+                  {keyAccess?.last_error ?? vertexCredentialError ?? '—'}
+                </DetailFact>
+                <DetailFact label="Token health">
+                  {vertexCredentialHealth === 'rejected'
+                    ? 'Credential rejected'
+                    : vertexCredentialHealth === 'warning'
+                      ? 'Needs attention'
+                      : 'Ready'}
+                </DetailFact>
+              </DetailFacts>
+              <div className="mt-4">
+                <Notice tone="warning">
+                  Use a least-privilege service account with Vertex AI User
+                  (`roles/aiplatform.user`) and permission to use the quota
+                  project.
+                </Notice>
+              </div>
+              <DetailRows className="mt-3">
+                <EndpointRow
+                  upstream={upstream}
+                  kind="credential"
+                  editing={activeEditor === 'endpoint'}
+                  onEditingChange={editorToggle('endpoint')}
+                />
+              </DetailRows>
+            </DetailSection>
           ) : isApiKey ? (
             <ApiKeyAccessSection
               upstream={upstream}
@@ -2635,7 +2786,13 @@ export function DetailView({
               <DetailRows>
                 <EndpointRow
                   upstream={upstream}
-                  kind={upstream.kind.endsWith('_oauth') ? 'oauth' : 'api_key'}
+                  kind={
+                    isSubscription
+                      ? 'oauth'
+                      : isVertexCredential
+                        ? 'credential'
+                        : 'api_key'
+                  }
                   editing={activeEditor === 'endpoint'}
                   onEditingChange={editorToggle('endpoint')}
                 />
@@ -2645,7 +2802,7 @@ export function DetailView({
         </DetailSectionGrid>
       </DetailPane>
 
-      {isSubscription || !isApiKey ? null : (
+      {isSubscription || (!isApiKey && !isVertexCredential) ? null : (
         <UpstreamConnectDialog
           target={replaceOpen ? { mode: 'replace', upstream } : null}
           onClose={() => setReplaceOpen(false)}

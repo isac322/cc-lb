@@ -21,3 +21,5 @@ mod redaction_routing_trace;
 mod redaction_snapshot;
 #[path = "redaction_user_prompt_toggle.rs"]
 mod redaction_user_prompt_toggle;
+#[path = "redaction_vertex_tokens.rs"]
+mod redaction_vertex_tokens;

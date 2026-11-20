@@ -60,6 +60,9 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
 fn stores(storage: Arc<Storage>) -> Arc<Stores> {
     Arc::new(Stores {
         upstreams: storage.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
@@ -94,6 +97,9 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -354,6 +360,9 @@ async fn revision_hash_changes_when_oauth_becomes_reconnect_required() {
     let oauth = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-reconnect".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -427,6 +436,9 @@ async fn cancel_during_tick_is_graceful() {
     let blocking_store = Arc::new(BlockingUpstreamStore::default());
     let blocking_stores = Arc::new(Stores {
         upstreams: blocking_store.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            blocking_store.clone(),
+        )),
         principals: Arc::new(EmptyPrincipalStore),
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
         upstream_rate_limits: Arc::new(EmptyRateLimitStore),

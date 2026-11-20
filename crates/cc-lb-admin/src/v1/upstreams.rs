@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::api_key::poll_enqueue::enqueue_usage_poll;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -29,14 +30,20 @@ use cc_lb_quota::{
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
+use cc_lb_storage_api::upstream::{
+    UpstreamKind, UpstreamWarmupDialectPlugin, VertexApiVersion, VertexCredentialType,
+    VertexTarget, VertexUpstreamConfig,
+};
 use cc_lb_storage_api::{
-    OAuthTokensCreate, OrganizationMetadataRecord, RemediationCode, Storage, StorageError,
-    SubscriptionQuotaSample, SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord,
+    ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
+    ApiKeyResolution, ApiKeyWorkspace, ApiKeyWorkspaceMode, OAuthTokensCreate,
+    OrganizationMetadataRecord, Provider, ProviderProjectSource, RemediationCode, Storage,
+    StorageError, SubscriptionQuotaSample, SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord,
     UpstreamApiKeyStore, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
     WarmupLane, WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
+use cc_lb_vertex_auth::{CanonicalCredential, parse_credential, vertex_credential_aad};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -45,10 +52,10 @@ use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
 use super::api_key::access::{ApiKeyAccessResponse, api_key_access_response};
-use super::api_key::poll_enqueue::enqueue_usage_poll;
 use super::api_key::preflight::{
-    ApiKeyUpdateRequest, KeyCheck, PREFLIGHT_ROUTE, no_store, prepare_api_key_create,
-    prepare_api_key_update, validate_base_url_input,
+    ApiKeyUpdateRequest, KeyCheck, PREFLIGHT_ROUTE, PreflightRequest, PreparedApiKeyCreate,
+    PreparedApiKeyUpdate, no_store, prepare_api_key_create, prepare_api_key_update,
+    validate_base_url_input, vertex_config, vertex_preflight,
 };
 use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
@@ -69,6 +76,21 @@ const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_GEMINI_OAUTH_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com/";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 
+fn vertex_preflight_failure_code(
+    outcome: &cc_lb_control::anthropic_api_key::PreflightOutcome,
+) -> RemediationCode {
+    outcome
+        .wire
+        .remediation
+        .first()
+        .map(|remediation| remediation.code)
+        .or_else(|| {
+            (outcome.wire.verdict
+                == cc_lb_control::anthropic_api_key::PreflightVerdict::Unreachable)
+                .then_some(RemediationCode::ProbeUnreachable)
+        })
+        .unwrap_or(RemediationCode::KeyInvalid)
+}
 fn prepare_imported_oauth_bundle(
     kind: UpstreamKind,
     bundle: Option<OAuthTokenBundle>,
@@ -298,6 +320,14 @@ struct UpstreamCreateBody {
     /// OAuth token bundle for non-interactive credential import.
     #[serde(default, alias = "oauth_tokens")]
     oauth_token_bundle: Option<OAuthTokenBundle>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    express: Option<bool>,
+    #[serde(default)]
+    google_credential: Option<String>,
+    #[serde(default)]
+    api_version: Option<VertexApiVersion>,
     /// Gemini Code Assist project used in the request envelope.
     #[serde(default)]
     project_id: Option<String>,
@@ -329,6 +359,14 @@ struct UpstreamUpdateBody {
     /// OAuth token bundle for non-interactive credential replacement.
     #[serde(default, alias = "oauth_tokens")]
     oauth_token_bundle: Option<OAuthTokenBundle>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    express: Option<bool>,
+    #[serde(default)]
+    google_credential: Option<String>,
+    #[serde(default)]
+    api_version: Option<VertexApiVersion>,
     /// Gemini Code Assist project used in the request envelope.
     #[serde(default)]
     project_id: Option<String>,
@@ -362,6 +400,10 @@ impl std::fmt::Debug for UpstreamCreateBody {
             base_url,
             api_key_value,
             oauth_token_bundle,
+            location,
+            express,
+            google_credential,
+            api_version,
             project_id,
             warmup_enabled,
             warmup_dialect_plugin,
@@ -377,6 +419,10 @@ impl std::fmt::Debug for UpstreamCreateBody {
                 "oauth_token_bundle",
                 &oauth_token_bundle.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("location", location)
+            .field("express", express)
+            .field("google_credential", &redacted_presence(google_credential))
+            .field("api_version", api_version)
             .field("project_id", project_id)
             .field("warmup_dialect_plugin", warmup_dialect_plugin)
             .field("warmup_enabled", warmup_enabled)
@@ -394,6 +440,10 @@ impl std::fmt::Debug for UpstreamUpdateBody {
             clear_base_url,
             api_key_value,
             oauth_token_bundle,
+            location,
+            express,
+            google_credential,
+            api_version,
             project_id,
             enabled,
             warmup_enabled,
@@ -411,6 +461,10 @@ impl std::fmt::Debug for UpstreamUpdateBody {
                 "oauth_token_bundle",
                 &oauth_token_bundle.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("location", location)
+            .field("express", express)
+            .field("google_credential", &redacted_presence(google_credential))
+            .field("api_version", api_version)
             .field("project_id", project_id)
             .field("enabled", enabled)
             .field("warmup_enabled", warmup_enabled)
@@ -429,6 +483,17 @@ struct ListQuery {
 }
 
 #[derive(Debug, Serialize)]
+struct VertexResponse {
+    project_id: Option<String>,
+    location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_version: Option<VertexApiVersion>,
+    express: bool,
+    credential_type: Option<VertexCredentialType>,
+    principal_hint: Option<String>,
+    quota_project_id: Option<String>,
+}
+#[derive(Debug, Serialize)]
 struct UpstreamResponse {
     id: String,
     name: String,
@@ -445,6 +510,8 @@ struct UpstreamResponse {
     /// Recognizable fragment of the stored key; never the key itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     key_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vertex: Option<VertexResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -808,6 +875,99 @@ impl From<PostCommitAborted> for UpstreamError {
     }
 }
 
+fn normalize_vertex_base_url(base_url: Option<Url>) -> Option<Url> {
+    base_url.map(|mut url| {
+        url.set_path("/");
+        url.set_query(None);
+        url.set_fragment(None);
+        url
+    })
+}
+
+fn validate_vertex_fields(
+    kind: UpstreamKind,
+    project_id: Option<&str>,
+    location: Option<&str>,
+    express: Option<bool>,
+    google_credential: Option<&str>,
+    api_version: Option<VertexApiVersion>,
+) -> Result<Option<VertexUpstreamConfig>, UpstreamError> {
+    let has_vertex_fields = location.is_some()
+        || express.is_some()
+        || google_credential.is_some()
+        || api_version.is_some();
+    if !matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        if has_vertex_fields {
+            return Err(UpstreamError::InvalidInput {
+                field: "vertex".to_owned(),
+                reason: "Vertex fields are supported only for Vertex upstreams".to_owned(),
+            });
+        }
+        return Ok(None);
+    }
+    let config = vertex_config(kind, project_id, location, express, api_version)?;
+    if kind == UpstreamKind::VertexApiKey {
+        if google_credential.is_some() {
+            return Err(UpstreamError::InvalidInput {
+                field: "google_credential".to_owned(),
+                reason: "Vertex API-key upstreams require api_key_value".to_owned(),
+            });
+        }
+    } else if google_credential.is_none() {
+        return Err(UpstreamError::InvalidInput {
+            field: "google_credential".to_owned(),
+            reason: "google_credential is required".to_owned(),
+        });
+    }
+    Ok(Some(config))
+}
+
+fn vertex_access(
+    verified: bool,
+    key_hint: String,
+    project_id: Option<&str>,
+    checked_at: Option<u64>,
+    now: u64,
+    remediation: Vec<RemediationCode>,
+    last_error: Option<String>,
+) -> ApiKeyAccessWrite {
+    ApiKeyAccessWrite {
+        verified,
+        key_class: ApiKeyClass::Unknown,
+        key_hint,
+        api_key_id: None,
+        needs_workspace: false,
+        capabilities: ApiKeyCapabilities {
+            inference: if verified {
+                ApiKeyInference::Ok
+            } else {
+                ApiKeyInference::Unverified
+            },
+            workspace: ApiKeyWorkspace {
+                mode: ApiKeyWorkspaceMode::Required,
+                id: None,
+                name: None,
+            },
+            workspace_list: ApiKeyOrgCapability::NotApplicable,
+            api_key_resolution: ApiKeyResolution::NotApplicable,
+            key_type: None,
+        },
+        remediation,
+        usage_report_state: Some(ApiKeyOrgCapability::NotApplicable),
+        provider: Some(Provider::Gemini),
+        project_id: project_id.map(ToOwned::to_owned),
+        project_source: project_id.map(|_| ProviderProjectSource::Configured),
+        provider_report_state: None,
+        provider_report_status_metadata: None,
+        last_error,
+        checked_at_unix_secs: checked_at,
+        last_attempt_at_unix_secs: now,
+    }
+}
+
 async fn validate_warmup_plugin(
     storage: &dyn Storage,
     kind: UpstreamKind,
@@ -852,11 +1012,72 @@ async fn create_upstream(
     if let Some(base_url) = body.base_url.as_ref() {
         validate_base_url_input(base_url)?;
     }
+    if matches!(
+        body.kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) && body.api_key_value.as_deref().is_some_and(|value| {
+        let trimmed = value.trim_start();
+        trimmed.starts_with('{') || trimmed.starts_with('[')
+    }) {
+        return Err(UpstreamError::InvalidInput {
+            field: "api_key_value".to_owned(),
+            reason: "Vertex API-key value must not be credential JSON".to_owned(),
+        });
+    }
     // The id is allocated up front so the credential — sealed with AAD = id —
     // and the spec row can be committed in one storage transaction (#852).
     let id = Uuid::new_v4();
     let name = body.name.clone();
     let kind = body.kind;
+    let effective_project_id = body.project_id.clone().or_else(|| {
+        if kind == UpstreamKind::VertexCredential {
+            body.google_credential.as_deref().and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("project_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+            })
+        } else {
+            None
+        }
+    });
+    let vertex = validate_vertex_fields(
+        kind,
+        effective_project_id.as_deref(),
+        body.location.as_deref(),
+        body.express,
+        body.google_credential.as_deref(),
+        body.api_version,
+    )?;
+    let vertex_credential = if kind == UpstreamKind::VertexCredential {
+        let raw = body
+            .google_credential
+            .as_deref()
+            .ok_or_else(|| UpstreamError::InvalidInput {
+                field: "google_credential".to_owned(),
+                reason: "google_credential is required".to_owned(),
+            })?;
+        Some(
+            parse_credential(raw.as_bytes()).map_err(|error| UpstreamError::InvalidInput {
+                field: "google_credential".to_owned(),
+                reason: error.code().to_owned(),
+            })?,
+        )
+    } else {
+        None
+    };
+    let stored_base_url = if matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        normalize_vertex_base_url(body.base_url.clone())
+    } else {
+        body.base_url.clone()
+    };
     if !matches!(
         kind,
         UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
@@ -916,7 +1137,10 @@ async fn create_upstream(
                 || (body.project_id.is_some()
                     && !matches!(
                         kind,
-                        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+                        UpstreamKind::OpenaiApiKey
+                            | UpstreamKind::GeminiApiKey
+                            | UpstreamKind::VertexApiKey
+                            | UpstreamKind::VertexCredential
                     ))
             {
                 return Err(UpstreamError::BadRequest {
@@ -928,7 +1152,102 @@ async fn create_upstream(
             None
         }
     };
+    if matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        if kind == UpstreamKind::VertexApiKey && body.workspace_id.is_some() {
+            return Err(UpstreamError::BadRequest {
+                error: "unexpected_workspace_id",
+                detail: "Vertex API-key upstreams do not accept workspace_id".to_owned(),
+            });
+        }
+        if kind == UpstreamKind::VertexCredential && body.api_key_value.is_some() {
+            return Err(UpstreamError::BadRequest {
+                error: "unexpected_api_key",
+                detail: "Vertex credential upstreams do not accept api_key_value".to_owned(),
+            });
+        }
+    }
+    let mut vertex_preflight_access = None;
+    if kind == UpstreamKind::VertexCredential && !body.skip_preflight {
+        let outcome = vertex_preflight(
+            &state,
+            &PreflightRequest {
+                api_key_value: None,
+                kind: Some(kind),
+                project_id: effective_project_id.clone(),
+                location: body.location.clone(),
+                express: body.express,
+                google_credential: body.google_credential.clone(),
+                api_version: body.api_version,
+                workspace_id: None,
+                base_url: stored_base_url.as_ref().map(Url::to_string),
+            },
+            kind,
+        )
+        .await?;
+        if outcome.wire.verdict != cc_lb_control::anthropic_api_key::PreflightVerdict::Ok {
+            let code = vertex_preflight_failure_code(&outcome);
+            return Err(UpstreamError::Remediation {
+                status: cc_lb_control::anthropic_api_key::http_status(code)
+                    .unwrap_or(StatusCode::BAD_REQUEST),
+                code,
+                message: cc_lb_control::anthropic_api_key::operator_message(code).to_owned(),
+            });
+        }
+        vertex_preflight_access = Some(outcome.access);
+    }
     let api_key = match kind {
+        UpstreamKind::VertexApiKey => {
+            if let Some(existing) = UpstreamStore::get_by_name(storage, &name).await? {
+                return Err(UpstreamError::NameConflict {
+                    name,
+                    existing_id: existing.id,
+                });
+            }
+            let key =
+                super::api_key::preflight::normalize_key_input(body.api_key_value.as_deref())?;
+            super::api_key::preflight::gate_key(&key)?;
+            let check = if body.skip_preflight {
+                KeyCheck::unverified(
+                    &key,
+                    None,
+                    kind,
+                    body.project_id.as_deref(),
+                    cc_lb_clock::unix_secs(state.clock.now()),
+                )
+            } else {
+                let outcome = vertex_preflight(
+                    &state,
+                    &PreflightRequest {
+                        api_key_value: Some(key.as_str().to_owned()),
+                        kind: Some(kind),
+                        project_id: body.project_id.clone(),
+                        location: body.location.clone(),
+                        express: body.express,
+                        google_credential: None,
+                        api_version: body.api_version,
+                        workspace_id: None,
+                        base_url: stored_base_url.as_ref().map(Url::to_string),
+                    },
+                    kind,
+                )
+                .await?;
+                if outcome.wire.verdict != cc_lb_control::anthropic_api_key::PreflightVerdict::Ok {
+                    let code = vertex_preflight_failure_code(&outcome);
+                    return Err(UpstreamError::Remediation {
+                        status: cc_lb_control::anthropic_api_key::http_status(code)
+                            .unwrap_or(StatusCode::BAD_REQUEST),
+                        code,
+                        message: cc_lb_control::anthropic_api_key::operator_message(code)
+                            .to_owned(),
+                    });
+                }
+                KeyCheck::from_outcome(outcome, None)
+            };
+            Some(PreparedApiKeyCreate { key, check })
+        }
         UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
             // A taken name is refused before the key is probed.
             if let Some(existing) = UpstreamStore::get_by_name(storage, &name).await? {
@@ -962,6 +1281,48 @@ async fn create_upstream(
             }
             None
         }
+        UpstreamKind::VertexCredential => None,
+    };
+    let vertex_credential_ciphertext = vertex_credential
+        .as_ref()
+        .map(|credential| {
+            let bytes = serde_json::to_vec(credential).map_err(|_| UpstreamError::BadRequest {
+                error: "credential_parse_failed",
+                detail: "invalid Google credential".to_owned(),
+            })?;
+            state
+                .aead
+                .encrypt(&bytes, &vertex_credential_aad(&id.to_string()))
+                .map_err(|error| UpstreamError::BadRequest {
+                    error: "credential_encryption_failed",
+                    detail: error.to_string(),
+                })
+        })
+        .transpose()?;
+    let vertex_access = if let Some(access) = vertex_preflight_access {
+        Some(access)
+    } else if let Some(credential) = vertex_credential.as_ref() {
+        let project_id = vertex.as_ref().and_then(|config| match &config.target {
+            VertexTarget::Regional { project_id, .. } => Some(project_id.as_ref()),
+            VertexTarget::Express => None,
+        });
+        Some(vertex_access(
+            false,
+            credential.principal_hint().to_owned(),
+            project_id,
+            None,
+            cc_lb_clock::unix_secs(state.clock.now()),
+            if body.skip_preflight {
+                vec![RemediationCode::ProbeUnreachable]
+            } else {
+                Vec::new()
+            },
+            None,
+        ))
+    } else {
+        api_key
+            .as_ref()
+            .map(|prepared| prepared.check.access.clone())
     };
     let warmup_enabled = body.warmup_enabled.unwrap_or(matches!(
         kind,
@@ -970,10 +1331,14 @@ async fn create_upstream(
     // The api key is sealed under the preallocated id so the spec row and its
     // credential land in one storage transaction; no reader ever observes an
     // api-key upstream without its key.
-    let api_key_ciphertext = api_key
-        .as_ref()
-        .map(|prepared| encrypt_plaintext_value(&state, prepared.key.as_str(), id.as_bytes()))
-        .transpose()?;
+    let api_key_ciphertext = if let Some(ciphertext) = vertex_credential_ciphertext {
+        Some(ciphertext)
+    } else {
+        api_key
+            .as_ref()
+            .map(|prepared| encrypt_plaintext_value(&state, prepared.key.as_str(), id.as_bytes()))
+            .transpose()?
+    };
     let oauth_tokens = oauth_bundle
         .as_ref()
         .map(|bundle| {
@@ -992,7 +1357,7 @@ async fn create_upstream(
             id,
             name: body.name,
             kind,
-            base_url: body.base_url,
+            base_url: stored_base_url,
             api_key_ciphertext,
             oauth_tokens,
             warmup_enabled,
@@ -1000,9 +1365,14 @@ async fn create_upstream(
             workspace_id: api_key
                 .as_ref()
                 .and_then(|prepared| prepared.check.workspace_id.clone()),
-            api_key_access: api_key
+            vertex,
+            vertex_credential_type: vertex_credential
                 .as_ref()
-                .map(|prepared| prepared.check.access.clone()),
+                .map(CanonicalCredential::credential_type),
+            vertex_quota_project_id: vertex_credential
+                .as_ref()
+                .and_then(|credential| credential.quota_project_id().map(ToOwned::to_owned)),
+            api_key_access: vertex_access,
         },
     )
     .await
@@ -1107,6 +1477,8 @@ async fn list_upstreams(
                 UpstreamKind::AnthropicApiKey
                     | UpstreamKind::OpenaiApiKey
                     | UpstreamKind::GeminiApiKey
+                    | UpstreamKind::VertexApiKey
+                    | UpstreamKind::VertexCredential
             )
         })
         .map(|record| record.id)
@@ -2118,11 +2490,28 @@ pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, Upstre
     if let Some(base_url) = upstream.base_url.as_ref() {
         return Ok(base_url.clone());
     }
+    if matches!(
+        upstream.kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        return upstream
+            .vertex
+            .as_ref()
+            .map(|config| {
+                Url::parse(&cc_lb_domain::vertex_origin(&config.target))
+                    .map_err(|error| invalid_warmup_state(&error.to_string()))
+            })
+            .unwrap_or_else(|| {
+                Url::parse(DEFAULT_GEMINI_BASE_URL).map_err(|error| {
+                    invalid_warmup_state(&format!("invalid default warmup URL: {error}"))
+                })
+            });
+    }
     let default = match upstream.kind {
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
         UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
-        UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
-        UpstreamKind::GeminiOauth => DEFAULT_GEMINI_OAUTH_BASE_URL,
+        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential => unreachable!(),
     };
     Url::parse(default)
         .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}")))
@@ -2140,7 +2529,9 @@ pub(super) fn effective_base_url(
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
         UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
         UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
-        UpstreamKind::GeminiOauth => DEFAULT_GEMINI_OAUTH_BASE_URL,
+        UpstreamKind::GeminiOauth | UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential => {
+            DEFAULT_GEMINI_OAUTH_BASE_URL
+        }
     };
     Url::parse(default)
         .map_err(|error| invalid_warmup_state(&format!("invalid default preflight URL: {error}")))
@@ -2182,6 +2573,204 @@ async fn update_upstream(
     }
     if let Some(base_url) = body.base_url.as_ref() {
         validate_base_url_input(base_url)?;
+    }
+    if current.kind == UpstreamKind::VertexApiKey
+        && (body.google_credential.is_some() || body.workspace_id.is_some())
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "unexpected_vertex_credential_fields",
+            detail: "Vertex API-key upstreams do not accept google_credential or workspace_id"
+                .to_owned(),
+        });
+    }
+    if current.kind == UpstreamKind::VertexApiKey
+        && body.api_key_value.as_deref().is_some_and(|value| {
+            let trimmed = value.trim_start();
+            trimmed.starts_with('{') || trimmed.starts_with('[')
+        })
+    {
+        return Err(UpstreamError::InvalidInput {
+            field: "api_key_value".to_owned(),
+            reason: "Vertex API-key value must not be credential JSON".to_owned(),
+        });
+    }
+    if current.kind == UpstreamKind::VertexCredential && body.api_key_value.is_some() {
+        return Err(UpstreamError::BadRequest {
+            error: "unexpected_api_key",
+            detail: "Vertex credential upstreams do not accept api_key_value".to_owned(),
+        });
+    }
+    let vertex_update = if matches!(
+        current.kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        let Some(current_config) = current.vertex.as_ref() else {
+            return Err(UpstreamError::BadRequest {
+                error: "invalid_vertex_config",
+                detail: "Vertex upstream is missing its configuration".to_owned(),
+            });
+        };
+        let current_express = matches!(current_config.target, VertexTarget::Express);
+        if body
+            .express
+            .is_some_and(|express| express != current_express)
+        {
+            return Err(UpstreamError::InvalidInput {
+                field: "express".to_owned(),
+                reason: "express is immutable".to_owned(),
+            });
+        }
+        let (project_id, location) = match &current_config.target {
+            VertexTarget::Express => (None, None),
+            VertexTarget::Regional {
+                project_id,
+                location,
+            } => (Some(project_id.as_ref()), Some(location.as_ref())),
+        };
+        let _ = validate_vertex_fields(
+            current.kind,
+            body.project_id.as_deref().or(project_id),
+            body.location.as_deref().or(location),
+            Some(current_express),
+            (current.kind == UpstreamKind::VertexCredential).then_some("stored"),
+            body.api_version.or(Some(current_config.api_version)),
+        )?;
+        Some(vertex_config(
+            current.kind,
+            body.project_id.as_deref().or(project_id),
+            body.location.as_deref().or(location),
+            Some(current_express),
+            body.api_version.or(Some(current_config.api_version)),
+        )?)
+    } else {
+        validate_vertex_fields(
+            current.kind,
+            body.project_id.as_deref(),
+            body.location.as_deref(),
+            body.express,
+            body.google_credential.as_deref(),
+            body.api_version,
+        )?
+    };
+    let vertex_replacement = if current.kind == UpstreamKind::VertexCredential {
+        body.google_credential
+            .as_deref()
+            .map(|raw| {
+                parse_credential(raw.as_bytes()).map_err(|error| UpstreamError::InvalidInput {
+                    field: "google_credential".to_owned(),
+                    reason: error.code().to_owned(),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let mut vertex_key_check = None;
+    let mut vertex_credential_access = None;
+    if matches!(
+        current.kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) && (!body.skip_preflight
+        && (body.api_key_value.is_some()
+            || body.google_credential.is_some()
+            || body.project_id.is_some()
+            || body.location.is_some()
+            || body.base_url.is_some()
+            || body.clear_base_url))
+    {
+        let target_base_url = if body.clear_base_url {
+            None
+        } else {
+            normalize_vertex_base_url(body.base_url.clone().or_else(|| current.base_url.clone()))
+        };
+        let (project_id, location, express, api_version) = match vertex_update.as_ref() {
+            Some(config) => match &config.target {
+                VertexTarget::Express => (None, None, Some(true), Some(config.api_version)),
+                VertexTarget::Regional {
+                    project_id,
+                    location,
+                } => (
+                    Some(project_id.to_string()),
+                    Some(location.to_string()),
+                    Some(false),
+                    Some(config.api_version),
+                ),
+            },
+            None => (None, None, None, None),
+        };
+        let (api_key_value, google_credential) = if current.kind == UpstreamKind::VertexApiKey {
+            let bytes = if let Some(value) = body.api_key_value.as_deref() {
+                value.as_bytes().to_vec()
+            } else {
+                let ciphertext = current
+                    .api_key_ciphertext
+                    .as_deref()
+                    .ok_or(UpstreamError::ApiKeyCredentialDecrypt)?;
+                state
+                    .aead
+                    .decrypt(ciphertext, current.id.as_bytes())
+                    .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?
+            };
+            (
+                Some(String::from_utf8(bytes).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?),
+                None,
+            )
+        } else {
+            let bytes = if let Some(credential) = vertex_replacement.as_ref() {
+                serde_json::to_vec(credential).map_err(|_| UpstreamError::InvalidInput {
+                    field: "google_credential".to_owned(),
+                    reason: "credential_invalid".to_owned(),
+                })?
+            } else {
+                let ciphertext = current
+                    .api_key_ciphertext
+                    .as_deref()
+                    .ok_or(UpstreamError::ApiKeyCredentialDecrypt)?;
+                state
+                    .aead
+                    .decrypt(ciphertext, &vertex_credential_aad(&current.id.to_string()))
+                    .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?
+            };
+            (
+                None,
+                Some(String::from_utf8(bytes).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?),
+            )
+        };
+        let outcome = vertex_preflight(
+            &state,
+            &PreflightRequest {
+                api_key_value,
+                workspace_id: None,
+                base_url: target_base_url.map(|url| url.to_string()),
+                kind: Some(current.kind),
+                project_id,
+                location,
+                express,
+                google_credential,
+                api_version,
+            },
+            current.kind,
+        )
+        .await?;
+        if outcome.wire.verdict != cc_lb_control::anthropic_api_key::PreflightVerdict::Ok {
+            let code = outcome
+                .wire
+                .remediation
+                .first()
+                .map(|item| item.code)
+                .unwrap_or(RemediationCode::KeyInvalid);
+            return Err(UpstreamError::Remediation {
+                status: cc_lb_control::anthropic_api_key::http_status(code)
+                    .unwrap_or(StatusCode::BAD_REQUEST),
+                code,
+                message: cc_lb_control::anthropic_api_key::operator_message(code).to_owned(),
+            });
+        }
+        if current.kind == UpstreamKind::VertexApiKey {
+            vertex_key_check = Some(KeyCheck::from_outcome(outcome, None));
+        } else {
+            vertex_credential_access = Some(outcome.access);
+        }
     }
     if !matches!(
         current.kind,
@@ -2302,6 +2891,14 @@ async fn update_upstream(
         } else {
             body.base_url.clone().or_else(|| current.base_url.clone())
         };
+        let target_base_url = if matches!(
+            current.kind,
+            UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+        ) {
+            normalize_vertex_base_url(target_base_url)
+        } else {
+            target_base_url
+        };
         let base_url_written = body.base_url.is_some() || body.clear_base_url;
         let (old_host, new_host) = if base_url_written {
             (
@@ -2338,6 +2935,9 @@ async fn update_upstream(
                 warmup_enabled: body.warmup_enabled,
                 warmup_dialect_plugin: body.warmup_dialect_plugin,
                 workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 api_key_access: None,
                 reset_api_key_poll_state: false,
             },
@@ -2388,7 +2988,38 @@ async fn update_upstream(
         } else {
             body.base_url.clone().or_else(|| current.base_url.clone())
         };
+        let target_base_url = if matches!(
+            current.kind,
+            UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+        ) {
+            normalize_vertex_base_url(target_base_url)
+        } else {
+            target_base_url
+        };
         let api_key = match current.kind {
+            UpstreamKind::VertexApiKey => {
+                if body.workspace_id.is_some() || body.clear_workspace_id {
+                    return Err(UpstreamError::InvalidInput {
+                        field: "workspace_id".to_owned(),
+                        reason: "workspace_id is not supported for Vertex".to_owned(),
+                    });
+                }
+                let new_key = body
+                    .api_key_value
+                    .as_deref()
+                    .map(|raw| {
+                        let key = super::api_key::preflight::normalize_key_input(Some(raw))?;
+                        super::api_key::preflight::gate_key(&key)?;
+                        Ok::<_, UpstreamError>(key)
+                    })
+                    .transpose()?;
+                PreparedApiKeyUpdate {
+                    new_key,
+                    check: vertex_key_check,
+                    workspace_id: None,
+                    reset_poll_state: body.api_key_value.is_some(),
+                }
+            }
             UpstreamKind::AnthropicApiKey
             | UpstreamKind::OpenaiApiKey
             | UpstreamKind::GeminiApiKey => {
@@ -2464,17 +3095,59 @@ async fn update_upstream(
                 }
                 Default::default()
             }
+            UpstreamKind::VertexCredential => Default::default(),
         };
 
         let mut fields_changed = changed_fields(&body);
         if api_key.workspace_id.is_some() && !fields_changed.contains(&"workspace_id") {
             fields_changed.push("workspace_id");
         }
-        let api_key_ciphertext = api_key
-            .new_key
+        let replacement_ciphertext = vertex_replacement
             .as_ref()
-            .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
+            .map(|credential| {
+                let bytes =
+                    serde_json::to_vec(credential).map_err(|_| UpstreamError::BadRequest {
+                        error: "credential_parse_failed",
+                        detail: "invalid Google credential".to_owned(),
+                    })?;
+                state
+                    .aead
+                    .encrypt(&bytes, &vertex_credential_aad(&current.id.to_string()))
+                    .map_err(|error| UpstreamError::BadRequest {
+                        error: "credential_encryption_failed",
+                        detail: error.to_string(),
+                    })
+            })
             .transpose()?;
+        let api_key_ciphertext = if let Some(ciphertext) = replacement_ciphertext {
+            Some(ciphertext)
+        } else {
+            api_key
+                .new_key
+                .as_ref()
+                .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
+                .transpose()?
+        };
+        let vertex_access_update = vertex_replacement.as_ref().map(|credential| {
+            if let Some(access) = vertex_credential_access.take() {
+                return access;
+            }
+            let project_id = vertex_update
+                .as_ref()
+                .and_then(|config| match &config.target {
+                    VertexTarget::Regional { project_id, .. } => Some(project_id.as_ref()),
+                    VertexTarget::Express => None,
+                });
+            vertex_access(
+                false,
+                credential.principal_hint().to_owned(),
+                project_id,
+                None,
+                cc_lb_clock::unix_secs(state.clock.now()),
+                vec![RemediationCode::ProbeUnreachable],
+                None,
+            )
+        });
         let base_url_written = body.base_url.is_some() || body.clear_base_url;
         let (old_host, new_host) = if base_url_written {
             (
@@ -2493,8 +3166,10 @@ async fn update_upstream(
                 name: body.name,
                 base_url: if body.clear_base_url {
                     Some(None)
+                } else if body.base_url.is_some() {
+                    Some(target_base_url.clone())
                 } else {
-                    body.base_url.map(Some)
+                    None
                 },
                 api_key_ciphertext,
                 oauth_tokens: None,
@@ -2503,7 +3178,15 @@ async fn update_upstream(
                 warmup_enabled: body.warmup_enabled,
                 warmup_dialect_plugin: body.warmup_dialect_plugin,
                 workspace_id: api_key.workspace_id,
-                api_key_access: check.as_ref().map(|check| check.access.clone()),
+                vertex: vertex_update.map(Some),
+                vertex_credential_type: vertex_replacement
+                    .as_ref()
+                    .map(|credential| Some(credential.credential_type())),
+                vertex_quota_project_id: vertex_replacement
+                    .as_ref()
+                    .map(|credential| credential.quota_project_id().map(ToOwned::to_owned)),
+                api_key_access: vertex_access_update
+                    .or_else(|| check.as_ref().map(|check| check.access.clone())),
                 reset_api_key_poll_state: api_key.reset_poll_state,
             },
         )
@@ -2574,7 +3257,11 @@ async fn update_upstream(
 fn key_handling_response(record: &UpstreamRecord, response: Response) -> Response {
     if matches!(
         record.kind,
-        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+        UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential
     ) {
         no_store(response)
     } else {
@@ -2917,7 +3604,11 @@ async fn api_key_details(
 ) -> Result<Option<UpstreamApiKeyDetailsRecord>, UpstreamError> {
     if !matches!(
         record.kind,
-        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+        UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential
     ) {
         return Ok(None);
     }
@@ -3081,6 +3772,30 @@ fn upstream_response(
         .and(details)
         .map(|details| details.key_hint.clone())
         .filter(|hint| !hint.is_empty());
+    let vertex = record.vertex.as_ref().map(|config| {
+        let (project_id, location, express) = match &config.target {
+            VertexTarget::Express => (None, None, true),
+            VertexTarget::Regional {
+                project_id,
+                location,
+            } => (
+                Some(project_id.to_string()),
+                Some(location.to_string()),
+                false,
+            ),
+        };
+        VertexResponse {
+            project_id,
+            location,
+            api_version: Some(config.api_version),
+            express,
+            credential_type: record.vertex_credential_type,
+            principal_hint: details
+                .map(|details| details.key_hint.clone())
+                .filter(|hint| !hint.is_empty()),
+            quota_project_id: record.vertex_quota_project_id.clone(),
+        }
+    });
     UpstreamResponse {
         id: record.id.to_string(),
         name: record.name.clone(),
@@ -3097,6 +3812,7 @@ fn upstream_response(
         },
         api_key_access,
         key_hint,
+        vertex,
     }
 }
 
@@ -3155,6 +3871,15 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     }
     if body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
+    }
+    if body.google_credential.is_some() {
+        fields.push("google_credential");
+    }
+    if body.location.is_some() {
+        fields.push("location");
+    }
+    if body.api_version.is_some() {
+        fields.push("api_version");
     }
     if body.project_id.is_some() {
         fields.push("project_id");
@@ -4090,6 +4815,9 @@ mod tests {
             .expect("token encryption succeeds");
         storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("gemini-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::GeminiOauth,
@@ -4254,6 +4982,9 @@ mod tests {
     ) -> UpstreamRecord {
         storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("api-key-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -4301,6 +5032,9 @@ mod tests {
             .expect("token encryption succeeds");
         storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("oauth-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::AnthropicOauth,
@@ -4908,6 +5642,9 @@ mod tests {
         let upstream = context
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("oauth-no-creds-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::AnthropicOauth,
@@ -4959,6 +5696,9 @@ mod tests {
         let upstream = context
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("oauth-fire-no-creds-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::AnthropicOauth,

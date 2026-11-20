@@ -1,0 +1,26 @@
+[package]
+name = "cc-lb-signer-vertex"
+autotests = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cc-lb-domain.workspace = true
+cc-lb-upstream.workspace = true
+cc-lb-vertex-auth.workspace = true
+http.workspace = true
+serde_json.workspace = true
+sonic-rs.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

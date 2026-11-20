@@ -137,14 +137,14 @@ evidence:
       proof_page: /docs/trust/
   proof_inventory:
     claimable:
-      - Anthropic, OpenAI, and Gemini API-key and OAuth upstream kinds with provider-prefixed routes for stateless generation, token-count, embedding, model-catalog, and Realtime/Live WebSocket operations — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs; docs/runtime-management.md
+      - Anthropic, OpenAI, Gemini API-key/OAuth, and Vertex AI Gemini (`vertex_api_key`, `vertex_credential`) upstream kinds with provider-native routes for bounded generation, token count, approved cached contents, publisher model catalogs, and Live where the target permits — crates/cc-lb-domain/src/upstream.rs; docs/runtime-management.md; docs/vertex-ai-qa.md
       - Best-effort prompt-cache keepalive scheduler — crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30
       - Cost-first subscription preference routing — crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40
       - Filter and shape Wasmtime plugin runtime — crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60
       - Database-backed runtime management — docs/runtime-management.md:1-30
       - Internal deployment with 10 connected accounts — owner confirmation
     not_claimable:
-      - Universal multi-provider gateway — current working-tree source includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds and routes stateless provider operations under `/anthropic`, `/openai`, and `/gemini`, but account-bound resource APIs (files, batches, cached contents, skills, vector stores, containers), Bedrock, and Vertex remain unsupported
+      - Universal multi-provider gateway — account-bound provider APIs, Bedrock, AWS SigV4, ambient ADC/metadata-server credentials, and external-account files remain unsupported; Vertex support is bounded to the documented two Gemini kinds, targets, and operations
       - Full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients remains unverified; shipped route support and credential eligibility do not establish client parity. Exact-client, per-feature evidence must cover the selected upstream credential class and required entitlement; source or descriptors, recorders, and API-key controls cannot establish OAuth, remote-session, or voice success (docs/runtime-management.md; docs/client-capabilities.json)
       - 100% cache-hit or zero-overhead guarantee — scheduler is best effort
       - Enterprise HA, SLA, global scale, or battle-tested maturity — no public evidence at that scope
@@ -156,7 +156,7 @@ anti_claims:
     because: cc-lb is an independent project with no evidenced endorsement, partnership, or certification.
     evidence: assets/brand/README.md:3-6
   - never_say: Universal multi-provider LLM gateway
-    because: current working-tree UpstreamKind includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds with stateless provider operations under provider-prefixed routes, while account-bound resource APIs, Bedrock, and Vertex remain unsupported.
+    because: current working-tree UpstreamKind includes Anthropic, OpenAI, Gemini API-key/OAuth, and two Vertex kinds with stateless provider-native operations under provider-prefixed routes, while account-bound resource APIs and Bedrock remain unsupported.
     evidence: current working-tree sources (not meta.pinned_commit) — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs:8-44; docs/runtime-management.md
   - never_say: Zero-config, instant drop-in replacement
     because: startup requires secrets, admin authentication, database state, upstreams, principals, and proxy keys.
@@ -262,7 +262,7 @@ objections:
     evidence: ["docs/runtime-management.md:1-30", "crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30", "crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40"]
     source_threads: []
   - question: Does cc-lb support every major LLM provider?
-    answer: No. The supported upstream kinds are Anthropic, OpenAI, and Gemini API key and OAuth for bounded generation and token-count operations (`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`, `GET /v1/responses` WebSocket, and `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`); Bedrock, Vertex, and full provider management APIs are out of scope.
+    answer: No. The eight supported upstream kinds are Anthropic, OpenAI, Gemini API key and OAuth, and Vertex `vertex_api_key`/`vertex_credential` for bounded native generation, token-count, regional cached-content, publisher model-catalog, and Live operations (`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`, `GET /v1/responses` WebSocket, and Gemini/Vertex `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`); Express Vertex has no cache, model-catalog, or Live support. Bedrock and full provider management APIs are out of scope.
     evidence: ["crates/cc-lb-domain/src/upstream.rs:53-99", "crates/cc-lb-engine/src/provider_capability.rs:8-44", "docs/runtime-management.md:22-35"]
     source_threads: []
 

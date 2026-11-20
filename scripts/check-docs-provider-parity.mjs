@@ -6,7 +6,7 @@
 // either `node` or `bun`. It never writes files. Use --root <dir> to inspect a
 // scratch copy of the repository.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -129,6 +129,8 @@ const KINDS = [
   'openai_oauth',
   'gemini_api_key',
   'gemini_oauth',
+  'vertex_api_key',
+  'vertex_credential',
 ];
 
 // These pages carry the canonical public scope. The other overview pages only
@@ -143,6 +145,51 @@ const overviewPages = [
   ['concepts index', 'site/src/content/docs/concepts/index.md'],
   ['getting-started page', 'site/src/content/docs/getting-started/index.md'],
 ];
+
+function collectFiles(relativeDirectory) {
+  const absoluteDirectory = path.join(repoRoot, relativeDirectory);
+  if (!existsSync(absoluteDirectory) || !statSync(absoluteDirectory).isDirectory()) return [];
+  const files = [];
+  for (const entry of readdirSync(absoluteDirectory, { withFileTypes: true })) {
+    const relativePath = path.join(relativeDirectory, entry.name);
+    if (entry.isDirectory()) files.push(...collectFiles(relativePath));
+    else if (entry.isFile()) files.push(relativePath);
+  }
+  return files;
+}
+
+const paritySurfacePaths = [
+  'README.md',
+  'PRODUCT.md',
+  'positioning.yml',
+  'crates/cc-lb-admin/web/PRODUCT.md',
+  'docs/runtime-management.md',
+  'docs/cc-lb-guide.html',
+  'docs/adr/0014-vertex-ai-gemini-upstreams.md',
+  'docs/vertex-ai-qa.md',
+  'site/src/pages/index.astro',
+  ...collectFiles('site/src/content/docs'),
+];
+
+const staleVertexApiKeyCapabilityPattern =
+  /regional\s+(?:targets?|project[- ]bound\s+(?:keys?|API keys?))[^.!?\r\n]{0,140}(?:add|support|ship)[^.!?\r\n]{0,100}(?:cached-content|cache|catalog|Live)/i;
+
+const staleSixKindsPattern = /\bsix(?:\s|-)+(?:shipped\s+)?(?:upstream\s+)?kinds?\b/i;
+const staleVertexUnsupportedPattern =
+  /\bVertex(?:\s+AI(?:\s+Gemini)?)?\s+(?:is|are|remains?|stays?)\s+(?:unsupported|not supported|out of scope|outside the supported scope)\b/i;
+
+for (const relativePath of paritySurfacePaths) {
+  const text = readText(relativePath);
+  if (staleSixKindsPattern.test(text)) {
+    fail(`${relativePath}: rejects stale six-kinds wording`);
+  }
+  if (staleVertexUnsupportedPattern.test(text)) {
+    fail(`${relativePath}: rejects stale Vertex-unsupported wording`);
+  }
+  if (staleVertexApiKeyCapabilityPattern.test(text)) {
+    fail(`${relativePath}: claims regional Vertex API-key cache/catalog/Live support`);
+  }
+}
 
 function requireProviderOverview(label, text) {
   requirePattern(`${label}: Anthropic coverage`, text, /\bAnthropic\b/i);
@@ -204,7 +251,7 @@ for (const [label, pattern] of htmlGuideChecks) {
 requirePattern(
   'HTML operator guide: unsupported provider scope',
   htmlGuide,
-  /지원하지 않는 provider 경로[\s\S]{0,220}\bBedrock\b[\s\S]{0,80}\bVertex\b[\s\S]{0,80}\bSigV4\b[\s\S]{0,80}\bADC\b/i,
+  /지원하는 Vertex AI Gemini 경로[\s\S]{0,500}vertex_api_key[\s\S]{0,500}vertex_credential[\s\S]{0,500}Bedrock[\s\S]{0,120}SigV4[\s\S]{0,160}(?:ambient ADC|metadata-server)[\s\S]{0,160}지원하지 않습니다/i,
 );
 requirePattern(
   'HTML operator guide: no cross-provider translation',
@@ -216,7 +263,6 @@ const staleClaimPatterns = [
   ['Anthropic-only claim', /\b(?:Anthropic[- ]only|only\s+Anthropic)\b/i],
   ['no-WebSocket claim', /\b(?:no|without|does not support|doesn\x27t support)\s+(?:a\s+)?(?:provider\s+)?websockets?\b/i],
   ['cloud setup claim', /\b(?:cloud\s+(?:setup|translation)|(?:setup|translation)\s+(?:for|with|via)\s+(?:AWS|Google|Azure)\s+Cloud)\b/i],
-  ['two-kind claim', /\btwo\s+supported\s+upstream\s+kinds\b/i],
   [
     'positive provider translation claim',
     /\b(?:cc-lb|the\s+(?:proxy|gateway))\s+(?:translates?|supports?|provides?)\b[^.\n]{0,120}\b(?:between\s+providers|cross[- ]provider\s+translation)\b/i,
@@ -350,7 +396,7 @@ requirePattern(
   /Antigravity terms warning\]\(\/docs\/reference\/admin-api\/#oauth-flow\)/i,
 );
 
-// Keep-alive scope is deliberately narrower than the six-provider proxy scope.
+// Keep-alive scope is deliberately narrower than the eight-provider proxy scope.
 const promptCache = readText('site/src/content/docs/concepts/prompt-cache.md');
 const operatorGuide = readText('docs/cache-keepalive-operator.md');
 const cacheChecks = [
@@ -418,14 +464,18 @@ const positioning = readText('positioning.yml');
 requirePattern(
   'README control',
   readme,
-  /^## Supported scope\s*$[\s\S]{0,1800}(?:anthropic_api_key|anthropic_oauth)[\s\S]{0,1200}(?:openai_api_key|openai_oauth)[\s\S]{0,1200}(?:gemini_api_key|gemini_oauth)[\s\S]{0,1200}(?:Bedrock|Vertex)[\s\S]{0,400}(?:not|outside|unsupported)/im,
+  /`vertex_api_key`[\s\S]{0,500}`vertex_credential`[\s\S]{0,800}Express[\s\S]{0,180}no cached-content[\s\S]{0,500}publisher[\s\S]{0,300}entitlement-aware[\s\S]{0,300}billing[\s\S]{0,300}least-privilege/i,
 );
 requirePattern(
   'positioning control',
   positioning,
-  /^\s*proof_inventory:\s*$[\s\S]{0,1800}\b(?:Anthropic|OpenAI|Gemini)\b[\s\S]{0,1200}\bnot_claimable:\s*$[\s\S]{0,800}(?:Bedrock|Vertex|unsupported)/im,
+  /Vertex AI Gemini[\s\S]{0,500}`vertex_api_key`[\s\S]{0,500}`vertex_credential`[\s\S]{0,1200}not_claimable:[\s\S]{0,800}(?:Bedrock|AWS SigV4|ambient ADC\/metadata-server|external-account)/i,
 );
-requirePattern('positioning unsupported-scope control', positioning, /^\s+not_claimable:\s*$/m);
+requirePattern(
+  'positioning unsupported-scope control',
+  positioning,
+  /^\s+not_claimable:\s*$/m,
+);
 
 if (failures.length) {
   for (const failure of failures) console.error(`FAIL ${failure}`);

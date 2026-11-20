@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::upstream::{
     OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate,
-    UpstreamUpdate,
+    UpstreamUpdate, VertexApiVersion, VertexTarget, VertexUpstreamConfig,
 };
 use cc_lb_storage_api::{StorageError, UpstreamStore};
 use url::Url;
@@ -51,6 +51,9 @@ where
     B: UpstreamStoreBackend,
 {
     create_upstream(Arc::clone(&backend)).await?;
+    qa_sto_4_vertex_config_roundtrip(Arc::clone(&backend)).await?;
+    qa_sto_3_vertex_constraints_reject_invalid_combinations(Arc::clone(&backend)).await?;
+    qa_sto_5_vertex_owner_epoch_matrix(Arc::clone(&backend)).await?;
     create_with_api_key_secret(Arc::clone(&backend)).await?;
     create_with_oauth_tokens(Arc::clone(&backend)).await?;
     create_upstream_duplicate_id_conflicts(Arc::clone(&backend)).await?;
@@ -66,7 +69,10 @@ where
     complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
     reconnect_rejects_stale_generation_status(Arc::clone(&backend)).await?;
     terminal_refresh_failure_dominates_late_status(Arc::clone(&backend)).await?;
-    provider_generic_terminal_latch_dominates_late_status(Arc::clone(&backend)).await?;
+    qa_sto_6_terminal_status_latch_and_replacement(Arc::clone(&backend)).await?;
+    qa_sto_7_status_rebuild_preserves_terminal_marker(Arc::clone(&backend)).await?;
+    qa_sto_8_peer_terminal_status_changes_material_without_revision_bump(Arc::clone(&backend))
+        .await?;
     provider_generic_stale_status_cannot_poison_replacement(Arc::clone(&backend)).await?;
     api_key_credential_replacement_can_clear_apply_error(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
@@ -93,6 +99,274 @@ macro_rules! scenario {
     };
 }
 
+scenario!(qa_sto_4_vertex_config_roundtrip, |store| async move {
+    let created = store
+        .create(UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "qa-sto-4-vertex-roundtrip".to_owned(),
+            kind: UpstreamKind::VertexCredential,
+            base_url: Some(url("https://vertex.example.test/ignored/path?discarded=1")?),
+            api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: Some("workspace-qa".to_owned()),
+            vertex: Some(VertexUpstreamConfig {
+                target: VertexTarget::Regional {
+                    project_id: "project-12345".into(),
+                    location: "us-central1".into(),
+                },
+                api_version: VertexApiVersion::V1,
+            }),
+            vertex_credential_type: Some(cc_lb_domain::VertexCredentialType::AuthorizedUser),
+            vertex_quota_project_id: Some("quota-project-123".to_owned()),
+            api_key_access: None,
+        })
+        .await?;
+    let loaded = store
+        .get_by_id(created.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created record"))?;
+    ensure!(
+        loaded == created,
+        "Vertex record must round-trip byte-equivalently"
+    );
+    ensure!(loaded.workspace_id.as_deref() == Some("workspace-qa"));
+    Ok(())
+});
+
+scenario!(
+    qa_sto_3_vertex_constraints_reject_invalid_combinations,
+    |store| async move {
+        let invalid = [
+            (
+                "vertex-credential-express",
+                UpstreamKind::VertexCredential,
+                Some(VertexUpstreamConfig {
+                    target: VertexTarget::Express,
+                    api_version: VertexApiVersion::V1Beta1,
+                }),
+                Some(cc_lb_domain::VertexCredentialType::ServiceAccount),
+            ),
+            (
+                "vertex-credential-missing-target",
+                UpstreamKind::VertexCredential,
+                None,
+                Some(cc_lb_domain::VertexCredentialType::ServiceAccount),
+            ),
+            (
+                "vertex-api-key-bad-project",
+                UpstreamKind::VertexApiKey,
+                Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "Bad.Project".into(),
+                        location: "us-central1".into(),
+                    },
+                    api_version: VertexApiVersion::V1Beta1,
+                }),
+                None,
+            ),
+            (
+                "vertex-api-key-bad-location",
+                UpstreamKind::VertexApiKey,
+                Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "project-12345".into(),
+                        location: "US-central1".into(),
+                    },
+                    api_version: VertexApiVersion::V1Beta1,
+                }),
+                None,
+            ),
+            (
+                "legacy-with-vertex-fields",
+                UpstreamKind::GeminiApiKey,
+                Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "project-12345".into(),
+                        location: "us-central1".into(),
+                    },
+                    api_version: VertexApiVersion::V1Beta1,
+                }),
+                None,
+            ),
+        ];
+        for (name, kind, vertex, credential_type) in invalid {
+            let result = store
+                .create(UpstreamCreate {
+                    id: Uuid::new_v4(),
+                    name: name.to_owned(),
+                    kind,
+                    base_url: None,
+                    api_key_ciphertext: Some(vec![1]),
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    vertex,
+                    vertex_credential_type: credential_type,
+                    vertex_quota_project_id: None,
+                    api_key_access: None,
+                })
+                .await;
+            ensure!(result.is_err(), "{name} must be rejected");
+        }
+        for (index, location) in ["global", "us", "eu", "us-central1"]
+            .into_iter()
+            .enumerate()
+        {
+            let created = store
+                .create(UpstreamCreate {
+                    id: Uuid::new_v4(),
+                    name: format!("vertex-valid-location-{index}"),
+                    kind: UpstreamKind::VertexApiKey,
+                    base_url: None,
+                    api_key_ciphertext: Some(vec![index as u8]),
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    vertex: Some(VertexUpstreamConfig {
+                        target: VertexTarget::Regional {
+                            project_id: "project-12345".into(),
+                            location: location.into(),
+                        },
+                        api_version: VertexApiVersion::V1Beta1,
+                    }),
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
+                    api_key_access: None,
+                })
+                .await?;
+            ensure!(created.vertex.is_some());
+        }
+        Ok(())
+    }
+);
+scenario!(qa_sto_5_vertex_owner_epoch_matrix, |store| async move {
+    let created = store
+        .create(UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "qa-sto-5-vertex-epochs".to_owned(),
+            kind: UpstreamKind::VertexCredential,
+            base_url: Some(url("https://vertex.example.test")?),
+            api_key_ciphertext: Some(vec![1]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            vertex: Some(VertexUpstreamConfig {
+                target: VertexTarget::Regional {
+                    project_id: "project-12345".into(),
+                    location: "us-central1".into(),
+                },
+                api_version: VertexApiVersion::V1Beta1,
+            }),
+            vertex_credential_type: Some(cc_lb_domain::VertexCredentialType::ServiceAccount),
+            vertex_quota_project_id: None,
+            api_key_access: None,
+        })
+        .await?;
+    ensure!(created.owner_epoch == 0);
+
+    let version_only = store
+        .update_spec(
+            created.id,
+            created.revision,
+            UpstreamUpdate {
+                vertex: Some(Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "project-12345".into(),
+                        location: "us-central1".into(),
+                    },
+                    api_version: VertexApiVersion::V1,
+                })),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(
+        version_only.owner_epoch == 0,
+        "API-version-only must not bump epoch"
+    );
+    let credential_type_only = store
+        .update(
+            version_only.id,
+            version_only.revision,
+            UpstreamUpdate {
+                vertex_credential_type: Some(Some(
+                    cc_lb_domain::VertexCredentialType::AuthorizedUser,
+                )),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(credential_type_only.owner_epoch == 0);
+
+    let version_only = credential_type_only;
+
+    let project_changed = store
+        .update_spec(
+            version_only.id,
+            version_only.revision,
+            UpstreamUpdate {
+                vertex: Some(Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "project-67890".into(),
+                        location: "us-central1".into(),
+                    },
+                    api_version: VertexApiVersion::V1,
+                })),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(project_changed.owner_epoch == 1);
+
+    let location_changed = store
+        .update_spec(
+            project_changed.id,
+            project_changed.revision,
+            UpstreamUpdate {
+                vertex: Some(Some(VertexUpstreamConfig {
+                    target: VertexTarget::Regional {
+                        project_id: "project-67890".into(),
+                        location: "europe-west4".into(),
+                    },
+                    api_version: VertexApiVersion::V1,
+                })),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(location_changed.owner_epoch == 2);
+
+    let base_url_changed = store
+        .update_spec(
+            location_changed.id,
+            location_changed.revision,
+            UpstreamUpdate {
+                base_url: Some(Some(url("https://vertex.example.test/v2")?)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(base_url_changed.owner_epoch == 3);
+
+    let key_changed = store
+        .update(
+            base_url_changed.id,
+            base_url_changed.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(vec![2]),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(key_changed.owner_epoch == 4);
+    Ok(())
+});
+
 scenario!(create_upstream, |store| async move {
     let record = create_named(store.as_ref(), "upstream-create").await?;
     ensure!(record.name == "upstream-create", "name mismatch");
@@ -116,6 +390,9 @@ scenario!(create_with_api_key_secret, |store| async move {
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await?;
@@ -167,6 +444,9 @@ scenario!(create_with_oauth_tokens, |store| async move {
             warmup_enabled: true,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await?;
@@ -221,6 +501,9 @@ scenario!(create_upstream_duplicate_id_conflicts, |store| async move {
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await?;
@@ -244,6 +527,9 @@ scenario!(create_upstream_duplicate_id_conflicts, |store| async move {
             warmup_enabled: true,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await
@@ -450,6 +736,7 @@ scenario!(
                     last_apply_at_unix_secs: Some(Some(1_800_000_000)),
                     last_warmup_at_unix_secs: Some(Some(1_800_000_001)),
                     expected_oauth_token_generation: Some(0),
+                    expected_spec_revision: None,
                 },
             )
             .await?;
@@ -478,6 +765,7 @@ scenario!(
                     UpstreamStatusUpdate {
                         last_apply_error: Some(Some("status_401".to_owned())),
                         expected_oauth_token_generation: Some(generation - 1),
+                        expected_spec_revision: None,
                         ..UpstreamStatusUpdate::default()
                     },
                 )
@@ -525,6 +813,7 @@ scenario!(
                         last_apply_at_unix_secs: Some(None),
                         last_warmup_at_unix_secs: Some(None),
                         expected_oauth_token_generation: Some(generation - 1),
+                        expected_spec_revision: None,
                     },
                 )
                 .await
@@ -544,6 +833,7 @@ scenario!(
                 UpstreamStatusUpdate {
                     last_apply_error: Some(Some("status_400".to_owned())),
                     expected_oauth_token_generation: Some(3),
+                    expected_spec_revision: None,
                     ..UpstreamStatusUpdate::default()
                 },
             )
@@ -581,6 +871,7 @@ scenario!(
                 UpstreamStatusUpdate {
                     last_apply_error: Some(Some("status_401".to_owned())),
                     expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                    expected_spec_revision: None,
                     ..UpstreamStatusUpdate::default()
                 },
             )
@@ -593,6 +884,7 @@ scenario!(
                     last_apply_at_unix_secs: Some(Some(1_800_000_010)),
                     last_warmup_at_unix_secs: Some(Some(1_800_000_011)),
                     expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                    expected_spec_revision: None,
                 },
             )
             .await?;
@@ -639,6 +931,7 @@ scenario!(
                 UpstreamStatusUpdate {
                     last_apply_error: Some(Some("status_503".to_owned())),
                     expected_oauth_token_generation: Some(refreshed.oauth_token_generation),
+                    expected_spec_revision: None,
                     ..UpstreamStatusUpdate::default()
                 },
             )
@@ -656,6 +949,209 @@ scenario!(
         Ok(())
     }
 );
+scenario!(
+    qa_sto_6_terminal_status_latch_and_replacement,
+    |store| async move {
+        let terminal = create_named_kind(
+            store.as_ref(),
+            "qa-sto-6-vertex-terminal",
+            UpstreamKind::VertexCredential,
+        )
+        .await?;
+        store
+            .set_status(
+                terminal.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some(
+                        cc_lb_domain::VERTEX_CREDENTIAL_INVALID_GRANT.to_owned(),
+                    )),
+                    expected_spec_revision: Some(terminal.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        store
+            .set_status(
+                terminal.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("token_endpoint_unavailable".to_owned())),
+                    expected_spec_revision: Some(terminal.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            store
+                .get_by_id(terminal.id)
+                .await?
+                .unwrap()
+                .last_apply_error
+                .as_deref()
+                == Some(cc_lb_domain::VERTEX_CREDENTIAL_INVALID_GRANT),
+            "Vertex terminal credential failure must survive transient status"
+        );
+        ensure!(
+            store
+                .set_status(
+                    terminal.id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("stale".to_owned())),
+                        expected_spec_revision: Some(terminal.revision - 1),
+                        ..UpstreamStatusUpdate::default()
+                    },
+                )
+                .await
+                .is_err(),
+            "stale Vertex status revision must conflict"
+        );
+        let replaced = store
+            .update(
+                terminal.id,
+                terminal.revision,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(vec![9, 8, 7]),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            replaced.last_apply_error.is_none(),
+            "credential replacement must clear terminal status"
+        );
+        let nonterminal = create_named_kind(
+            store.as_ref(),
+            "qa-sto-6-vertex-nonterminal",
+            UpstreamKind::VertexCredential,
+        )
+        .await?;
+        store
+            .set_status(
+                nonterminal.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_400".to_owned())),
+                    expected_spec_revision: Some(nonterminal.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        store
+            .set_status(
+                nonterminal.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("network".to_owned())),
+                    expected_spec_revision: Some(nonterminal.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            store
+                .get_by_id(nonterminal.id)
+                .await?
+                .unwrap()
+                .last_apply_error
+                .as_deref()
+                == Some("network"),
+            "non-terminal Vertex status must be replaceable"
+        );
+        Ok(())
+    }
+);
+scenario!(
+    qa_sto_7_status_rebuild_preserves_terminal_marker,
+    |store| async move {
+        let record = create_named_kind(
+            store.as_ref(),
+            "qa-sto-7-terminal-rebuild",
+            UpstreamKind::VertexCredential,
+        )
+        .await?;
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some(
+                        cc_lb_domain::VERTEX_CREDENTIAL_INVALID_CLIENT.to_owned(),
+                    )),
+                    expected_spec_revision: Some(record.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        let rebuilt = store
+            .list(None, 100)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.id == record.id)
+            .ok_or_else(|| anyhow::anyhow!("rebuilt view lost terminal upstream"))?;
+        ensure!(
+            rebuilt.last_apply_error.as_deref()
+                == Some(cc_lb_domain::VERTEX_CREDENTIAL_INVALID_CLIENT),
+            "view rebuild must preserve terminal marker"
+        );
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("transient".to_owned())),
+                    expected_spec_revision: Some(rebuilt.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        let after_late_status = store
+            .get_by_id(record.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("terminal upstream disappeared"))?;
+        ensure!(
+            after_late_status.last_apply_error.as_deref()
+                == Some(cc_lb_domain::VERTEX_CREDENTIAL_INVALID_CLIENT),
+            "rebuild status application must not overwrite terminal marker"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    qa_sto_8_peer_terminal_status_changes_material_without_revision_bump,
+    |store| async move {
+        let record = create_named_kind(
+            store.as_ref(),
+            "qa-sto-8-peer-terminal",
+            UpstreamKind::VertexCredential,
+        )
+        .await?;
+        let before = store
+            .get_by_id(record.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("record"))?;
+        let before_material = serde_json::to_vec(&before)?;
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some(
+                        cc_lb_domain::VERTEX_CREDENTIAL_INVALID_GRANT.to_owned(),
+                    )),
+                    expected_spec_revision: Some(before.revision),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        let after = store
+            .get_by_id(record.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("record after peer write"))?;
+        let after_material = serde_json::to_vec(&after)?;
+        ensure!(before.revision == after.revision);
+        ensure!(
+            before_material != after_material,
+            "peer terminal status must change reconciliation material"
+        );
+        Ok(())
+    }
+);
+
 scenario!(
     provider_generic_terminal_latch_dominates_late_status,
     |store| async move {
@@ -690,6 +1186,7 @@ scenario!(
                         UpstreamStatusUpdate {
                             last_apply_error: Some(Some(terminal_reason.to_owned())),
                             expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                            expected_spec_revision: None,
                             ..UpstreamStatusUpdate::default()
                         },
                     )
@@ -702,6 +1199,7 @@ scenario!(
                             last_apply_at_unix_secs: Some(Some(1234)),
                             last_warmup_at_unix_secs: Some(Some(5678)),
                             expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                            expected_spec_revision: None,
                         },
                     )
                     .await?;
@@ -761,6 +1259,7 @@ scenario!(
                         last_apply_at_unix_secs: Some(Some(1111)),
                         last_warmup_at_unix_secs: Some(Some(2222)),
                         expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                        expected_spec_revision: None,
                     },
                 )
                 .await?;
@@ -787,6 +1286,7 @@ scenario!(
                             last_apply_at_unix_secs: Some(Some(3333)),
                             last_warmup_at_unix_secs: Some(Some(4444)),
                             expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                            expected_spec_revision: None,
                         },
                     )
                     .await
@@ -819,6 +1319,9 @@ scenario!(
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
                 workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 api_key_access: None,
             })
             .await?;
@@ -1203,6 +1706,9 @@ scenario!(
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
                 workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 api_key_access: None,
             })
             .await
@@ -1274,6 +1780,9 @@ scenario!(validate_identifier_rejects_bad_name, |store| async move {
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await
@@ -1318,6 +1827,16 @@ async fn create_named_kind(
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: (kind == UpstreamKind::VertexCredential).then_some(VertexUpstreamConfig {
+                target: VertexTarget::Regional {
+                    project_id: "project-12345".into(),
+                    location: "us-central1".into(),
+                },
+                api_version: VertexApiVersion::V1Beta1,
+            }),
+            vertex_credential_type: (kind == UpstreamKind::VertexCredential)
+                .then_some(cc_lb_domain::VertexCredentialType::ServiceAccount),
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await?)

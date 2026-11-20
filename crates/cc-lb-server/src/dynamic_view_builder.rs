@@ -18,16 +18,22 @@ use cc_lb_quota::plan_capacity::{
 };
 use cc_lb_routing::FilterPlugin;
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
+use cc_lb_vertex_auth::{
+    BearerSource, TokenRegistry, TokenSource, TokenTransport, parse_credential,
+    vertex_credential_aad,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use crate::vertex_status::{ReportingBearerSource, VertexStatusSink};
+use crate::vertex_transport::production_transport;
 use crate::wasm_host::{WasmtimeFilterPlugin, WasmtimeUpstreamDialect};
-use cc_lb_storage_api::upstream::UpstreamKind;
-use secrecy::ExposeSecret;
 
+use cc_lb_signer_vertex::{VertexCredentialSource, VertexSigner};
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
@@ -41,7 +47,9 @@ use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError, scrub_secret,
 };
+use http::HeaderValue;
 use parking_lot::RwLock;
+use secrecy::ExposeSecret;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -53,9 +61,33 @@ use cc_lb_control::PromptCacheObservationSinkLike;
 /// Maximum number of user-supplied router filters. The built-in
 /// `subscription-preference` entry is structural router-chain state.
 const MAX_ROUTER_CHAIN_DEPTH: usize = 16;
+static VERTEX_TOKEN_TRANSPORT: LazyLock<Arc<dyn TokenTransport>> =
+    LazyLock::new(production_transport);
+
+fn vertex_token_transport() -> Arc<dyn TokenTransport> {
+    VERTEX_TOKEN_TRANSPORT.clone()
+}
+
+#[derive(Clone)]
+pub struct VertexState {
+    pub(crate) token_registry: Arc<TokenRegistry>,
+    pub(crate) token_transport: Arc<dyn TokenTransport>,
+    pub(crate) status_sink: Arc<VertexStatusSink>,
+}
+
+impl VertexState {
+    pub fn new(store: Arc<dyn UpstreamStore>) -> Self {
+        Self {
+            token_registry: Arc::new(TokenRegistry::new()),
+            token_transport: vertex_token_transport(),
+            status_sink: Arc::new(VertexStatusSink::new(store)),
+        }
+    }
+}
 
 pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
+    pub vertex_state: Arc<VertexState>,
     pub principals: Arc<dyn PrincipalStore>,
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
     pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
@@ -193,6 +225,10 @@ pub async fn build_dynamic_view(
         .iter()
         .map(|upstream| upstream.id)
         .collect::<Vec<_>>();
+    stores
+        .vertex_state
+        .token_registry
+        .retain_live(&all_upstream_ids.iter().map(ToString::to_string).collect());
     subscription_quota_cache
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
@@ -227,15 +263,25 @@ pub async fn build_dynamic_view(
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, &aead, now).await?;
+    let vertex_sources = Arc::new(build_vertex_sources(
+        &upstreams,
+        &aead,
+        &stores.vertex_state.token_registry,
+        &stores.vertex_state.token_transport,
+        &clock,
+    ));
 
-    let signer_factory = Arc::new(DbCompositeSignerFactory::new(
+    let signer_factory = Arc::new(DbCompositeSignerFactory::new_with_vertex_state(
         upstreams.clone(),
         stores.upstreams.clone(),
         aead,
         lazy_refresher,
         clock.clone(),
-        gemini_config.cloned().unwrap_or_default(),
-        antigravity_config.cloned().unwrap_or_default(),
+        (
+            gemini_config.cloned().unwrap_or_default(),
+            antigravity_config.cloned().unwrap_or_default(),
+        ),
+        (stores.vertex_state.clone(), vertex_sources),
     ));
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
@@ -945,7 +991,10 @@ async fn apply_upstreams(
     for upstream in upstreams {
         let is_oauth = matches!(
             upstream.kind,
-            UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+            UpstreamKind::AnthropicOauth
+                | UpstreamKind::OpenaiOauth
+                | UpstreamKind::GeminiOauth
+                | UpstreamKind::VertexCredential
         );
         let last_apply_error = if is_oauth {
             upstream.last_apply_error.clone()
@@ -970,9 +1019,29 @@ async fn apply_upstreams(
             continue;
         }
 
+        if upstream.kind == UpstreamKind::VertexCredential
+            && cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                upstream.last_apply_error.as_deref(),
+            )
+        {
+            statuses.insert(
+                upstream.name.clone(),
+                UpstreamStatusEntry {
+                    status: ApplyStatus::Error,
+                    last_apply_error: upstream.last_apply_error.clone(),
+                    last_apply_at_unix_secs: now,
+                },
+            );
+            continue;
+        }
         if let Err(message) = validate_upstream(upstream, aead) {
-            let reconnect_required =
-                is_oauth && refresh_requires_reconnect(last_apply_error.as_deref());
+            let reconnect_required = if upstream.kind == UpstreamKind::VertexCredential {
+                cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                    last_apply_error.as_deref(),
+                )
+            } else {
+                is_oauth && refresh_requires_reconnect(last_apply_error.as_deref())
+            };
             if !reconnect_required {
                 if is_oauth {
                     match stores
@@ -982,9 +1051,13 @@ async fn apply_upstreams(
                             UpstreamStatusUpdate {
                                 last_apply_error: Some(Some(message.clone())),
                                 last_apply_at_unix_secs: Some(Some(now)),
-                                expected_oauth_token_generation: Some(
-                                    upstream.oauth_token_generation,
-                                ),
+                                expected_oauth_token_generation: matches!(
+                                    upstream.kind,
+                                    UpstreamKind::AnthropicOauth
+                                        | UpstreamKind::OpenaiOauth
+                                        | UpstreamKind::GeminiOauth
+                                )
+                                .then_some(upstream.oauth_token_generation),
                                 ..UpstreamStatusUpdate::default()
                             },
                         )
@@ -1111,8 +1184,66 @@ fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<()
                 ));
             }
         }
+        UpstreamKind::VertexApiKey => {
+            resolve_api_key(aead, upstream).map_err(|reason| {
+                format!(
+                    "vertex api-key upstream credential invalid: {}",
+                    match reason {
+                        ApiKeyResolutionError::Missing => "missing",
+                        ApiKeyResolutionError::NotDecryptable => "not_decryptable",
+                        ApiKeyResolutionError::NotUtf8 => "not_utf8",
+                        ApiKeyResolutionError::InvalidHeaderValue => "invalid_header",
+                        ApiKeyResolutionError::LegacyEncoding => "legacy_encoding",
+                    }
+                )
+            })?;
+        }
+        UpstreamKind::VertexCredential => {
+            let ciphertext = upstream.api_key_ciphertext.as_deref().ok_or_else(|| {
+                "vertex credential upstream missing credential ciphertext".to_owned()
+            })?;
+            let plaintext = aead
+                .decrypt(ciphertext, &vertex_credential_aad(&upstream.id.to_string()))
+                .map_err(|_| {
+                    "vertex credential upstream credential is not decryptable".to_owned()
+                })?;
+            parse_credential(&plaintext).map(|_| ()).map_err(|error| {
+                format!("vertex credential upstream credential invalid: {error}")
+            })?;
+        }
     }
     Ok(())
+}
+
+fn build_vertex_sources(
+    upstreams: &[UpstreamRecord],
+    aead: &AeadService,
+    registry: &TokenRegistry,
+    transport: &Arc<dyn TokenTransport>,
+    clock: &cc_lb_clock::ClockHandle,
+) -> HashMap<Uuid, Arc<TokenSource>> {
+    upstreams
+        .iter()
+        .filter(|record| record.kind == UpstreamKind::VertexCredential)
+        .filter_map(|record| {
+            let ciphertext = record.api_key_ciphertext.as_deref()?;
+            let upstream_id = record.id.to_string();
+            let source = registry.get(&upstream_id, ciphertext).or_else(|| {
+                let plaintext = aead
+                    .decrypt(ciphertext, &vertex_credential_aad(&upstream_id))
+                    .ok()?;
+                let credential = parse_credential(&plaintext).ok()?;
+                Some(registry.source_for(
+                    upstream_id,
+                    ciphertext,
+                    credential,
+                    transport.clone(),
+                    clock.clone(),
+                ))
+            })?;
+            Some((record.id, source))
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1128,17 +1259,48 @@ struct DbCompositeSignerFactory {
     clock: cc_lb_clock::ClockHandle,
     gemini_config: Arc<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
+    token_registry: Arc<TokenRegistry>,
+    token_transport: Arc<dyn TokenTransport>,
+    vertex_sources: Arc<HashMap<Uuid, Arc<TokenSource>>>,
+    vertex_status_sink: Arc<VertexStatusSink>,
 }
 
 impl DbCompositeSignerFactory {
+    #[cfg(test)]
     fn new(
         upstreams: Vec<UpstreamRecord>,
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         clock: cc_lb_clock::ClockHandle,
-        gemini_config: cc_lb_config::GeminiOAuthConfig,
-        antigravity_config: cc_lb_config::AntigravityOAuthConfig,
+        oauth_configs: (
+            cc_lb_config::GeminiOAuthConfig,
+            cc_lb_config::AntigravityOAuthConfig,
+        ),
+    ) -> Self {
+        let vertex_state = Arc::new(VertexState::new(upstream_store.clone()));
+        Self::new_with_vertex_state(
+            upstreams,
+            upstream_store,
+            aead,
+            lazy_refresher,
+            clock,
+            oauth_configs,
+            (vertex_state, Arc::new(HashMap::new())),
+        )
+    }
+
+    fn new_with_vertex_state(
+        upstreams: Vec<UpstreamRecord>,
+        upstream_store: Arc<dyn UpstreamStore>,
+        aead: Arc<AeadService>,
+        lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+        clock: cc_lb_clock::ClockHandle,
+        oauth_configs: (
+            cc_lb_config::GeminiOAuthConfig,
+            cc_lb_config::AntigravityOAuthConfig,
+        ),
+        (vertex_state, vertex_sources): (Arc<VertexState>, Arc<HashMap<Uuid, Arc<TokenSource>>>),
     ) -> Self {
         Self {
             upstreams,
@@ -1151,8 +1313,12 @@ impl DbCompositeSignerFactory {
             subscription_signer_states: Arc::new(RwLock::new(HashMap::new())),
             router_chosen_upstream_name: None,
             clock,
-            gemini_config: Arc::new(gemini_config),
-            antigravity_config: Arc::new(antigravity_config),
+            gemini_config: Arc::new(oauth_configs.0),
+            antigravity_config: Arc::new(oauth_configs.1),
+            token_registry: vertex_state.token_registry.clone(),
+            token_transport: vertex_state.token_transport.clone(),
+            vertex_sources,
+            vertex_status_sink: vertex_state.status_sink.clone(),
         }
     }
 
@@ -1169,10 +1335,13 @@ impl DbCompositeSignerFactory {
             clock: self.clock.clone(),
             gemini_config: self.gemini_config.clone(),
             antigravity_config: self.antigravity_config.clone(),
+            token_registry: self.token_registry.clone(),
+            token_transport: self.token_transport.clone(),
+            vertex_sources: self.vertex_sources.clone(),
+            vertex_status_sink: self.vertex_status_sink.clone(),
         }
     }
 }
-
 impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
     fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         // The downstream caller's key is deliberately not forwarded upstream.
@@ -1358,6 +1527,79 @@ impl SignerFactory for DbCompositeSignerFactory {
                 } else {
                     factory.build(upstream).await
                 }
+            }
+            UpstreamKind::VertexApiKey => {
+                let api_key = resolve_api_key(&self.aead, record).map_err(|error| {
+                    SignerError::MissingCredentials {
+                        reason: format!("vertex api-key credential unavailable: {error:?}"),
+                    }
+                })?;
+                let header = HeaderValue::from_str(api_key.as_str()).map_err(|_| {
+                    SignerError::MissingCredentials {
+                        reason: "vertex api-key credential is not a valid header".to_owned(),
+                    }
+                })?;
+                let cfg = record
+                    .vertex
+                    .clone()
+                    .ok_or_else(|| SignerError::MissingCredentials {
+                        reason: "vertex api-key upstream missing Vertex configuration".to_owned(),
+                    })?;
+                Ok(Arc::new(VertexSigner::new(
+                    &record.id.to_string(),
+                    record.kind,
+                    cfg,
+                    record.base_url.clone(),
+                    record.vertex_quota_project_id.clone(),
+                    VertexCredentialSource::ApiKey(header),
+                )))
+            }
+            UpstreamKind::VertexCredential => {
+                if cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                    record.last_apply_error.as_deref(),
+                ) {
+                    return Err(SignerError::MissingCredentials {
+                        reason: "vertex credential requires replacement".to_owned(),
+                    });
+                }
+                let ciphertext = record.api_key_ciphertext.as_deref().ok_or_else(|| {
+                    SignerError::MissingCredentials {
+                        reason: "vertex credential upstream has no stored credential".to_owned(),
+                    }
+                })?;
+                // Installed views keep a strong source reference. The weak
+                // registry is only consulted as a cross-view reuse path; no
+                // decryption or credential parsing occurs on request builds.
+                let source = self
+                    .vertex_sources
+                    .get(&record.id)
+                    .cloned()
+                    .or_else(|| self.token_registry.get(&record.id.to_string(), ciphertext))
+                    .ok_or_else(|| SignerError::MissingCredentials {
+                        reason: "vertex credential source unavailable".to_owned(),
+                    })?;
+                let source: Arc<dyn BearerSource> = Arc::new(source);
+                let source = ReportingBearerSource::new(
+                    source,
+                    (*self.vertex_status_sink).clone(),
+                    record.id,
+                    record.revision,
+                );
+                let cfg = record
+                    .vertex
+                    .clone()
+                    .ok_or_else(|| SignerError::MissingCredentials {
+                        reason: "vertex credential upstream missing Vertex configuration"
+                            .to_owned(),
+                    })?;
+                Ok(Arc::new(VertexSigner::new(
+                    &record.id.to_string(),
+                    record.kind,
+                    cfg,
+                    record.base_url.clone(),
+                    record.vertex_quota_project_id.clone(),
+                    VertexCredentialSource::Bearer(source),
+                )))
             }
         }
     }
@@ -1872,7 +2114,10 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
             UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth,
             Upstream::OpenaiDirect { .. }
         ) | (
-            UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth,
+            UpstreamKind::GeminiApiKey
+                | UpstreamKind::GeminiOauth
+                | UpstreamKind::VertexApiKey
+                | UpstreamKind::VertexCredential,
             Upstream::GeminiDirect { .. }
         )
     )
@@ -1889,21 +2134,24 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
     use async_trait::async_trait;
     use cc_lb_clock::TestClock;
     use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     use super::*;
     use crate::prompt_cache_observation_sink::{
         DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
     };
+    use cc_lb_upstream::sign_request;
+    use cc_lb_vertex_auth::{TokenEndpoint, TokenRequest, TokenResponse, TransportError};
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
 
@@ -2519,6 +2767,9 @@ mod tests {
         let openai = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "openai-provider-chain".to_owned(),
                 kind: UpstreamKind::OpenaiOauth,
@@ -2763,6 +3014,9 @@ mod tests {
         let openai = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "openai-frame-upstream".to_owned(),
                 kind: UpstreamKind::OpenaiOauth,
@@ -2783,6 +3037,9 @@ mod tests {
         let gemini = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "gemini-frame-upstream".to_owned(),
                 kind: UpstreamKind::GeminiApiKey,
@@ -2934,6 +3191,9 @@ mod tests {
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "stale-missing-oauth".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -3022,6 +3282,9 @@ mod tests {
             let created = UpstreamStore::create(
                 storage.as_ref(),
                 UpstreamCreate {
+                    vertex: None,
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
                     id: Uuid::new_v4(),
                     name: format!("stale-oauth-{enabled}"),
                     kind: UpstreamKind::AnthropicOauth,
@@ -3260,6 +3523,7 @@ mod tests {
     ) -> Stores {
         Stores {
             upstreams: storage.clone(),
+            vertex_state: Arc::new(VertexState::new(storage.clone())),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -3277,6 +3541,9 @@ mod tests {
         let created = UpstreamStore::create(
             storage,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -3547,6 +3814,217 @@ mod tests {
         )
         .expect("shape request")
     }
+    struct VertexMintTransport {
+        calls: AtomicUsize,
+        responses: Mutex<VecDeque<TokenResponse>>,
+    }
+
+    #[async_trait]
+    impl TokenTransport for VertexMintTransport {
+        async fn post(
+            &self,
+            _endpoint: TokenEndpoint,
+            _request: TokenRequest,
+        ) -> Result<TokenResponse, TransportError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .expect("test response"))
+        }
+    }
+
+    fn vertex_credential_record(id: Uuid, ciphertext: Vec<u8>) -> UpstreamRecord {
+        UpstreamRecord {
+            id,
+            name: "vertex-credential-test".to_owned(),
+            kind: UpstreamKind::VertexCredential,
+            enabled: true,
+            api_key_ciphertext: Some(ciphertext),
+            vertex: Some(cc_lb_domain::VertexUpstreamConfig {
+                target: cc_lb_domain::VertexTarget::Regional {
+                    project_id: "project-123".into(),
+                    location: "us-central1".into(),
+                },
+                api_version: cc_lb_domain::VertexApiVersion::V1Beta1,
+            }),
+            ..UpstreamRecord::default()
+        }
+    }
+
+    fn vertex_signed_request() -> cc_lb_upstream::ShapedRequest {
+        let mut request = shaped_request();
+        request.set_url(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+                .parse()
+                .expect("Vertex URL"),
+        );
+        request.set_body(bytes::Bytes::from_static(
+            br#"{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}"#,
+        ));
+        request
+    }
+
+    fn vertex_token_response(token: &'static str) -> TokenResponse {
+        TokenResponse {
+            status: 200,
+            headers: vec![],
+            body: format!(
+                r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":3600}}"#
+            )
+            .into_bytes(),
+        }
+    }
+
+    fn vertex_factory(
+        record: UpstreamRecord,
+        storage: Arc<Storage>,
+        aead: Arc<AeadService>,
+        state: Arc<VertexState>,
+        clock: cc_lb_clock::ClockHandle,
+    ) -> DbCompositeSignerFactory {
+        let sources = Arc::new(build_vertex_sources(
+            std::slice::from_ref(&record),
+            &aead,
+            &state.token_registry,
+            &state.token_transport,
+            &clock,
+        ));
+        DbCompositeSignerFactory::new_with_vertex_state(
+            vec![record],
+            storage,
+            aead,
+            None,
+            clock,
+            (
+                cc_lb_config::GeminiOAuthConfig::default(),
+                cc_lb_config::AntigravityOAuthConfig::default(),
+            ),
+            (state, sources),
+        )
+        .with_router_choice_state("vertex-credential-test".to_owned())
+    }
+
+    #[tokio::test]
+    async fn qa_tok_4_factory_reuses_mint_and_replaces_rotated_ciphertext() {
+        let (_dir, storage) = storage_fixture(61).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let transport = Arc::new(VertexMintTransport {
+            calls: AtomicUsize::new(0),
+            responses: Mutex::new(VecDeque::from([
+                vertex_token_response("first"),
+                vertex_token_response("second"),
+            ])),
+        });
+        let mut state = VertexState::new(storage.clone());
+        state.token_transport = transport.clone();
+        let state = Arc::new(state);
+        let id = Uuid::new_v4();
+        let plaintext = br#"{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#;
+        let first_ciphertext = aead
+            .encrypt(plaintext, &vertex_credential_aad(&id.to_string()))
+            .expect("first ciphertext");
+        let first_record = vertex_credential_record(id, first_ciphertext);
+        let factory = vertex_factory(
+            first_record,
+            storage.clone(),
+            aead.clone(),
+            state.clone(),
+            clock.clone(),
+        );
+        let upstream = Upstream::GeminiDirect { base_url: None };
+        let signer = factory.build(&upstream).await.expect("first signer");
+        sign_request(signer.as_ref(), vertex_signed_request())
+            .await
+            .expect("first request");
+        drop(signer);
+        let signer = factory.build(&upstream).await.expect("cached signer");
+        sign_request(signer.as_ref(), vertex_signed_request())
+            .await
+            .expect("cached request");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let rotated_ciphertext = aead
+            .encrypt(plaintext, &vertex_credential_aad(&id.to_string()))
+            .expect("rotated ciphertext");
+        let rotated_factory = vertex_factory(
+            vertex_credential_record(id, rotated_ciphertext),
+            storage,
+            aead,
+            state,
+            clock,
+        );
+        let signer = rotated_factory
+            .build(&upstream)
+            .await
+            .expect("rotated signer");
+        sign_request(signer.as_ref(), vertex_signed_request())
+            .await
+            .expect("rotated request");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn qa_tok_5_factory_401_refreshes_once_with_fresh_token() {
+        let (_dir, storage) = storage_fixture(62).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let transport = Arc::new(VertexMintTransport {
+            calls: AtomicUsize::new(0),
+            responses: Mutex::new(VecDeque::from([
+                vertex_token_response("stale"),
+                vertex_token_response("fresh"),
+            ])),
+        });
+        let mut state = VertexState::new(storage.clone());
+        state.token_transport = transport.clone();
+        let state = Arc::new(state);
+        let id = Uuid::new_v4();
+        let ciphertext = aead
+            .encrypt(
+                br#"{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#,
+                &vertex_credential_aad(&id.to_string()),
+            )
+            .expect("ciphertext");
+        let factory = vertex_factory(
+            vertex_credential_record(id, ciphertext),
+            storage,
+            aead,
+            state,
+            clock,
+        );
+        let signer = factory
+            .build(&Upstream::GeminiDirect { base_url: None })
+            .await
+            .expect("signer");
+        let first = sign_request(signer.as_ref(), vertex_signed_request())
+            .await
+            .expect("stale request");
+        assert_eq!(
+            first.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer stale"))
+        );
+        let decision = signer
+            .on_unauthorized(&UpstreamError::Unauthorized {
+                status: http::StatusCode::UNAUTHORIZED,
+                body: None,
+            })
+            .await;
+        let RetryDecision::Refresh { new_signer } = decision else {
+            panic!("401 must trigger one refresh retry");
+        };
+        let second = sign_request(new_signer.as_ref(), vertex_signed_request())
+            .await
+            .expect("fresh retry");
+        assert_eq!(
+            second.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer fresh"))
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
 
     #[tokio::test]
     async fn gemini_signer_profile_comes_from_encrypted_credentials() {
@@ -3690,8 +4168,7 @@ mod tests {
                 aead.clone(),
                 None,
                 Arc::new(TestClock::new_at_secs(1_700_000_000)),
-                gemini_config,
-                config,
+                (gemini_config, config),
             )
             .with_router_choice_state(stored.name.clone());
             let signer = factory
@@ -3869,8 +4346,10 @@ mod tests {
                 aead.clone(),
                 None,
                 clock.clone(),
-                cc_lb_config::GeminiOAuthConfig::default(),
-                cc_lb_config::AntigravityOAuthConfig::default(),
+                (
+                    cc_lb_config::GeminiOAuthConfig::default(),
+                    cc_lb_config::AntigravityOAuthConfig::default(),
+                ),
             )
             .with_router_choice_state(stored.name.clone());
             let upstream = match kind {
@@ -3969,8 +4448,10 @@ mod tests {
                 Arc::new(AeadService::from_master_key([19; 32])),
                 None,
                 Arc::new(TestClock::new_at_secs(1_700_000_000)),
-                cc_lb_config::GeminiOAuthConfig::default(),
-                cc_lb_config::AntigravityOAuthConfig::default(),
+                (
+                    cc_lb_config::GeminiOAuthConfig::default(),
+                    cc_lb_config::AntigravityOAuthConfig::default(),
+                ),
             )
             .with_router_choice_state("workspace-key".to_owned());
 
@@ -4049,6 +4530,9 @@ mod tests {
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "mid-build-oauth".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -4322,6 +4806,9 @@ mod tests {
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "reconnect-aba-oauth".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -4584,6 +5071,9 @@ mod tests {
         let record = UpstreamStore::create(
             storage,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind,
@@ -4621,8 +5111,10 @@ mod tests {
             aead,
             Some(handle),
             clock,
-            config.oauth.gemini.clone().unwrap_or_default(),
-            config.oauth.antigravity.clone().unwrap_or_default(),
+            (
+                config.oauth.gemini.clone().unwrap_or_default(),
+                config.oauth.antigravity.clone().unwrap_or_default(),
+            ),
         )
         .with_router_choice_state(record.name)
     }

@@ -32,6 +32,9 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "declared-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -117,6 +120,9 @@ async fn readyz_with_oauth(
         let upstream = UpstreamStore::create(
             storage_arc.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "healthy-api-key".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -137,6 +143,9 @@ async fn readyz_with_oauth(
     let oauth_upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "broken-oauth".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

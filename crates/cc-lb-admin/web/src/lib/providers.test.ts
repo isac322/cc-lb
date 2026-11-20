@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'vitest';
+import upstreamKinds from './__contract__/upstream_kinds.json';
+import vertexHosts from './__contract__/vertex_hosts.json';
 import {
   type RequestEventKind,
   RequestEventKindSchema,
@@ -17,6 +19,9 @@ import {
   providerOf,
   providersForRequestEventKind,
   requestEventKindsForProvider,
+  upstreamAuthMode,
+  upstreamKindLabel,
+  vertexHostFor,
 } from './providers';
 
 function upstream(
@@ -84,6 +89,45 @@ describe('virtual provider installation', () => {
     ).toEqual(['openai']);
     expect(intersectProviders(['anthropic'], ['gemini'])).toEqual([]);
     expect(intersectProviders(undefined, undefined)).toBeUndefined();
+  });
+});
+
+describe('Vertex web contracts', () => {
+  test('QA-WEB-1 maps every kind to provider, auth mode, label, and capabilities', () => {
+    for (const entry of upstreamKinds) {
+      const kind = entry.kind as UpstreamKind;
+      expect(providerOf(kind)).toBe(entry.provider);
+      expect(upstreamAuthMode(kind)).toBe(entry.auth_mode);
+      if (kind === 'vertex_api_key' || kind === 'vertex_credential') {
+        expect(capabilitiesOf(kind)).toEqual({
+          subscriptionQuota: false,
+          quotaHistory: false,
+          limitReset: false,
+          warmup: false,
+          cacheKeepalive: false,
+          apiKeyUsageReport: false,
+          credits: false,
+        });
+      }
+    }
+    expect(upstreamKindLabel('vertex_api_key')).toBe('Vertex API key');
+    expect(upstreamKindLabel('vertex_credential')).toBe('Vertex credential');
+  });
+
+  test('QA-WEB-2 derives hosts from the shared Vertex fixture', () => {
+    for (const entry of vertexHosts) {
+      expect(vertexHostFor(entry.location)).toBe(entry.host);
+    }
+    expect(defaultEndpointFor('vertex_api_key', 'us')).toBe(
+      'https://aiplatform.us.rep.googleapis.com',
+    );
+  });
+
+  test('QA-WEB-7 keeps Credential and API key auth filters distinct under Gemini', () => {
+    expect(upstreamAuthMode('vertex_api_key')).toBe('api_key');
+    expect(upstreamAuthMode('vertex_credential')).toBe('google_credential');
+    expect(providerOf('vertex_api_key')).toBe('gemini');
+    expect(providerOf('vertex_credential')).toBe('gemini');
   });
 });
 

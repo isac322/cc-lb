@@ -1080,6 +1080,7 @@ pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstrea
         retry_after,
     })
 }
+
 fn valid_retry_delay(delay: &str) -> bool {
     if delay.is_empty() || delay.len() > 64 {
         return false;
@@ -3753,6 +3754,36 @@ mod tests {
         let body = br#"{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}"#;
         let error = observe_http_error_body(body).expect("retry info extracted");
         assert_eq!(error.retry_after(), Some("1.5s"));
+    }
+
+    #[test]
+    fn qa_err_3_vertex_hintless_429_has_no_retry_after() {
+        let error = observe_http_error_body(
+            br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#,
+        )
+        .expect("Vertex error extracted");
+        assert_eq!(error.retry_after(), None);
+        assert_eq!(
+            error.into_parts_with(None).0.as_deref(),
+            Some("RESOURCE_EXHAUSTED")
+        );
+    }
+    #[test]
+    fn qa_err_1_vertex_client_errors_preserve_status_tokens() {
+        for (code, status) in [(400, "INVALID_ARGUMENT"), (403, "PERMISSION_DENIED")] {
+            let body = format!(r#"{{"error":{{"code":{code}}}}}"#);
+            let error = observe_http_error_body(body.as_bytes()).expect("error extracted");
+            let (kind, _, _) = error.into_parts_with(None);
+            assert_eq!(kind.as_deref(), Some(status));
+        }
+    }
+
+    #[test]
+    fn qa_err_2_vertex_unauthenticated_error_is_distinct_from_quota() {
+        let error = observe_http_error_body(br#"{"error":{"code":401}}"#).expect("error extracted");
+        let (kind, _, retry_after) = error.into_parts_with(None);
+        assert_eq!(kind.as_deref(), Some("UNAUTHENTICATED"));
+        assert!(retry_after.is_none());
     }
 
     #[test]

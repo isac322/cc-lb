@@ -73,10 +73,11 @@ pub enum CredentialKind {
 }
 
 /// Upstream record kind exposed to router plugins for candidate selection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamKind {
     /// Anthropic API-key upstream.
+    #[default]
     AnthropicApiKey,
     /// Anthropic OAuth upstream.
     AnthropicOauth,
@@ -88,6 +89,10 @@ pub enum UpstreamKind {
     GeminiApiKey,
     /// Gemini OAuth subscription upstream.
     GeminiOauth,
+    /// Gemini Vertex AI API-key upstream.
+    VertexApiKey,
+    /// Gemini Vertex AI credential upstream.
+    VertexCredential,
 }
 impl UpstreamKind {
     /// Returns the provider implemented by this upstream.
@@ -95,16 +100,21 @@ impl UpstreamKind {
         match self {
             Self::AnthropicApiKey | Self::AnthropicOauth => Provider::Anthropic,
             Self::OpenaiApiKey | Self::OpenaiOauth => Provider::Openai,
-            Self::GeminiApiKey | Self::GeminiOauth => Provider::Gemini,
+            Self::GeminiApiKey
+            | Self::GeminiOauth
+            | Self::VertexApiKey
+            | Self::VertexCredential => Provider::Gemini,
         }
     }
 
     /// Returns the credential kind used by this upstream.
     pub const fn credential_kind(self) -> CredentialKind {
         match self {
-            Self::AnthropicApiKey | Self::OpenaiApiKey | Self::GeminiApiKey => {
-                CredentialKind::ApiKey
-            }
+            Self::AnthropicApiKey
+            | Self::OpenaiApiKey
+            | Self::GeminiApiKey
+            | Self::VertexApiKey
+            | Self::VertexCredential => CredentialKind::ApiKey,
             Self::AnthropicOauth | Self::OpenaiOauth | Self::GeminiOauth => CredentialKind::Oauth,
         }
     }
@@ -118,6 +128,8 @@ impl UpstreamKind {
             Self::OpenaiOauth => "openai_oauth",
             Self::GeminiApiKey => "gemini_api_key",
             Self::GeminiOauth => "gemini_oauth",
+            Self::VertexApiKey => "vertex_api_key",
+            Self::VertexCredential => "vertex_credential",
         }
     }
 }
@@ -211,5 +223,63 @@ mod tests {
     fn upstream_kind_wire_names_remain_exact() {
         assert_eq!(UpstreamKind::AnthropicApiKey.as_str(), "anthropic_api_key");
         assert_eq!(UpstreamKind::AnthropicOauth.as_str(), "anthropic_oauth");
+    }
+    #[test]
+    fn qa_kind_1_all_eight_kinds_keep_provider_credential_and_wire_mappings() {
+        let mappings = [
+            (
+                UpstreamKind::AnthropicApiKey,
+                Provider::Anthropic,
+                CredentialKind::ApiKey,
+                "anthropic_api_key",
+            ),
+            (
+                UpstreamKind::AnthropicOauth,
+                Provider::Anthropic,
+                CredentialKind::Oauth,
+                "anthropic_oauth",
+            ),
+            (
+                UpstreamKind::OpenaiApiKey,
+                Provider::Openai,
+                CredentialKind::ApiKey,
+                "openai_api_key",
+            ),
+            (
+                UpstreamKind::OpenaiOauth,
+                Provider::Openai,
+                CredentialKind::Oauth,
+                "openai_oauth",
+            ),
+            (
+                UpstreamKind::GeminiApiKey,
+                Provider::Gemini,
+                CredentialKind::ApiKey,
+                "gemini_api_key",
+            ),
+            (
+                UpstreamKind::GeminiOauth,
+                Provider::Gemini,
+                CredentialKind::Oauth,
+                "gemini_oauth",
+            ),
+            (
+                UpstreamKind::VertexApiKey,
+                Provider::Gemini,
+                CredentialKind::ApiKey,
+                "vertex_api_key",
+            ),
+            (
+                UpstreamKind::VertexCredential,
+                Provider::Gemini,
+                CredentialKind::ApiKey,
+                "vertex_credential",
+            ),
+        ];
+        for (kind, provider, credential, wire_name) in mappings {
+            assert_eq!(kind.provider(), provider);
+            assert_eq!(kind.credential_kind(), credential);
+            assert_eq!(kind.as_str(), wire_name);
+        }
     }
 }

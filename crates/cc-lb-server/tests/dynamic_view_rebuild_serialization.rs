@@ -360,6 +360,9 @@ async fn create_upstream(storage: &Storage, name: &str, enabled: bool) -> Upstre
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -428,6 +431,9 @@ async fn fixture() -> Fixture {
     });
     let stores = Arc::new(Stores {
         upstreams: storage.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: chain_gate.clone(),
         upstream_rate_limits: rate_limit_gate.clone(),

@@ -1182,11 +1182,16 @@ export interface CreateUpstreamRequest {
   api_key_value?: string | null;
   oauth_token_bundle?: Record<string, unknown> | null;
   project_id?: string | null;
+  location?: string | null;
+  express?: boolean;
+  api_version?: 'v1' | 'v1beta1';
+  google_credential?: string | null;
   /** Org-scoped API keys: the `anthropic-workspace-id` every request carries. */
   workspace_id?: string | null;
   /** Save an API key Anthropic could not be asked about; stored unverified. */
   skip_preflight?: boolean;
 }
+
 /**
  * The connect dialog is the only caller: a refused save goes back to the step
  * that owns its fix, anything else is a `role="alert"` notice there. Never a
@@ -1219,6 +1224,10 @@ export interface UpdateUpstreamRequest {
   base_url?: string | null;
   clear_base_url?: boolean;
   api_key_value?: string | null;
+  project_id?: string | null;
+  location?: string | null;
+  api_version?: 'v1' | 'v1beta1';
+  google_credential?: string | null;
   /**
    * Org-scoped API keys only; the server re-probes before persisting. Like
    * `base_url`, `null` keeps the stored value: clearing needs

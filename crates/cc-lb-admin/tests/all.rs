@@ -108,5 +108,7 @@ mod v1_upstreams;
 mod v1_upstreams_api_key_read;
 #[path = "v1_upstreams_api_key_write.rs"]
 mod v1_upstreams_api_key_write;
+#[path = "v1_upstreams_vertex.rs"]
+mod v1_upstreams_vertex;
 #[path = "wasm_upload.rs"]
 mod wasm_upload;

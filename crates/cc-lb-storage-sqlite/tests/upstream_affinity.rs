@@ -814,6 +814,9 @@ async fn create_upstream_kind(
     UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: uuid::Uuid::new_v4(),
             name: name.to_owned(),
             kind,

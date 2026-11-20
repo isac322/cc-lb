@@ -1,10 +1,10 @@
 ---
 title: Upstreams
-description: Understand the six Anthropic, OpenAI, and Gemini upstream kinds, their credential paths, and OAuth warm-up.
+description: Understand the eight Anthropic, OpenAI, Gemini, and Vertex upstream kinds, their credential paths, and OAuth warm-up.
 slug: docs/concepts/upstreams
 ---
 
-An upstream is a named destination in the database-backed runtime view. cc-lb supports six upstream kinds:
+An upstream is a named destination in the database-backed runtime view. cc-lb supports eight upstream kinds:
 
 | Kind | Credential path | Default warm-up |
 | --- | --- | --- |
@@ -14,8 +14,10 @@ An upstream is a named destination in the database-backed runtime view. cc-lb su
 | `openai_oauth` | Admin-managed OAuth sign-in or imported OpenAI OAuth token bundle | Enabled; requires credentials before sending |
 | `gemini_api_key` | Operator-supplied Gemini API key | Disabled; API-key warm-up is unsupported |
 | `gemini_oauth` | Antigravity subscription sign-in or imported Gemini OAuth token bundle; existing Gemini CLI enterprise grants retain their profile | Enabled; requires credentials before sending |
+| `vertex_api_key` | Express or regional project-bound Vertex API key | Disabled; Vertex warm-up is not applicable |
+| `vertex_credential` | Regional Vertex service-account, authorized-user, or impersonated-service-account JSON | Disabled; Vertex warm-up is not applicable |
 
-The pool can contain all six kinds. The request path selects only enabled candidates compatible with the request's provider and operation that satisfy principal and routing constraints. OAuth warm-up starts eligible subscription quota windows; it is separate from prompt-cache keepalive. Operators can opt out per upstream. See the [warm-up reference](/docs/reference/source/upstream-warmup/) for provider-specific windows and limits.
+The pool can contain all eight kinds. The request path selects only enabled candidates compatible with the request's provider and operation that satisfy principal and routing constraints. OAuth warm-up starts eligible subscription quota windows; Vertex never joins subscription quota, warm-up, or keepalive. Express and regional API-key targets have no cached-content, model-catalog, or Live support because Google rejects API keys for those operations; regional credentials add approved cache, publisher catalog, and Live routes through Vertex. Operators can opt out per upstream. See the [warm-up reference](/docs/reference/source/upstream-warmup/) for provider-specific windows and limits.
 
 ## Native route families
 
@@ -27,7 +29,7 @@ The pool can contain all six kinds. The request path selects only enabled candid
 
 Provider-prefixed routes use `/anthropic/v1/...`, `/openai/v1/...`, or `/gemini/v1beta/...` (plus Gemini model catalogs under `/gemini/v1/...`). The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists supported operations and credential restrictions.
 
-cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope. Supported model catalog routes are limited to those in the endpoint reference.
+cc-lb does not translate between providers or act as a universal multi-provider gateway. Vertex AI Gemini is supported through `vertex_api_key` and `vertex_credential`; Express and regional API-key targets support generate/stream/countTokens only because Google rejects API keys for cached-content create, publisher model-catalog list/get, and Live. Regional credential targets additionally support approved cached-content create/use, publisher model-catalog list/get, and Live routes through Vertex. The catalog is a minimal publisher projection, not entitlement-aware; explicit cached-content billing remains Vertex-controlled, and regional credential deployments should use least-privilege service accounts. Bedrock remains unsupported; ambient ADC/metadata-server credentials, external-account files, and account-bound provider-management APIs remain outside scope.
 
 ## Anthropic HTTP fallback between upstreams
 
@@ -114,7 +116,7 @@ Choose a model supported by the provider for the principal's `allowed_models`; t
 
 For an Anthropic, OpenAI, or Gemini OAuth upstream, use the authenticated [interactive provider OAuth flow](/docs/reference/admin-api/#oauth-flow): start the provider-specific draft, open the returned authorization URL (or follow the OpenAI device-code instructions), then complete it with the returned state token and code.
 
-OpenAI and Gemini also accept imported OAuth token bundles through the authenticated admin API; see the [CLI/API OAuth bundle reference](/docs/reference/source/runtime-management/#cliapi-oauth-bundle-import) for provider-specific fields. Gemini subscription sign-in requires operator-configured [Antigravity client credentials](/docs/reference/configuration/#subscription-oauth-providers), does not use Vertex or ADC, and carries the [Google Antigravity Additional Terms warning](/docs/reference/admin-api/#oauth-flow).
+OpenAI and Gemini also accept imported OAuth token bundles through the authenticated admin API; see the [CLI/API OAuth bundle reference](/docs/reference/source/runtime-management/#cliapi-oauth-bundle-import) for provider-specific fields. Gemini subscription sign-in requires operator-configured [Antigravity client credentials](/docs/reference/configuration/#subscription-oauth-providers); Vertex uses its separate `vertex_api_key` or `vertex_credential` upstreams and does not use subscription OAuth or ambient ADC.
 
 OAuth warm-up is opt-out after credentials exist for all three OAuth kinds. Operators can disable it per upstream with an ETag-protected update.
 

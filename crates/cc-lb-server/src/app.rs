@@ -84,7 +84,7 @@ use crate::admin_ports::{
 };
 use crate::build_meta::BuildMeta;
 use crate::dynamic_view_builder::{
-    Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
+    Stores as DynamicStores, VertexState, build_dynamic_view, ensure_wasm_cache_dirs,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight;
@@ -840,6 +840,9 @@ pub async fn seed_app_testing_storage(
                 warmup_dialect_plugin: None,
                 workspace_id: None,
                 api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
             },
         )
         .await
@@ -1100,6 +1103,7 @@ async fn build_app_with_storage_inner(
 
     let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),
+        vertex_state: Arc::new(VertexState::new(storage_for_dynamic.clone())),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
@@ -2868,6 +2872,12 @@ fn upstream_usable(view: &DynamicView, aead: &AeadService, upstream: &UpstreamRe
         UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
             !cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
                 && oauth_credentials_decryptable(aead, upstream)
+        }
+        UpstreamKind::VertexApiKey => true,
+        UpstreamKind::VertexCredential => {
+            !cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                upstream.last_apply_error.as_deref(),
+            ) && upstream.api_key_ciphertext.is_some()
         }
     }
 }
@@ -5116,6 +5126,105 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn qa_ready_1_terminal_vertex_credential_is_unusable_without_probe_decrypt() {
+        let mut terminal = websocket_upstream(
+            404,
+            "terminal-vertex",
+            Url::parse("http://vertex.example").expect("vertex URL"),
+        );
+        terminal.kind = UpstreamKind::VertexCredential;
+        terminal.api_key_ciphertext = Some(vec![0xff]);
+        terminal.last_apply_error =
+            Some(cc_lb_domain::vertex::VERTEX_CREDENTIAL_INVALID_CLIENT.to_owned());
+        let statuses = cc_lb_control::UpstreamStatusSnapshot {
+            entries: HashMap::from([(
+                terminal.name.clone(),
+                cc_lb_control::UpstreamStatusEntry {
+                    status: cc_lb_control::ApplyStatus::Active,
+                    last_apply_error: terminal.last_apply_error.clone(),
+                    last_apply_at_unix_secs: 0,
+                },
+            )]),
+            ..Default::default()
+        };
+        let state = websocket_test_state(
+            vec![terminal],
+            TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(WebSocketTestSignerFactory),
+            Arc::new(FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        state.server_state.transition_to_ready();
+        let view = state.dynamic_view.load();
+        state.dynamic_view.store(
+            cc_lb_control::DynamicViewBuilder::from_view(&view)
+                .upstream_status_snapshot(Arc::new(statuses))
+                .build(),
+        );
+        assert!(matches!(
+            readiness(&state),
+            Readiness::NotReady("no_ready_upstream")
+        ));
+    }
+    #[tokio::test]
+    async fn qa_ready_1_healthy_upstream_keeps_terminal_vertex_mix_ready() {
+        let healthy = websocket_upstream(
+            405,
+            "healthy-api-key",
+            Url::parse("http://api-key.example").expect("api key URL"),
+        );
+        let mut terminal = websocket_upstream(
+            406,
+            "terminal-vertex-mix",
+            Url::parse("http://vertex.example").expect("vertex URL"),
+        );
+        terminal.kind = UpstreamKind::VertexCredential;
+        terminal.api_key_ciphertext = Some(vec![0xff]);
+        terminal.last_apply_error =
+            Some(cc_lb_domain::vertex::VERTEX_CREDENTIAL_INVALID_GRANT.to_owned());
+        let statuses = cc_lb_control::UpstreamStatusSnapshot {
+            entries: HashMap::from([
+                (
+                    healthy.name.clone(),
+                    cc_lb_control::UpstreamStatusEntry {
+                        status: cc_lb_control::ApplyStatus::Active,
+                        last_apply_error: None,
+                        last_apply_at_unix_secs: 0,
+                    },
+                ),
+                (
+                    terminal.name.clone(),
+                    cc_lb_control::UpstreamStatusEntry {
+                        status: cc_lb_control::ApplyStatus::Active,
+                        last_apply_error: terminal.last_apply_error.clone(),
+                        last_apply_at_unix_secs: 0,
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let state = websocket_test_state(
+            vec![healthy, terminal],
+            TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(WebSocketTestSignerFactory),
+            Arc::new(FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        state.server_state.transition_to_ready();
+        let view = state.dynamic_view.load();
+        state.dynamic_view.store(
+            cc_lb_control::DynamicViewBuilder::from_view(&view)
+                .upstream_status_snapshot(Arc::new(statuses))
+                .build(),
+        );
+        assert!(matches!(readiness(&state), Readiness::Ready { .. }));
     }
 
     #[tokio::test]

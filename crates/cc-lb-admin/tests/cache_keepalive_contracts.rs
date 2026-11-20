@@ -109,6 +109,9 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let upstream = storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "retired-upstream".to_owned(),
             kind: StorageUpstreamKind::AnthropicApiKey,

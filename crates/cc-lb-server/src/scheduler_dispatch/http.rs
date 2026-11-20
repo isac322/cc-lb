@@ -637,7 +637,9 @@ pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> SchedulerResult<Ur
             .map(|target| target.base)
             .map_err(|error| SchedulerError::Job(error.to_string()));
         }
-        cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
+        cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey
+        | cc_lb_storage_api::upstream::UpstreamKind::VertexApiKey
+        | cc_lb_storage_api::upstream::UpstreamKind::VertexCredential => DEFAULT_GEMINI_BASE_URL,
     };
     Url::parse(default).map_err(|error| SchedulerError::Job(error.to_string()))
 }

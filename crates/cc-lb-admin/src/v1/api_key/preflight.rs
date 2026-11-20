@@ -5,6 +5,7 @@
 //! normalized and prefix-gated, `base_url` must be http(s) without userinfo,
 //! and a workspace id must be well formed. Only then does the probe chain run.
 
+use async_trait::async_trait;
 use axum::{
     Extension, Json,
     extract::{State, rejection::JsonRejection},
@@ -15,17 +16,23 @@ use bytes::Bytes;
 use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
     KeyInputError, NormalizedApiKey, PreflightCapabilities, PreflightClassification,
-    PreflightInput, PreflightMode, PreflightOutcome, PreflightRequest, PreflightVerdict,
-    PreflightWireResponse, PreflightWorkspaces, ProbeTransport, WireInference,
-    endpoint_operator_message, http_status, key_hint, normalize_api_key, operator_message,
-    prefix_gate, run_preflight, validate_base_url, validate_workspace_id,
+    PreflightInput, PreflightMode, PreflightOutcome, PreflightVerdict, PreflightWireResponse,
+    PreflightWorkspaces, ProbeTransport, WireInference, endpoint_operator_message, http_status,
+    key_hint, normalize_api_key, operator_message, prefix_gate, run_preflight, validate_base_url,
+    validate_workspace_id,
 };
+use cc_lb_domain::{VertexApiVersion, VertexTarget, VertexUpstreamConfig};
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
     ApiKeyResolution, ApiKeyWorkspace, ApiKeyWorkspaceMode, Provider, ProviderProjectSource,
     RemediationCode, UpstreamApiKeyDetailsRecord, UpstreamKind, UpstreamRecord,
 };
+use cc_lb_vertex_auth::{
+    MintError, TokenEndpoint, TokenRequest, TokenResponse, TokenTransport, mint_once,
+    parse_credential,
+};
 use http_body_util::{BodyExt, Full, Limited};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
@@ -35,6 +42,130 @@ use crate::auth::AdminIdentity;
 use crate::v1::upstreams::{UpstreamError, audit_upstream_action, effective_base_url};
 
 pub(crate) const PREFLIGHT_ROUTE: &str = "/admin/v1/upstreams/preflight";
+#[derive(Clone, Default, Deserialize)]
+pub(crate) struct PreflightRequest {
+    #[serde(default)]
+    pub(crate) api_key_value: Option<String>,
+    #[serde(default)]
+    pub(crate) workspace_id: Option<String>,
+    #[serde(default)]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<UpstreamKind>,
+    #[serde(default)]
+    pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) location: Option<String>,
+    #[serde(default)]
+    pub(crate) express: Option<bool>,
+    #[serde(default)]
+    pub(crate) google_credential: Option<String>,
+    #[serde(default)]
+    pub(crate) api_version: Option<VertexApiVersion>,
+}
+
+impl std::fmt::Debug for PreflightRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreflightRequest")
+            .field(
+                "api_key_value",
+                &self.api_key_value.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("workspace_id", &self.workspace_id)
+            .field("base_url", &self.base_url)
+            .field("kind", &self.kind)
+            .field("project_id", &self.project_id)
+            .field("location", &self.location)
+            .field("express", &self.express)
+            .field(
+                "google_credential",
+                &self.google_credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("api_version", &self.api_version)
+            .finish()
+    }
+}
+struct AdminTokenTransport {
+    http: cc_lb_control::anthropic_api_key::ProbeHttpClient,
+    max_body_bytes: usize,
+    timeout: std::time::Duration,
+}
+
+#[async_trait]
+impl TokenTransport for AdminTokenTransport {
+    async fn post(
+        &self,
+        endpoint: TokenEndpoint,
+        request: TokenRequest,
+    ) -> Result<TokenResponse, cc_lb_vertex_auth::TransportError> {
+        let endpoint_kind = match endpoint {
+            TokenEndpoint::OAuth2Token => "oauth2_token",
+            TokenEndpoint::IamGenerateAccessToken { .. } => "iam_generate_access_token",
+        };
+        let url = match endpoint {
+            TokenEndpoint::OAuth2Token => "https://oauth2.googleapis.com/token".to_owned(),
+            TokenEndpoint::IamGenerateAccessToken { email } => format!(
+                "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{email}:generateAccessToken"
+            ),
+        };
+        let mut builder = axum::http::Request::builder().method(Method::POST).uri(url);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let outbound = builder
+            .header(header::CONTENT_TYPE, request.content_type)
+            .body(Full::new(Bytes::from(request.body)))
+            .map_err(|_| cc_lb_vertex_auth::TransportError::InvalidEndpoint)?;
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let response = tokio::time::timeout(self.timeout, async {
+            self.http.request(outbound).await
+        })
+        .await
+        .map_err(|_| {
+            tracing::warn!(%endpoint_kind, error_kind = "timeout", "Vertex credential token request timed out");
+            cc_lb_vertex_auth::TransportError::Timeout
+        })?
+        .map_err(|error| {
+            let error_kind = if error.is_connect() {
+                "connect"
+            } else {
+                "transport"
+            };
+            tracing::warn!(%endpoint_kind, %error_kind, error = ?error, "Vertex credential token request failed");
+            cc_lb_vertex_auth::TransportError::Network
+        })?;
+        let status = response.status().as_u16();
+        tracing::debug!(%endpoint_kind, status, "Vertex credential token endpoint responded");
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+            })
+            .collect();
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let body = tokio::time::timeout(
+            remaining,
+            Limited::new(response.into_body(), self.max_body_bytes).collect(),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!(%endpoint_kind, error_kind = "timeout", "Vertex credential token response read timed out");
+            cc_lb_vertex_auth::TransportError::Timeout
+        })?
+        .map_err(|error| {
+            tracing::warn!(%endpoint_kind, error_kind = "response_body", error = ?error, "Vertex credential token response read failed");
+            cc_lb_vertex_auth::TransportError::Network
+        })?
+        .to_bytes()
+        .to_vec();
+        Ok(TokenResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
 
 /// `POST /admin/v1/upstreams/preflight`: probes a pasted key. The verdict is
 /// data (always 200); only request-shape errors are 4xx. Nothing but the
@@ -76,6 +207,23 @@ async fn preflight(
     body: PreflightRequest,
 ) -> Result<Response, UpstreamError> {
     let kind = body.kind.unwrap_or(UpstreamKind::AnthropicApiKey);
+    if matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        let outcome = vertex_preflight(state, &body, kind).await?;
+        return finish_preflight_audit(state, identity, outcome).await;
+    }
+    if body.location.is_some()
+        || body.express.is_some()
+        || body.google_credential.is_some()
+        || body.api_version.is_some()
+    {
+        return Err(UpstreamError::InvalidInput {
+            field: "vertex".to_owned(),
+            reason: "Vertex fields are supported only for Vertex upstreams".to_owned(),
+        });
+    }
     if !matches!(
         kind,
         UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
@@ -119,6 +267,13 @@ async fn preflight(
         )
         .await
     };
+    finish_preflight_audit(state, identity, outcome).await
+}
+async fn finish_preflight_audit(
+    state: &AdminState,
+    identity: &AdminIdentity,
+    outcome: PreflightOutcome,
+) -> Result<Response, UpstreamError> {
     let wire = outcome.wire;
     let payload = AuditPayload::UpstreamPreflight {
         key_hint: wire.key_hint.clone(),
@@ -139,6 +294,253 @@ async fn preflight(
     )
     .await?;
     Ok(Json(wire).into_response())
+}
+
+pub(crate) fn vertex_config(
+    kind: UpstreamKind,
+    project_id: Option<&str>,
+    location: Option<&str>,
+    express: Option<bool>,
+    api_version: Option<VertexApiVersion>,
+) -> Result<VertexUpstreamConfig, UpstreamError> {
+    let express = express.unwrap_or(false);
+    let target = if express {
+        if project_id.is_some() || location.is_some() {
+            return Err(UpstreamError::InvalidInput {
+                field: "project_id".to_owned(),
+                reason: "Express upstreams do not accept project_id or location".to_owned(),
+            });
+        }
+        VertexTarget::Express
+    } else {
+        let project_id = project_id.ok_or_else(|| UpstreamError::InvalidInput {
+            field: "project_id".to_owned(),
+            reason: "Regional Vertex upstreams require project_id".to_owned(),
+        })?;
+        let location = location.ok_or_else(|| UpstreamError::InvalidInput {
+            field: "location".to_owned(),
+            reason: "Regional Vertex upstreams require location".to_owned(),
+        })?;
+        VertexTarget::Regional {
+            project_id: project_id.to_owned().into_boxed_str(),
+            location: location.to_owned().into_boxed_str(),
+        }
+    };
+    let config = VertexUpstreamConfig {
+        target,
+        api_version: api_version.unwrap_or_default(),
+    };
+    config
+        .validate(kind == UpstreamKind::VertexCredential)
+        .map_err(|error| UpstreamError::InvalidInput {
+            field: match error {
+                cc_lb_domain::VertexValidationError::InvalidProjectId => "project_id",
+                cc_lb_domain::VertexValidationError::InvalidLocation => "location",
+                cc_lb_domain::VertexValidationError::CredentialRequiresRegional => "express",
+            }
+            .to_owned(),
+            reason: "invalid Vertex target".to_owned(),
+        })?;
+    Ok(config)
+}
+
+pub(crate) async fn vertex_preflight(
+    state: &AdminState,
+    body: &PreflightRequest,
+    kind: UpstreamKind,
+) -> Result<PreflightOutcome, UpstreamError> {
+    let config = vertex_config(
+        kind,
+        body.project_id.as_deref(),
+        body.location.as_deref(),
+        body.express,
+        body.api_version,
+    )?;
+    let custom = body
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let url = Url::parse(value).map_err(|_| UpstreamError::InvalidInput {
+                field: "base_url".to_owned(),
+                reason: "base_url must be an absolute http or https URL".to_owned(),
+            })?;
+            validate_base_url_input(&url)?;
+            let mut origin = url;
+            origin.set_path("/");
+            origin.set_query(None);
+            origin.set_fragment(None);
+            Ok::<Url, UpstreamError>(origin)
+        })
+        .transpose()?;
+    let base_url = custom.unwrap_or_else(|| {
+        Url::parse(&cc_lb_domain::vertex_origin(&config.target))
+            .expect("Vertex origin is a valid URL")
+    });
+    let (hint, result) = match kind {
+        UpstreamKind::VertexApiKey => {
+            if body.google_credential.is_some() {
+                return Err(UpstreamError::InvalidInput {
+                    field: "google_credential".to_owned(),
+                    reason: "Vertex API-key upstreams require api_key_value".to_owned(),
+                });
+            }
+            let key = normalize_key_input(body.api_key_value.as_deref())?;
+            gate_key(&key)?;
+            let result =
+                vertex_probe(state, &base_url, &config, "x-goog-api-key", key.as_str()).await;
+            (key_hint(key.as_str()), result)
+        }
+        UpstreamKind::VertexCredential => {
+            if body.api_key_value.is_some() {
+                return Err(UpstreamError::InvalidInput {
+                    field: "api_key_value".to_owned(),
+                    reason: "Vertex credential upstreams require google_credential".to_owned(),
+                });
+            }
+            let raw =
+                body.google_credential
+                    .as_deref()
+                    .ok_or_else(|| UpstreamError::InvalidInput {
+                        field: "google_credential".to_owned(),
+                        reason: "google_credential is required".to_owned(),
+                    })?;
+            let credential =
+                parse_credential(raw.as_bytes()).map_err(|error| UpstreamError::InvalidInput {
+                    field: "google_credential".to_owned(),
+                    reason: error.code().to_owned(),
+                })?;
+            let token = mint_once(
+                &credential,
+                std::sync::Arc::new(AdminTokenTransport {
+                    http: state.anthropic_org_api.http().clone(),
+                    max_body_bytes: state.anthropic_org_api.limits().max_body_bytes,
+                    timeout: state.anthropic_org_api.limits().per_probe,
+                }),
+                state.clock.clone(),
+            )
+            .await;
+            let result = match token {
+                Ok(token) => {
+                    let bearer =
+                        token
+                            .header
+                            .to_str()
+                            .map_err(|_| UpstreamError::InvalidInput {
+                                field: "google_credential".to_owned(),
+                                reason: "invalid Google credential".to_owned(),
+                            })?;
+                    vertex_probe(state, &base_url, &config, "authorization", bearer).await
+                }
+                Err(error) => {
+                    tracing::warn!(error_kind = %error, "Vertex credential preflight mint failed");
+                    let code = match error {
+                        MintError::PermissionDenied => RemediationCode::KeyForbidden,
+                        MintError::InvalidClient
+                        | MintError::UnauthorizedClient
+                        | MintError::InvalidScope
+                        | MintError::Unauthorized
+                        | MintError::InvalidGrant
+                        | MintError::InvalidGrantTerminal => RemediationCode::KeyInvalid,
+                        _ => RemediationCode::ProbeUnreachable,
+                    };
+                    ProviderProbeResult::Rejected { code }
+                }
+            };
+            (Some(credential.principal_hint().to_owned()), result)
+        }
+        _ => unreachable!(),
+    };
+    let probe_key =
+        normalize_api_key(hint.as_deref().unwrap_or("vertex-credential")).map_err(|_| {
+            UpstreamError::Internal {
+                detail: "failed to construct Vertex preflight identity".to_owned(),
+            }
+        })?;
+    let mut outcome = provider_outcome(
+        &probe_key,
+        now_unix_secs(state),
+        kind,
+        match &config.target {
+            VertexTarget::Regional { project_id, .. } => Some(project_id),
+            VertexTarget::Express => None,
+        },
+        result,
+    );
+    outcome.wire.key_hint = hint.clone();
+    outcome.access.key_hint = hint.unwrap_or_default();
+    Ok(outcome)
+}
+
+fn vertex_generate_probe_payload() -> Value {
+    json!({
+        "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+        "generationConfig": {
+            "maxOutputTokens": 1,
+            "thinkingConfig": {"thinkingLevel": "MINIMAL"}
+        }
+    })
+}
+
+async fn vertex_probe(
+    state: &AdminState,
+    base_url: &Url,
+    config: &VertexUpstreamConfig,
+    header_name: &'static str,
+    header_raw: &str,
+) -> ProviderProbeResult {
+    let header_value = HeaderValue::from_str(header_raw).ok();
+    let Some(header_value) = header_value else {
+        return ProviderProbeResult::Unreachable { timed_out: false };
+    };
+    let (project, location) = match &config.target {
+        VertexTarget::Express => (None, None),
+        VertexTarget::Regional {
+            project_id,
+            location,
+        } => (Some(project_id.as_ref()), Some(location.as_ref())),
+    };
+    let prefix = format!("/{}/", config.api_version.as_str());
+    let path = match (project, location) {
+        (Some(project), Some(location)) => format!(
+            "{prefix}projects/{project}/locations/{location}/publishers/google/models/gemini-3.5-flash"
+        ),
+        _ => format!("{prefix}publishers/google/models/gemini-3.5-flash"),
+    };
+    let mut generate = base_url.clone();
+    generate.set_path(&format!("{path}:generateContent"));
+    generate.set_query(None);
+    let mut count = base_url.clone();
+    count.set_path(&format!("{path}:countTokens"));
+    count.set_query(None);
+    let requests = [
+        (generate, vertex_generate_probe_payload()),
+        (
+            count,
+            json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}),
+        ),
+    ];
+    let mut results = Vec::new();
+    for (url, payload) in requests {
+        results.push(
+            provider_request(
+                state,
+                Method::POST,
+                url,
+                header_name,
+                header_value.clone(),
+                Some(payload),
+            )
+            .await
+            .map(|(status, body)| vertex_status_result(status, &body))
+            .unwrap_or_else(|error| error),
+        );
+    }
+    combine_provider_results(results.try_into().unwrap_or([
+        ProviderProbeResult::Unreachable { timed_out: false },
+        ProviderProbeResult::Unreachable { timed_out: false },
+    ]))
 }
 
 pub(crate) async fn provider_native_preflight(
@@ -297,24 +699,40 @@ async fn provider_request(
     payload: Option<Value>,
 ) -> Result<(StatusCode, Bytes), ProviderProbeResult> {
     let body = match payload {
-        Some(payload) => serde_json::to_vec(&payload).map(Bytes::from).map(Full::new),
-        None => Ok(Full::new(Bytes::new())),
-    }
-    .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
+        Some(payload) => serde_json::to_vec(&payload)
+            .map(Bytes::from)
+            .map(Full::new)
+            .map_err(|error| {
+                tracing::warn!(error_kind = "request_serialization", error = ?error, "Vertex preflight request serialization failed");
+                ProviderProbeResult::Unreachable { timed_out: false }
+            })?,
+        None => Full::new(Bytes::new()),
+    };
     let request = axum::http::Request::builder()
         .method(method)
         .uri(url.as_str())
         .header(header_name, header_value)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body)
-        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
+        .map_err(|error| {
+            tracing::warn!(error_kind = "request_build", error = ?error, "Vertex preflight request construction failed");
+            ProviderProbeResult::Unreachable { timed_out: false }
+        })?;
     let exchange = async {
         let response = state
             .anthropic_org_api
             .http()
             .request(request)
             .await
-            .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
+            .map_err(|error| {
+                let error_kind = if error.is_connect() {
+                    "connect"
+                } else {
+                    "transport"
+                };
+                tracing::warn!(%error_kind, error = ?error, "Vertex preflight provider request failed");
+                ProviderProbeResult::Unreachable { timed_out: false }
+            })?;
         let status = response.status();
         let body = Limited::new(
             response.into_body(),
@@ -322,15 +740,65 @@ async fn provider_request(
         )
         .collect()
         .await
-        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?
+        .map_err(|error| {
+            tracing::warn!(error_kind = "response_body", error = ?error, "Vertex preflight provider response read failed");
+            ProviderProbeResult::Unreachable { timed_out: false }
+        })?
         .to_bytes();
         Ok::<_, ProviderProbeResult>((status, body))
     };
     tokio::time::timeout(state.anthropic_org_api.limits().per_probe, exchange)
         .await
-        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: true })?
+        .map_err(|_| {
+            tracing::warn!(
+                error_kind = "timeout",
+                "Vertex preflight provider request timed out"
+            );
+            ProviderProbeResult::Unreachable { timed_out: true }
+        })?
 }
 
+fn vertex_status_result(status: StatusCode, body: &[u8]) -> ProviderProbeResult {
+    if status.is_success() {
+        return ProviderProbeResult::Ok;
+    }
+    if status == StatusCode::BAD_REQUEST {
+        let invalid = serde_json::from_slice::<Value>(body)
+            .ok()
+            .is_some_and(|value| {
+                fn has_reason(value: &Value) -> bool {
+                    match value {
+                        Value::Object(map) => map.iter().any(|(key, value)| {
+                            (key == "reason" && value.as_str() == Some("API_KEY_INVALID"))
+                                || has_reason(value)
+                        }),
+                        Value::Array(values) => values.iter().any(has_reason),
+                        _ => false,
+                    }
+                }
+                has_reason(&value)
+            });
+        return if invalid {
+            ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid,
+            }
+        } else {
+            ProviderProbeResult::Unverified
+        };
+    }
+    match status {
+        StatusCode::UNAUTHORIZED => ProviderProbeResult::Rejected {
+            code: RemediationCode::KeyInvalid,
+        },
+        StatusCode::FORBIDDEN => ProviderProbeResult::Rejected {
+            code: RemediationCode::KeyForbidden,
+        },
+        StatusCode::NOT_FOUND => ProviderProbeResult::Unverified,
+        StatusCode::TOO_MANY_REQUESTS => ProviderProbeResult::RateLimited,
+        status if status.is_server_error() => ProviderProbeResult::Unreachable { timed_out: false },
+        _ => ProviderProbeResult::Unverified,
+    }
+}
 fn provider_status_result(status: StatusCode) -> Option<ProviderProbeResult> {
     match status {
         status if status.is_success() => None,
@@ -472,6 +940,12 @@ fn combine_provider_results<const N: usize>(
         return result;
     }
     if let Some(result) = results.iter().find_map(|result| match result {
+        ProviderProbeResult::Unverified => Some(*result),
+        _ => None,
+    }) {
+        return result;
+    }
+    if let Some(result) = results.iter().find_map(|result| match result {
         ProviderProbeResult::Unreachable { .. } => Some(*result),
         _ => None,
     }) {
@@ -491,6 +965,7 @@ fn combine_provider_results<const N: usize>(
 enum ProviderProbeResult {
     Ok,
     Rejected { code: RemediationCode },
+    Unverified,
     RateLimited,
     Unreachable { timed_out: bool },
 }
@@ -509,7 +984,9 @@ fn provider_probe_url(base_url: &Url, kind: UpstreamKind) -> Url {
 fn provider_for_kind(kind: UpstreamKind) -> Option<Provider> {
     match kind {
         UpstreamKind::OpenaiApiKey => Some(Provider::Openai),
-        UpstreamKind::GeminiApiKey => Some(Provider::Gemini),
+        UpstreamKind::GeminiApiKey
+        | UpstreamKind::VertexApiKey
+        | UpstreamKind::VertexCredential => Some(Provider::Gemini),
         _ => None,
     }
 }
@@ -639,6 +1116,46 @@ mod preserve_provider_metadata_tests {
     }
 }
 
+pub(crate) fn operator_message_for_kind(
+    kind: UpstreamKind,
+    code: Option<RemediationCode>,
+    timed_out: bool,
+) -> String {
+    if matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        return match code {
+            Some(RemediationCode::KeyForbidden) => {
+                "Vertex access denied; grant Cloud IAM roles/aiplatform.user and configure a quota project"
+                    .to_owned()
+            }
+            Some(RemediationCode::KeyInvalid) => {
+                "Vertex credential rejected; verify Cloud IAM roles/aiplatform.user and quota-project permissions"
+                    .to_owned()
+            }
+            _ if timed_out => "Vertex preflight timed out".to_owned(),
+            _ => {
+                "Vertex credential could not be verified; check Cloud IAM roles/aiplatform.user and quota-project permissions"
+                    .to_owned()
+            }
+        };
+    }
+    if kind == UpstreamKind::AnthropicApiKey {
+        return match code {
+            Some(code) => endpoint_operator_message(code, true).to_owned(),
+            None if timed_out => operator_message(RemediationCode::ProbeUnreachable).to_owned(),
+            None => operator_message(RemediationCode::ProbeUnreachable).to_owned(),
+        };
+    }
+    match code {
+        Some(RemediationCode::KeyForbidden) => "provider denied this API key".to_owned(),
+        Some(_) => "provider rejected this API key".to_owned(),
+        None if timed_out => "API-key probe timed out".to_owned(),
+        None => "could not reach the provider API".to_owned(),
+    }
+}
+
 fn provider_outcome(
     key: &NormalizedApiKey,
     now_unix_secs: u64,
@@ -660,10 +1177,15 @@ fn provider_outcome(
             PreflightVerdict::Rejected,
             WireInference::Denied,
             vec![code],
-            Some(match code {
-                RemediationCode::KeyForbidden => "provider denied this API key".to_owned(),
-                _ => "provider rejected this API key".to_owned(),
-            }),
+            Some(operator_message_for_kind(kind, Some(code), false)),
+            true,
+            None,
+        ),
+        ProviderProbeResult::Unverified => (
+            PreflightVerdict::Ok,
+            WireInference::Unverified,
+            Vec::new(),
+            Some(operator_message_for_kind(kind, None, false)),
             true,
             None,
         ),
@@ -679,11 +1201,7 @@ fn provider_outcome(
             PreflightVerdict::Unreachable,
             WireInference::Unverified,
             vec![RemediationCode::ProbeUnreachable],
-            Some(if timed_out {
-                "API-key probe timed out".to_owned()
-            } else {
-                "could not reach the provider API".to_owned()
-            }),
+            Some(operator_message_for_kind(kind, None, timed_out)),
             false,
             Some(ProbeTransport { timed_out }),
         ),
@@ -733,7 +1251,8 @@ fn provider_outcome(
     PreflightOutcome {
         wire,
         access: ApiKeyAccessWrite {
-            verified: verdict == PreflightVerdict::Ok,
+            verified: verdict == PreflightVerdict::Ok
+                && !matches!(inference, WireInference::Unverified),
             key_class: ApiKeyClass::Unknown,
             key_hint: hint.unwrap_or_default(),
             api_key_id: None,
@@ -774,7 +1293,7 @@ impl KeyCheck {
     /// host-only re-probe). A key the probe could not classify (`unknown`,
     /// e.g. on a custom host that sends no workspace header) keeps it: only
     /// a positively workspace-bound key rejects an explicit workspace.
-    fn from_outcome(mut outcome: PreflightOutcome, supplied: Option<&str>) -> Self {
+    pub(crate) fn from_outcome(mut outcome: PreflightOutcome, supplied: Option<&str>) -> Self {
         if outcome.access.key_class == ApiKeyClass::Unknown
             && let Some(id) = supplied
         {
@@ -1225,6 +1744,24 @@ mod tests {
             .err()
             .map(|error| error.error_code().to_owned())
     }
+    #[test]
+    fn qa_sec_preflight_request_debug_redacts_all_secret_fields() {
+        let request = PreflightRequest {
+            api_key_value: Some("api-key-secret".to_owned()),
+            workspace_id: None,
+            base_url: None,
+            kind: Some(UpstreamKind::VertexCredential),
+            project_id: None,
+            location: None,
+            express: None,
+            google_credential: Some("private-key-json".to_owned()),
+            api_version: None,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("api-key-secret"));
+        assert!(!debug.contains("private-key-json"));
+        assert!(debug.contains("[REDACTED]"));
+    }
 
     /// GATE-08 (T0): the outer trim is accepted; any other control or
     /// non-ASCII character is refused with `invalid_input`.
@@ -1379,6 +1916,17 @@ mod tests {
         );
         assert_eq!(count["contents"][0]["parts"][0]["text"], "ping");
         assert!(count.get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn qa_elig_5_vertex_preflight_generate_probe_is_bounded() {
+        let payload = vertex_generate_probe_payload();
+        assert_eq!(payload["contents"][0]["parts"][0]["text"], "ping");
+        assert_eq!(payload["generationConfig"]["maxOutputTokens"], 1);
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "MINIMAL"
+        );
     }
 
     #[test]

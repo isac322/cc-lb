@@ -37,6 +37,9 @@ impl Fixture {
         storage.initialize().await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
+            vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -73,6 +76,9 @@ impl Fixture {
         let record = self
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -112,6 +118,9 @@ impl Fixture {
         let record = self
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -140,6 +149,9 @@ impl Fixture {
         let record = self
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -359,6 +371,9 @@ async fn dynamic_factory_catalog_retains_profile_metadata_prefix_and_stored_over
             let record = fixture
                 .storage
                 .create(UpstreamCreate {
+                    vertex: None,
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
                     id: Uuid::new_v4(),
                     name: format!("catalog-{profile:?}-{index}"),
                     kind: UpstreamKind::GeminiOauth,

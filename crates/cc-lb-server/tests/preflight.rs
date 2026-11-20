@@ -154,6 +154,9 @@ impl Fixture {
         let plugin_registry: Arc<dyn PluginRegistryStore> = storage.clone();
         let stores = Stores {
             upstreams,
+            vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals,
             plugin_registry,
             upstream_rate_limits: storage.clone(),
@@ -219,6 +222,9 @@ async fn seed_upstream(
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind,

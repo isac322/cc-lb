@@ -152,6 +152,10 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
 
 fn upstream(id: Uuid) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: format!("upstream-{id}"),
         kind: UpstreamKind::AnthropicApiKey,

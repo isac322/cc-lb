@@ -393,6 +393,31 @@ fn rendered_exposition_matches_declared_label_contract() {
 }
 
 #[test]
+fn vertex_token_mint_runtime_metric_renders_expected_labels() {
+    let exposition = render(|| {
+        metrics::counter!(
+            "cclb_vertex_token_mint_total",
+            "credential_type" => "authorized_user",
+            "outcome" => "success"
+        )
+        .increment(1);
+    });
+    let sample = exposition
+        .samples
+        .iter()
+        .find(|sample| sample.family == "cclb_vertex_token_mint_total")
+        .expect("fake mint emits a Vertex token metric");
+    assert_eq!(
+        sample.labels,
+        BTreeMap::from([
+            ("credential_type".to_owned(), "authorized_user".to_owned()),
+            ("outcome".to_owned(), "success".to_owned()),
+        ])
+    );
+    assert_eq!(sample.value, 1.0);
+}
+
+#[test]
 fn zero_initialized_series_fabricate_no_attribution() {
     let exposition = render(register_metrics);
 

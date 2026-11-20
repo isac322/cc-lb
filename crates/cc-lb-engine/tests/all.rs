@@ -1,6 +1,8 @@
 mod common;
 #[path = "gemini_oauth_catalog.rs"]
 mod gemini_oauth_catalog;
+#[path = "lifecycle_vertex_qa.rs"]
+mod lifecycle_vertex_qa;
 mod prompt_cache_routing_support;
 mod router_lifecycle_support;
 

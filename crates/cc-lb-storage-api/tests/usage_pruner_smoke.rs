@@ -365,6 +365,9 @@ async fn seed_usage_buckets(
     let upstream = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "api-key-prune".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

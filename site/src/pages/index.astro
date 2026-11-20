@@ -319,7 +319,7 @@ cargo build --release -p cc-lb-server
         <div class="proof-grid">
           <article class="proof-item">
             <h3>Pool API-key and OAuth upstreams</h3>
-            <p>Route native Anthropic, OpenAI, and Gemini traffic through six supported upstream kinds.</p>
+            <p>Route native Anthropic, OpenAI, Gemini, and Vertex traffic through eight supported upstream kinds.</p>
             <a class="text-link" href="/docs/concepts/upstreams/">Read upstreams</a>
           </article>
           <article class="proof-item">
@@ -372,15 +372,16 @@ cargo build --release -p cc-lb-server
           <p class="section-label">Scope and trust</p>
           <h2 id="scope-title">Open source with explicit limits.</h2>
           <p>
-            cc-lb is built for self-hosting teams operating six upstream kinds across bounded native
-            provider routes. The public contract is intentionally narrow; read the trust notes before
+            cc-lb is built for self-hosting teams operating eight upstream kinds across bounded native
+            provider routes. It preserves provider-native protocols and does not translate requests
+            between providers. The public contract is intentionally narrow; read the trust notes before
             deploying.
           </p>
         </div>
         <div class="scope-list">
           <div>
             <span>Supported</span>
-            <strong><code>anthropic_api_key</code>, <code>anthropic_oauth</code>, <code>openai_api_key</code>, <code>openai_oauth</code>, <code>gemini_api_key</code>, and <code>gemini_oauth</code></strong>
+            <strong><code>anthropic_api_key</code>, <code>anthropic_oauth</code>, <code>openai_api_key</code>, <code>openai_oauth</code>, <code>gemini_api_key</code>, <code>gemini_oauth</code>, <code>vertex_api_key</code>, and <code>vertex_credential</code></strong>
           </div>
           <div>
             <span>Native routes</span>
@@ -388,7 +389,7 @@ cargo build --release -p cc-lb-server
           </div>
           <div>
             <span>Excluded</span>
-            <strong>Bedrock, Vertex, SigV4/ADC credential paths, cross-provider translation, and account-bound provider management</strong>
+            <strong>Vertex AI Gemini is supported through scoped API-key and Google-credential upstreams; Express and regional API-key targets support generate, stream, and countTokens only because Google rejects API keys for cache, model catalog, and Live, while regional credentials additionally support approved cached-content create/use, publisher model-catalog list/get, and Live routes through Vertex.</strong> The catalog is a minimal publisher projection, not entitlement-aware; explicit cached-content billing remains Vertex-controlled, and regional credential deployments should use least-privilege service accounts. Bedrock, SigV4, ambient ADC/metadata-server credentials, external-account files, and account-bound provider management remain unsupported.
           </div>
           <div>
             <span>Runtime</span>

@@ -363,6 +363,9 @@ async fn shape_injected_forced_tool_choice_is_durably_not_tracked_without_sessio
     let upstream = UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "shape-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

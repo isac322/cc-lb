@@ -43,17 +43,25 @@ impl BillingStopKind {
     }
 }
 
-/// Maps a proxied request's final status and provider error fields to a
-/// billing stop. Anthropic matching remains message-based for compatibility;
-/// OpenAI and Gemini use provider-defined error tokens.
+/// Maps a proxied request's final status and provider error fields to a billing stop.
+/// Vertex records do not treat generic `FAILED_PRECONDITION` as billing.
 pub fn classify_billing_stop(
-    provider: cc_lb_storage_api::Provider,
+    kind: cc_lb_storage_api::UpstreamKind,
     status: u16,
     error_type: Option<&str>,
     error_code: Option<&str>,
     message: Option<&str>,
 ) -> Option<BillingStopKind> {
-    match provider {
+    if matches!(
+        kind,
+        cc_lb_storage_api::UpstreamKind::VertexApiKey
+            | cc_lb_storage_api::UpstreamKind::VertexCredential
+    ) && (error_type.is_some_and(|value| value.eq_ignore_ascii_case("failed_precondition"))
+        || error_code.is_some_and(|value| value.eq_ignore_ascii_case("failed_precondition")))
+    {
+        return None;
+    }
+    match kind.provider() {
         cc_lb_storage_api::Provider::Anthropic => classify_anthropic(status, error_type, message),
         cc_lb_storage_api::Provider::Openai => {
             if status != 429 || error_type != Some("insufficient_quota") {
@@ -136,7 +144,7 @@ mod tests {
     fn classifies_each_billing_stop() {
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 402,
                 None,
                 None,
@@ -146,7 +154,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 400,
                 Some("invalid_request_error"),
                 None,
@@ -156,7 +164,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 400,
                 Some("invalid_request_error"),
                 None,
@@ -166,7 +174,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 429,
                 Some("rate_limit_error"),
                 None,
@@ -199,7 +207,7 @@ mod tests {
         for (code, expected) in cases {
             assert_eq!(
                 classify_billing_stop(
-                    cc_lb_storage_api::Provider::Openai,
+                    cc_lb_storage_api::UpstreamKind::OpenaiApiKey,
                     429,
                     Some("insufficient_quota"),
                     Some(code),
@@ -215,7 +223,7 @@ mod tests {
     fn classifies_gemini_billing_tokens_case_insensitively() {
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Gemini,
+                cc_lb_storage_api::UpstreamKind::GeminiApiKey,
                 402,
                 Some("PAYMENT_REQUIRED"),
                 None,
@@ -225,7 +233,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Gemini,
+                cc_lb_storage_api::UpstreamKind::GeminiApiKey,
                 400,
                 Some("FAILED_PRECONDITION"),
                 None,
@@ -239,7 +247,7 @@ mod tests {
     fn ignores_unrelated_failures() {
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 400,
                 Some("invalid_request_error"),
                 None,
@@ -249,7 +257,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Openai,
+                cc_lb_storage_api::UpstreamKind::OpenaiApiKey,
                 429,
                 Some("rate_limit_error"),
                 Some("rate_limit_exceeded"),
@@ -259,7 +267,7 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Openai,
+                cc_lb_storage_api::UpstreamKind::OpenaiApiKey,
                 429,
                 Some("insufficient_quota"),
                 None,
@@ -270,7 +278,7 @@ mod tests {
         for token in ["rate_limit_exceeded", "quota_exceeded", "too_many_requests"] {
             assert_eq!(
                 classify_billing_stop(
-                    cc_lb_storage_api::Provider::Gemini,
+                    cc_lb_storage_api::UpstreamKind::GeminiApiKey,
                     429,
                     Some(token),
                     None,
@@ -282,7 +290,7 @@ mod tests {
         }
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 500,
                 None,
                 None,
@@ -292,11 +300,24 @@ mod tests {
         );
         assert_eq!(
             classify_billing_stop(
-                cc_lb_storage_api::Provider::Anthropic,
+                cc_lb_storage_api::UpstreamKind::AnthropicApiKey,
                 200,
                 None,
                 None,
                 None,
+            ),
+            None
+        );
+    }
+    #[test]
+    fn qa_err_4_vertex_failed_precondition_is_not_a_billing_stop() {
+        assert_eq!(
+            classify_billing_stop(
+                cc_lb_storage_api::UpstreamKind::VertexCredential,
+                400,
+                Some("FAILED_PRECONDITION"),
+                None,
+                Some("precondition failed"),
             ),
             None
         );

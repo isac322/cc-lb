@@ -829,6 +829,48 @@ mod tests {
             .is_empty()
         );
     }
+    #[test]
+    fn qa_aff_1_vertex_cached_content_digest_uses_client_visible_name() {
+        let keys = extract_response_affinity_keys(
+            ProviderCapability::GeminiCachedContentsCreate,
+            &serde_json::json!({
+                "name": "cachedContents/vertex-id",
+                "model": "models/gemini-2.5-flash",
+                "expireTime": "2026-12-01T00:00:00Z"
+            }),
+            "principal-vertex",
+        )
+        .expect("extracts client-visible cache name");
+        assert_eq!(
+            kinds_and_digests(&keys),
+            HashSet::from([(
+                UpstreamAffinityKind::GeminiCachedContent,
+                digest("cachedContents/vertex-id")
+            )])
+        );
+    }
+
+    #[test]
+    fn qa_aff_2_vertex_generate_and_count_requests_pin_same_cache() {
+        for capability in [
+            ProviderCapability::GeminiGenerateContent,
+            ProviderCapability::GeminiCountTokens,
+        ] {
+            let keys = extract_request_affinity_keys(
+                capability,
+                &serde_json::json!({"cachedContent": "cachedContents/vertex-id"}),
+                "principal-vertex",
+            )
+            .expect("extracts cache reference");
+            assert_eq!(
+                kinds_and_digests(&keys),
+                HashSet::from([(
+                    UpstreamAffinityKind::GeminiCachedContent,
+                    digest("cachedContents/vertex-id")
+                )])
+            );
+        }
+    }
 
     #[test]
     fn extracts_gemini_count_tokens_top_level_cached_content() {

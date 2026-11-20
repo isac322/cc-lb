@@ -66,6 +66,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let primary = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "aaa-primary".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -90,6 +93,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let target = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "bbb-target".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -144,6 +150,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         upstreams: Arc::new(NameSortedUpstreamStore {
             inner: storage.clone(),
         }),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),

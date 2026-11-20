@@ -2,6 +2,7 @@ mod gemini_native;
 
 #[path = "realtime_websocket_lifecycle.rs"]
 mod realtime_websocket_lifecycle;
+pub use realtime_websocket_lifecycle::live_eligible;
 
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::convert::Infallible;
@@ -24,7 +25,7 @@ use cc_lb_domain::{
     NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
     NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, RoutingTrace,
     StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
-    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry, vertex_origin,
 };
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::{
@@ -159,6 +160,7 @@ const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 const DEFAULT_GEMINI_CODE_ASSIST_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+const DEFAULT_VERTEX_BASE_URL: &str = "https://aiplatform.googleapis.com/";
 pub(super) const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
 const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
@@ -517,15 +519,35 @@ pub enum RequestKind {
 }
 
 impl RequestKind {
+    /// Returns whether this request can be sent to the concrete upstream record.
+    ///
+    /// Vertex API-key records intentionally support only generation/counting.
+    /// Google rejects API keys for cache and model-catalog RPCs; those routes
+    /// require OAuth credentials. Credential records support the full Vertex
+    /// HTTP surface represented here.
+    pub(crate) fn eligible(self, record: &UpstreamRecord) -> bool {
+        use StorageUpstreamKind as K;
+        if self.provider() != record.kind.provider() {
+            return false;
+        }
+        match record.kind {
+            K::VertexApiKey => {
+                matches!(self, Self::GeminiGenerateContent | Self::GeminiCountTokens)
+            }
+            K::VertexCredential => matches!(
+                self,
+                Self::GeminiGenerateContent
+                    | Self::GeminiCountTokens
+                    | Self::GeminiCachedContentsCreate
+                    | Self::GeminiModels
+            ),
+            _ => self.matches_upstream(record.kind),
+        }
+    }
+
     fn matches_upstream(self, kind: StorageUpstreamKind) -> bool {
         use StorageUpstreamKind as K;
-        if self.provider()
-            != match kind {
-                K::AnthropicApiKey | K::AnthropicOauth => cc_lb_domain::Provider::Anthropic,
-                K::OpenaiApiKey | K::OpenaiOauth => cc_lb_domain::Provider::Openai,
-                K::GeminiApiKey | K::GeminiOauth => cc_lb_domain::Provider::Gemini,
-            }
-        {
+        if self.provider() != kind.provider() {
             return false;
         }
         match kind {
@@ -544,6 +566,7 @@ impl RequestKind {
                 self,
                 Self::GeminiGenerateContent | Self::GeminiCountTokens | Self::GeminiModels
             ),
+            _ => false,
         }
     }
 
@@ -820,7 +843,7 @@ async fn fetch_prompt_cache_warm_entries_for_bundles(
         .iter()
         .filter(|upstream| upstream.enabled)
         .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+        .filter(|upstream| request_kind.eligible(upstream))
         .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
         .map(|upstream| upstream.id)
         .collect();
@@ -927,7 +950,7 @@ async fn fetch_provider_native_cache_scores(
         .iter()
         .filter(|upstream| upstream.enabled)
         .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+        .filter(|upstream| request_kind.eligible(upstream))
         .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
         .filter(|upstream| upstream_credentials_routable(view, upstream))
         .map(|upstream| upstream.id)
@@ -1151,7 +1174,7 @@ fn build_candidates_with_matches_for_bundles_and_native(
             .iter()
             .filter(|upstream| upstream.enabled)
             .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-            .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+            .filter(|upstream| request_kind.eligible(upstream))
             .filter(|upstream| {
                 allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id)
             })
@@ -5024,6 +5047,8 @@ impl Lifecycle {
                 request_path: "/v1/responses".to_owned(),
                 dialect: dialect.clone(),
                 gemini_oauth: false,
+                vertex: false,
+                vertex_location: None,
             },
         }))
     }
@@ -5885,6 +5910,7 @@ impl Lifecycle {
             handle_span: &handle_span,
             enabled: request_affinity.is_none(),
             excluded: Vec::new(),
+            vertex_rate_limited_scope: None,
             upstream_attempts: 1,
         };
         let mut attempt_num: u32 = 0;
@@ -6383,6 +6409,20 @@ impl Lifecycle {
                     request_path: ctx.path.clone(),
                     dialect: routed.route.dialect.clone(),
                     gemini_oauth: routed.record.kind == StorageUpstreamKind::GeminiOauth,
+                    vertex: matches!(
+                        routed.record.kind,
+                        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
+                    ),
+                    vertex_location: routed
+                        .record
+                        .vertex
+                        .as_ref()
+                        .and_then(|config| match &config.target {
+                            cc_lb_domain::VertexTarget::Regional { location, .. } => {
+                                Some(location.to_string())
+                            }
+                            cc_lb_domain::VertexTarget::Express => None,
+                        }),
                 },
                 prompt_cache_observation_context,
                 response_affinity_context,
@@ -6724,7 +6764,49 @@ impl Lifecycle {
             .then_some(semantic_body.as_ref())
             .flatten()
             .and_then(|body| unwrap_gemini_code_assist_body(body).ok().flatten());
-        let semantic_body = gemini_unwrapped_body.clone().or(semantic_body);
+        let mut vertex_response_translated = false;
+        let mut vertex_translation_failed = false;
+        let mut vertex_catalog_translation_failed = false;
+        let mut semantic_body = gemini_unwrapped_body.clone().or(semantic_body);
+        if transform_ctx.vertex
+            && status.is_success()
+            && !body_collect_failed
+            && let Some(body) = semantic_body.as_deref()
+        {
+            match translate_vertex_response(
+                body,
+                &transform_ctx.request_path,
+                response_affinity_context.capability,
+                transform_ctx.vertex_location.as_deref(),
+            ) {
+                Ok(None) => {}
+                Ok(Some(translated)) => {
+                    vertex_response_translated = true;
+                    parts.headers = sanitize_downstream_response_headers(
+                        std::mem::take(&mut parts.headers),
+                        translated.len(),
+                        None,
+                    );
+                    semantic_body = Some(translated);
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        request_id = %event_ctx.request_id,
+                        reason,
+                        "invalid Vertex response shape"
+                    );
+                    vertex_translation_failed = true;
+                    vertex_catalog_translation_failed =
+                        response_affinity_context.capability == ProviderCapability::GeminiModels;
+                    semantic_body = None;
+                    parts.status = if vertex_catalog_translation_failed {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    };
+                }
+            }
+        }
         let response_body_json = semantic_body
             .as_ref()
             .and_then(|body| sonic_rs::from_slice::<Value>(body).ok());
@@ -6803,6 +6885,35 @@ impl Lifecycle {
                 UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
                 None,
             )
+        } else if vertex_translation_failed {
+            let (status, error_type, message) = if vertex_catalog_translation_failed {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    "invalid Vertex model catalog",
+                )
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                )
+            };
+            parts.status = status;
+            parts.headers.clear();
+            parts.headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            provider_error_body(
+                response_affinity_context.capability,
+                status,
+                error_type,
+                message,
+                None,
+            )
+        } else if gemini_unwrapped_body.is_some() || gemini_catalog || vertex_response_translated {
+            semantic_body.clone().unwrap_or(body)
         } else {
             body
         };
@@ -6941,7 +7052,7 @@ impl Lifecycle {
             }
         }
         let mut affinity_bind_failed = false;
-        if status.is_success() && !body_collect_failed {
+        if status.is_success() && !body_collect_failed && !vertex_translation_failed {
             let mut affinity_keys = response_affinity_context.pending_request_keys.clone();
             // Do not gate this scan on request tools: a successful buffered response can
             // introduce unsolicited provider state (e.g. an Anthropic web-search result or
@@ -7519,6 +7630,14 @@ impl Lifecycle {
                 let message = source.to_string();
                 tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
                 record_shape_internal_error(observer, &message);
+                if matches!(
+                    upstream_kind,
+                    StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
+                ) {
+                    return Err(AttemptFailure::RawPassthrough(RawPassthroughError::Shape(
+                        source,
+                    )));
+                }
                 (
                     raw_passthrough_request(
                         raw_passthrough_base_url,
@@ -10791,7 +10910,10 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
     );
     let is_gemini = matches!(
         upstream_kind,
-        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth
+        StorageUpstreamKind::GeminiApiKey
+            | StorageUpstreamKind::GeminiOauth
+            | StorageUpstreamKind::VertexApiKey
+            | StorageUpstreamKind::VertexCredential
     );
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
@@ -11448,7 +11570,7 @@ pub(crate) use crate::response_transform::{
     ComposedSseResponseTransformHook, GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext,
     SseTransformOutcome, apply_buffered_transform_result, make_response_transform_error_frame,
     sanitize_downstream_response_headers, sanitize_downstream_stream_headers,
-    sanitized_response_headers_for_plugin, transform_sse_event_bytes,
+    sanitized_response_headers_for_plugin, transform_sse_event_bytes, translate_vertex_response,
     unwrap_gemini_code_assist_body,
 };
 
@@ -13071,10 +13193,13 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 }
 
 fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
-    let base_url = record
-        .base_url
-        .clone()
-        .or_else(|| Some(default_base_url(record.kind)));
+    let base_url = match record.kind {
+        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential => None,
+        _ => record
+            .base_url
+            .clone()
+            .or_else(|| Some(default_base_url(record.kind))),
+    };
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
             Ok(Upstream::AnthropicDirect { base_url })
@@ -13085,7 +13210,28 @@ fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
         StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth => {
             Ok(Upstream::GeminiDirect { base_url })
         }
+        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential => {
+            let Some(config) = record.vertex.as_ref() else {
+                return Err("Vertex upstream is missing its configuration".to_owned());
+            };
+            let base_url = record
+                .base_url
+                .as_ref()
+                .map(origin_only)
+                .transpose()
+                .map_err(|error| format!("invalid Vertex base URL: {error}"))?
+                .or_else(|| Url::parse(&vertex_origin(&config.target)).ok());
+            Ok(Upstream::GeminiDirect { base_url })
+        }
     }
+}
+
+fn origin_only(url: &Url) -> Result<Url, url::ParseError> {
+    let mut origin = Url::parse(url.as_str())?;
+    origin.set_path("");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    Ok(origin)
 }
 
 fn default_base_url(kind: StorageUpstreamKind) -> Url {
@@ -13097,6 +13243,11 @@ fn default_base_url(kind: StorageUpstreamKind) -> Url {
         StorageUpstreamKind::OpenaiApiKey => DEFAULT_OPENAI_BASE_URL,
         StorageUpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
         StorageUpstreamKind::GeminiOauth => DEFAULT_GEMINI_CODE_ASSIST_BASE_URL,
+        // Kind-only fallback; Vertex records normally resolve their host from
+        // `VertexUpstreamConfig` via `vertex_origin`.
+        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential => {
+            DEFAULT_VERTEX_BASE_URL
+        }
     };
     Url::parse(value).expect("provider base URL parses")
 }
@@ -13109,6 +13260,8 @@ fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKi
         StorageUpstreamKind::OpenaiApiKey => CandidateUpstreamKind::OpenaiApiKey,
         StorageUpstreamKind::GeminiApiKey => CandidateUpstreamKind::GeminiApiKey,
         StorageUpstreamKind::GeminiOauth => CandidateUpstreamKind::GeminiOauth,
+        StorageUpstreamKind::VertexApiKey => CandidateUpstreamKind::VertexApiKey,
+        StorageUpstreamKind::VertexCredential => CandidateUpstreamKind::VertexCredential,
     }
 }
 
@@ -13120,9 +13273,10 @@ fn storage_upstream_kind_label(kind: StorageUpstreamKind) -> &'static str {
         StorageUpstreamKind::OpenaiApiKey => "openai_api_key",
         StorageUpstreamKind::GeminiApiKey => "gemini_api_key",
         StorageUpstreamKind::GeminiOauth => "gemini_oauth",
+        StorageUpstreamKind::VertexApiKey => "vertex_api_key",
+        StorageUpstreamKind::VertexCredential => "vertex_credential",
     }
 }
-
 /// Distinct upstreams one request may try, counting the first. The
 /// same-upstream 401 refresh retry does not count against it.
 const MAX_UPSTREAM_ATTEMPTS: u8 = 3;
@@ -13221,10 +13375,22 @@ fn route_for_record(
 /// a response-only provider plugin. OAuth path handling matches ordinary routes.
 pub fn native_route_dialect(record: &UpstreamRecord) -> Arc<dyn UpstreamDialect> {
     Arc::new(RawPassthroughDialect {
-        base_url: record
-            .base_url
-            .clone()
-            .unwrap_or_else(|| default_base_url(record.kind)),
+        base_url: match record.kind {
+            StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential => record
+                .base_url
+                .clone()
+                .or_else(|| {
+                    record
+                        .vertex
+                        .as_ref()
+                        .and_then(|config| Url::parse(&vertex_origin(&config.target)).ok())
+                })
+                .expect("Vertex route has a configured origin"),
+            _ => record
+                .base_url
+                .clone()
+                .unwrap_or_else(|| default_base_url(record.kind)),
+        },
         openai_oauth: record.kind == StorageUpstreamKind::OpenaiOauth,
     })
 }
@@ -13298,6 +13464,15 @@ fn route_info_for_routed(
     }
 }
 
+fn vertex_scope(record: &UpstreamRecord) -> Option<(String, String)> {
+    match record.vertex.as_ref()?.target {
+        cc_lb_domain::VertexTarget::Regional {
+            ref project_id,
+            ref location,
+        } => Some((project_id.to_string(), location.to_string())),
+        cc_lb_domain::VertexTarget::Express => None,
+    }
+}
 /// Re-routes a request after a failover-eligible failure. Re-runs the
 /// principal's filter pipeline over fresh candidates minus every upstream
 /// already tried, so one routing convention covers the first pick and each
@@ -13317,6 +13492,8 @@ struct FailoverRouter<'a> {
     /// is account-bound).
     enabled: bool,
     excluded: Vec<Uuid>,
+    /// Vertex scope keys excluded after a Vertex rate-limit observation.
+    vertex_rate_limited_scope: Option<(String, String)>,
     upstream_attempts: u8,
 }
 
@@ -13348,8 +13525,25 @@ impl<'a> FailoverRouter<'a> {
                 &*lifecycle.clock,
             );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
-        // The last allowed attempt goes to an API key when one remains, so the
-        // attempt cap never strands a request on exhausted OAuth accounts.
+        if matches!(reason, FailoverReason::RateLimited)
+            && matches!(
+                failed.record.kind,
+                StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
+            )
+        {
+            self.vertex_rate_limited_scope = vertex_scope(failed.record);
+        }
+        if let Some(scope) = self.vertex_rate_limited_scope.as_ref() {
+            candidates.retain(|candidate| {
+                self.view
+                    .upstreams_snapshot()
+                    .iter()
+                    .find(|record| record.id == candidate.upstream_id)
+                    .and_then(vertex_scope)
+                    .is_none_or(|candidate_scope| &candidate_scope != scope)
+            });
+        }
+        // The last allowed attempt goes to an API key when one remains.
         let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
         if last_attempt
             && candidates
@@ -14481,6 +14675,88 @@ mod tests {
         );
         assert_eq!(result.cache_keepalive_surface, None);
         assert_eq!(result.cache_keepalive_ttl, None);
+    }
+
+    #[test]
+    fn qa_elig_1_vertex_matrix_limits_api_keys_to_generate_and_count() {
+        use StorageRecordKind as K;
+        let regional_target = cc_lb_domain::VertexTarget::Regional {
+            project_id: "project-123456".into(),
+            location: "us-central1".into(),
+        };
+        let express_key = UpstreamRecord {
+            kind: K::VertexApiKey,
+            vertex: Some(cc_lb_domain::VertexUpstreamConfig {
+                target: cc_lb_domain::VertexTarget::Express,
+                api_version: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let mut regional_key = express_key.clone();
+        regional_key.vertex = Some(cc_lb_domain::VertexUpstreamConfig {
+            target: regional_target.clone(),
+            api_version: Default::default(),
+        });
+        let mut credential = regional_key.clone();
+        credential.kind = K::VertexCredential;
+        // Google rejects API keys for the cache and publisher-catalog services,
+        // so both API-key targets serve only generate and countTokens.
+        for key in [&express_key, &regional_key] {
+            assert!(RequestKind::GeminiGenerateContent.eligible(key));
+            assert!(RequestKind::GeminiCountTokens.eligible(key));
+            assert!(!RequestKind::GeminiCachedContentsCreate.eligible(key));
+            assert!(!RequestKind::GeminiModels.eligible(key));
+        }
+        assert!(RequestKind::GeminiGenerateContent.eligible(&credential));
+        assert!(RequestKind::GeminiCachedContentsCreate.eligible(&credential));
+        assert!(RequestKind::GeminiModels.eligible(&credential));
+    }
+
+    #[test]
+    fn qa_elig_2_vertex_excludes_embeddings_prediction_openai_and_files() {
+        let record = UpstreamRecord {
+            kind: StorageRecordKind::VertexCredential,
+            vertex: Some(cc_lb_domain::VertexUpstreamConfig {
+                target: cc_lb_domain::VertexTarget::Regional {
+                    project_id: "project-123456".into(),
+                    location: "us-central1".into(),
+                },
+                api_version: Default::default(),
+            }),
+            ..Default::default()
+        };
+        for request in [
+            RequestKind::GeminiEmbedContent,
+            RequestKind::GeminiPredict,
+            RequestKind::GeminiOpenaiChatCompletions,
+            RequestKind::GeminiOpenaiEmbeddings,
+            RequestKind::GeminiOpenaiImages,
+        ] {
+            assert!(!request.eligible(&record), "{request:?}");
+        }
+    }
+    #[test]
+    fn qa_kind_2_vertex_candidates_are_api_key_fallbacks_not_subscription() {
+        use cc_lb_domain::CredentialKind;
+        for kind in [
+            StorageRecordKind::VertexApiKey,
+            StorageRecordKind::VertexCredential,
+        ] {
+            assert_eq!(kind.provider(), Provider::Gemini);
+            assert_eq!(kind.credential_kind(), CredentialKind::ApiKey);
+        }
+    }
+    #[test]
+    fn qa_aff_5_vertex_express_is_not_eligible_for_cached_contents() {
+        let express = UpstreamRecord {
+            kind: StorageRecordKind::VertexApiKey,
+            vertex: Some(cc_lb_domain::VertexUpstreamConfig {
+                target: cc_lb_domain::VertexTarget::Express,
+                api_version: Default::default(),
+            }),
+            ..Default::default()
+        };
+        assert!(!RequestKind::GeminiCachedContentsCreate.eligible(&express));
     }
 
     #[test]
@@ -16438,6 +16714,8 @@ mod tests {
             request_path: "/v1/messages".to_owned(),
             dialect: route.dialect,
             gemini_oauth: false,
+            vertex: false,
+            vertex_location: None,
         };
         let affinity_ctx = ResponseAffinityContext {
             capability: ProviderCapability::AnthropicMessages,
