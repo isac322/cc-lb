@@ -6679,7 +6679,18 @@ impl Lifecycle {
                     )
                     .await;
                     match body {
-                        Ok(body) => bodies.push(body),
+                        Ok(body) => {
+                            bodies.push(body);
+                            // Keep the running total current so a later failure
+                            // still accounts every completed choice.
+                            let body_refs =
+                                bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
+                            precomputed_usage =
+                                crate::openai_compat::chat::responses_usage_from_sse_bodies(
+                                    &body_refs,
+                                )
+                                .map(|usage| responses_usage_value_to_counts(&usage));
+                        }
                         Err(_) => {
                             response = provider_error_response(
                                 request_capability,
