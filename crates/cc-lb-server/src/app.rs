@@ -19,7 +19,7 @@ use axum::http::header::{
     CONNECTION, CONTENT_LENGTH, HOST, HeaderValue, RETRY_AFTER, SEC_WEBSOCKET_KEY,
     SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION, UPGRADE,
 };
-use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use bytes::{Bytes, BytesMut};
@@ -2569,6 +2569,87 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
     }
 }
 
+async fn rewrite_codex_backend_request(mut request: Request<Body>, next: Next) -> Response<Body> {
+    let path = request.uri().path();
+    let rewritten_path = format!("/v1{path}");
+    let rewritten_uri = match request.uri().query() {
+        Some(query) => format!("{rewritten_path}?{query}"),
+        None => rewritten_path,
+    }
+    .parse::<Uri>();
+    let Ok(rewritten_uri) = rewritten_uri else {
+        return provider_scope_error_response(
+            cc_lb_domain::Provider::Openai,
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid backend API path",
+        );
+    };
+    *request.uri_mut() = rewritten_uri;
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::CodexBackendSurface);
+    next.run(request).await
+}
+
+async fn backend_api_not_found(
+    State(state): State<ProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let observer = request
+        .extensions()
+        .get::<cc_lb_engine::LifecycleContext>()
+        .cloned();
+    if let Some(observer) = observer.as_ref() {
+        observer.mark_authn_reached();
+    }
+    let auth = match state.lifecycle.authenticate(request.headers()).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return cc_lb_engine::reject_unauthenticated_for_route(
+                &error,
+                request.method(),
+                request.uri().path(),
+                Some(cc_lb_domain::Provider::Openai),
+                observer.as_ref(),
+            );
+        }
+    };
+    if let Some(observer) = observer.as_ref() {
+        state
+            .lifecycle
+            .record_authentication_completed(&auth, observer);
+        observer.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
+    }
+    provider_scope_error_response(
+        cc_lb_domain::Provider::Openai,
+        StatusCode::NOT_FOUND,
+        "operation_not_supported",
+        "requested operation is not supported",
+    )
+}
+
+fn codex_backend_http_routes(
+    state: ProxyState,
+    request_id_state: RequestIdState,
+    timeout_secs: u64,
+) -> Router {
+    let routes = Router::new()
+        .route("/responses", post(lifecycle_handler))
+        .route("/models", get(lifecycle_handler))
+        .route("/alpha/search", post(lifecycle_handler))
+        .route("/realtime/calls", post(lifecycle_handler))
+        .with_state(state.clone());
+    wrap_scoped_proxy_routes(
+        routes,
+        state,
+        request_id_state,
+        timeout_secs,
+        Some(cc_lb_domain::Provider::Openai),
+    )
+    .layer(middleware::from_fn(rewrite_codex_backend_request))
+}
+
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_id_state = RequestIdState::uuid_v7("req_server_");
     let websocket_routes = Router::new()
@@ -2587,6 +2668,13 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
                         ),
                     ),
                 )
+                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+        )
+        .nest(
+            "/backend-api/codex",
+            Router::new()
+                .route("/responses", get(responses_websocket_handler))
+                .layer(middleware::from_fn(rewrite_codex_backend_request))
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
@@ -2631,6 +2719,22 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
                 timeout_secs,
                 Some(cc_lb_domain::Provider::Openai),
                 false,
+            ),
+        )
+        .nest(
+            "/backend-api/codex",
+            codex_backend_http_routes(state.clone(), request_id_state.clone(), timeout_secs),
+        )
+        .nest(
+            "/backend-api",
+            wrap_scoped_proxy_routes(
+                Router::new()
+                    .route("/{*path}", any(backend_api_not_found))
+                    .with_state(state.clone()),
+                state.clone(),
+                request_id_state.clone(),
+                timeout_secs,
+                Some(cc_lb_domain::Provider::Openai),
             ),
         )
         .nest(
@@ -2950,6 +3054,7 @@ async fn responses_websocket_handler(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     // WebSocket routes intentionally bypass the normal drain middleware.
@@ -2991,6 +3096,7 @@ async fn responses_websocket_handler(
         slots,
     )
     .with_provider(provider_scope.as_ref().map(|scope| scope.0.0))
+    .with_codex_backend(codex_backend.is_some())
     .with_downstream_query(uri.query().and_then(|query| {
         let scrubbed = scrub_query_api_key(query);
         (!scrubbed.is_empty()).then_some(scrubbed.into_owned())

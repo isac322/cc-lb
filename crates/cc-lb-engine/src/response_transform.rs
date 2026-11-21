@@ -28,6 +28,7 @@ pub(crate) struct ResponseTransformContext {
     pub(crate) dialect: Arc<dyn UpstreamDialect>,
     pub(crate) gemini_oauth: bool,
     pub(crate) vertex: bool,
+    pub(crate) codex_backend: bool,
     pub(crate) vertex_location: Option<String>,
 }
 

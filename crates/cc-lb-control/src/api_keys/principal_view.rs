@@ -226,6 +226,11 @@ impl PrincipalView {
 
         spec.allowed_models_exact.contains(model) || spec.allowed_models.is_match(model)
     }
+    pub fn has_model_allowlist(&self, principal_id: &str) -> bool {
+        self.get(principal_id).is_some_and(|spec| {
+            !spec.allowed_models_exact.is_empty() || !spec.allowed_models.is_empty()
+        })
+    }
 
     pub fn principal_status(&self, principal_id: &str) -> PrincipalStatus {
         let Some(spec) = self.get(principal_id) else {

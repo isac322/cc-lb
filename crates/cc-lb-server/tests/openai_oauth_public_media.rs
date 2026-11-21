@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::to_bytes,
     extract::{
-        Request, State,
+        OriginalUri, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
@@ -19,10 +19,10 @@ use tokio::{net::TcpListener, task::JoinHandle};
 type Recorded = (String, String, Vec<(String, String)>, Vec<u8>);
 
 #[derive(Clone, Default)]
-struct FakeState(Arc<Mutex<Vec<Recorded>>>);
-struct Fake {
-    base: String,
-    state: FakeState,
+pub(crate) struct FakeState(pub(crate) Arc<Mutex<Vec<Recorded>>>);
+pub(crate) struct Fake {
+    pub(crate) base: String,
+    pub(crate) state: FakeState,
     task: JoinHandle<Result<(), std::io::Error>>,
 }
 impl Drop for Fake {
@@ -31,12 +31,30 @@ impl Drop for Fake {
     }
 }
 
-async fn ws_handler(State(state): State<FakeState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn ws_handler(
+    State(state): State<FakeState>,
+    OriginalUri(uri): OriginalUri,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let query = uri.query().unwrap_or_default().to_owned();
     ws.on_upgrade(move |mut socket: WebSocket| async move {
         if let Some(Ok(Message::Text(t))) = socket.recv().await {
-            state.0.lock().unwrap().push(("/backend-api/codex/responses".into(), "WS".into(), vec![], t.as_bytes().to_vec()));
-            let _ = socket.send(Message::Text(r#"{"type":"response.created","response":{"id":"resp_tok","object":"response","status":"in_progress"}}"#.into())).await;
-            let _ = socket.send(Message::Text(r#"{"type":"response.completed","response":{"id":"resp_tok","object":"response","status":"completed","usage":{"input_tokens":42,"output_tokens":0,"total_tokens":42}}}"#.into())).await;
+            state.0.lock().unwrap().push((
+                "/backend-api/codex/responses".into(),
+                "WS".into(),
+                vec![("x-test-query".into(), query)],
+                t.as_bytes().to_vec(),
+            ));
+            let _ = socket
+                .send(Message::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_tok","object":"response","status":"in_progress"}}"#.into(),
+                ))
+                .await;
+            let _ = socket
+                .send(Message::Text(
+                    r#"{"type":"response.completed","response":{"id":"resp_tok","object":"response","status":"completed","usage":{"input_tokens":42,"output_tokens":0,"total_tokens":42}}}"#.into(),
+                ))
+                .await;
         }
     })
 }
@@ -119,7 +137,7 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
             .into_response(),
     }
 }
-async fn spawn() -> Fake {
+pub(crate) async fn spawn() -> Fake {
     let state = FakeState::default();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
@@ -170,7 +188,7 @@ async fn admin(
         .map(str::to_owned);
     (st, x.json().await.unwrap_or(json!({})), e)
 }
-async fn setup(s: &common::TestServer, f: &Fake, c: &reqwest::Client) -> String {
+pub(crate) async fn setup(s: &common::TestServer, f: &Fake, c: &reqwest::Client) -> String {
     let (_,v,_)=admin(c,s,Method::POST,"/admin/v1/upstreams",Some(json!({"name":"oauth-media","kind":"openai_oauth","base_url":f.base,"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"skip_preflight":true})),None).await;
     v["id"].as_str().unwrap().into()
 }

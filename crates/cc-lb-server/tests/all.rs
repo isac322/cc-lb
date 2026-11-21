@@ -1,3 +1,7 @@
+#[path = "backend_api_codex.rs"]
+mod backend_api_codex;
+#[path = "backend_api_codex_ws.rs"]
+mod backend_api_codex_ws;
 #[path = "keepalive_support/mod.rs"]
 mod keepalive_support;
 

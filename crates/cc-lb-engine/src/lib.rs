@@ -72,7 +72,7 @@ mod provider_input_estimate;
 mod request_classification;
 pub mod request_context;
 #[cfg(not(loom))]
-pub use request_context::{ProviderScope, RequestContext};
+pub use request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 #[cfg(not(loom))]
 pub mod realtime_websocket;
 pub mod request_diagnostics_sink;
