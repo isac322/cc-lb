@@ -6474,6 +6474,9 @@ impl Lifecycle {
                 // failure is unbilled, so RAII refunds that hold in full before
                 // the replacement is checked; never hold both estimates.
                 drop(reserved.take());
+                if let Some(o) = observer.as_ref() {
+                    o.clear_limit_reservation();
+                }
                 let limit_reserve_start = Instant::now();
                 active_limit = match self
                     .reserve_limit(

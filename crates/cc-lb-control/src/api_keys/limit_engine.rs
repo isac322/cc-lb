@@ -823,6 +823,11 @@ impl LimitEngine {
         let Some(record) = self.inner.reservations.lock().remove(id) else {
             return false;
         };
+        self.refund_record(record);
+        true
+    }
+
+    fn refund_record(&self, record: ReservationRecord) {
         let now_sec = unix_secs(self.inner.clock.now());
         for amount in &record.reserved {
             self.inner.record_amount(
@@ -833,7 +838,6 @@ impl LimitEngine {
                 now_sec,
             );
         }
-        true
     }
 
     /// Format the local request/token windows for a provider's response.
@@ -1772,22 +1776,25 @@ pub fn spawn_reservation_ttl_sweeper_with_max_ttl(
 
 fn sweep_expired(engine: &LimitEngine, idle_ttl: Duration, max_ttl: Duration) {
     let effective_max_ttl = max_ttl.max(idle_ttl);
-    let now = Instant::now();
-    let mut evicted = 0u64;
-    let expired_ids: Vec<ReservationId> = {
-        let map = engine.inner.reservations.lock();
-        map.iter()
+    let expired_records: Vec<ReservationRecord> = {
+        let mut map = engine.inner.reservations.lock();
+        let now = Instant::now();
+        let expired_ids: Vec<ReservationId> = map
+            .iter()
             .filter(|(_, r)| {
-                now.duration_since(r.last_activity_at) >= idle_ttl
-                    || now.duration_since(r.created_at) >= effective_max_ttl
+                now.saturating_duration_since(r.last_activity_at) >= idle_ttl
+                    || now.saturating_duration_since(r.created_at) >= effective_max_ttl
             })
             .map(|(k, _)| k.clone())
+            .collect();
+        expired_ids
+            .into_iter()
+            .filter_map(|id| map.remove(&id))
             .collect()
     };
-    for id in expired_ids {
-        if engine.refund_by_id(&id) {
-            evicted += 1;
-        }
+    let evicted = u64::try_from(expired_records.len()).unwrap_or(u64::MAX);
+    for record in expired_records {
+        engine.refund_record(record);
     }
     if evicted > 0 {
         metrics::counter!("cc_lb_limit_reservation_ttl_evicted_total").increment(evicted);
@@ -3787,6 +3794,53 @@ mod tests {
         assert!(
             engine.live_durable_concurrency_hold_ids().is_empty(),
             "handoff must drop durable concurrency guards out of the live refresh set"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn sweep_expired_evicts_atomically_at_boundary_after_touch() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(55),
+                0,
+                None,
+            )
+            .expect("reserve");
+        let id = res.id().to_owned();
+        res.forget();
+
+        // Advance right up to the idle boundary, then refresh immediately before sweeping.
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(engine.touch_reservation_by_id(&id));
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            55,
+            "refreshed reservation must survive atomic expiry sweep",
+        );
+
+        // Once truly idle past idle_ttl without refresh, sweep removes and refunds atomically.
+        tokio::time::advance(Duration::from_millis(50)).await;
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+        assert!(!engine.touch_reservation_by_id(&id));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            0,
         );
     }
 }
