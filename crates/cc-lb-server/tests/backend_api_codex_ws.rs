@@ -331,7 +331,11 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
         .await
         .expect_err("unauthenticated realtime websocket must fail");
     assert!(unauth_err.to_string().contains("401"), "{unauth_err}");
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // Unknown call_id fails closed with 404 before contacting upstream.
     let mut missing_req = format!(
@@ -347,7 +351,11 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
         .await
         .expect_err("unknown call_id must fail");
     assert!(missing_err.to_string().contains("404"), "{missing_err}");
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // Standalone Codex realtime connect with `?intent=quicksilver` succeeds for unrestricted principal.
     let mut standalone_req = format!(
@@ -754,7 +762,11 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
             .unwrap();
         assert_eq!(unauth.status(), 401, "{method}");
     }
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // Authenticated non-WS HTTP requests to `/backend-api/codex` return local 404 operation_not_supported.
     for method in [reqwest::Method::GET, reqwest::Method::POST] {
@@ -771,7 +783,11 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
         let body = auth_http.text().await.unwrap();
         assert!(body.contains("operation_not_supported"), "{body}");
     }
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // Standalone Codex realtime WS at `/backend-api/codex?intent=quicksilver` upgrades and strips actor header.
     let mut root_ws_req = format!(
@@ -958,7 +974,11 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
             .expect_err("unauthenticated /live websocket must fail");
         assert!(err.to_string().contains("401"), "{path}: {err}");
     }
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // Authenticated traversal/invalid call_id returns 400 and unknown call_id returns 404 before upstream contact.
     let mut bad_call_req = format!(
@@ -988,7 +1008,11 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
         .await
         .expect_err("unknown live call_id must fail");
     assert!(missing_err.to_string().contains("404"), "{missing_err}");
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     // API-key call cannot be joined via `/openai/backend-api/codex/live/{call_id}`.
     let api_call = client

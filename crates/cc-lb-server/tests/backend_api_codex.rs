@@ -667,6 +667,28 @@ impl Drop for CodexMediaRealtimeFake {
     }
 }
 
+impl CodexMediaRealtimeFake {
+    /// Recorded upstream requests excluding background scheduler OAuth usage
+    /// polls (`GET /backend-api/wham/usage` without `request-id`), which
+    /// `POST /admin/v1/upstreams` seeds automatically on OAuth import.
+    pub(crate) fn proxy_requests(&self) -> Vec<RecordedCodexRequest> {
+        self.state
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| !is_background_usage_poll(req))
+            .cloned()
+            .collect()
+    }
+}
+
+fn is_background_usage_poll(req: &RecordedCodexRequest) -> bool {
+    req.method == "GET"
+        && req.path == "/backend-api/wham/usage"
+        && req.headers.iter().all(|(name, _)| name != "request-id")
+}
+
 async fn codex_media_realtime_ws(
     axum::extract::State(state): axum::extract::State<CodexMediaRealtimeState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
@@ -905,6 +927,7 @@ pub(crate) async fn add_oauth_upstream(
                 "scopes": [],
                 "never_refresh": true
             },
+            "warmup_enabled": false,
             "skip_preflight": true
         })),
         None,
@@ -942,7 +965,11 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
             .unwrap();
         assert_eq!(unauth.status(), 401, "{path}");
     }
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     let gen_payload = br#"{"model":"gpt-image-2","prompt":"a red fox","output":"png","background":"transparent","quality":"high","size":"1024x1024","stream":true}"#;
     let gen_resp = client
@@ -1316,7 +1343,11 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
         .await
         .unwrap();
     assert_eq!(unauth_hangup.status(), 401);
-    assert!(fake.state.0.lock().unwrap().is_empty());
+    let unexpected = fake.proxy_requests();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected upstream requests: {unexpected:?}"
+    );
 
     let create_201 = client
         .post(format!(
