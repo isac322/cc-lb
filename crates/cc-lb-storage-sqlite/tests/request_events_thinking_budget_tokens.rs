@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use sqlx::Row;
 
@@ -63,12 +63,12 @@ async fn append_request_event_accepts_null_thinking_budget_tokens() {
 
 async fn test_storage(filename: &str) -> (tempfile::TempDir, SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!("sqlite://{}", temp_dir.path().join(filename).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join(filename),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("initialize sqlite");
     (temp_dir, storage)
 }
 

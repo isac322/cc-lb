@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, sync::Arc};
 
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability, MetaStore,
@@ -8,10 +8,7 @@ use cc_lb_storage_api::{
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sha2::{Digest, Sha256};
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
 use url::Url;
 use uuid::Uuid;
 
@@ -1049,9 +1046,8 @@ fn digest(value: &str) -> [u8; 32] {
 }
 
 struct Fixture {
-    schema: String,
+    isolated: crate::pg_test_support::IsolatedPg,
     application_name: String,
-    admin_pool: PgPool,
     pool: PgPool,
 }
 
@@ -1061,29 +1057,20 @@ impl Fixture {
             eprintln!("skip: CI_POSTGRES_URL not set");
             return Ok(None);
         };
-        let schema = format!("upstream_affinity_{}", Uuid::new_v4().simple());
         let application_name = format!("upstream-affinity-{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        let options = PgConnectOptions::from_str(&url)?
-            .options([("search_path", schema.as_str())])
-            .application_name(&application_name);
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(options)
-            .await?;
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(&url)
+            .await?
+            .with_application_name(application_name.clone());
+        let pool = match isolated.pool(8).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
         Ok(Some(Self {
-            schema,
+            isolated,
             application_name,
-            admin_pool,
             pool,
         }))
     }
@@ -1098,25 +1085,7 @@ impl Fixture {
 
     async fn drop_schema(self) -> TestResult<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
+        self.isolated.drop().await?;
         Ok(())
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

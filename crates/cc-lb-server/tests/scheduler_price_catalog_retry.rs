@@ -357,10 +357,11 @@ async fn postgres_price_catalog_503_retries_once_at_30s_then_kills() {
         .connect(&admin_url)
         .await
         .expect("connect database administrator");
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
-        .execute(&admin_pool)
-        .await
-        .expect("create isolated scheduler database");
+    if let Err(error) =
+        crate::common::create_postgres_database(&admin_pool, &name, "CC_LB_PG_SCHED_TEMPLATE").await
+    {
+        panic!("create isolated scheduler database: {error}");
+    }
     let mut url = url::Url::parse(&admin_url).expect("parse database URL");
     url.set_path(&format!("/{name}"));
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {

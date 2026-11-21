@@ -23,7 +23,7 @@ use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, RouteInfo};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{KeyStatus, MetaStore, Storage as StorageTrait, StoredApiKeyRecord};
+use cc_lb_storage_api::{KeyStatus, Storage as StorageTrait, StoredApiKeyRecord};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
@@ -154,9 +154,6 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(128);
-    let mut updates = test_bus.bus.subscribe();
 
     let cases = [
         (
@@ -182,6 +179,10 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
     ];
 
     for (index, (name, kind, record_base_url)) in cases.into_iter().enumerate() {
+        let mut test_bus =
+            TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+        let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(128);
+        let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
         let state = TestState::default();
         let dispatcher = CapturingSignedDispatch::default();
         let lifecycle = explicit_native_lifecycle(
@@ -200,7 +201,18 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
         assert_eq!(response.status(), StatusCode::OK, "{name} normal response");
         response.into_body().collect().await?;
         let normal_route = next_route(&mut lifecycle_events).await;
-        wait_for_final_update(&mut updates).await;
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    lifecycle_rx.recv().await.expect("lifecycle bus"),
+                    LifecycleEvent::RequestTerminated { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("normal request terminated");
 
         let cron = shaped_prompt_request("normal cc_workload=cron;");
         let cron_body = cron.body().clone();
@@ -208,7 +220,19 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
         assert_eq!(response.status(), StatusCode::OK, "{name} cron response");
         response.into_body().collect().await?;
         let cron_route = next_route(&mut lifecycle_events).await;
-        wait_for_final_update(&mut updates).await;
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    lifecycle_rx.recv().await.expect("lifecycle bus"),
+                    LifecycleEvent::RequestTerminated { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("cron request terminated");
+        test_bus.shutdown().await;
 
         let dispatched = dispatcher
             .bodies
@@ -928,12 +952,14 @@ async fn gemini_observed_tiers_and_requested_thinking_reach_durable_history()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let mut updates = test_bus.bus.subscribe();
     for alias in ["serviceTier", "service_tier"] {
         for observed in [Some("flex"), Some("priority"), None] {
             for streaming in [false, true] {
                 for wrapped in [false, true] {
+                    let mut test_bus = TestLifecycleBus::new()
+                        .with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+                    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+                    let mut updates = test_bus.bus.subscribe();
                     let mut usage = serde_json::json!({
                         "promptTokenCount": 100, "cachedContentTokenCount": 20,
                         "candidatesTokenCount": 6, "thoughtsTokenCount": 4
@@ -982,6 +1008,19 @@ async fn gemini_observed_tiers_and_requested_thinking_reach_durable_history()
                     .await;
                     assert_eq!(response.status(), StatusCode::OK);
                     response.into_body().collect().await?;
+                    timeout(Duration::from_secs(3), async {
+                        loop {
+                            if matches!(
+                                lifecycle_rx.recv().await.expect("lifecycle bus"),
+                                LifecycleEvent::RequestTerminated { .. }
+                            ) {
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("request terminated");
+                    test_bus.shutdown().await;
                     let (event, parsed_partial, observed_partial) =
                         timeout(Duration::from_secs(3), async {
                             let mut parsed_partial = false;
@@ -1041,7 +1080,8 @@ async fn review_1166_gemini_native_snake_thinking_reaches_durable_history()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut updates = test_bus.bus.subscribe();
     let state = TestState::default();
     let lifecycle = limited_lifecycle(
@@ -1069,6 +1109,7 @@ async fn review_1166_gemini_native_snake_thinking_reaches_durable_history()
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await?;
+    test_bus.shutdown().await;
 
     let event = timeout(Duration::from_secs(3), async {
         loop {
@@ -2810,7 +2851,7 @@ async fn admission_native_images_increment_input_and_total_tokens_at_exact_bound
 
 #[tokio::test]
 async fn admission_compressed_same_geometry_image_pair_cannot_escape_allowance() {
-    let compressed = synthetic_png_base64(1568, flate2::Compression::best());
+    let compressed = synthetic_png_base64(1568, flate2::Compression::fast());
     let uncompressed = synthetic_png_base64(1568, flate2::Compression::none());
     assert!(
         compressed.len() * 100 < uncompressed.len(),
@@ -3501,38 +3542,14 @@ async fn next_route(
     .expect("route event arrives")
 }
 
-async fn wait_for_final_update(
-    updates: &mut tokio::sync::broadcast::Receiver<cc_lb_request_log::RequestEventUpdate>,
-) {
-    timeout(Duration::from_secs(3), async {
-        loop {
-            if matches!(
-                updates
-                    .recv()
-                    .await
-                    .expect("request update stream remains open"),
-                cc_lb_request_log::RequestEventUpdate::Final(_)
-            ) {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("final request event arrives");
-}
-
 async fn sqlite_storage_for_lifecycle_happy(
     dir: &tempfile::TempDir,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("lifecycle-happy.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(common::templated_sqlite_storage(
+        &dir.path().join("lifecycle-happy.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ path = "tests/all.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cc-lb-scheduler/sqlite"]
+sqlite = ["cc-lb-scheduler/default", "cc-lb-scheduler/sqlite"]
 postgres = ["cc-lb-scheduler/postgres"]
 
 [dependencies]
@@ -71,6 +71,7 @@ uuid = { workspace = true, features = ["v5"] }
 mime_guess = "2.0.5"
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-opentelemetry.workspace = true

@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::{ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
+use futures_util::FutureExt as _;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -39,72 +41,71 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
+    let Some(admin_url) = ci_postgres_url() else {
         eprintln!("SKIP: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
-
-    reset_request_event_tables(&database_url).await?;
-    let instance_a = build_running_app(&database_url, "instance-a").await?;
-    let instance_b = build_running_app(&database_url, "instance-b").await?;
-
-    let response = instance_b
-        .app
-        .admin_router
-        .clone()
-        .oneshot(admin_stream_request()?)
-        .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut body = response.into_body();
-    let mut sse_buffer = String::new();
-    consume_initial_bookmark(&mut body, &mut sse_buffer).await?;
-
-    let event = request_event();
-    let event_id = event
-        .event_id
-        .clone()
-        .ok_or_else(|| error("event id missing"))?;
-    let cursor = instance_a.storage.append_request_event(&event).await?;
-
-    let update = tokio::time::timeout(
-        storage_tail_timeout(),
-        read_final_update(&mut body, &mut sse_buffer, &event_id),
+    let db = crate::common::IsolatedPostgresDb::create(
+        &admin_url,
+        "cc_lb_tail",
+        "CC_LB_PG_FULL_TEMPLATE",
     )
-    .await
-    .map_err(|_| {
-        error(format!(
-            "timed out waiting for final SSE frame for {event_id}"
-        ))
-    })??;
+    .await?;
+    let database_url = db.url.clone();
 
-    assert_eq!(update["payload"]["cursor"].as_u64(), Some(cursor));
-    assert_eq!(
-        update["payload"]["event"]["event_id"].as_str(),
-        Some(event_id.as_str())
-    );
+    let outcome = AssertUnwindSafe(async move {
+        let instance_a = build_running_app(&database_url, "instance-a").await?;
+        let instance_b = build_running_app(&database_url, "instance-b").await?;
 
-    Ok(())
+        let response = instance_b
+            .app
+            .admin_router
+            .clone()
+            .oneshot(admin_stream_request()?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut body = response.into_body();
+        let mut sse_buffer = String::new();
+        consume_initial_bookmark(&mut body, &mut sse_buffer).await?;
+
+        let event = request_event();
+        let event_id = event
+            .event_id
+            .clone()
+            .ok_or_else(|| error("event id missing"))?;
+        let cursor = instance_a.storage.append_request_event(&event).await?;
+
+        let update = tokio::time::timeout(
+            storage_tail_timeout(),
+            read_final_update(&mut body, &mut sse_buffer, &event_id),
+        )
+        .await
+        .map_err(|_| {
+            error(format!(
+                "timed out waiting for final SSE frame for {event_id}"
+            ))
+        })??;
+
+        assert_eq!(update["payload"]["cursor"].as_u64(), Some(cursor));
+        assert_eq!(
+            update["payload"]["event"]["event_id"].as_str(),
+            Some(event_id.as_str())
+        );
+
+        Ok(())
+    })
+    .catch_unwind()
+    .await;
+    let _ = db.drop().await;
+    match outcome {
+        Ok(res) => res,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await?;
-    let storage = PostgresStorage::new(pool.clone(), clock);
-    storage.initialize().await?;
-    sqlx::query("TRUNCATE request_events_v1 RESTART IDENTITY")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
-    Ok(())
 }
 
 async fn build_running_app(database_url: &str, label: &'static str) -> TestResult<RunningApp> {

@@ -302,9 +302,6 @@ impl Stage {
         use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
         use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 
-        let held = crate::common::postgres_test_lock(database_url)
-            .await
-            .expect("postgres test lock");
         let fake = Fake::spawn().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
@@ -340,7 +337,7 @@ impl Stage {
             fake,
             upstreams: Vec::new(),
             pinned: Vec::new(),
-            _held: vec![Box::new(held)],
+            _held: Vec::new(),
         }
     }
 
@@ -467,18 +464,6 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = ()>,
 {
-    async fn ddl(database_url: &str, sql: String) {
-        use sqlx::Connection as _;
-
-        let mut connection = sqlx::PgConnection::connect(database_url)
-            .await
-            .expect("postgres connects");
-        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(&mut connection)
-            .await
-            .expect("schema DDL runs");
-        connection.close().await.expect("postgres disconnects");
-    }
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -486,16 +471,20 @@ where
             .expect("tokio runtime")
     }
 
-    let schema = format!("api_key_full_stack_{}", Uuid::new_v4().simple());
-    runtime().block_on(ddl(database_url, format!("CREATE SCHEMA {schema}")));
-    let mut url = Url::parse(database_url).expect("postgres URL parses");
-    url.query_pairs_mut()
-        .append_pair("options[search_path]", &schema);
-    runtime().block_on(scenario(url.into()));
-    runtime().block_on(ddl(
-        database_url,
-        format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
-    ));
+    let db = runtime()
+        .block_on(crate::common::IsolatedPostgresDb::create(
+            database_url,
+            "api_key_full_stack",
+            "CC_LB_PG_APP_TEMPLATE",
+        ))
+        .expect("isolated postgres database creates");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime().block_on(scenario(db.url.clone()));
+    }));
+    let _ = runtime().block_on(db.drop());
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 // ---------------------------------------------------------------- stack
@@ -964,10 +953,13 @@ async fn pf_03_slow_org_probes_stay_in_budget_and_leave_the_proxy_alone() {
         for _ in 0..5 {
             statuses.push(stack.send(0, &[]).await);
         }
-        (statuses, stack.fake().org.in_flight())
+        let in_flight = stack.fake().org.in_flight();
+        tokio::time::pause();
+        (statuses, in_flight)
     };
     let (replies, (proxy_statuses, in_flight_after_proxy)) =
         tokio::join!(preflights, proxy_while_probing);
+    tokio::time::resume();
     let elapsed = started.elapsed();
 
     assert!(elapsed <= BUDGET, "preflights took {elapsed:?}");

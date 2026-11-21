@@ -30,6 +30,24 @@ name: publish-check
 #    validates the final package.
 
 on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'crates/cc-lb-plugin-wire/**'
+      - 'crates/cc-lb-pdk-wasmtime/**'
+      - 'crates/cc-lb-pdk-wasmtime-macros/**'
+      - 'crates/cc-lb-plugin-conformance/**'
+      - 'crates/cc-lb-runtime-wasmtime/**'
+      - 'crates/cc-lb-storage-api/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'release-plz.toml'
+      - '.github/workflows/publish-check.yml'
+      - '.github/actions/check-published-crates/**'
+      - '.github/actions/setup-rust-tools/**'
+      - '.github/actions/setup-rust-target-cache/**'
+      - '.github/actions/save-rust-target-cache/**'
   pull_request:
     paths:
       - 'crates/cc-lb-plugin-wire/**'
@@ -42,7 +60,10 @@ on:
       - 'Cargo.lock'
       - 'release-plz.toml'
       - '.github/workflows/publish-check.yml'
-      - '.github/actions/check-published-crates/action.yml'
+      - '.github/actions/check-published-crates/**'
+      - '.github/actions/setup-rust-tools/**'
+      - '.github/actions/setup-rust-target-cache/**'
+      - '.github/actions/save-rust-target-cache/**'
 
 permissions:
   contents: read
@@ -59,6 +80,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - uses: ./.github/actions/check-published-crates
         with:

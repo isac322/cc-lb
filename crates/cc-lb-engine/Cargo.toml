@@ -11,6 +11,10 @@ autotests = false
 name = "integration"
 path = "tests/all.rs"
 
+[[test]]
+name = "typestate_contracts"
+path = "tests/typestate_contracts/main.rs"
+
 [features]
 sqlite = []
 postgres = []
@@ -85,10 +89,11 @@ zstd.workspace = true
 trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
-fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", default-features = false }
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true

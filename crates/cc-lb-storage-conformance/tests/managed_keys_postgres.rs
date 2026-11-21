@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_clock::{ClockHandle, SystemClock};
@@ -11,10 +11,7 @@ use cc_lb_storage_conformance::scenarios::managed_keys::{
     managed_keys_nul_byte_rejected,
 };
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
 use tokio::runtime::Runtime;
 
 struct PostgresManagedKeyBackend {
@@ -22,8 +19,7 @@ struct PostgresManagedKeyBackend {
 }
 
 struct PostgresFixture {
-    url: String,
-    schema: String,
+    isolated: crate::pg_template_helper::IsolatedPg,
     pool: PgPool,
 }
 
@@ -33,34 +29,19 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
     type Fixture = PostgresFixture;
 
     async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
-        let schema = schema_name();
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(
-                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
+        let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&self.url).await?;
+        let pool = match isolated.pool(8).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error);
+            }
+        };
         PostgresStorage::new(pool.clone(), system_clock())
             .initialize()
             .await?;
 
-        Ok(PostgresFixture {
-            url: self.url.clone(),
-            schema,
-            pool,
-        })
+        Ok(PostgresFixture { isolated, pool })
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Store> {
@@ -73,18 +54,7 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
 
     async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {
         fixture.pool.close().await;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&fixture.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&fixture.schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-        Ok(())
+        fixture.isolated.drop().await
     }
 }
 
@@ -139,22 +109,6 @@ where
         .expect("tokio runtime")
         .block_on(scenario(Arc::new(PostgresManagedKeyBackend { url })))
         .unwrap_or_else(|error| panic!("{name} postgres: {error}"));
-}
-
-fn schema_name() -> String {
-    format!("managed_keys_{}", uuid::Uuid::new_v4().simple())
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }
 
 fn system_clock() -> ClockHandle {

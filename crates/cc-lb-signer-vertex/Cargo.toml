@@ -23,4 +23,5 @@ sonic-rs.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

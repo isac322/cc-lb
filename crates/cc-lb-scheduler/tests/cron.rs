@@ -160,10 +160,12 @@ mod postgres_tests {
             .connect_with(admin_options.clone())
             .await?;
 
-        let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
-            .execute(&admin_pool)
-            .await
+        if let Err(error) = crate::common::create_postgres_database(
+            &admin_pool,
+            &database_name,
+            "CC_LB_PG_SCHED_TEMPLATE",
+        )
+        .await
         {
             eprintln!("SKIP: could not create temporary postgres database: {error}");
             admin_pool.close().await;

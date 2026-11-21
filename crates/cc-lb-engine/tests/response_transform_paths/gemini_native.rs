@@ -134,7 +134,7 @@ async fn observe_upstream(
 ) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "gemini-native.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut receiver = test_bus.bus.subscribe_lifecycle();
     let hook = with_hook
@@ -166,6 +166,7 @@ async fn observe_upstream(
     })
     .await
     .expect("native Gemini request terminates");
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     Ok(Observation {
@@ -287,7 +288,7 @@ async fn native_alt_sse_json_error_diagnostics_survive_first_frame_drop() -> Tes
             for fixture in [JSON_OBJECT, JSON_ARRAY] {
                 let dir = tempfile::tempdir()?;
                 let storage = Arc::new(sqlite_storage(&dir, "gemini-native-sink.sqlite").await?);
-                let test_bus = TestLifecycleBus::new()
+                let mut test_bus = TestLifecycleBus::new()
                     .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
                 let mut receiver = test_bus.bus.subscribe_lifecycle();
                 let hook = with_hook.then(|| {
@@ -351,6 +352,7 @@ async fn native_alt_sse_json_error_diagnostics_survive_first_frame_drop() -> Tes
                 })
                 .await
                 .expect("dropping or draining the error body terminates the request");
+                test_bus.shutdown().await;
                 let mut rows = wait_for_events(storage.as_ref(), 1).await?;
                 assert_eq!(rows.len(), 1, "one persisted request event");
                 loop {
@@ -561,7 +563,7 @@ async fn native_truncated_sse_error_diagnostics_survive_error_frame_drop() -> Te
             for with_hook in [false, true] {
                 let dir = tempfile::tempdir()?;
                 let storage = Arc::new(sqlite_storage(&dir, "gemini-truncated-sink.sqlite").await?);
-                let test_bus = TestLifecycleBus::new()
+                let mut test_bus = TestLifecycleBus::new()
                     .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
                 let mut receiver = test_bus.bus.subscribe_lifecycle();
                 let hook = with_hook.then(|| {
@@ -627,6 +629,7 @@ async fn native_truncated_sse_error_diagnostics_survive_error_frame_drop() -> Te
                 })
                 .await
                 .expect("disposing of the truncated SSE body terminates the request");
+                test_bus.shutdown().await;
                 let mut rows = wait_for_events(storage.as_ref(), 1).await?;
                 assert_eq!(rows.len(), 1, "one persisted request event");
                 loop {

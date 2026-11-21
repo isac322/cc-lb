@@ -12,3 +12,7 @@ chrono.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

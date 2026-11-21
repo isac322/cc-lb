@@ -21,7 +21,7 @@ use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
@@ -1129,7 +1129,7 @@ async fn large_binary_stream_exceeding_sse_parse_budget_relays_cleanly_with_hook
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "large-binary-relay.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut updates = test_bus.bus.subscribe();
     let buffered = Arc::new(UnchangedBufferedTransform::default());
@@ -1161,6 +1161,7 @@ async fn large_binary_stream_exceeding_sse_parse_budget_relays_cleanly_with_hook
     assert_eq!(received, body);
     assert!(buffered.seen_bodies().is_empty());
     assert!(sse.seen_events().is_empty());
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         while let Ok(update) = updates.recv().await {
             if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
@@ -1324,7 +1325,7 @@ async fn non_json_relay_with_hook_matches_control_headers_and_accounting()
             )
             .await?,
         );
-        let test_bus =
+        let mut test_bus =
             TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
         let mut updates = test_bus.bus.subscribe();
         let mut events_rx = test_bus.bus.subscribe_lifecycle();
@@ -1384,6 +1385,7 @@ async fn non_json_relay_with_hook_matches_control_headers_and_accounting()
         .await
         .expect("stream completion is published");
         assert_eq!(success.body_bytes, Some(body.len() as u64));
+        test_bus.shutdown().await;
         tokio::time::timeout(Duration::from_secs(3), async {
             while let Ok(update) = updates.recv().await {
                 if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
@@ -1498,7 +1500,7 @@ async fn explicit_non_sse_streams_ignore_sse_shaped_error_and_usage_text()
             let _recorder_guard = metrics::set_default_local_recorder(&recorder);
             let filename = format!("explicit-non-sse-{case}-{with_hook}.sqlite");
             let storage = Arc::new(sqlite_storage(&dir, &filename).await?);
-            let test_bus = TestLifecycleBus::new()
+            let mut test_bus = TestLifecycleBus::new()
                 .with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
             let mut updates = test_bus.bus.subscribe();
             let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -1524,6 +1526,7 @@ async fn explicit_non_sse_streams_ignore_sse_shaped_error_and_usage_text()
             );
             assert_eq!(received, body, "{content_type}, with_hook={with_hook}");
             assert!(transform.seen_bodies().is_empty());
+            test_bus.shutdown().await;
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     if matches!(
@@ -1634,7 +1637,7 @@ async fn streamed_non_json_error_with_hook_relays_and_scrubs_stored_secret()
     const SECRET: &str = "sk-ant-initial";
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "binary-error-secret.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut updates = test_bus.bus.subscribe();
     let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -1670,6 +1673,7 @@ async fn streamed_non_json_error_with_hook_relays_and_scrubs_stored_secret()
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(received, body);
     assert!(transform.seen_bodies().is_empty());
+    test_bus.shutdown().await;
     tokio::time::timeout(Duration::from_secs(3), async {
         while let Ok(update) = updates.recv().await {
             if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
@@ -1934,7 +1938,7 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
 {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "response-transform-observation.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(FailingBufferedTransform);
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch())
@@ -1951,6 +1955,7 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, buffered_upstream_body());
 
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     let event = &events[0];
@@ -1966,7 +1971,7 @@ async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
     );
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "buffered-error-precedence.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         Some(Arc::new(FailingBufferedTransform)),
@@ -1989,6 +1994,7 @@ async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(output, body);
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
@@ -2007,12 +2013,11 @@ async fn sqlite_storage(
     dir: &tempfile::TempDir,
     file_name: &str,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(storage)
+    Ok(common::templated_sqlite_storage(
+        &dir.path().join(file_name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?)
 }
 
 async fn wait_for_events(
@@ -2028,14 +2033,14 @@ async fn wait_for_events(
         if std::time::Instant::now() >= deadline {
             panic!("expected {expected} request event(s), got {}", events.len());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
 async fn buffered_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "buffered-accounting.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(BufferedUsageMutatingTransform);
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch())
@@ -2051,6 +2056,7 @@ async fn buffered_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn st
 
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     assert!(body_text.contains(r#""input_tokens":999"#));
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -2526,7 +2532,7 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip-passthrough.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -2552,6 +2558,7 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
         Some(&HeaderValue::from_static("gzip"))
     );
     assert_eq!(output, body);
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -2618,7 +2625,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
@@ -2666,6 +2673,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     assert_eq!(error.error_type, "upstream_response_decode_error");
     assert!(error.error_message.contains("matching checksum"));
 
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     let event = &events[0];
@@ -3203,7 +3211,7 @@ async fn relay_and_record(
 ) -> Result<RelayedRow, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, db_name).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(None, sse_transform, dispatcher)
         .with_event_bus(test_bus.bus_arc());
@@ -3215,6 +3223,7 @@ async fn relay_and_record(
         .await
         .expect("lifecycle handles upstream SSE response");
     let (status, headers, body) = collect_body(response).await;
+    test_bus.shutdown().await;
     let mut events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     let row = events.remove(0);
@@ -3247,7 +3256,7 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip-before-output.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3274,6 +3283,7 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
     assert!(text.contains("\"api_error\""));
     assert!(text.contains("matching checksum"));
     assert!(transform.seen_events().is_empty());
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -3294,7 +3304,7 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "gzip-transform-failure.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3320,6 +3330,7 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     assert!(text.contains("response_transform_error"));
     assert!(!text.contains("\"api_error\""));
 
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -3348,7 +3359,7 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("deflate"));
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "raw-deflate-passthrough.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3374,6 +3385,7 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("deflate"))
     );
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
@@ -3388,7 +3400,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     let headers = json_headers(body.len(), true);
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "non-sse-gzip.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3428,6 +3440,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
         Some(&HeaderValue::from_static("gzip"))
     );
     assert!(transform.seen_events().is_empty());
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
@@ -3568,7 +3581,7 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "unterminated-passthrough.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3595,6 +3608,7 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
         text[..error_offset].ends_with("\n\n"),
         "error frame must start after an SSE event boundary: {text:?}",
     );
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -3613,7 +3627,7 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
         Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\r\n");
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "trailing-terminators.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
         None,
@@ -3635,6 +3649,7 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
     let (_status, _headers, output) = collect_body(response).await;
 
     assert_eq!(output, body);
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
@@ -3713,7 +3728,7 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "unterminated-http-error.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = Bytes::from_static(
@@ -3741,6 +3756,7 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let text = std::str::from_utf8(&output).expect("error frame is utf8");
     assert!(text.contains(r#""type":"api_error""#));
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, StatusCode::TOO_MANY_REQUESTS.as_u16());
@@ -3756,7 +3772,7 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "unterminated-http-passthrough.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let body = Bytes::from_static(
         b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"forced fake rate limit response\"}}\n",
@@ -3782,6 +3798,7 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(output, body);
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
@@ -3806,7 +3823,7 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "transform-http-error.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let compressed = gzip_bytes(&sse_upstream_body(false));
     let mut headers = sse_headers();
@@ -3833,6 +3850,7 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let text = std::str::from_utf8(&output).expect("error frame is utf8");
     assert!(text.contains("response_transform_error"));
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, StatusCode::TOO_MANY_REQUESTS.as_u16());
@@ -4067,7 +4085,7 @@ async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
 async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "sse-accounting.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(SseUsageMutatingTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(true))
@@ -4083,6 +4101,7 @@ async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::er
 
     let text = std::str::from_utf8(&body).expect("sse body is utf8");
     assert!(text.contains(r#""input_tokens":999"#));
+    test_bus.shutdown().await;
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
     assert_eq!(

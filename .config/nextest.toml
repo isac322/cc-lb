@@ -1,16 +1,56 @@
 [profile.default]
 slow-timeout = { period = "60s" }
 
+[test-groups.pg-usage-rollup]
+max-threads = 1
+
+[test-groups.pg-price-catalog]
+max-threads = 1
+
+[test-groups.pg-heavy-xmin]
+max-threads = 1
+
 [[profile.default.overrides]]
 filter = 'test(authn_rail_typestate_contracts)'
 threads-required = 2
 priority = 100
 
 [[profile.default.overrides]]
+filter = 'test(cache_keepalive_wall_clock)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-server::integration) and test(/sim_principal_b_multi_agent_interleaving|sim_principal_a_|scheduler_price_catalog_retry|native_cached_input_pricing|native_image_admission/)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'package(cc-lb-server) and kind(lib) and test(postgres_idle_keepalive_worker_renews_session_before_expiry)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-scheduler::integration) and test(worker_restart_lifetime_postgres)'
+priority = 95
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(usage_rollup|upstream_subscription_quota_aggregate_store_postgres)/)'
+test-group = 'pg-usage-rollup'
+priority = 95
+
+[[profile.default.overrides]]
+filter = 'test(/price_catalog_.*_postgres|price_snapshots_retain_three_newest_distinct_payloads/)'
+test-group = 'pg-price-catalog'
+priority = 95
+
+[[profile.default.overrides]]
 filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_postgres|principal_store_postgres/)'
 priority = 90
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-postgres::integration)'
-threads-required = 4
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/overview_error_attribution_migration::|usage_rollup_pricing_completeness_migration::/)'
+priority = 95
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/crash_recovery::|request_event_filter_index_plans::/)'
+test-group = 'pg-heavy-xmin'
+threads-required = 2
 priority = 100

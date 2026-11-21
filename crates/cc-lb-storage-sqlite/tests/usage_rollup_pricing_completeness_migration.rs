@@ -1,8 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
-use cc_lb_storage_api::{
-    MetaStore, RequestEvent, RequestEventStore, UsageRollupResolution, UsageRollupStore,
-};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore, UsageRollupResolution, UsageRollupStore};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 
 #[tokio::test]
@@ -114,11 +112,12 @@ async fn upgrade_122_retained_events_remain_unclassified_after_idle_restart_and_
         assert_eq!(row.effective_cache_write_input_tokens, None);
     }
     // Fast initialization and incremental migrations share the same additive schema.
-    let fresh_url = format!("sqlite://{}", dir.path().join("fresh.sqlite").display());
-    let fresh = cc_lb_storage_sqlite::open_sqlite(&fresh_url, Arc::new(cc_lb_clock::SystemClock))
-        .await
-        .unwrap();
-    fresh.initialize().await.unwrap();
+    let fresh = super::common::templated_sqlite_storage(
+        &dir.path().join("fresh.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .unwrap();
     assert_eq!(shape(storage.pool()).await, shape(fresh.pool()).await);
     assert_no_pricing_recovery_metadata(&fresh).await;
     sqlx::query("DROP TABLE usage_rollups_v2")
@@ -389,10 +388,10 @@ fn event(id: &str) -> RequestEvent {
 }
 
 async fn fresh_storage(url: &str) -> cc_lb_storage_sqlite::SqliteStorage {
-    let storage = cc_lb_storage_sqlite::open_sqlite(url, Arc::new(cc_lb_clock::SystemClock))
+    let path = std::path::Path::new(url.trim_start_matches("sqlite://"));
+    let storage = super::common::templated_sqlite_storage(path, Arc::new(cc_lb_clock::SystemClock))
         .await
         .unwrap();
-    storage.initialize().await.unwrap();
     sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET status='complete'")
         .execute(storage.pool())
         .await

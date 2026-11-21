@@ -162,7 +162,7 @@ try {
     assert.equal(child.exitCode, null, 'cc-lb exited before readiness');
     try { ready = (await fetch(`http://127.0.0.1:${adminPort}/admin/health`, { signal: AbortSignal.timeout(500) })).status === 200; } catch {}
     if (ready) break;
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.ok(ready, 'cc-lb did not become ready');
   for (const [name, kind, syntheticKey] of [

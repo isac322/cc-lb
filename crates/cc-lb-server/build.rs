@@ -3,8 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=GIT_SHA");
-    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
-    println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
+    if !has_nonempty_env("GIT_SHA") {
+        println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+        println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
+    }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     emit("CC_LB_VERSION", env!("CARGO_PKG_VERSION").to_owned());
@@ -24,6 +26,10 @@ fn main() {
 
 fn emit(name: &str, value: String) {
     println!("cargo:rustc-env={name}={value}");
+}
+
+fn has_nonempty_env(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
 }
 
 fn git_sha() -> String {

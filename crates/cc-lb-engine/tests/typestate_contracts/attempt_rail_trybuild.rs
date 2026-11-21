@@ -1,4 +1,4 @@
-#[path = "support/trybuild.rs"]
+#[path = "../support/trybuild.rs"]
 pub(super) mod trybuild_support;
 
 pub(super) fn register_attempt_rail_cases(test_cases: &trybuild::TestCases) {

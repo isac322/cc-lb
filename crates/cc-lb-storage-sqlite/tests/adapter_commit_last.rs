@@ -8,20 +8,20 @@ use std::sync::Arc;
 
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::{
-    MetaStore, PluginRegistryStore, StorageError, UpstreamCreate, UpstreamStore, UpstreamUpdate,
-    WasmBlob, WasmRegistryEntryInput, upstream::UpstreamKind,
+    PluginRegistryStore, StorageError, UpstreamCreate, UpstreamStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntryInput, upstream::UpstreamKind,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use uuid::Uuid;
 
 async fn open(name: &str) -> (tempfile::TempDir, SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!("sqlite://{}", temp_dir.path().join(name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join(name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("initialize sqlite");
     (temp_dir, storage)
 }
 

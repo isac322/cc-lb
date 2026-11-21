@@ -17,12 +17,12 @@ use uuid::Uuid;
 
 async fn quota_storage(database_name: &str) -> (TempDir, SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("create quota tempdir");
-    let database_url = format!("sqlite://{}", temp_dir.path().join(database_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open quota sqlite");
-    storage.initialize().await.expect("initialize quota sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join(database_name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("initialize quota sqlite");
     (temp_dir, storage)
 }
 

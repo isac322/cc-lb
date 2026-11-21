@@ -414,7 +414,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let mut update_rx = test_bus.bus.subscribe();
@@ -433,6 +433,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
     drop(response.into_body());
 
     assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
+    test_bus.shutdown().await;
     assert_one_final(&mut update_rx).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -1070,7 +1071,7 @@ async fn terminal_body_error_case(
 ) -> Result<(HeaderMap, Bytes), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let mut update_rx = test_bus.bus.subscribe();
@@ -1107,6 +1108,7 @@ async fn terminal_body_error_case(
     )
     .await;
     assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
+    test_bus.shutdown().await;
     assert_one_final(&mut update_rx).await;
 
     let rows = common::stored_request_events(storage.as_ref()).await?;
@@ -1169,7 +1171,7 @@ async fn upstream_frame_error_preserves_http_error_classification()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let mut update_rx = test_bus.bus.subscribe();
@@ -1208,6 +1210,7 @@ async fn upstream_frame_error_preserves_http_error_classification()
         "upstream_4xx",
     )
     .await;
+    test_bus.shutdown().await;
     assert_one_final(&mut update_rx).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -1234,7 +1237,7 @@ async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn 
 {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let lifecycle = lifecycle(sse_dispatch(StatusCode::OK, refusal_sse_body()), &test_bus);
@@ -1260,6 +1263,7 @@ async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn 
     assert!(text.contains("\"stop_reason\":\"refusal\""));
     assert_eq!(text.matches("event: message_stop").count(), 1);
 
+    test_bus.shutdown().await;
     assert_one_final(&mut update_rx).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -1284,7 +1288,7 @@ async fn provider_error_before_body_failure_preserves_provider_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let lifecycle = lifecycle(
@@ -1313,6 +1317,7 @@ async fn provider_error_before_body_failure_preserves_provider_error()
     let text = std::str::from_utf8(&body).expect("relay body is SSE text");
     assert_eq!(text.matches("event: error\n").count(), 1);
 
+    test_bus.shutdown().await;
     assert_one_final(&mut update_rx).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);

@@ -1,0 +1,143 @@
+name: Setup Rust target caches
+description: Restore shared Cargo registry and rolling workspace target dependencies with mtime preservation.
+
+inputs:
+  cache-job-key:
+    description: Job-specific identifier for Layer 1 rolling workspace cache.
+    required: true
+  target-dir:
+    description: Cargo target directory path to restore.
+    required: false
+    default: "target/debug"
+  extra-cache-paths:
+    description: Optional newline-separated extra paths to restore with target-dir.
+    required: false
+    default: ""
+  restore-ws-mtimes:
+    description: Whether to restore recorded workspace file and directory mtimes after cache restore.
+    required: false
+    default: "true"
+  stable-build-metadata:
+    description: Whether to fix GIT_SHA and SOURCE_DATE_EPOCH for reproducible caching.
+    required: false
+    default: "true"
+  save-caches:
+    description: Whether to save the Cargo registry cache on miss (set false on fan-out shards).
+    required: false
+    default: "true"
+
+outputs:
+  target-cache-hit:
+    description: Whether the exact Layer 1 SHA cache matched.
+    value: ${{ steps.target-restore.outputs.cache-hit }}
+  lock-cache-hit:
+    description: Whether a Layer 1 cache matching the current dependency lock hash was restored.
+    value: ${{ steps.match-status.outputs.lock_cache_hit }}
+  target-cache-key:
+    description: Computed exact Layer 1 cache key for save-rust-target-cache.
+    value: ${{ steps.key-meta.outputs.target_key }}
+  cache-paths:
+    description: Canonical multiline path list matching save-rust-target-cache.
+    value: ${{ steps.key-meta.outputs.restore_paths }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Rust cache keys and export build env
+      id: key-meta
+      shell: bash
+      env:
+        JOB_KEY: ${{ inputs.cache-job-key }}
+        STABLE_META: ${{ inputs.stable-build-metadata }}
+        TARGET_DIR_INPUT: ${{ inputs.target-dir }}
+        EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
+        LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}
+      run: |
+        set -euo pipefail
+        base_prefix="target-ws-v4-${RUNNER_OS}-${RUNNER_ARCH}-${JOB_KEY}-1.99.1"
+        lock_prefix="${base_prefix}-${LOCK_HASH}"
+        target_key="${lock_prefix}-${GITHUB_SHA}"
+
+        {
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_PROFILE_DEV_DEBUG=0"
+          echo "CARGO_PROFILE_TEST_DEBUG=0"
+          if [ "$STABLE_META" = "true" ]; then
+            echo "GIT_SHA=0000000"
+            echo "SOURCE_DATE_EPOCH=0"
+          else
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)"
+          fi
+        } >> "$GITHUB_ENV"
+
+        {
+          echo "base_prefix=$base_prefix"
+          echo "lock_prefix=$lock_prefix"
+          echo "target_key=$target_key"
+          echo "restore_paths<<__EOF__"
+          echo "$TARGET_DIR_INPUT"
+          if [ -n "$EXTRA_PATHS_INPUT" ]; then
+            printf '%s\n' "$EXTRA_PATHS_INPUT"
+          fi
+          echo "__EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Cache shared Cargo registry and git db
+      if: inputs.save-caches != 'false'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore shared Cargo registry and git db
+      if: inputs.save-caches == 'false'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore Layer 1 rolling Cargo target dependencies
+      id: target-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.key-meta.outputs.restore_paths }}
+        key: ${{ steps.key-meta.outputs.target_key }}
+        restore-keys: |
+          ${{ steps.key-meta.outputs.lock_prefix }}-
+          ${{ steps.key-meta.outputs.base_prefix }}-
+
+    - name: Unpack bundled admin dist, evaluate lock cache hit, and restore workspace mtimes
+      id: match-status
+      shell: bash
+      env:
+        MATCHED_KEY: ${{ steps.target-restore.outputs.cache-matched-key }}
+        LOCK_PREFIX: ${{ steps.key-meta.outputs.lock_prefix }}-
+        RESTORE_MTIMES: ${{ inputs.restore-ws-mtimes }}
+        TARGET_DIR_INPUT: ${{ inputs.target-dir }}
+      run: |
+        set -euo pipefail
+        if [ -n "$MATCHED_KEY" ] && [[ "$MATCHED_KEY" == "$LOCK_PREFIX"* ]]; then
+          echo "lock_cache_hit=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "lock_cache_hit=false" >> "$GITHUB_OUTPUT"
+        fi
+        if [ -d "${TARGET_DIR_INPUT}/.admin-web-dist" ]; then
+          mkdir -p crates/cc-lb-admin/web
+          rm -rf crates/cc-lb-admin/web/dist
+          cp -a "${TARGET_DIR_INPUT}/.admin-web-dist" crates/cc-lb-admin/web/dist
+        fi
+        if [ "$RESTORE_MTIMES" = "true" ]; then
+          node scripts/ws-mtimes.mjs restore --in "${TARGET_DIR_INPUT}/.ws-mtimes.json"
+        fi

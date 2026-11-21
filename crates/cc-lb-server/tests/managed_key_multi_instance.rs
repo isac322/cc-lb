@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
+use futures_util::FutureExt as _;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -110,93 +112,121 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
+    let Some(admin_url) = ci_postgres_url() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
     let rebind_completions = rebind_completions();
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
-
-    reset_managed_key_tables(&database_url).await?;
-    let upstream = spawn_ok_upstream().await?;
-    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
-
-    let mut issue_rebinds = rebind_completions.subscribe();
-    let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
-    assert_eq!(issued.principal_id, PRINCIPAL_ID);
-    let authenticated = wait_for_proxy_status(
-        instance_b.proxy_addr,
-        &issued.plaintext_key,
-        200,
-        401,
-        &mut issue_rebinds,
+    let db = crate::common::IsolatedPostgresDb::create(
+        &admin_url,
+        "cc_lb_mkey",
+        "CC_LB_PG_FULL_TEMPLATE",
     )
     .await?;
-    assert!(
-        authenticated.body.contains(r#""type":"message""#),
-        "unexpected proxy success body: {}",
-        authenticated.body
-    );
+    let database_url = db.url.clone();
 
-    let mut revoke_rebinds = rebind_completions.subscribe();
-    let revoked = revoke_key(instance_a.admin_addr, &issued.key_id).await?;
-    assert_eq!(
-        revoked.status, 200,
-        "instance A revoke should succeed: body={}",
-        revoked.body
-    );
-    wait_for_proxy_status(
-        instance_b.proxy_addr,
-        &issued.plaintext_key,
-        401,
-        200,
-        &mut revoke_rebinds,
-    )
-    .await?;
+    let outcome = AssertUnwindSafe(async move {
+        let upstream = spawn_ok_upstream().await?;
+        let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
-    Ok(())
+        let mut issue_rebinds = rebind_completions.subscribe();
+        let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
+        assert_eq!(issued.principal_id, PRINCIPAL_ID);
+        let authenticated = wait_for_proxy_status(
+            instance_b.proxy_addr,
+            &issued.plaintext_key,
+            200,
+            401,
+            &mut issue_rebinds,
+        )
+        .await?;
+        assert!(
+            authenticated.body.contains(r#""type":"message""#),
+            "unexpected proxy success body: {}",
+            authenticated.body
+        );
+
+        let mut revoke_rebinds = rebind_completions.subscribe();
+        let revoked = revoke_key(instance_a.admin_addr, &issued.key_id).await?;
+        assert_eq!(
+            revoked.status, 200,
+            "instance A revoke should succeed: body={}",
+            revoked.body
+        );
+        wait_for_proxy_status(
+            instance_b.proxy_addr,
+            &issued.plaintext_key,
+            401,
+            200,
+            &mut revoke_rebinds,
+        )
+        .await?;
+
+        Ok(())
+    })
+    .catch_unwind()
+    .await;
+    let _ = db.drop().await;
+    match outcome {
+        Ok(res) => res,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_cross_instance_issue() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
+    let Some(admin_url) = ci_postgres_url() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
     let _ = rebind_completions();
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
+    let db = crate::common::IsolatedPostgresDb::create(
+        &admin_url,
+        "cc_lb_mkey",
+        "CC_LB_PG_FULL_TEMPLATE",
+    )
+    .await?;
+    let database_url = db.url.clone();
 
-    reset_managed_key_tables(&database_url).await?;
-    let upstream = spawn_ok_upstream().await?;
-    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
+    let outcome = AssertUnwindSafe(async move {
+        let upstream = spawn_ok_upstream().await?;
+        let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
-    let mut tasks = Vec::with_capacity(EXPECTED_ISSUED_KEYS);
-    for index in 0..TASKS_PER_INSTANCE {
-        let admin_addr = instance_a.admin_addr;
-        tasks.push(tokio::task::spawn(async move {
-            issue_key(admin_addr, &format!("instance-a-{index}")).await
-        }));
+        let mut tasks = Vec::with_capacity(EXPECTED_ISSUED_KEYS);
+        for index in 0..TASKS_PER_INSTANCE {
+            let admin_addr = instance_a.admin_addr;
+            tasks.push(tokio::task::spawn(async move {
+                issue_key(admin_addr, &format!("instance-a-{index}")).await
+            }));
+        }
+        for index in 0..TASKS_PER_INSTANCE {
+            let admin_addr = instance_b.admin_addr;
+            tasks.push(tokio::task::spawn(async move {
+                issue_key(admin_addr, &format!("instance-b-{index}")).await
+            }));
+        }
+
+        let mut key_ids = HashSet::with_capacity(EXPECTED_ISSUED_KEYS);
+        for task in tasks {
+            let issued = task.await??;
+            assert!(
+                key_ids.insert(issued.key_id),
+                "duplicate key_id issued by concurrent requests"
+            );
+        }
+
+        assert_eq!(key_ids.len(), EXPECTED_ISSUED_KEYS);
+        println!("issued={} unique={}", EXPECTED_ISSUED_KEYS, key_ids.len());
+
+        Ok(())
+    })
+    .catch_unwind()
+    .await;
+    let _ = db.drop().await;
+    match outcome {
+        Ok(res) => res,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
-    for index in 0..TASKS_PER_INSTANCE {
-        let admin_addr = instance_b.admin_addr;
-        tasks.push(tokio::task::spawn(async move {
-            issue_key(admin_addr, &format!("instance-b-{index}")).await
-        }));
-    }
-
-    let mut key_ids = HashSet::with_capacity(EXPECTED_ISSUED_KEYS);
-    for task in tasks {
-        let issued = task.await??;
-        assert!(
-            key_ids.insert(issued.key_id),
-            "duplicate key_id issued by concurrent requests"
-        );
-    }
-
-    assert_eq!(key_ids.len(), EXPECTED_ISSUED_KEYS);
-    println!("issued={} unique={}", EXPECTED_ISSUED_KEYS, key_ids.len());
-
-    Ok(())
 }
 
 fn ci_postgres_url() -> Option<String> {
@@ -329,32 +359,6 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
         Ok(_) | Err(StorageError::Conflict { .. }) => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await?;
-    let storage: Arc<dyn StorageTrait> =
-        Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage.initialize().await?;
-    sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM upstream_spec_v1 WHERE name = 'test-upstream'")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DROP SCHEMA IF EXISTS cc_lb_scheduler CASCADE")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
-
-    Ok(())
 }
 
 struct RunningUpstream {

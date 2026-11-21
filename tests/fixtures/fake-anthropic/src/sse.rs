@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::modes::FakeMode;
+use crate::oauth_pause::OAuthRefreshPause;
 use crate::routes::with_fixture_headers;
 use crate::weather::RequestWeather;
 
@@ -15,11 +16,17 @@ pub(crate) fn streaming_response(
     mode: FakeMode,
     slow_mode_bps: u64,
     weather: RequestWeather,
+    stream_pause_after_first_delta: Option<OAuthRefreshPause>,
 ) -> Response {
     let stream = async_stream::stream! {
         let mut event_index = 0_u64;
         let mut delta_index = 0_u64;
         for (event_name, data) in stream_items(&model, mode, weather.delta_count()) {
+            if delta_index == 1
+                && let Some(pause) = &stream_pause_after_first_delta
+            {
+                pause.pause_response().await;
+            }
             let weather_delay = weather.delay_for_event(event_index, event_name, delta_index);
             if weather_delay > Duration::ZERO {
                 sleep(weather_delay).await;

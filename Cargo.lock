@@ -665,6 +665,7 @@ dependencies = [
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
  "cc-lb-vertex-auth",
+ "cc-lb-workspace-hack",
  "chrono",
  "fake-anthropic",
  "figment",
@@ -713,6 +714,7 @@ version = "2.2.1"
 dependencies = [
  "base64 0.23.1",
  "cc-lb-oauth-protocol",
+ "cc-lb-workspace-hack",
  "chacha20poly1305",
  "serde",
  "serde_json",
@@ -723,6 +725,9 @@ dependencies = [
 [[package]]
 name = "cc-lb-clock"
 version = "0.1.0"
+dependencies = [
+ "cc-lb-workspace-hack",
+]
 
 [[package]]
 name = "cc-lb-config"
@@ -730,6 +735,7 @@ version = "2.2.1"
 dependencies = [
  "cc-lb-domain",
  "cc-lb-oauth-protocol",
+ "cc-lb-workspace-hack",
  "clap",
  "figment",
  "http",
@@ -762,6 +768,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-workspace-hack",
  "chrono",
  "dashmap",
  "fake-anthropic",
@@ -795,6 +802,7 @@ dependencies = [
 name = "cc-lb-domain"
 version = "2.2.1"
 dependencies = [
+ "cc-lb-workspace-hack",
  "schemars",
  "serde",
  "serde_json",
@@ -833,6 +841,7 @@ dependencies = [
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-workspace-hack",
  "chrono",
  "dashmap",
  "fake-anthropic",
@@ -891,6 +900,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-request-log",
+ "cc-lb-workspace-hack",
  "serde",
  "serde_json",
  "uuid",
@@ -912,6 +922,7 @@ name = "cc-lb-oauth-protocol"
 version = "2.2.1"
 dependencies = [
  "base64 0.23.1",
+ "cc-lb-workspace-hack",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -924,6 +935,7 @@ version = "2.2.1"
 dependencies = [
  "bytes",
  "cc-lb-domain",
+ "cc-lb-workspace-hack",
  "http",
  "insta",
  "metrics",
@@ -994,6 +1006,7 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
  "hex",
  "http",
  "http-body-util",
@@ -1020,6 +1033,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-routing",
+ "cc-lb-workspace-hack",
  "http",
  "proptest",
 ]
@@ -1030,6 +1044,7 @@ version = "2.2.1"
 dependencies = [
  "cc-lb-domain",
  "cc-lb-storage-api",
+ "cc-lb-workspace-hack",
  "http",
  "serde",
  "uuid",
@@ -1040,6 +1055,7 @@ name = "cc-lb-request-log"
 version = "2.2.1"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-workspace-hack",
  "chrono",
  "serde",
  "serde_json",
@@ -1053,6 +1069,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-upstream",
+ "cc-lb-workspace-hack",
  "http",
  "serde",
  "uuid",
@@ -1106,6 +1123,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
  "chrono",
  "cron",
  "fake-anthropic",
@@ -1172,6 +1190,7 @@ dependencies = [
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
  "cc-lb-vertex-auth",
+ "cc-lb-workspace-hack",
  "chrono",
  "clap",
  "fake-anthropic",
@@ -1231,6 +1250,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-oauth-protocol",
  "cc-lb-upstream",
+ "cc-lb-workspace-hack",
  "fake-anthropic",
  "http",
  "secrecy",
@@ -1253,6 +1273,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-storage-api",
  "cc-lb-upstream",
+ "cc-lb-workspace-hack",
  "dashmap",
  "http",
  "http-body-util",
@@ -1278,6 +1299,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-upstream",
  "cc-lb-vertex-auth",
+ "cc-lb-workspace-hack",
  "http",
  "serde_json",
  "sonic-rs",
@@ -1298,6 +1320,7 @@ dependencies = [
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
  "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
  "serde",
  "serde_json",
  "tempfile",
@@ -1323,6 +1346,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
  "futures",
  "serde_json",
  "sha2 0.11.1",
@@ -1346,6 +1370,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
+ "cc-lb-workspace-hack",
  "chrono",
  "metrics",
  "serde",
@@ -1370,6 +1395,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
+ "cc-lb-workspace-hack",
  "metrics",
  "serde",
  "serde_json",
@@ -1411,6 +1437,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-server",
+ "cc-lb-workspace-hack",
  "fake-anthropic",
  "ring",
  "rustls",
@@ -1427,6 +1454,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-domain",
+ "cc-lb-workspace-hack",
  "http",
  "thiserror 2.0.21",
  "url",
@@ -1440,6 +1468,7 @@ dependencies = [
  "base64 0.23.1",
  "cc-lb-clock",
  "cc-lb-domain",
+ "cc-lb-workspace-hack",
  "chrono",
  "http",
  "metrics",
@@ -1450,6 +1479,94 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "cc-lb-workspace-hack"
+version = "2.2.1"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "apalis",
+ "apalis-core",
+ "apalis-postgres",
+ "apalis-sqlite",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "bstr",
+ "bumpalo",
+ "bytes",
+ "cc",
+ "chrono",
+ "constant_time_eq",
+ "crossbeam-epoch",
+ "crypto-common 0.1.7",
+ "data-encoding",
+ "digest 0.10.7",
+ "digest 0.11.3",
+ "either",
+ "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hashbrown 0.17.1",
+ "hickory-resolver",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "indexmap",
+ "insta",
+ "ipnet",
+ "libc",
+ "libsqlite3-sys",
+ "log",
+ "metrics-exporter-prometheus",
+ "metrics-util",
+ "mime_guess",
+ "num-traits",
+ "once_cell",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-atomic",
+ "proc-macro2",
+ "proptest",
+ "quote",
+ "rand 0.10.3",
+ "rand 0.8.8",
+ "rand 0.9.5",
+ "rand_core 0.6.4",
+ "regex-automata",
+ "regex-syntax",
+ "reqwest",
+ "ring",
+ "rkyv",
+ "rustc-hash",
+ "rustix",
+ "rustls",
+ "semver",
+ "serde_core",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha2 0.11.1",
+ "simdutf8",
+ "smallvec",
+ "sonic-rs",
+ "sqlx",
+ "subtle",
+ "syn 2.0.119",
+ "syn 3.0.9",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing-core",
+ "tracing-subscriber",
+ "trybuild",
+ "ulid",
+ "uuid",
+ "wasmtime",
 ]
 
 [[package]]
@@ -2142,6 +2259,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bytes",
+ "cc-lb-workspace-hack",
  "clap",
  "http",
  "http-body-util",
@@ -3265,6 +3383,7 @@ version = "2.2.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "cc-lb-workspace-hack",
  "clap",
  "http",
  "ring",
@@ -5103,6 +5222,7 @@ dependencies = [
  "cc-lb-server",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
  "http",
  "serde_json",
  "sqlx",
@@ -5117,12 +5237,16 @@ dependencies = [
 name = "tests-loom"
 version = "2.2.1"
 dependencies = [
+ "cc-lb-workspace-hack",
  "loom",
 ]
 
 [[package]]
 name = "tests-multi-replica"
 version = "2.2.1"
+dependencies = [
+ "cc-lb-workspace-hack",
+]
 
 [[package]]
 name = "thiserror"

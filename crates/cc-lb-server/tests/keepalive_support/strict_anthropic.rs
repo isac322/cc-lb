@@ -135,56 +135,76 @@ pub fn cache_key(value: &Value) -> String {
 pub fn cache_keys(value: &Value) -> Vec<String> {
     // /en/build-with-claude/prompt-caching, How prompt caching works: prefix order.
     let mut keys = Vec::new();
+    let tools = value.get("tools");
     for field in ["tools", "system"] {
         if let Some(items) = value.get(field).and_then(Value::as_array) {
             for (index, item) in items.iter().enumerate() {
                 if item.get("cache_control").is_some() {
-                    let mut prefix = json!({});
-                    if field == "system"
-                        && let Some(tools) = value.get("tools")
-                    {
-                        prefix["tools"] = tools.clone();
+                    let prefix_slice = &items[..=index];
+                    if field == "tools" {
+                        keys.push(request_key_parts(
+                            value,
+                            Some(BorrowedVal::Slice(prefix_slice)),
+                            None,
+                            None,
+                        ));
+                    } else {
+                        keys.push(request_key_parts(
+                            value,
+                            tools.map(BorrowedVal::Value),
+                            Some(BorrowedVal::Slice(prefix_slice)),
+                            None,
+                        ));
                     }
-                    prefix[field] = Value::Array(items[..=index].to_vec());
-                    keys.push(request_key(value, &prefix));
                 }
             }
-        } else if value
-            .get(field)
-            .and_then(Value::as_object)
-            .and_then(|object| object.get("cache_control"))
-            .is_some()
+        } else if let Some(obj) = value.get(field)
+            && obj
+                .as_object()
+                .and_then(|object| object.get("cache_control"))
+                .is_some()
         {
-            let mut prefix = json!({});
-            if field == "system"
-                && let Some(tools) = value.get("tools")
-            {
-                prefix["tools"] = tools.clone();
+            if field == "tools" {
+                keys.push(request_key_parts(
+                    value,
+                    Some(BorrowedVal::Value(obj)),
+                    None,
+                    None,
+                ));
+            } else {
+                keys.push(request_key_parts(
+                    value,
+                    tools.map(BorrowedVal::Value),
+                    Some(BorrowedVal::Value(obj)),
+                    None,
+                ));
             }
-            prefix[field] = value[field].clone();
-            keys.push(request_key(value, &prefix));
         }
     }
+    let system = value.get("system");
     if let Some(messages) = value.get("messages").and_then(Value::as_array) {
         for (message_index, message) in messages.iter().enumerate() {
             if message.get("cache_control").is_some() {
-                let mut prefix = value.clone();
-                prefix["messages"] = Value::Array(messages[..=message_index].to_vec());
-                keys.push(request_key(value, &prefix));
+                keys.push(request_key_parts(
+                    value,
+                    tools.map(BorrowedVal::Value),
+                    system.map(BorrowedVal::Value),
+                    Some(BorrowedVal::Slice(&messages[..=message_index])),
+                ));
             }
             if let Some(blocks) = message.get("content").and_then(Value::as_array) {
                 for (block_index, block) in blocks.iter().enumerate() {
                     if block.get("cache_control").is_some() {
-                        let mut prefix = value.clone();
-                        let mut selected = messages[..=message_index].to_vec();
-                        if let Some(content) = selected[message_index]
-                            .get_mut("content")
-                            .and_then(Value::as_array_mut)
-                        {
-                            content.truncate(block_index + 1);
-                        }
-                        prefix["messages"] = Value::Array(selected);
-                        keys.push(request_key(value, &prefix));
+                        keys.push(request_key_parts(
+                            value,
+                            tools.map(BorrowedVal::Value),
+                            system.map(BorrowedVal::Value),
+                            Some(BorrowedVal::MessagesTruncated {
+                                preceding: &messages[..message_index],
+                                last: message,
+                                content_len: block_index + 1,
+                            }),
+                        ));
                     }
                 }
             }
@@ -193,32 +213,120 @@ pub fn cache_keys(value: &Value) -> Vec<String> {
     keys
 }
 
-fn request_key(value: &Value, prefix: &Value) -> String {
-    let mut key = Map::new();
-    key.insert(
-        "model".to_owned(),
-        value.get("model").cloned().unwrap_or(Value::Null),
-    );
-    for field in ["tools", "system", "messages"] {
-        key.insert(
-            field.to_owned(),
-            prefix.get(field).cloned().unwrap_or(Value::Null),
-        );
+enum BorrowedVal<'a> {
+    Value(&'a Value),
+    Slice(&'a [Value]),
+    MessagesTruncated {
+        preceding: &'a [Value],
+        last: &'a Value,
+        content_len: usize,
+    },
+}
+
+impl serde::Serialize for BorrowedVal<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Value(v) => v.serialize(serializer),
+            Self::Slice(items) => {
+                use serde::ser::SerializeSeq as _;
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in *items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Self::MessagesTruncated {
+                preceding,
+                last,
+                content_len,
+            } => {
+                use serde::ser::SerializeSeq as _;
+                let mut seq = serializer.serialize_seq(Some(preceding.len() + 1))?;
+                for msg in *preceding {
+                    seq.serialize_element(msg)?;
+                }
+                seq.serialize_element(&TruncatedMessage(last, *content_len))?;
+                seq.end()
+            }
+        }
     }
-    key.insert("thinking".to_owned(), thinking_key(value.get("thinking")));
-    key.insert(
-        "effort".to_owned(),
-        value
-            .get("output_config")
-            .and_then(|config| config.get("effort"))
-            .cloned()
-            .unwrap_or_else(|| Value::String("default".to_owned())),
-    );
-    key.insert(
-        "tool_choice".to_owned(),
-        value.get("tool_choice").cloned().unwrap_or(Value::Null),
-    );
-    digest(&Value::Object(key))
+}
+
+struct TruncatedMessage<'a>(&'a Value, usize);
+
+impl serde::Serialize for TruncatedMessage<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let Some(obj) = self.0.as_object() else {
+            return self.0.serialize(serializer);
+        };
+        let mut map = serializer.serialize_map(Some(obj.len()))?;
+        for (k, v) in obj {
+            if k == "content"
+                && let Some(arr) = v.as_array()
+            {
+                map.serialize_entry(k, &BorrowedVal::Slice(&arr[..self.1.min(arr.len())]))?;
+            } else {
+                map.serialize_entry(k, v)?;
+            }
+        }
+        map.end()
+    }
+}
+
+struct ShaWriter(Sha256);
+
+impl std::io::Write for ShaWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn request_key(value: &Value, prefix: &Value) -> String {
+    request_key_parts(
+        value,
+        prefix.get("tools").map(BorrowedVal::Value),
+        prefix.get("system").map(BorrowedVal::Value),
+        prefix.get("messages").map(BorrowedVal::Value),
+    )
+}
+
+fn request_key_parts(
+    value: &Value,
+    tools: Option<BorrowedVal<'_>>,
+    system: Option<BorrowedVal<'_>>,
+    messages: Option<BorrowedVal<'_>>,
+) -> String {
+    #[derive(serde::Serialize)]
+    struct KeyFields<'a> {
+        effort: &'a str,
+        messages: BorrowedVal<'a>,
+        model: &'a Value,
+        system: BorrowedVal<'a>,
+        thinking: Value,
+        tool_choice: &'a Value,
+        tools: BorrowedVal<'a>,
+    }
+    let effort = value
+        .get("output_config")
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str);
+    let key = KeyFields {
+        effort: effort.unwrap_or("default"),
+        messages: messages.unwrap_or(BorrowedVal::Value(&Value::Null)),
+        model: value.get("model").unwrap_or(&Value::Null),
+        system: system.unwrap_or(BorrowedVal::Value(&Value::Null)),
+        thinking: thinking_key(value.get("thinking")),
+        tool_choice: value.get("tool_choice").unwrap_or(&Value::Null),
+        tools: tools.unwrap_or(BorrowedVal::Value(&Value::Null)),
+    };
+    let mut writer = ShaWriter(Sha256::new());
+    let _ = serde_json::to_writer(&mut writer, &key);
+    hex::encode(writer.0.finalize())
 }
 
 fn validate_thinking(
@@ -544,11 +652,6 @@ fn thinking_key(value: Option<&Value>) -> Value {
     Value::Object(key)
 }
 
-fn digest(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    hex::encode(Sha256::digest(bytes))
-}
-
 /// Anthropic error JSON used for all strict validation failures.
 pub fn invalid_request_body(message: impl Into<String>) -> Value {
     json!({"type":"error","error":{"type":"invalid_request_error","message":message.into()}})
@@ -772,5 +875,117 @@ mod tests {
         assert!(validate_messages_request(&value, &headers(false)).is_ok());
         value["system"] = json!([block]);
         assert!(validate_messages_request(&value, &headers(false)).is_err());
+    }
+
+    #[test]
+    fn borrowed_cache_keys_match_reference_value_serialization() {
+        fn ref_digest(value: &Value) -> String {
+            hex::encode(Sha256::digest(serde_json::to_vec(value).unwrap()))
+        }
+        fn ref_key(value: &Value, prefix: &Value) -> String {
+            let mut key = Map::new();
+            key.insert(
+                "model".to_owned(),
+                value.get("model").cloned().unwrap_or(Value::Null),
+            );
+            for field in ["tools", "system", "messages"] {
+                key.insert(
+                    field.to_owned(),
+                    prefix.get(field).cloned().unwrap_or(Value::Null),
+                );
+            }
+            key.insert("thinking".to_owned(), thinking_key(value.get("thinking")));
+            key.insert(
+                "effort".to_owned(),
+                value
+                    .get("output_config")
+                    .and_then(|c| c.get("effort"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("default".to_owned())),
+            );
+            key.insert(
+                "tool_choice".to_owned(),
+                value.get("tool_choice").cloned().unwrap_or(Value::Null),
+            );
+            ref_digest(&Value::Object(key))
+        }
+        fn ref_keys(value: &Value) -> Vec<String> {
+            let mut keys = Vec::new();
+            for field in ["tools", "system"] {
+                if let Some(items) = value.get(field).and_then(Value::as_array) {
+                    for (index, item) in items.iter().enumerate() {
+                        if item.get("cache_control").is_some() {
+                            let mut prefix = json!({});
+                            if field == "system"
+                                && let Some(tools) = value.get("tools")
+                            {
+                                prefix["tools"] = tools.clone();
+                            }
+                            prefix[field] = Value::Array(items[..=index].to_vec());
+                            keys.push(ref_key(value, &prefix));
+                        }
+                    }
+                }
+            }
+            if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+                for (mi, msg) in messages.iter().enumerate() {
+                    if msg.get("cache_control").is_some() {
+                        let mut prefix = value.clone();
+                        prefix["messages"] = Value::Array(messages[..=mi].to_vec());
+                        keys.push(ref_key(value, &prefix));
+                    }
+                    if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
+                        for (bi, block) in blocks.iter().enumerate() {
+                            if block.get("cache_control").is_some() {
+                                let mut prefix = value.clone();
+                                let mut selected = messages[..=mi].to_vec();
+                                selected[mi].as_object_mut().unwrap().insert(
+                                    "content".to_owned(),
+                                    Value::Array(blocks[..=bi].to_vec()),
+                                );
+                                prefix["messages"] = Value::Array(selected);
+                                keys.push(ref_key(value, &prefix));
+                            }
+                        }
+                    }
+                }
+            }
+            keys
+        }
+
+        let sample = json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 4096,
+            "tools": [{"name": "bash", "cache_control": {"type": "ephemeral"}}],
+            "system": [
+                {"type": "text", "text": "sys-0"},
+                {"type": "text", "text": "sys-1", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "output_config": {"effort": "high"},
+            "tool_choice": {"type": "auto"},
+            "messages": [
+                {
+                    "role": "user",
+                    "cache_control": {"type": "ephemeral"},
+                    "content": [
+                        {"type": "text", "text": "b0"},
+                        {"type": "text", "text": "b1", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "b2"}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "a0", "cache_control": {"type": "ephemeral"}}
+                    ]
+                }
+            ]
+        });
+        assert_eq!(cache_keys(&sample), ref_keys(&sample));
+        assert_eq!(
+            cache_key(&base(json!({"type": "adaptive"}))),
+            ref_key(&base(json!({"type": "adaptive"})), &Value::Null)
+        );
     }
 }

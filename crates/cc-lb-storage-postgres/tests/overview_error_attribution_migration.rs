@@ -114,7 +114,7 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
             ).bind(resolution).fetch_one(pool).await?;
             assert_eq!(total, 10002);
         }
-        let fresh = Fixture::create(&url).await?;
+        let fresh = Fixture::create_templated(&url).await?;
         let parity: TestResult = async {
             fresh.storage.initialize().await?;
             fresh.storage.verify_schema_current().await?;
@@ -395,11 +395,31 @@ async fn shape(
 struct Fixture {
     database: String,
     options: PgConnectOptions,
-    admin: PgPool,
+    admin: Option<PgPool>,
+    isolated: Option<crate::pg_test_support::IsolatedPg>,
     storage: PostgresStorage,
 }
 
 impl Fixture {
+    async fn create_templated(url: &str) -> TestResult<Self> {
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        let options = isolated.connect_options();
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            database: String::new(),
+            options,
+            admin: None,
+            isolated: Some(isolated),
+            storage: PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock)),
+        })
+    }
+
     async fn create(url: &str) -> TestResult<Self> {
         let database = format!("cc_lb_attribution_{}", Uuid::new_v4().simple());
         let base = PgConnectOptions::from_str(url)?;
@@ -418,20 +438,30 @@ impl Fixture {
         Ok(Self {
             database,
             options,
-            admin,
+            admin: Some(admin),
+            isolated: None,
             storage: PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock)),
         })
     }
 
     async fn drop_database(self) -> TestResult {
         self.storage.pool().close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.database
-        )))
-        .execute(&self.admin)
-        .await?;
-        self.admin.close().await;
+        if let Some(isolated) = self.isolated {
+            if let Some(admin) = self.admin {
+                admin.close().await;
+            }
+            isolated.drop().await?;
+            return Ok(());
+        }
+        if let Some(admin) = self.admin {
+            sqlx::query(AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.database
+            )))
+            .execute(&admin)
+            .await?;
+            admin.close().await;
+        }
         Ok(())
     }
 }

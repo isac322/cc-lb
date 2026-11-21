@@ -12,7 +12,7 @@ use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
+    CacheKeepaliveSessionStore, CacheTtl, UpstreamStore,
 };
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -37,19 +37,14 @@ impl RenewalFixture {
     pub(super) async fn new(cache_read_input_tokens: u64) -> Self {
         let temp_dir = tempfile::tempdir().expect("temporary directory");
         let clock = Arc::new(TestClock::new_at_secs(1_000));
-        let database_url = format!(
-            "sqlite://{}",
-            temp_dir.path().join("renewal.sqlite").display()
-        );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
-                .await
-                .expect("open sqlite storage"),
-        );
-        storage
-            .initialize()
+            crate::common::templated_sqlite_storage(
+                &temp_dir.path().join("renewal.sqlite"),
+                clock.clone(),
+            )
             .await
-            .expect("initialize sqlite storage");
+            .expect("open sqlite storage"),
+        );
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {

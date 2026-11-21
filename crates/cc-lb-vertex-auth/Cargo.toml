@@ -22,5 +22,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 url.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true
+
 [lints.rust]
 unused_must_use = "forbid"

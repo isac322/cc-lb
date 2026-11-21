@@ -22,7 +22,7 @@ metrics_addr = "127.0.0.1:0"
 instance_url = "http://127.0.0.1:9090"
 
 [storage.pool]
-acquire_timeout_secs = 3
+acquire_timeout_secs = 1
 
 [aead]
 key_env = "CC_LB_AEAD_KEY"

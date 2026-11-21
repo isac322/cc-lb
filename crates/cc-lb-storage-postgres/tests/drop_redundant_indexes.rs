@@ -1,12 +1,12 @@
 //! Redundant indexes remain removed after the relational request-event cutover.
 //! Request events have no JSON payload column; diagnostics remain out of SQL.
 
-use std::{collections::BTreeSet, str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 fn postgres_url() -> Option<String> {
@@ -317,65 +317,24 @@ async fn assert_relational_schema(pool: &PgPool, storage: &PostgresStorage) -> R
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("drop_redundant_indexes_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        match PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await
-        {
-            Ok(pool) => Ok(Self {
-                schema,
-                admin_pool,
-                pool,
-            }),
+        let isolated = crate::pg_test_support::IsolatedPg::create_empty(url).await?;
+        match isolated.pool(4).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
             Err(error) => {
-                sqlx::query(AssertSqlSafe(format!(
-                    "DROP SCHEMA IF EXISTS {} CASCADE",
-                    quote_ident(&schema)
-                )))
-                .execute(&admin_pool)
-                .await
-                .context("drop schema after isolated pool creation failed")?;
-                admin_pool.close().await;
-                Err(error.into())
+                let _ = isolated.drop().await;
+                Err(error)
             }
         }
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        }),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

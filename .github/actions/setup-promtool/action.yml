@@ -11,6 +11,7 @@ runs:
   using: composite
   steps:
     - name: Restore latest promtool fallback cache
+      if: ${{ inputs.version == 'latest' }}
       uses: actions/cache@v6
       with:
         path: ${{ runner.tool_cache }}/promtool

@@ -47,16 +47,29 @@ install_client() {
   local bin_path="$client_dir/node_modules/.bin/$binary"
   mkdir -p "$client_dir"
 
+  if [ "${REAL_CLIENT_SKIP_INSTALL:-0}" = "1" ]; then
+    if [ -x "$bin_path" ]; then
+      printf -v "$env_name" '%s' "$bin_path"
+      export "$env_name"
+      return 0
+    fi
+    printf 'FAIL reason: %s: binary missing at %s while REAL_CLIENT_SKIP_INSTALL=1\n' \
+      "$client" "$bin_path" >&2
+    return 1
+  fi
+
   if [ -x "$bin_path" ] &&
     installed_packages_match "$client_dir" "${package_specs[@]}" && {
     [ "$installer_preference" = "auto" ] ||
       grep -q "installer=$installer_preference" "$status_file" 2>/dev/null
   }; then
-    if [ "$installer_preference" = "auto" ]; then
-      printf 'PASS %s %s@%s binary=%s\n' "$client" "$package" "$version" "$bin_path" > "$status_file"
-    else
-      printf 'PASS %s %s@%s binary=%s installer=%s\n' \
-        "$client" "$package" "$version" "$bin_path" "$installer_preference" > "$status_file"
+    if [ ! -f "$status_file" ]; then
+      if [ "$installer_preference" = "auto" ]; then
+        printf 'PASS %s %s@%s binary=%s\n' "$client" "$package" "$version" "$bin_path" > "$status_file"
+      else
+        printf 'PASS %s %s@%s binary=%s installer=%s\n' \
+          "$client" "$package" "$version" "$bin_path" "$installer_preference" > "$status_file"
+      fi
     fi
     printf -v "$env_name" '%s' "$bin_path"
     export "$env_name"
@@ -217,15 +230,55 @@ print("PASS senpi request-family markers match pinned package")
 PY
 }
 
-install_requested claude-code @anthropic-ai/claude-code 2.1.303 claude CLAUDE_CODE_BIN
-install_requested opencode opencode-ai 1.19.3 opencode OPENCODE_BIN
-# Pin the published 1.3.0 package set explicitly so the tested pi binary and
-# its companion packages stay in lockstep.
-install_requested pi @earendil-works/pi-coding-agent 1.3.0 pi PI_BIN npm \
-  @earendil-works/pi-ai@1.3.0 \
-  @earendil-works/pi-agent-core@1.3.0 \
-  @earendil-works/pi-tui@1.3.0
-install_requested senpi @code-yeongyu/senpi 2026.10.18-1 senpi SENPI_BIN
-if [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; then
+if [ -z "${REAL_CLIENT_ONLY:-}" ] && [ "${REAL_CLIENT_SKIP_INSTALL:-0}" != "1" ]; then
+  install_client claude-code @anthropic-ai/claude-code 2.1.303 claude CLAUDE_CODE_BIN &
+  pid_claude=$!
+  install_client opencode opencode-ai 1.19.3 opencode OPENCODE_BIN &
+  pid_opencode=$!
+  # Pin the published 1.3.0 package set explicitly so the tested pi binary and
+  # its companion packages stay in lockstep.
+  install_client pi @earendil-works/pi-coding-agent 1.3.0 pi PI_BIN npm \
+    @earendil-works/pi-ai@1.3.0 \
+    @earendil-works/pi-agent-core@1.3.0 \
+    @earendil-works/pi-tui@1.3.0 &
+  pid_pi=$!
+  install_client senpi @code-yeongyu/senpi 2026.10.18-1 senpi SENPI_BIN &
+  pid_senpi=$!
+
+  install_failed=0
+  for pid in "$pid_claude" "$pid_opencode" "$pid_pi" "$pid_senpi"; do
+    wait "$pid" || install_failed=1
+  done
+  [ "$install_failed" -eq 0 ] || exit 1
+
+  export CLAUDE_CODE_BIN="$TARGET_DIR/claude-code/node_modules/.bin/claude"
+  export OPENCODE_BIN="$TARGET_DIR/opencode/node_modules/.bin/opencode"
+  export PI_BIN="$TARGET_DIR/pi/node_modules/.bin/pi"
+  export SENPI_BIN="$TARGET_DIR/senpi/node_modules/.bin/senpi"
+
+  # opencode-ai installs both AVX2 and baseline/musl optional packages on Linux x64 (~177 MB dead weight).
+  if [ "$(uname -s)" = "Linux" ] && grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
+    for unused_opencode_dir in \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-baseline" \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-musl" \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-baseline-musl"; do
+      if [ -d "$unused_opencode_dir" ]; then
+        rm -rf "$unused_opencode_dir"
+      fi
+    done
+    "$OPENCODE_BIN" --version >/dev/null
+  fi
+else
+  install_requested claude-code @anthropic-ai/claude-code 2.1.303 claude CLAUDE_CODE_BIN
+  install_requested opencode opencode-ai 1.19.3 opencode OPENCODE_BIN
+  # Pin the published 1.3.0 package set explicitly so the tested pi binary and
+  # its companion packages stay in lockstep.
+  install_requested pi @earendil-works/pi-coding-agent 1.3.0 pi PI_BIN npm \
+    @earendil-works/pi-ai@1.3.0 \
+    @earendil-works/pi-agent-core@1.3.0 \
+    @earendil-works/pi-tui@1.3.0
+  install_requested senpi @code-yeongyu/senpi 2026.10.18-1 senpi SENPI_BIN
+fi
+if { [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; } && [ "${REAL_CLIENT_SKIP_INSTALL:-0}" != "1" ]; then
   verify_senpi_markers
 fi

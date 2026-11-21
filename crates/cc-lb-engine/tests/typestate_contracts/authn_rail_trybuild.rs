@@ -1,11 +1,11 @@
 use super::attempt_rail_trybuild::{register_attempt_rail_cases, trybuild_support};
 
 #[allow(dead_code)]
-#[path = "trybuild/authn_rail/pass_valid_flow.rs"]
+#[path = "../trybuild/authn_rail/pass_valid_flow.rs"]
 mod authn_pass_valid_flow;
 
 #[allow(dead_code)]
-#[path = "trybuild/attempt_rail/pass_valid_flow.rs"]
+#[path = "../trybuild/attempt_rail/pass_valid_flow.rs"]
 mod attempt_pass_valid_flow;
 
 #[test]

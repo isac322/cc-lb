@@ -13,4 +13,5 @@ url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 serde_json.workspace = true
