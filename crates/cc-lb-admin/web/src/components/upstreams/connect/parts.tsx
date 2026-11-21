@@ -708,7 +708,7 @@ export const QUIET_LINK_CLASS =
 export const ANCHOR_CLASS =
   'inline-flex w-fit items-center gap-1 text-accent-text underline underline-offset-2 hover:text-text';
 
-/** An Anthropic Console page, opened beside cc-lb. */
+/** A provider console page (Anthropic Console, Google Cloud), opened beside cc-lb. */
 export function ConsoleLink({
   href,
   children,

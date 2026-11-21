@@ -89,6 +89,7 @@ import {
   isAnthropicBaseUrl,
   usageFixLine,
 } from '../components/upstreams/connect/apiKeyCopy';
+import { ConsoleLink } from '../components/upstreams/connect/parts';
 import {
   UpstreamConnectDialog,
   type UpstreamConnectTarget,
@@ -164,6 +165,7 @@ import {
   upstreamKindLabel,
   upstreamMatchesAuthFilter,
   upstreamTypeLabel,
+  vertexBillingUrl,
 } from '../lib/providers';
 import {
   POLLING_INTERVALS,
@@ -2363,7 +2365,11 @@ export function DetailView({
                 apiUsageQ.error ? errorMessage(apiUsageQ.error) : null
               }
               usageModeShown={apiKeyUsable(keyAccess)}
-              isVertex={upstream.kind === 'vertex_api_key'}
+              vertexBillingHref={
+                upstream.kind === 'vertex_api_key'
+                  ? vertexBillingUrl(upstream.vertex?.project_id)
+                  : undefined
+              }
             />
           ) : (
             <DetailSection title="Usage" description="Selected range">
@@ -2381,6 +2387,17 @@ export function DetailView({
                 </Link>{' '}
                 → compare recorded requests, tokens and estimated list price.
               </p>
+              {isVertexCredential ? (
+                <p className="mt-2 text-body-sm text-text-muted">
+                  <ConsoleLink
+                    href={vertexBillingUrl(upstream.vertex?.project_id)}
+                  >
+                    Open Google Cloud credits
+                  </ConsoleLink>{' '}
+                  → see the remaining credit for this project. Google shows it
+                  only to an account with billing access.
+                </p>
+              ) : null}
             </DetailSection>
           )}
 

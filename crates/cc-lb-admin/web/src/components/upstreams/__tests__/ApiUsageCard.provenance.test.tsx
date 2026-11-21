@@ -92,6 +92,7 @@ function renderCard(
     metric?: 'tokens' | 'cost';
     usageModeShown?: boolean;
     month?: KeyUsageMonth;
+    vertexBillingHref?: string;
   } = {},
 ) {
   render(
@@ -103,6 +104,7 @@ function renderCard(
       provenance={provenance}
       month={opts.month ?? MONTH}
       usageModeShown={opts.usageModeShown ?? true}
+      vertexBillingHref={opts.vertexBillingHref}
     />,
   );
   return screen.getByTestId('api-usage-card');
@@ -257,5 +259,28 @@ describe('ApiUsageCard real zero and models (UI-U-07)', () => {
     const legend = within(card).getByTestId('api-usage-legend-slot');
     expect(legend.textContent).toContain('claude-sonnet-4');
     expect(legend.textContent).toContain('Other');
+  });
+
+  test('Gemini keys link AI Studio; Vertex keys link their Google Cloud project', () => {
+    const gemini = renderCard({ ...REPORTED, provider: 'gemini' });
+    expect(
+      within(gemini)
+        .getByRole('link', { name: 'Gemini usage and billing in AI Studio' })
+        .getAttribute('href'),
+    ).toBe('https://aistudio.google.com/docs/billing#monitor-usage');
+    cleanup();
+
+    const href =
+      'https://console.cloud.google.com/billing/credits?project=project-123';
+    const vertex = renderCard(
+      { ...REPORTED, provider: 'gemini' },
+      { vertexBillingHref: href },
+    );
+    expect(
+      within(vertex)
+        .getByRole('link', { name: 'Google Cloud credits and billing' })
+        .getAttribute('href'),
+    ).toBe(href);
+    expect(within(vertex).queryByText(/AI Studio/)).toBeNull();
   });
 });

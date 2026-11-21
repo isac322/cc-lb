@@ -767,4 +767,28 @@ describe('Vertex admin web QA', () => {
       screen.getAllByRole('button', { name: 'Replace credential' }),
     ).toHaveLength(1);
   });
+
+  test('Vertex credential Usage links to the project credits in Google Cloud', () => {
+    renderPane(
+      vertex({
+        kind: 'vertex_credential',
+        vertex: {
+          project_id: 'project-123',
+          location: 'global',
+          api_version: 'v1beta1',
+          express: false,
+          credential_type: 'service_account',
+          principal_hint: 'svc@example.com',
+          quota_project_id: null,
+        },
+      }),
+    );
+    const link = screen.getByRole('link', {
+      name: /Open Google Cloud credits/,
+    });
+    expect(link.getAttribute('href')).toBe(
+      'https://console.cloud.google.com/billing/credits?project=project-123',
+    );
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
 });

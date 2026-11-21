@@ -219,6 +219,17 @@ export function vertexHostFor(location: string | null | undefined): string {
   return `${normalized}-aiplatform.googleapis.com`;
 }
 
+/**
+ * Credits page of the billing account linked to a Vertex upstream's project.
+ * Google has no API for credit balances, so the console is where operators
+ * read them. Express keys carry no project, so they open the billing home.
+ */
+export function vertexBillingUrl(projectId: string | null | undefined): string {
+  return projectId
+    ? `https://console.cloud.google.com/billing/credits?project=${encodeURIComponent(projectId)}`
+    : 'https://console.cloud.google.com/billing';
+}
+
 export function isDefaultProviderEndpoint(
   kind: UpstreamKind,
   value: string,

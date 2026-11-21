@@ -21,6 +21,7 @@ import {
   requestEventKindsForProvider,
   upstreamAuthMode,
   upstreamKindLabel,
+  vertexBillingUrl,
   vertexHostFor,
 } from './providers';
 
@@ -120,6 +121,18 @@ describe('Vertex web contracts', () => {
     }
     expect(defaultEndpointFor('vertex_api_key', 'us')).toBe(
       'https://aiplatform.us.rep.googleapis.com',
+    );
+  });
+
+  test('Vertex billing link opens the credits of the upstream project', () => {
+    expect(vertexBillingUrl('project-9860b797-ff6a-42bc-bcc')).toBe(
+      'https://console.cloud.google.com/billing/credits?project=project-9860b797-ff6a-42bc-bcc',
+    );
+    expect(vertexBillingUrl('a&b')).toBe(
+      'https://console.cloud.google.com/billing/credits?project=a%26b',
+    );
+    expect(vertexBillingUrl(null)).toBe(
+      'https://console.cloud.google.com/billing',
     );
   });
 
