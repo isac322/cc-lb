@@ -12,6 +12,7 @@ import {
   type ProviderReportState,
   type Upstream,
 } from '../../lib/api';
+import { vertexBillingUrl } from '../../lib/providers';
 import {
   useRecheckApiKey,
   useUpdateUpstream,
@@ -445,14 +446,14 @@ function ProviderAccessRows({
               className={ANCHOR_CLASS}
               href={
                 provider === 'vertex'
-                  ? 'https://console.cloud.google.com/billing'
+                  ? vertexBillingUrl(vertex?.project_id)
                   : 'https://aistudio.google.com/docs/billing#monitor-usage'
               }
               target="_blank"
               rel="noopener noreferrer"
             >
               {provider === 'vertex'
-                ? 'Google Cloud billing'
+                ? 'Google Cloud credits and billing'
                 : 'Gemini usage and billing in AI Studio'}
             </a>
           ) : null}

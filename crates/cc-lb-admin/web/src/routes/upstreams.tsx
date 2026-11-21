@@ -164,6 +164,7 @@ import {
   upstreamKindLabel,
   upstreamMatchesAuthFilter,
   upstreamTypeLabel,
+  vertexBillingUrl,
 } from '../lib/providers';
 import {
   POLLING_INTERVALS,
@@ -2363,7 +2364,11 @@ export function DetailView({
                 apiUsageQ.error ? errorMessage(apiUsageQ.error) : null
               }
               usageModeShown={apiKeyUsable(keyAccess)}
-              isVertex={upstream.kind === 'vertex_api_key'}
+              vertexBillingHref={
+                upstream.kind === 'vertex_api_key'
+                  ? vertexBillingUrl(upstream.vertex?.project_id)
+                  : undefined
+              }
             />
           ) : (
             <DetailSection title="Usage" description="Selected range">
@@ -2381,6 +2386,21 @@ export function DetailView({
                 </Link>{' '}
                 → compare recorded requests, tokens and estimated list price.
               </p>
+              {isVertexCredential ? (
+                <p className="mt-2 text-body-sm text-text-muted">
+                  <a
+                    href={vertexBillingUrl(upstream.vertex?.project_id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-sm text-accent-text underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                  >
+                    Open Google Cloud credits{' '}
+                    <ExternalLink className="w-3 h-3" />
+                  </a>{' '}
+                  → see the remaining credit for this project. Google shows it
+                  only to an account with billing access.
+                </p>
+              ) : null}
             </DetailSection>
           )}
 
