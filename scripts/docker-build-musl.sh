@@ -74,7 +74,7 @@ cat > "$tmp_dir/Dockerfile" <<EOF
 # syntax=docker/dockerfile:1
 FROM tonistiigi/xx:${xx_version} AS xx
 FROM rust:${rust_version}-alpine
-RUN apk add --no-cache clang lld git make su-exec
+RUN apk add --no-cache clang lld git make su-exec file
 COPY --from=xx / /
 ARG TARGETPLATFORM
 RUN xx-apk add --no-cache musl-dev gcc && xx-cargo --setup-target-triple
@@ -200,48 +200,65 @@ for var in \
   fi
 done
 
+cat > "$tmp_dir/inner-build.sh" <<'INNER'
+#!/bin/ash
+set -euo pipefail
+
+export HOME=/tmp
+export GIT_CONFIG_GLOBAL=/tmp/gitconfig
+
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+  unset SOURCE_DATE_EPOCH
+fi
+
+if [ "${SKIP_SPA}" = "1" ]; then
+  rm -rf /src/crates/cc-lb-admin/web/dist
+  export CC_LB_ADMIN_SKIP_SPA=1
+else
+  export CC_LB_ADMIN_PREBUILT_SPA=1
+fi
+
+RUSTC="$(rustup which rustc)"
+export RUSTC
+PATH="$(dirname "$RUSTC"):${PATH}"
+export PATH
+
+c_target_var="CFLAGS_$(printf '%s' "$TARGET_TRIPLE" | tr '-' '_')"
+export "${c_target_var}=--target=${TARGET_TRIPLE}"
+
+git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory /src || true
+
+cargo metadata --no-deps --format-version 1 > /target/.cargo-metadata.json
+
+set -- build --release --locked \
+  -p cc-lb-server --bin cc-lb \
+  --no-default-features --features "${FEATURES}" \
+  --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
+  --target-dir /target
+
+if [ "${CARGO_TIMINGS}" = "1" ]; then
+  set -- "$@" --timings
+fi
+
+xx-cargo "$@"
+install -Dm0755 "/target/${TARGET_TRIPLE}/release/cc-lb" "/out/${OUT_NAME}"
+INNER
+chmod 0755 "$tmp_dir/inner-build.sh"
+
 compile_t0=$(date +%s)
 docker run --rm \
   "${env_args[@]}" \
   -v "$repo_root:/src" \
   -v "$cargo_config_mount:/src/.cargo/config.toml:ro" \
+  -v "$tmp_dir/inner-build.sh:/tmp/inner-build.sh:ro" \
   -v "$CARGO_HOME_DIR:/cargo-home" \
   -v "$CARGO_TARGET_DIR_HOST:/target" \
   -v "$out_dir:/out" \
   -w /src \
   "$builder_tag" \
-  su-exec "${host_uid}:${host_gid}" /bin/ash -euo pipefail -c '
-    export HOME=/tmp
-    export GIT_CONFIG_GLOBAL=/tmp/gitconfig
-    if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
-    if [ "${SKIP_SPA}" = "1" ]; then
-      rm -rf /src/crates/cc-lb-admin/web/dist
-      export CC_LB_ADMIN_SKIP_SPA=1
-    else
-      export CC_LB_ADMIN_PREBUILT_SPA=1
-    fi
-    RUSTC="$(rustup which rustc)"
-    export RUSTC
-    PATH="$(dirname "$RUSTC"):${PATH}"
-    export PATH
-    c_target_var="CFLAGS_$(printf "%s" "$TARGET_TRIPLE" | tr "-" "_")"
-    export "${c_target_var}=--target=${TARGET_TRIPLE}"
-    git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory /src || true
-
-    cargo metadata --no-deps --format-version 1 > /target/.cargo-metadata.json
-
-    set -- build --release --locked \
-      -p cc-lb-server --bin cc-lb \
-      --no-default-features --features "${FEATURES}" \
-      --config '\''target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]'\'' \
-      --target-dir /target
-    if [ "${CARGO_TIMINGS}" = "1" ]; then
-      set -- "$@" --timings
-    fi
-
-    xx-cargo "$@"
-    install -Dm0755 "/target/${TARGET_TRIPLE}/release/cc-lb" "/out/${OUT_NAME}"
-    xx-verify --static "/out/${OUT_NAME}"
+  /bin/ash -euo pipefail -c '
+    su-exec "${HOST_UID}:${HOST_GID}" /bin/ash /tmp/inner-build.sh
+    XX_VERIFY_NOLOCK=1 xx-verify --static "/out/${OUT_NAME}"
   '
 compile_t1=$(date +%s)
 
