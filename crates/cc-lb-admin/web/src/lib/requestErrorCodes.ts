@@ -76,6 +76,17 @@ const KNOWN: Record<string, Omit<ErrorCodeExplanation, 'known'>> = {
     nextStep: 'Check the HTTP method the client uses.',
     target: null,
   },
+  operation_not_supported: {
+    summary: 'The requested operation is not supported.',
+    nextStep: 'Use a supported endpoint or provider.',
+    target: null,
+  },
+  compat_unsupported_parameter: {
+    summary:
+      'The request uses a parameter unsupported by the subscription upstream.',
+    nextStep: 'Remove the parameter or use an API-key upstream.',
+    target: 'upstream',
+  },
   drain_rejected: {
     summary: 'The proxy was draining for shutdown and refused new requests.',
     nextStep: 'Retry once the proxy is back up.',

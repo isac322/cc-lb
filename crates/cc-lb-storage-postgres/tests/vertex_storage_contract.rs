@@ -88,7 +88,7 @@ async fn create_vertex(storage: &PostgresStorage, name: &str) -> TestResult<Upst
 
 #[tokio::test]
 #[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn qa_sto_2_postgres_0172_to_0173_applies_kind_check_and_honors_one_second_lock_timeout()
+async fn qa_sto_2_postgres_0174_to_0175_applies_kind_check_and_honors_one_second_lock_timeout()
 -> TestResult {
     let Some(fixture) = Fixture::create().await? else {
         return Ok(());
@@ -96,7 +96,7 @@ async fn qa_sto_2_postgres_0172_to_0173_applies_kind_check_and_honors_one_second
     let result: TestResult = async {
         let pool = fixture.pool(4).await?;
         let mut connection = sqlx::PgConnection::connect_with(&fixture.options).await?;
-        sqlx::migrate!("./migrations").run_direct(Some(172), &mut connection, false).await?;
+        sqlx::migrate!("./migrations").run_direct(Some(174), &mut connection, false).await?;
         connection.close().await?;
         let id = Uuid::from_u128(0x1731);
         sqlx::query(
@@ -114,7 +114,7 @@ async fn qa_sto_2_postgres_0172_to_0173_applies_kind_check_and_honors_one_second
         let mut blocked = sqlx::PgConnection::connect_with(&fixture.options).await?;
         let started = std::time::Instant::now();
         let error = sqlx::migrate!("./migrations").run_direct(None, &mut blocked, false).await
-            .expect_err("0173 must fail closed when the one-second lock timeout expires");
+            .expect_err("0175 must fail closed when the one-second lock timeout expires");
         assert!(started.elapsed() < Duration::from_secs(5), "lock timeout was not bounded: {error}");
         assert!(error.to_string().contains("lock timeout"), "unexpected lock error: {error}");
         blocked.close().await?;

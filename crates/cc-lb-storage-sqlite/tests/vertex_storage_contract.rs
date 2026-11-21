@@ -41,7 +41,7 @@ async fn create_vertex(storage: &SqliteStorage, name: &str) -> TestResult<Upstre
 }
 
 #[tokio::test]
-async fn qa_sto_1_sqlite_0127_to_0128_preserves_rows_children_epochs_workspace_and_warmup()
+async fn qa_sto_1_sqlite_0129_to_0130_preserves_rows_children_epochs_workspace_and_warmup()
 -> TestResult {
     let temp_dir = tempfile::tempdir()?;
     let database_url = format!(
@@ -50,14 +50,14 @@ async fn qa_sto_1_sqlite_0127_to_0128_preserves_rows_children_epochs_workspace_a
     );
     let storage = open(&database_url).await?;
     let current = sqlx::migrate!("./migrations");
-    let before_0128: Migrator = Migrator::with_migrations(
+    let before_0130: Migrator = Migrator::with_migrations(
         current
             .iter()
-            .filter(|migration| migration.version <= 127)
+            .filter(|migration| migration.version <= 129)
             .cloned()
             .collect(),
     );
-    before_0128.run(storage.pool()).await?;
+    before_0130.run(storage.pool()).await?;
     let id = Uuid::from_u128(0x1281);
     sqlx::query(
         "INSERT INTO upstream_spec_v1

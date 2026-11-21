@@ -1246,6 +1246,7 @@ mod tests {
                     candidate: crate::responses_websocket::WebSocketCandidate {
                         upstream_id: uuid::Uuid::nil(),
                         upstream_name: "embedded-realtime".to_owned(),
+                        socket_per_lane: false,
                     },
                     url: "wss://provider.invalid/realtime".parse().unwrap(),
                     headers: http::HeaderMap::new(),

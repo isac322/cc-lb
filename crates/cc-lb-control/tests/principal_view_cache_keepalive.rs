@@ -34,6 +34,7 @@ fn principal_with_cache_keepalive(enabled: bool) -> PrincipalRecord {
             min_cache_tokens: 10_000,
             classifier: Default::default(),
         }),
+        openai_oauth_compat: None,
     }
 }
 

@@ -79,6 +79,10 @@ Antigravity completion uses `loadCodeAssist` and `onboardUser` with Antigravity 
 
 Creating an upstream from a completed draft stores the provider-specific credential and seeds both token refresh and subscription usage polling. OAuth endpoints remain behind admin authentication.
 
+## OpenAI OAuth compatibility override
+
+Principal create and update requests accept an optional `openai_oauth_compat` object. Its fields match the server `[openai_oauth_compat]` policy (`store_true`, `sampling`, `logprobs`, `truncation_auto`, `prompt_cache_in_memory`, `service_tier`, `web_search_preview`, `metadata`, `max_tool_calls`, `background`, `hosted_tools`, `compact`, `chat_n`, `chat_stop`, `chat_seed_penalties`, and `transcription`). Set only the fields that should differ; unset fields inherit the server default. Send `null` to clear the complete override. The effective policy is resolved for each request (and each Responses WebSocket frame). This field is returned by principal reads but is omitted from exports.
+
 ## Warm-up
 
 `warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. `POST /admin/v1/upstreams` and OAuth sign-in create these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.

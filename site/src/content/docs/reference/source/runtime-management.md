@@ -82,23 +82,40 @@ Not yet supported: files, message batches, skills, agents, and sessions.
 
 #### OpenAI endpoint reference
 
+ChatGPT-subscription (`openai_oauth`) upstreams serve the public OpenAI Responses surface as well as the backend-shaped Codex surface. Codex-shaped requests pass through unchanged. Public requests are translated or emulated only for `openai_oauth`; they are never translated across providers. The public `/v1/responses` route (including its WebSocket form) is supported, while unprefixed `/v1/chat/completions`, `/v1/models`, and `/v1/responses/input_tokens` remain unsupported.
+
+HTTP compatibility includes `stream:false` aggregation, model-list/model retrieval conversion, Responses compaction emulation, image generation/edit conversion, and input-token counting through a WebSocket `generate:false` turn. Public `chat/completions` is translated to Responses, including tools, response formats, token limits, streaming, `n` fan-out on one subscription account, and `stop` cutting. Realtime calls are converted to the Codex call shape; hangup, sideband, and realtime WebSocket traffic uses `openai_public_api.realtime_origin` and stays pinned to the account that created the call or session. `audio/transcriptions` is disabled by default; when enabled it uses the subscription dictation endpoint, returns text/JSON only, and the upstream retains submitted audio for 30 days.
+
+Operations without a subscription equivalent route to an eligible `openai_api_key` upstream: stored continuations and response operations, stored chat operations, `prompt`, hosted tools, background requests, account-owned resource families, and API-key-only families such as embeddings, moderation, speech, translations, and variations. Backend-shaped requests stay on their owning account and never fail over across ownership.
+
+The compatibility policy handles unsupported fields by coercing, dropping, emulating, or rejecting them. Defaults include `store:true` → `false`, dropping sampling/logprob fields and unsupported metadata fields (with metadata echoed), coercing `service_tier` `auto`/`flex` to `default`, converting `web_search_preview` to `web_search`, truncation retry, and dropping `prompt_cache_retention: in_memory`. `file_search` and `code_interpreter` route to API-key upstreams when available. `response.metadata` events are removed only from translated/public-only streams, and `{detail}` errors are converted to public error objects. cc-lb stores no request or response data; only bounded request-scoped buffers are used, with a WebSocket owner body retained until that connection closes.
+
+WebSocket `stream_id` lanes are emulated with one upstream socket per lane, all pinned to one subscription account. The lane id is restored on client events and is never sent upstream. Lanes are bounded by admission, close on completion or disconnect, and never move accounts. Continuation works on the latest response in the same lane; older, cross-lane, or reconnect continuations are rejected with `previous_response_not_found`.
+
+The converted model catalog request adds cc-lb's built-in `client_version` only for public clients; a client-supplied value is preserved for Codex-shaped requests. Results are filtered by the principal's allowed models. `memories/trace_summarize` is not mapped.
+
+Not supported: realtime client secrets and provider operations with no safe translation. The [configuration reference](https://github.com/isac322/cc-lb/blob/master/site/src/content/docs/reference/configuration.md) describes policy settings.
+
+#### OpenAI endpoint reference (API-key and OAuth)
+
 | Method | Client path | Credentials |
 |---|---|---|
 | POST / GET WebSocket | `/openai/v1/responses` | API key, OAuth |
-| POST | `/openai/v1/responses/input_tokens` | API key |
-| POST | `/openai/v1/responses/compact` | API key, OAuth |
-| POST | `/openai/v1/chat/completions`, `/openai/v1/completions` | API key |
-| POST | `/openai/v1/embeddings`, `/openai/v1/moderations` | API key |
-| POST | `/openai/v1/audio/speech`, `/openai/v1/audio/transcriptions`, `/openai/v1/audio/translations` | API key |
-| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` | API key, OAuth |
-| POST | `/openai/v1/images/variations` | API key |
+| POST | `/openai/v1/responses/input_tokens`, `/openai/v1/responses/compact` | API key, OAuth (emulated) |
+| POST | `/openai/v1/chat/completions` | API key, OAuth (translated) |
+| POST | `/openai/v1/completions` | API key |
+| POST | `/openai/v1/alpha/search` | OAuth |
 | GET | `/openai/v1/models`, `/openai/v1/models/{id}` | API key, OAuth |
-| POST | `/openai/v1/alpha/search`, `/openai/v1/memories/trace_summarize` | OAuth only |
-| GET WebSocket | `/openai/v1/realtime?model={model}` | API key |
+| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` | API key, OAuth |
+| POST | `/openai/v1/audio/transcriptions` | API key; OAuth when enabled |
+| POST | `/openai/v1/realtime/calls`; hangup, sideband, WebSocket | OAuth (calls converted; public API origin) |
+| POST | `/openai/v1/embeddings`, `/openai/v1/moderations`, `/openai/v1/audio/speech`, `/openai/v1/audio/translations`, `/openai/v1/images/variations` | API key |
+| Any | `/openai/v1/responses/{id}`, `/openai/v1/responses/{id}/cancel`, `/openai/v1/responses/{id}/input_items` | API key (recorded owner, else single owner) |
+| Any | `/openai/v1/files`, `/uploads`, `/batches`, `/vector_stores`, `/conversations`, `/containers`, `/evals`, `/fine_tuning`, `/assistants`, `/threads`, `/skills`, `/chatkit`, `/videos`, `/audio/voices`, stored `/chat/completions` | API key (single owner) |
 
-OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
+OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL. The realtime operations use the separate public API origin. The `x-codex-turn-state` response header is forwarded unchanged.
 
-Not yet supported: files, uploads, batches, vector stores, conversations, containers, stored chat completion retrieve/update/delete, response retrieve/delete/cancel/input_items, Realtime calls control and client secrets, videos, and audio voices.
+Account-owned resources live in one API account. A response created through cc-lb keeps its recorded owner. Any other account-owned request routes only when exactly one eligible `openai_api_key` upstream exists; with none it returns `404 operation_not_supported`, and with more than one it returns `503 upstream_affinity_unavailable` instead of guessing. These requests never fail over. A realtime hangup for a call cc-lb did not create returns `404 realtime_call_not_found`.
 
 #### Gemini endpoint reference
 

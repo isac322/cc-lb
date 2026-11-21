@@ -342,6 +342,7 @@ async fn shape_injected_forced_tool_choice_is_durably_not_tracked_without_sessio
                 min_cache_tokens: 10_000,
                 classifier: Default::default(),
             }),
+            openai_oauth_compat: None,
         },
         1,
     )

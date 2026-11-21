@@ -165,7 +165,7 @@ const paritySurfacePaths = [
   'crates/cc-lb-admin/web/PRODUCT.md',
   'docs/runtime-management.md',
   'docs/cc-lb-guide.html',
-  'docs/adr/0014-vertex-ai-gemini-upstreams.md',
+  'docs/adr/0015-vertex-ai-gemini-upstreams.md',
   'docs/vertex-ai-qa.md',
   'site/src/pages/index.astro',
   ...collectFiles('site/src/content/docs'),

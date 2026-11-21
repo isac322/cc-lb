@@ -408,6 +408,7 @@ impl Stage {
                     allowed_upstreams: allowed,
                     default_limits: Vec::new(),
                     cache_keepalive: None,
+                    openai_oauth_compat: None,
                 },
                 now,
             )

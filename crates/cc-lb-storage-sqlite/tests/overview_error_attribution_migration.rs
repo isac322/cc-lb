@@ -208,7 +208,7 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
         .await
         .unwrap();
         sqlx::migrate!("./migrations")
-            .run_direct(Some(128), &mut connection, false)
+            .run_direct(Some(130), &mut connection, false)
             .await
             .unwrap();
         connection.close().await.unwrap();
@@ -552,7 +552,7 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
         .await
         .unwrap();
         sqlx::migrate!("./migrations")
-            .run_direct(Some(128), &mut connection, false)
+            .run_direct(Some(130), &mut connection, false)
             .await
             .unwrap();
         connection.close().await.unwrap();

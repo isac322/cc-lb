@@ -389,7 +389,7 @@ async fn preview_route_rejects_unclassified_operation_instead_of_anthropic_fallb
             headers: HeaderMap::new(),
             body_bytes: Bytes::from_static(br#"{"model":"gpt-5.2","input":[]}"#),
             provider: Some(cc_lb_domain::Provider::Openai),
-            path: "/v1/files".to_owned(),
+            path: "/v1/realtime/client_secrets".to_owned(),
         })
         .await
         .expect_err("unsupported operation must fail closed");
@@ -397,7 +397,7 @@ async fn preview_route_rejects_unclassified_operation_instead_of_anthropic_fallb
     assert!(matches!(
         error,
         PreviewRouteError::UnsupportedOperation { method, path }
-            if method == "POST" && path == "/v1/files"
+            if method == "POST" && path == "/v1/realtime/client_secrets"
     ));
 }
 

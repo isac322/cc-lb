@@ -317,6 +317,7 @@ async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &st
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             cache_keepalive: None,
+            openai_oauth_compat: None,
         },
         1_800_000_000,
     )

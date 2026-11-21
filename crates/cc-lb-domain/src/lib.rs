@@ -7,6 +7,7 @@ mod cache;
 mod credits;
 mod error;
 mod identity;
+mod openai_oauth_compat;
 mod plan;
 mod quota;
 mod routing;
@@ -25,6 +26,10 @@ pub use credits::{
 };
 pub use error::{InternalError, InternalErrorKind, InternalErrorStage};
 pub use identity::{Principal, PrincipalKind, PrincipalKindLite, ReplicaIdentity};
+pub use openai_oauth_compat::{
+    CoerceOrReject, DropOrReject, EmulateDropOrReject, EmulateOrReject, EnabledOrDisabled,
+    HostedToolHandling, MetadataHandling, OpenaiOauthCompatOverride, OpenaiOauthCompatPolicy,
+};
 pub use plan::PlanInfo;
 pub use quota::{
     RateLimitKind, RateLimitObservation, SubscriptionQuotaCandidateSnapshot,

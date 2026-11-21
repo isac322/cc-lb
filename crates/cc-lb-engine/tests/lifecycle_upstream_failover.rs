@@ -3145,6 +3145,7 @@ async fn responses_websocket_idle_key_expiry_or_revocation_rejects_queued_and_ne
                 allowed_upstreams: Vec::new(),
                 default_limits: limits.clone(),
                 cache_keepalive: None,
+                openai_oauth_compat: None,
             },
             NOW,
         )

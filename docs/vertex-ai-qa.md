@@ -34,8 +34,8 @@ The matrix below records the exact automated and manual checks for this contract
 2. **QA-KIND-2** — Given subscription and Vertex candidates, when preference/final-attempt failover runs, then Vertex is metered API-key fallback, never subscription. `[auto: engine lifecycle/subscription preference]`
 3. **QA-ELIG-1** — Given the eligibility matrix, when candidates build, then Express and regional API-key targets are eligible only for generate/stream/countTokens, regional credentials are eligible for approved cache/catalog/Live rows, and API-key targets are excluded from cache/models/Live. `[auto: engine lifecycle filter tests]`
 4. **QA-ELIG-2** — Given a Vertex-only pool, when embedding/prediction/OpenAI-compatible/Files requests arrive, then no signer runs and the existing no-eligible error returns. `[auto: engine lifecycle happy tests]`
-5. **QA-STO-1** — Given SQLite at 0127, when 0128 runs, then rows, child rows, indexes, FKs, epochs, workspace, and warmup references survive. `[auto: storage-sqlite migration compatibility]`
-6. **QA-STO-2** — Given Postgres at 0172, when 0173 runs, then schema/kind check apply with one-second lock timeout. `[auto: storage-postgres tests]`
+5. **QA-STO-1** — Given SQLite at 0129, when 0130 runs, then rows, child rows, indexes, FKs, epochs, workspace, and warmup references survive. `[auto: storage-sqlite migration compatibility]`
+6. **QA-STO-2** — Given Postgres at 0174, when 0175 runs, then schema/kind check apply with one-second lock timeout. `[auto: storage-postgres tests]`
 7. **QA-STO-3** — Given invalid Vertex fields and combinations, when inserted, then every invalid case rejects and positive locations pass. `[auto: storage adapters/conformance]`
 8. **QA-STO-4** — Given a Vertex record, when both adapters and memory store round-trip it, then configuration is byte-equivalent. `[auto: storage conformance]`
 9. **QA-STO-5** — Given project/location/credential/key/base-url changes, when epochs are checked, then epochs increment and stale bindings fail; version-only does not. `[auto: storage affinity tests]`

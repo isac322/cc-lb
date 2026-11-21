@@ -162,6 +162,7 @@ fn keepalive_principal_view() -> Arc<PrincipalView> {
             min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         }),
+        openai_oauth_compat: None,
     };
     Arc::new(PrincipalView::from_db(&[principal], HashMap::new()))
 }

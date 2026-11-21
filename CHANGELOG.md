@@ -20,6 +20,13 @@ All notable changes to this project will be documented in this file.
 - Added `[warmup].gemini_third_party_model` (default `gpt-oss-120b-medium`) for the third-party lane request. The value must start with `claude-` or `gpt-oss-`; other values fail at config load.
 - The admin upstream warm-up card shows each Gemini model group on its own row with its next run, last run, and an account-not-reporting state. **Fire now** asks which model group to warm, and the history drawer can filter by model group. Anthropic and OpenAI cards are unchanged.
 
+- OpenAI OAuth upstreams now serve public Responses and Chat Completions through translation, model/image/compaction/input-token conversion, WebSocket lane emulation, realtime forwarding, and optional subscription transcription; Codex-shaped requests remain unchanged. ([#1355](https://github.com/isac322/cc-lb/issues/1355))
+
+### Changed
+- Public operations requiring provider-owned state or lacking a subscription equivalent route to eligible `openai_api_key` upstreams without guessing ownership. Added the restart-only `[openai_oauth_compat]` policy, per-principal `openai_oauth_compat` override, and `openai_public_api.realtime_origin`. ([#1355](https://github.com/isac322/cc-lb/issues/1355))
+
+### Removed
+- Removed the `memories/trace_summarize` OAuth route mapping. ([#1355](https://github.com/isac322/cc-lb/issues/1355))
 ### Breaking
 
 - Plugin exports are now provider-specific: filter modules use `cc_lb_filter_{anthropic,openai,gemini}`, and shape modules use the corresponding provider-qualified shape and response-transform exports. Legacy unqualified exports, including `cc_lb_filter`, are Anthropic-only. Non-Anthropic legacy filters must add provider-qualified exports to keep handling OpenAI or Gemini traffic.

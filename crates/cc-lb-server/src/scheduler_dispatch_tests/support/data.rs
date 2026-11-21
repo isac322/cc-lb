@@ -9,6 +9,7 @@ pub(super) fn principal_with_keepalive() -> cc_lb_storage_api::PrincipalCreate {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::<Limit>::new(),
         cache_keepalive: Some(keepalive_config()),
+        openai_oauth_compat: None,
     }
 }
 
@@ -27,6 +28,7 @@ pub(super) fn principal_record_with_id(id: &str) -> PrincipalRecord {
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: Some(keepalive_config()),
+        openai_oauth_compat: None,
     }
 }
 

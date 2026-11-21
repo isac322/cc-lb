@@ -1,4 +1,4 @@
-# ADR 0014: Vertex AI Gemini upstreams
+# ADR 0015: Vertex AI Gemini upstreams
 
 - Status: Accepted
 - Date: 2026-11-20

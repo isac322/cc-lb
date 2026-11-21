@@ -292,6 +292,7 @@ fn lifecycle_with_owner(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: None,
+        openai_oauth_compat: None,
     };
     let authn = TestAuthn::with_principal_view(
         TestState::default(),

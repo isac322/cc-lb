@@ -32,7 +32,7 @@ export const CONFIG_EDITOR_CATEGORIES = [
     id: 'network',
     label: 'Network & requests',
     description: 'Listeners, request bodies, and request deadlines.',
-    roots: ['listener', 'body', 'timeouts'],
+    roots: ['listener', 'body', 'timeouts', 'openai_public_api'],
   },
   {
     id: 'data',
@@ -64,7 +64,7 @@ export const CONFIG_EDITOR_CATEGORIES = [
     id: 'identity',
     label: 'Identity & access',
     description: 'Admin authentication, OAuth, and cluster identity.',
-    roots: ['admin', 'oauth', 'cluster'],
+    roots: ['admin', 'oauth', 'cluster', 'openai_oauth_compat'],
   },
   {
     id: 'quota',
@@ -461,6 +461,26 @@ export const CONFIG_EDITOR_SECTIONS = [
     advancedPaths: [],
     danger: [],
   },
+  {
+    id: 'openai-public-api',
+    categoryId: 'network',
+    label: 'OpenAI public API',
+    description:
+      'Public OpenAI origin used by realtime operations on subscription upstreams.',
+    paths: ['openai_public_api.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'openai-oauth-compat',
+    categoryId: 'identity',
+    label: 'OpenAI API compatibility',
+    description:
+      'How public OpenAI API options are handled on ChatGPT subscription upstreams.',
+    paths: ['openai_oauth_compat.*'],
+    advancedPaths: [],
+    danger: [],
+  },
 ] as const satisfies readonly ConfigEditorSectionMetadata[];
 
 const CONFIG_EDITOR_SECTION_LIST: readonly ConfigEditorSectionMetadata[] =
@@ -560,6 +580,12 @@ const PRESENTATION_RULES: readonly {
   },
   {
     pattern: '**.*_endpoint',
+    kinds: ['string'],
+    presentation: 'url',
+    unit: null,
+  },
+  {
+    pattern: '**.*_origin',
     kinds: ['string'],
     presentation: 'url',
     unit: null,
@@ -1873,6 +1899,164 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       higher:
         'Allows slower upstream responses at the cost of longer-held connections.',
       impactDimensions: ['latency', 'availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.store_true',
+    guidance: {
+      description: 'Handling for requests that set store to true.',
+      recommendation:
+        'Coercion serves the request with storage disabled; rejection preserves strict client feedback.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.sampling',
+    guidance: {
+      description: 'Handling for temperature and top-p sampling controls.',
+      recommendation:
+        'Dropping unsupported controls keeps requests flowing with upstream defaults.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.logprobs',
+    guidance: {
+      description: 'Handling for log-probability request and include fields.',
+      recommendation:
+        'Dropping these fields serves ordinary responses; rejection makes unsupported output explicit.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.truncation_auto',
+    guidance: {
+      description: 'Handling for automatic context truncation.',
+      recommendation:
+        'Emulation trims the oldest items and retries; dropping skips the feature without rejecting.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.prompt_cache_in_memory',
+    guidance: {
+      description: 'Handling for in-memory prompt-cache retention requests.',
+      recommendation:
+        'Dropping the unsupported retention request preserves normal inference.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.service_tier',
+    guidance: {
+      description: 'Handling for auto and flex service-tier requests.',
+      recommendation:
+        'Coercion maps them to the supported default tier; rejection preserves strict feedback.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.web_search_preview',
+    guidance: {
+      description: 'Handling for the preview web-search tool.',
+      recommendation:
+        'Coercion maps it to the supported web-search tool; rejection fails unsupported requests.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.metadata',
+    guidance: {
+      description: 'Handling for metadata, user, and safety identifier fields.',
+      recommendation:
+        'Drop-and-echo preserves client metadata in the response while omitting it upstream.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.max_tool_calls',
+    guidance: {
+      description: 'Handling for the maximum tool calls limit.',
+      recommendation:
+        'Dropping the unsupported limit keeps tool requests flowing.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.background',
+    guidance: {
+      description:
+        'Handling for background responses without an API-key upstream.',
+      recommendation:
+        'Dropping the background flag serves a foreground response instead.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.hosted_tools',
+    guidance: {
+      description: 'Handling for file search and code interpreter tools.',
+      recommendation:
+        'Dropping the hosted tool keeps the rest of the request usable; rejection is stricter.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.compact',
+    guidance: {
+      description: 'Handling for the responses compact endpoint.',
+      recommendation:
+        'Emulation serves compact requests where possible; rejection makes the unsupported endpoint explicit.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.chat_n',
+    guidance: {
+      description:
+        'Handling for Chat Completions requests with multiple choices.',
+      recommendation:
+        'Emulation fans out requests to preserve n; rejection avoids extra upstream work.',
+      impactDimensions: ['availability', 'throughput'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.chat_stop',
+    guidance: {
+      description: 'Handling for stop sequences in Chat Completions.',
+      recommendation:
+        'Emulation preserves stop behavior; dropping serves with upstream defaults.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.chat_seed_penalties',
+    guidance: {
+      description:
+        'Handling for chat seed and frequency or presence penalties.',
+      recommendation:
+        'Dropping unsupported controls keeps Chat Completions requests flowing.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'openai_oauth_compat.transcription',
+    guidance: {
+      description:
+        'Whether audio transcription is served through the subscription dictation endpoint.',
+      recommendation:
+        'The upstream keeps submitted audio for 30 days; enable only when that retention is acceptable.',
+      impactDimensions: ['availability', 'storage'],
+    },
+  },
+  {
+    pattern: 'openai_public_api.realtime_origin',
+    guidance: {
+      description:
+        'Origin used for realtime hangup, sideband, and WebSocket operations with ChatGPT-subscription upstreams.',
+      recommendation:
+        'Use the public OpenAI origin unless a controlled gateway or test endpoint is required. Changes take effect after restart.',
+      impactDimensions: ['network', 'availability'],
     },
   },
   {

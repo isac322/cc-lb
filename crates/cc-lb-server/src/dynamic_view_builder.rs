@@ -2329,6 +2329,7 @@ mod tests {
         PrincipalStore::create(
             storage,
             cc_lb_storage_api::PrincipalCreate {
+                openai_oauth_compat: None,
                 name: name.to_owned(),
                 kind: cc_lb_storage_api::PrincipalKind::Machine,
                 allowed_models: Vec::new(),
@@ -2758,6 +2759,7 @@ mod tests {
         let principal = PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::PrincipalCreate {
+                openai_oauth_compat: None,
                 name: "provider-chain".to_owned(),
                 kind: cc_lb_storage_api::PrincipalKind::Machine,
                 allowed_models: Vec::new(),
@@ -3467,6 +3469,7 @@ mod tests {
         let principal = PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::PrincipalCreate {
+                openai_oauth_compat: None,
                 name: "pipeline-wiring".to_owned(),
                 kind: cc_lb_storage_api::PrincipalKind::Machine,
                 allowed_models: vec!["*".to_owned()],

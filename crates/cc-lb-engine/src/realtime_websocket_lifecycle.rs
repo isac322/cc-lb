@@ -39,6 +39,13 @@ impl Lifecycle {
         setup: Bytes,
     ) -> Result<RealtimeWebSocketSession, WebSocketError> {
         let RealtimeWebSocketTarget { path, query, model } = target;
+        let public_query = query.map(str::to_owned);
+        let call_id = query.and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == "call_id")
+                .map(|(_, value)| value.into_owned())
+                .filter(|call_id| !call_id.trim().is_empty())
+        });
         let RealtimeWebSocketObservation {
             observer,
             completion_observer,
@@ -106,24 +113,25 @@ impl Lifecycle {
                     "authenticated principal is unavailable",
                 ));
             }
-            let requested_model = model
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .ok_or_else(|| {
-                    WebSocketError::new(
-                        400,
-                        "invalid_request_error",
-                        "realtime WebSocket requests require a model",
-                    )
-                })?;
-            if !view
-                .principal_view
-                .is_model_allowed(auth.principal_id(), requested_model)
+            let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
+            if let Some(requested_model) = requested_model
+                && !view
+                    .principal_view
+                    .is_model_allowed(auth.principal_id(), requested_model)
             {
                 return Err(WebSocketError::new(
                     403,
                     "model_not_allowed",
                     "model is not allowed for this principal",
+                ));
+            }
+            let allow_modelless =
+                matches!(kind, RealtimeWebSocketKind::Openai) && call_id.is_some();
+            if requested_model.is_none() && !allow_modelless {
+                return Err(WebSocketError::new(
+                    400,
+                    "invalid_request_error",
+                    "realtime WebSocket requests require a model",
                 ));
             }
             let cached = view
@@ -144,6 +152,41 @@ impl Lifecycle {
                     error,
                 ));
             }
+            let sideband_upstream_id = if matches!(kind, RealtimeWebSocketKind::Openai) {
+                if let Some(call_id) = call_id.as_deref() {
+                    let key = UpstreamAffinityKey {
+                        principal_id: auth.principal_id().to_owned(),
+                        provider: "openai".to_owned(),
+                        kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiRealtimeCall,
+                        value_sha256: Sha256::digest(call_id.as_bytes()).into(),
+                    };
+                    match self.resolve_request_affinities(&[key]).await {
+                        Ok(Some(resolution)) => Some(resolution.target_upstream_id),
+                        Ok(None) => None,
+                        Err(error)
+                            if error.error_type == "api_error"
+                                && error.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE =>
+                        {
+                            return Err(WebSocketError::new(
+                                404,
+                                "realtime_call_not_found",
+                                "realtime call is not bound to an available upstream",
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(WebSocketError::new(
+                                error.status.as_u16(),
+                                error.error_type,
+                                error.message,
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let mut clean_headers = headers.clone();
             strip_hop_by_hop(&mut clean_headers);
             let query = query
@@ -178,19 +221,35 @@ impl Lifecycle {
                 &HashMap::new(),
                 &*self.clock,
             );
-            let required_kind = match kind {
-                RealtimeWebSocketKind::Openai => Some(StorageUpstreamKind::OpenaiApiKey),
-                RealtimeWebSocketKind::Gemini => None,
-            };
-            let records = view.upstreams_snapshot();
-            candidates.retain(|candidate| {
-                required_kind.is_some_and(|required| candidate.kind == required)
-                    || (matches!(kind, RealtimeWebSocketKind::Gemini)
-                        && records
-                            .iter()
-                            .find(|record| record.id == candidate.upstream_id)
-                            .is_some_and(live_eligible))
-            });
+            if let Some(target) = sideband_upstream_id {
+                candidates.retain(|candidate| {
+                    candidate.upstream_id == target
+                        && matches!(
+                            candidate.kind,
+                            CandidateUpstreamKind::OpenaiApiKey
+                                | CandidateUpstreamKind::OpenaiOauth
+                        )
+                });
+            } else {
+                match kind {
+                    RealtimeWebSocketKind::Openai => candidates.retain(|candidate| {
+                        matches!(
+                            candidate.kind,
+                            CandidateUpstreamKind::OpenaiApiKey
+                                | CandidateUpstreamKind::OpenaiOauth
+                        )
+                    }),
+                    RealtimeWebSocketKind::Gemini => {
+                        let records = view.upstreams_snapshot();
+                        candidates.retain(|candidate| {
+                            records
+                                .iter()
+                                .find(|record| record.id == candidate.upstream_id)
+                                .is_some_and(live_eligible)
+                        });
+                    }
+                }
+            }
             let started = Instant::now();
             let mut filtered = execute_filter_pipeline(
                 pipeline.filters_for(kind.provider()),
@@ -203,14 +262,28 @@ impl Lifecycle {
                     observer.record_internal_error(error);
                 }
             }
+            if let Some(target) = sideband_upstream_id {
+                filtered.candidates.retain(|candidate| {
+                    candidate.upstream_id == target
+                        && matches!(
+                            candidate.kind,
+                            CandidateUpstreamKind::OpenaiApiKey
+                                | CandidateUpstreamKind::OpenaiOauth
+                        )
+                });
+            }
             let terminal =
                 self.select_terminal_upstream(pipeline.terminal.clone(), &filtered.candidates);
             let first_id = terminal.upstream_id.ok_or_else(|| {
-                WebSocketError::new(
-                    503,
-                    error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
-                    "no eligible provider API-key upstream",
-                )
+                if sideband_upstream_id.is_some() {
+                    realtime_call_not_found()
+                } else {
+                    WebSocketError::new(
+                        503,
+                        error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                        "no eligible provider API-key upstream",
+                    )
+                }
             })?;
             let body =
                 Arc::new(serde_json::json!({"model": model.unwrap_or_default(), "stream": true}));
@@ -244,6 +317,9 @@ impl Lifecycle {
                     .iter()
                     .find(|record| record.id == id)
                     .ok_or_else(|| {
+                        if sideband_upstream_id.is_some() {
+                            return realtime_call_not_found();
+                        }
                         WebSocketError::new(
                             503,
                             error_codes::ROUTE_NOT_CONFIGURED,
@@ -346,6 +422,11 @@ impl Lifecycle {
                             )
                         })?;
                 } else {
+                    if record.kind == StorageUpstreamKind::OpenaiOauth {
+                        url = self.config.openai_realtime_origin.clone();
+                        url.set_path("/v1/realtime");
+                        url.set_query(public_query.as_deref());
+                    }
                     let scheme = match url.scheme() {
                         "https" | "wss" => "wss",
                         "http" | "ws" => "ws",
@@ -440,6 +521,7 @@ impl Lifecycle {
                 candidate: WebSocketCandidate {
                     upstream_id: id,
                     upstream_name: record.name.clone(),
+                    socket_per_lane: false,
                 },
                 url,
                 headers: signed_headers,
@@ -507,6 +589,14 @@ impl Lifecycle {
 ///
 /// Vertex API keys are excluded: the Live endpoint requires OAuth credentials
 /// that assert a principal, just like the cache and model-catalog RPCs.
+fn realtime_call_not_found() -> WebSocketError {
+    WebSocketError::new(
+        404,
+        "realtime_call_not_found",
+        "realtime call is not bound to an available upstream",
+    )
+}
+
 pub fn live_eligible(record: &UpstreamRecord) -> bool {
     matches!(
         record.kind,

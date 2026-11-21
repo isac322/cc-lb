@@ -139,6 +139,7 @@ pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
             min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         }),
+        openai_oauth_compat: None,
     }
 }
 
