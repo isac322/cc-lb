@@ -3190,6 +3190,29 @@ struct ConcurrentAttemptInputs<'a, 'r> {
     signer: Arc<dyn Signer>,
     observer: Option<&'a LifecycleContext>,
     cache_metadata: &'a RequestCacheMetadata,
+    shared_request_started:
+        Arc<tokio::sync::OnceCell<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>>,
+}
+fn reduce_fanout(
+    mut attempts: Vec<AttemptResponse>,
+) -> (AttemptResponse, Option<Vec<Response<Body>>>) {
+    let retry_index = attempts.iter().position(|attempt| {
+        matches!(
+            attempt.response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS
+        )
+    });
+    if let Some(index) = retry_index {
+        attempts.swap(0, index);
+    }
+    let mut attempts = attempts.into_iter();
+    let first = attempts
+        .next()
+        .expect("fan-out produced at least one response");
+    let rest = retry_index
+        .is_none()
+        .then(|| attempts.map(|attempt| attempt.response).collect());
+    (first, rest)
 }
 
 impl From<RawPassthroughError> for AttemptFailure {
@@ -6182,8 +6205,7 @@ impl Lifecycle {
         .with_cache_bundle(cache_metadata.bundles.for_upstream(resolved_record).clone());
 
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
-        let chat_fanout_n = (routed.record.kind == StorageUpstreamKind::OpenaiOauth
-            && request_capability == ProviderCapability::OpenaiChatCompletions)
+        let chat_fanout_n = (request_capability == ProviderCapability::OpenaiChatCompletions)
             .then(|| {
                 body_view
                     .value()
@@ -6229,7 +6251,7 @@ impl Lifecycle {
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
         let mut compat_response_plan: Option<CompatResponsePlan>;
-        let mut keepalive_request_dispatched_at = None;
+        let keepalive_request_started = Arc::new(tokio::sync::OnceCell::new());
         let mut fanout_responses: Option<Vec<Response<Body>>>;
         let affinity_owner_epoch_required = request_capability
             == ProviderCapability::GeminiCachedContentsCreate
@@ -6466,8 +6488,10 @@ impl Lifecycle {
                     Some(dispatch_started),
                 );
             }
-            let mut response = if let Some(count) = chat_fanout_n.filter(|_| !failover_entry) {
-                let (results, first_timings, shaped_body, dispatched_at) = self
+            let mut response = if let Some(count) =
+                chat_fanout_n.filter(|_| routed.record.kind == StorageUpstreamKind::OpenaiOauth)
+            {
+                let (results, first_timings, shaped_body, _dispatched_at) = self
                     .run_upstream_attempts_concurrently(
                         count,
                         ConcurrentAttemptInputs {
@@ -6479,12 +6503,12 @@ impl Lifecycle {
                             signer: signer.clone(),
                             observer: observer.as_ref(),
                             cache_metadata: &cache_metadata,
+                            shared_request_started: keepalive_request_started.clone(),
                         },
                     )
                     .await;
                 attempt_timings = first_timings;
                 keepalive_shaped_body = shaped_body;
-                keepalive_request_dispatched_at = dispatched_at;
                 let mut attempts = Vec::with_capacity(results.len());
                 for result in results {
                     match result {
@@ -6508,16 +6532,13 @@ impl Lifecycle {
                         }
                     }
                 }
-                let mut attempts = attempts.into_iter();
-                let first = attempts
-                    .next()
-                    .expect("fan-out produced at least one response");
+                let (first, rest) = reduce_fanout(attempts);
                 let AttemptResponse {
                     response: first_response,
                     compat_response_plan: first_plan,
                 } = first;
                 compat_response_plan = first_plan;
-                fanout_responses = Some(attempts.map(|attempt| attempt.response).collect());
+                fanout_responses = rest;
                 first_response
             } else {
                 match self
@@ -6532,7 +6553,7 @@ impl Lifecycle {
                         &mut attempt_timings,
                         &mut keepalive_shaped_body,
                         &cache_metadata,
-                        &mut keepalive_request_dispatched_at,
+                        &keepalive_request_started,
                     )
                     .await
                 {
@@ -6610,42 +6631,97 @@ impl Lifecycle {
                     &mut attempt_timings,
                     Some(dispatch_started),
                 );
-                fanout_responses = None;
-                response = match self
-                    .run_upstream_attempt(
-                        auth,
-                        reserved.as_ref(),
-                        &ctx,
-                        &principal,
-                        &routed,
-                        new_signer.clone(),
-                        observer.as_ref(),
-                        &mut attempt_timings,
-                        &mut keepalive_shaped_body,
-                        &cache_metadata,
-                        &mut keepalive_request_dispatched_at,
-                    )
-                    .await
+                // Only subscription routes emulate `n`; native routes pass it through.
+                response = if let Some(count) =
+                    chat_fanout_n.filter(|_| routed.record.kind == StorageUpstreamKind::OpenaiOauth)
                 {
-                    Ok(attempt) => {
-                        compat_response_plan = attempt.compat_response_plan;
-                        attempt.response
-                    }
-                    Err(failure) => {
-                        if matches!(failure, AttemptFailure::Sign(_))
-                            && let Some(next) = failover.next(self, &routed, FailoverReason::Sign)
-                        {
-                            routed = next;
-                            continue;
+                    let (results, first_timings, shaped_body, _dispatched_at) = self
+                        .run_upstream_attempts_concurrently(
+                            count,
+                            ConcurrentAttemptInputs {
+                                authenticated: auth,
+                                reserved: reserved.as_ref(),
+                                ctx: &ctx,
+                                principal: &principal,
+                                routed: &routed,
+                                signer: new_signer.clone(),
+                                observer: observer.as_ref(),
+                                cache_metadata: &cache_metadata,
+                                shared_request_started: keepalive_request_started.clone(),
+                            },
+                        )
+                        .await;
+                    attempt_timings = first_timings;
+                    keepalive_shaped_body = shaped_body;
+                    let mut attempts = Vec::with_capacity(results.len());
+                    for result in results {
+                        match result {
+                            Ok(attempt) => attempts.push(attempt),
+                            Err(failure) => {
+                                if matches!(failure, AttemptFailure::Sign(_))
+                                    && let Some(next) =
+                                        failover.next(self, &routed, FailoverReason::Sign)
+                                {
+                                    routed = next;
+                                    continue 'attempts;
+                                }
+                                return Ok(self.relay_attempt_failure(
+                                    failure,
+                                    request_capability,
+                                    active_limit.as_ref(),
+                                    observer.as_ref(),
+                                    &attempt_timings,
+                                    request_capability.provider(),
+                                ));
+                            }
                         }
-                        return Ok(self.relay_attempt_failure(
-                            failure,
-                            request_capability,
-                            active_limit.as_ref(),
+                    }
+                    let (first, rest) = reduce_fanout(attempts);
+                    let AttemptResponse {
+                        response: first_response,
+                        compat_response_plan: first_plan,
+                    } = first;
+                    compat_response_plan = first_plan;
+                    fanout_responses = rest;
+                    first_response
+                } else {
+                    match self
+                        .run_upstream_attempt(
+                            auth,
+                            reserved.as_ref(),
+                            &ctx,
+                            &principal,
+                            &routed,
+                            new_signer.clone(),
                             observer.as_ref(),
-                            &attempt_timings,
-                            request_capability.provider(),
-                        ));
+                            &mut attempt_timings,
+                            &mut keepalive_shaped_body,
+                            &cache_metadata,
+                            &keepalive_request_started,
+                        )
+                        .await
+                    {
+                        Ok(attempt) => {
+                            compat_response_plan = attempt.compat_response_plan;
+                            attempt.response
+                        }
+                        Err(failure) => {
+                            if matches!(failure, AttemptFailure::Sign(_))
+                                && let Some(next) =
+                                    failover.next(self, &routed, FailoverReason::Sign)
+                            {
+                                routed = next;
+                                continue;
+                            }
+                            return Ok(self.relay_attempt_failure(
+                                failure,
+                                request_capability,
+                                active_limit.as_ref(),
+                                observer.as_ref(),
+                                &attempt_timings,
+                                request_capability.provider(),
+                            ));
+                        }
                     }
                 };
                 // Everything the refreshed attempt returns is scrubbed with
@@ -6773,7 +6849,7 @@ impl Lifecycle {
                                     &mut attempt_timings,
                                     &mut keepalive_shaped_body,
                                     &cache_metadata,
-                                    &mut keepalive_request_dispatched_at,
+                                    &keepalive_request_started,
                                 )
                                 .await
                             {
@@ -6973,7 +7049,7 @@ impl Lifecycle {
                         &mut attempt_timings,
                         &mut keepalive_shaped_body,
                         &cache_metadata,
-                        &mut keepalive_request_dispatched_at,
+                        &keepalive_request_started,
                     )
                     .await
                 {
@@ -7023,8 +7099,10 @@ impl Lifecycle {
         // an owner even when the initial response-tracking decision was false.
         let compaction_response_enabled = keepalive_response_enabled && !track_keepalive_response;
         let keepalive_shaped_body = keepalive_shaped_body.filter(|_| track_keepalive_response);
-        let (request_dispatched_at, request_start_order) =
-            keepalive_request_dispatched_at.unwrap_or((dispatch_started, None));
+        let (request_dispatched_at, request_start_order) = keepalive_request_started
+            .get()
+            .map(|(instant, order)| (*instant, order.clone()))
+            .unwrap_or((dispatch_started, None));
         let keepalive_completion = (request_start_order.is_some()
             || keepalive_shaped_body.is_some()
             || compaction_response_enabled)
@@ -8253,13 +8331,14 @@ impl Lifecycle {
             signer,
             observer,
             cache_metadata,
+            shared_request_started,
         } = inputs;
         let mut states = (0..count)
             .map(|_| {
                 (
                     AttemptTimings::default(),
                     None::<Bytes>,
-                    None::<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
+                    shared_request_started.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -8280,11 +8359,18 @@ impl Lifecycle {
             )));
         }
         let results = Self::join_local(futures).await;
-        let (timings, shaped_body, dispatched_at) = states
+        let (timings, shaped_body, _) = states
             .into_iter()
             .next()
             .expect("concurrent fan-out has at least one attempt");
-        (results, timings, shaped_body, dispatched_at)
+        (
+            results,
+            timings,
+            shaped_body,
+            shared_request_started
+                .get()
+                .map(|(instant, order)| (*instant, order.clone())),
+        )
     }
 
     /// Dispatch one attempt to `routed` (already announced with
@@ -8303,10 +8389,9 @@ impl Lifecycle {
         attempt_timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<(
-            Instant,
-            Option<crate::cache_keepalive::RequestStartOrder>,
-        )>,
+        keepalive_request_started: &Arc<
+            tokio::sync::OnceCell<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
+        >,
     ) -> Result<AttemptResponse, AttemptFailure> {
         let attempt_scope = match reserved {
             Some(reserved) => reserved.begin_attempt(),
@@ -8327,7 +8412,7 @@ impl Lifecycle {
                 attempt_timings,
                 shaped_body_out,
                 cache_metadata,
-                keepalive_request_dispatched_at,
+                keepalive_request_started,
             )
             .await?;
         let response = &attempt_result.response;
@@ -8548,10 +8633,9 @@ impl Lifecycle {
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
         cache_metadata: &RequestCacheMetadata,
-        keepalive_request_dispatched_at: &mut Option<(
-            Instant,
-            Option<crate::cache_keepalive::RequestStartOrder>,
-        )>,
+        keepalive_request_started: &Arc<
+            tokio::sync::OnceCell<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
+        >,
     ) -> Result<AttemptResponse, AttemptFailure> {
         tracing::Span::current().record(
             "cc_lb.upstream.id",
@@ -8721,13 +8805,15 @@ impl Lifecycle {
             "about to dispatch signed request"
         );
 
-        if keepalive_request_dispatched_at.is_none() {
-            let order = self
-                .cache_keepalive
-                .on_request_started(authenticated, principal, cache_metadata)
-                .await;
-            *keepalive_request_dispatched_at = Some((Instant::now(), order));
-        }
+        let _ = keepalive_request_started
+            .get_or_init(|| async {
+                let order = self
+                    .cache_keepalive
+                    .on_request_started(authenticated, principal, cache_metadata)
+                    .await;
+                (Instant::now(), order)
+            })
+            .await;
 
         let dispatch_start = Instant::now();
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));

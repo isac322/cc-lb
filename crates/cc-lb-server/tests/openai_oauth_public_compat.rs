@@ -183,6 +183,7 @@ impl Drop for FailoverFake {
 #[derive(Clone)]
 struct FailoverState {
     calls: Arc<AtomicUsize>,
+    mixed_first_success: bool,
 }
 
 async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Response {
@@ -193,7 +194,18 @@ async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Resp
     }
     if path == "/codex/responses" {
         let _ = to_bytes(req.into_body(), 2_000_000).await.unwrap();
-        if client_request && state.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+        let call = if client_request {
+            state.calls.fetch_add(1, Ordering::SeqCst)
+        } else {
+            usize::MAX
+        };
+        if client_request
+            && if state.mixed_first_success {
+                call == 1
+            } else {
+                call < 2
+            }
+        {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({"detail":"rate limited"})),
@@ -210,9 +222,10 @@ async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Resp
     (StatusCode::NOT_FOUND, Json(json!({"detail":"not found"}))).into_response()
 }
 
-async fn spawn_failover() -> FailoverFake {
+async fn spawn_mixed_failover() -> FailoverFake {
     let state = FailoverState {
         calls: Arc::new(AtomicUsize::new(0)),
+        mixed_first_success: true,
     };
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
@@ -473,7 +486,7 @@ async fn openai_oauth_chat_stream_failure_before_output_is_http_error() {
 async fn openai_oauth_chat_fanout_retries_all_choices_after_rate_limit() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let s = common::spawn_test_server_with_openai_budget("").await;
-    let f = spawn_failover().await;
+    let f = spawn_mixed_failover().await;
     let c = reqwest::Client::new();
     setup(&s, &f.base, &c).await;
     let (status, value, _) = admin(
