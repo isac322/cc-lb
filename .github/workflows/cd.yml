@@ -273,6 +273,11 @@ jobs:
     env:
       DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.dry_run == 'true' && needs.prepare.outputs.sha || inputs.source_ref }}
+          persist-credentials: false
+
       - name: Build and push release platform
         uses: ./.github/actions/build-release-platform
         with:
@@ -280,7 +285,6 @@ jobs:
           platform: ${{ matrix.platform }}
           smoke: ${{ matrix.smoke }}
           version: ${{ inputs.version }}
-          source_ref: ${{ inputs.source_ref }}
           sha: ${{ needs.prepare.outputs.sha }}
           rust_version: ${{ needs.prepare.outputs.rust_version }}
           deps_hash: ${{ needs.prepare.outputs.deps_hash }}
@@ -301,6 +305,11 @@ jobs:
     env:
       DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.dry_run == 'true' && needs.prepare.outputs.sha || inputs.source_ref }}
+          persist-credentials: false
+
       - name: Build and push arm64 release platform
         uses: ./.github/actions/build-release-platform
         with:
@@ -308,7 +317,6 @@ jobs:
           platform: linux/arm64
           smoke: 'false'
           version: ${{ inputs.version }}
-          source_ref: ${{ inputs.source_ref }}
           sha: ${{ needs.prepare.outputs.sha }}
           rust_version: ${{ needs.prepare.outputs.rust_version }}
           deps_hash: ${{ needs.prepare.outputs.deps_hash }}

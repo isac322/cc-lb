@@ -14,9 +14,6 @@ inputs:
   version:
     description: Semver version without leading v
     required: true
-  source_ref:
-    description: Immutable source tag or ref to check out when dry_run is false
-    required: true
   sha:
     description: Expected resolved commit SHA
     required: true
@@ -36,12 +33,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Check out target source
-      uses: actions/checkout@v7
-      with:
-        ref: ${{ inputs.dry_run == 'true' && inputs.sha || inputs.source_ref }}
-        persist-credentials: false
-
     - name: Resolve release deps cache keys
       id: cache-meta
       shell: bash
