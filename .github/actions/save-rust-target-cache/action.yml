@@ -1,0 +1,92 @@
+name: Save Rust target caches
+description: Prune transient executables, record workspace mtimes, and update rolling Layer 1 target cache.
+
+inputs:
+  target-dir:
+    description: Cargo target directory path to prune and save.
+    required: false
+    default: "target/debug"
+  extra-cache-paths:
+    description: Optional newline-separated extra paths to save alongside target-dir.
+    required: false
+    default: ""
+  cache-paths:
+    description: Canonical multiline path list matching setup-rust-target-cache.outputs.cache-paths.
+    required: false
+    default: ""
+  target-cache-hit:
+    description: Value of setup-rust-target-cache.outputs.target-cache-hit
+    required: true
+  lock-cache-hit:
+    description: Value of setup-rust-target-cache.outputs.lock-cache-hit
+    required: true
+  target-cache-key:
+    description: Value of setup-rust-target-cache.outputs.target-cache-key
+    required: true
+  keep-workspace-libs:
+    description: Whether to preserve compiled workspace libraries and fingerprints when pruning.
+    required: false
+    default: "true"
+  save-target:
+    description: Whether this job should prune and save Layer 1 target cache.
+    required: false
+    default: "true"
+  force-save:
+    description: Save rolling seed even when a matching dependency lock cache already exists (e.g. master pushes).
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Prune artifacts and record workspace mtimes
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true' && (inputs.lock-cache-hit != 'true' || inputs.force-save == 'true')
+      id: prune
+      shell: bash
+      env:
+        TARGET_DIR_INPUT: ${{ inputs.target-dir }}
+        EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
+        CACHE_PATHS_INPUT: ${{ inputs.cache-paths }}
+        KEEP_LIBS: ${{ inputs.keep-workspace-libs }}
+      run: |
+        set -euo pipefail
+        prune_flags=()
+        if [ "$KEEP_LIBS" = "true" ]; then
+          prune_flags+=(--keep-workspace-libs)
+        fi
+        if [ -d "$TARGET_DIR_INPUT" ]; then
+          node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT" "${prune_flags[@]}"
+          node scripts/ws-mtimes.mjs record --out "${TARGET_DIR_INPUT}/.ws-mtimes.json" --extra-dir crates/cc-lb-admin/web/dist
+          if [ -d "crates/cc-lb-admin/web/dist" ]; then
+            rm -rf "${TARGET_DIR_INPUT}/.admin-web-dist"
+            cp -a crates/cc-lb-admin/web/dist "${TARGET_DIR_INPUT}/.admin-web-dist"
+          fi
+        fi
+        if [ -n "$EXTRA_PATHS_INPUT" ]; then
+          while IFS= read -r extra_path; do
+            [ -n "$extra_path" ] || continue
+            if [ -d "$extra_path" ]; then
+              node scripts/prune-rust-target.mjs --target-dir "$extra_path" "${prune_flags[@]}"
+              find "$extra_path" -name 'trybuild.lock' -delete || true
+            fi
+          done <<<"$EXTRA_PATHS_INPUT"
+        fi
+        {
+          echo "save_paths<<__EOF__"
+          if [ -n "$CACHE_PATHS_INPUT" ]; then
+            printf '%s\n' "$CACHE_PATHS_INPUT"
+          else
+            echo "$TARGET_DIR_INPUT"
+            if [ -n "$EXTRA_PATHS_INPUT" ]; then
+              printf '%s\n' "$EXTRA_PATHS_INPUT"
+            fi
+          fi
+          echo "__EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Save Layer 1 rolling Cargo target cache
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true' && (inputs.lock-cache-hit != 'true' || inputs.force-save == 'true')
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.prune.outputs.save_paths }}
+        key: ${{ inputs.target-cache-key }}

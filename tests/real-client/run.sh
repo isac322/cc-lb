@@ -25,25 +25,48 @@ fail() {
   exit 1
 }
 
-cleanup_pid_tree() {
-  pid=$1
-  [ -n "$pid" ] || return 0
-  if kill -0 "$pid" 2>/dev/null; then
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    pkill -KILL -P "$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-  wait "$pid" 2>/dev/null || true
+signal_pid_tree() {
+  sig=$1
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill "-$sig" -P "$pid" 2>/dev/null || true
+      kill "-$sig" "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+any_pid_alive() {
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 cleanup() {
-  cleanup_pid_tree "$CLIENT_PID"
-  cleanup_pid_tree "$PROXY_PID"
-  cleanup_pid_tree "$FAKE_PID"
+  pids=()
+  [ -n "${CLIENT_PID:-}" ] && pids+=("$CLIENT_PID")
+  [ -n "${PROXY_PID:-}" ] && pids+=("$PROXY_PID")
+  [ -n "${FAKE_PID:-}" ] && pids+=("$FAKE_PID")
+  if [ "${#pids[@]}" -gt 0 ]; then
+    signal_pid_tree TERM "${pids[@]}"
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      if ! any_pid_alive "${pids[@]}"; then
+        break
+      fi
+      sleep 0.05
+    done
+    if any_pid_alive "${pids[@]}"; then
+      signal_pid_tree KILL "${pids[@]}"
+    fi
+    for pid in "${pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     rm -rf "$TMP_DIR"
   fi
@@ -126,7 +149,7 @@ while time.time() < deadline:
             sys.exit(0)
     except OSError as exc:
         last = exc
-        time.sleep(0.1)
+        time.sleep(0.05)
 print(f'{name} did not accept tcp on 127.0.0.1:{port}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
@@ -159,7 +182,7 @@ while time.time() < deadline:
             last = response.splitlines()[0].decode(errors='replace') if response else 'empty response'
     except OSError as exc:
         last = exc
-    time.sleep(0.1)
+    time.sleep(0.05)
 print(f'{name} did not become ready on http://127.0.0.1:{port}{path}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
@@ -223,10 +246,13 @@ detect_skip_reason() {
 }
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-real-client.XXXXXX")
-# Allocate 5 distinct ports atomically: hold all sockets open during reservation
-# so the kernel cannot hand the same ephemeral port to two sockets, then close
-# them just before binding. Avoids race collisions seen on busy CI runners.
-read -r proxy_port admin_port metrics_port fake_port client_port <<EOF
+if [ -n "${CC_LB_REAL_CLIENT_PORTS:-}" ]; then
+  read -r proxy_port admin_port metrics_port fake_port client_port <<<"$CC_LB_REAL_CLIENT_PORTS"
+else
+  # Allocate 5 distinct ports atomically: hold all sockets open during reservation
+  # so the kernel cannot hand the same ephemeral port to two sockets, then close
+  # them just before binding. Avoids race collisions seen on busy CI runners.
+  read -r proxy_port admin_port metrics_port fake_port client_port <<EOF
 $(python3 - <<'PY'
 import socket
 socks = []
@@ -241,11 +267,13 @@ print(' '.join(str(p) for p in ports))
 PY
 )
 EOF
+fi
 config_path="$TMP_DIR/cc-lb.toml"
 gcp_credentials="$TMP_DIR/gcp-adc.json"
 stdout_file="$TMP_DIR/client.stdout"
 stderr_file="$TMP_DIR/client.stderr"
 mkdir -p \
+  "$TMP_DIR/data" \
   "$TMP_DIR/home" \
   "$TMP_DIR/xdg-config" \
   "$TMP_DIR/xdg-data" \
@@ -308,9 +336,8 @@ model: $senpi_provider/$senpi_model
 ---
 Answer the delegated request directly.
 EOF
-fi
-
-python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
+  if [ "$upstream" = "custom" ]; then
+    python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
 import binascii
 import struct
 import sys
@@ -337,6 +364,9 @@ png = (
 with open(sys.argv[1], "wb") as output:
     output.write(png)
 PY
+  fi
+fi
+
 cat > "$gcp_credentials" <<'JSON'
 {"type":"authorized_user","client_id":"fake-client","client_secret":"fake-secret","refresh_token":"fake-refresh"}
 JSON
@@ -353,14 +383,10 @@ else
   FAKE_DEFAULT_MODE="$fake_default_mode" cargo run -q -p "$fake_package" -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
 fi
 FAKE_PID=$!
-if ! wait_port "$fake_port" "$fake_package"; then
-  printf '%s\n' "--- $fake_package log ---" >&2
-  cat "$TMP_DIR/fake.log" >&2 || true
-  fail "$fake_package did not start"
-fi
 
 cc_lb_bin="${CC_LB_BIN:-$ROOT_DIR/target/debug/cc-lb}"
 if [ -x "$cc_lb_bin" ]; then
+  CC_LB_DATA_DIR="$TMP_DIR/data" \
   CC_LB_ADMIN_TOKEN=admin-token \
   CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
   AWS_ACCESS_KEY_ID=AKIATEST \
@@ -371,6 +397,7 @@ if [ -x "$cc_lb_bin" ]; then
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
   "$cc_lb_bin" serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
 else
+  CC_LB_DATA_DIR="$TMP_DIR/data" \
   CC_LB_ADMIN_TOKEN=admin-token \
   CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
   AWS_ACCESS_KEY_ID=AKIATEST \
@@ -382,67 +409,139 @@ else
   cargo run -q -p cc-lb-server -- serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
 fi
 PROXY_PID=$!
-if ! wait_port "$proxy_port" cc-lb; then
-  printf '%s\n' '--- proxy log ---' >&2
-  cat "$TMP_DIR/proxy.log" >&2 || true
-  fail "cc-lb did not start"
-fi
-if ! wait_port "$admin_port" cc-lb-admin; then
-  printf '%s\n' '--- proxy log ---' >&2
-  cat "$TMP_DIR/proxy.log" >&2 || true
-  fail "cc-lb-admin did not start"
-fi
 
 # The test uses a managed API key issued for the DB principal. The principal
 # and routing-target upstream named "real_client" must exist in the dynamic
 # store before cc-lb can route the request. The database records are the only
 # source of principal and upstream kinds.
-principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
-  -H 'Authorization: Bearer admin-token' \
-  -H 'content-type: application/json' \
-  --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
-  "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
-if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
-  printf '%s\n' '--- admin-principal.json ---' >&2
-  cat "$TMP_DIR/admin-principal.json" >&2 || true
-  fail "register principal expected 201 or 409, got $principal_code"
-fi
-
-upstream_body=$(printf '{"name":"real_client","kind":"anthropic_api_key","base_url":"http://127.0.0.1:%s","api_key_value":"sk-ant-test"}' "$fake_port")
-upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
-  -H 'Authorization: Bearer admin-token' \
-  -H 'content-type: application/json' \
-  --data "$upstream_body" \
-  "http://127.0.0.1:$admin_port/admin/v1/upstreams") || upstream_code=000
-if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
-  printf '%s\n' '--- admin-upstream.json ---' >&2
-  cat "$TMP_DIR/admin-upstream.json" >&2 || true
-  fail "register upstream expected 201 or 409, got $upstream_code"
-fi
-
-principal_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$TMP_DIR/admin-principal.json")
-curl -sS -o "$TMP_DIR/admin-key.json" -X POST \
-  -H 'Authorization: Bearer admin-token' \
-  -H 'content-type: application/json' \
-  --data '{"label":"real-client"}' \
-  "http://127.0.0.1:$admin_port/admin/v1/principals/$principal_id/keys"
-API_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plaintext_key'])" "$TMP_DIR/admin-key.json")
-
-if [ -f "$TMP_DIR/senpi-agent/models.json" ]; then
-  python3 - "$TMP_DIR/senpi-agent/models.json" "$API_KEY" <<'PY'
+set +e
+API_KEY=$(python3 - "$fake_port" "$proxy_port" "$admin_port" "$TMP_DIR" "$fake_package" <<'PY'
 import json
+import socket
 import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 
-path, api_key = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    config = json.load(handle)
-for provider in config.get("providers", {}).values():
-    if "apiKey" in provider:
-        provider["apiKey"] = api_key
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(config, handle, separators=(",", ":"))
+fake_port, proxy_port, admin_port, tmp_dir, fake_pkg = (
+    int(sys.argv[1]),
+    int(sys.argv[2]),
+    int(sys.argv[3]),
+    Path(sys.argv[4]),
+    sys.argv[5],
+)
+
+def wait_ports(targets):
+    pending = list(targets)
+    deadline = time.monotonic() + 30.0
+    last = {}
+    while pending and time.monotonic() < deadline:
+        still = []
+        for port, label, rc in pending:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                    print(f"{label} accepting tcp on 127.0.0.1:{port}", file=sys.stderr)
+            except OSError as exc:
+                last[port] = exc
+                still.append((port, label, rc))
+        pending = still
+        if pending:
+            time.sleep(0.02)
+    if pending:
+        port, label, rc = pending[0]
+        print(f"{label} did not accept tcp on 127.0.0.1:{port}: {last.get(port)}", file=sys.stderr)
+        sys.exit(rc)
+
+wait_ports([(fake_port, fake_pkg, 10), (proxy_port, "cc-lb", 11), (admin_port, "cc-lb-admin", 12)])
+
+def post_json(path, payload, out_name):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{admin_port}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": "Bearer admin-token", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+            code = resp.status
+    except urllib.error.HTTPError as err:
+        body = err.read()
+        code = err.code
+    except Exception as exc:
+        (tmp_dir / out_name).write_text(str(exc), encoding="utf-8")
+        return 0, b""
+    (tmp_dir / out_name).write_bytes(body)
+    return code, body
+
+p_code, p_body = post_json("/admin/v1/principals", {"name": "api-key", "kind": "machine", "allowed_models": ["*"]}, "admin-principal.json")
+if p_code not in (201, 409):
+    print(f"BOOTSTRAP_ERR:register principal expected 201 or 409, got {p_code}", file=sys.stderr)
+    sys.exit(13)
+
+u_code, _ = post_json(
+    "/admin/v1/upstreams",
+    {"name": "real_client", "kind": "anthropic_api_key", "base_url": f"http://127.0.0.1:{fake_port}", "api_key_value": "sk-ant-test"},
+    "admin-upstream.json",
+)
+if u_code not in (201, 409):
+    print(f"BOOTSTRAP_ERR:register upstream expected 201 or 409, got {u_code}", file=sys.stderr)
+    sys.exit(14)
+
+principal_id = json.loads(p_body)["id"]
+k_code, k_body = post_json(f"/admin/v1/principals/{principal_id}/keys", {"label": "real-client"}, "admin-key.json")
+if k_code < 200 or k_code >= 300:
+    print(f"BOOTSTRAP_ERR:issue key expected 2xx, got {k_code}", file=sys.stderr)
+    sys.exit(15)
+api_key = json.loads(k_body)["plaintext_key"]
+
+models_path = tmp_dir / "senpi-agent" / "models.json"
+if models_path.is_file():
+    config = json.loads(models_path.read_text(encoding="utf-8"))
+    for provider in config.get("providers", {}).values():
+        if "apiKey" in provider:
+            provider["apiKey"] = api_key
+    models_path.write_text(json.dumps(config, separators=(",", ":")), encoding="utf-8")
+
+print(api_key)
 PY
-fi
+)
+bootstrap_rc=$?
+set -e
+case "$bootstrap_rc" in
+  0) ;;
+  10)
+    printf '%s\n' "--- $fake_package log ---" >&2
+    cat "$TMP_DIR/fake.log" >&2 || true
+    fail "$fake_package did not start"
+    ;;
+  11)
+    printf '%s\n' '--- proxy log ---' >&2
+    cat "$TMP_DIR/proxy.log" >&2 || true
+    fail "cc-lb did not start"
+    ;;
+  12)
+    printf '%s\n' '--- proxy log ---' >&2
+    cat "$TMP_DIR/proxy.log" >&2 || true
+    fail "cc-lb-admin did not start"
+    ;;
+  13)
+    printf '%s\n' '--- admin-principal.json ---' >&2
+    cat "$TMP_DIR/admin-principal.json" >&2 || true
+    fail "register principal failed"
+    ;;
+  14)
+    printf '%s\n' '--- admin-upstream.json ---' >&2
+    cat "$TMP_DIR/admin-upstream.json" >&2 || true
+    fail "register upstream failed"
+    ;;
+  *)
+    printf '%s\n' '--- admin-key.json ---' >&2
+    cat "$TMP_DIR/admin-key.json" >&2 || true
+    fail "admin bootstrap failed ($bootstrap_rc)"
+    ;;
+esac
 
 set +e
 case "$client" in
@@ -451,6 +550,8 @@ case "$client" in
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+      XDG_STATE_HOME="$TMP_DIR/xdg-state" \
       ANTHROPIC_API_KEY="$API_KEY" \
       ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port" \
       ANTHROPIC_MODEL=claude-3-5-sonnet-20241022 \
@@ -524,6 +625,8 @@ PY
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+      XDG_STATE_HOME="$TMP_DIR/xdg-state" \
       PI_CODING_AGENT_DIR="$TMP_DIR/pi-agent" \
       PI_CODING_AGENT_SESSION_DIR="$TMP_DIR/pi-sessions" \
       ANTHROPIC_API_KEY="$API_KEY" \
@@ -538,6 +641,8 @@ PY
       USERPROFILE="$TMP_DIR/home"
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config"
       XDG_DATA_HOME="$TMP_DIR/xdg-data"
+      XDG_CACHE_HOME="$TMP_DIR/xdg-cache"
+      XDG_STATE_HOME="$TMP_DIR/xdg-state"
       SENPI_CODING_AGENT_DIR="$TMP_DIR/senpi-agent"
       SENPI_CODING_AGENT_SESSION_DIR="$TMP_DIR/senpi-sessions"
       ANTHROPIC_BASE_URL="$senpi_anthropic_base_url"

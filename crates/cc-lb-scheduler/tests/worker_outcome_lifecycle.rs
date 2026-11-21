@@ -1483,10 +1483,12 @@ mod postgres {
             server_version.starts_with("18."),
             "outcome lifecycle tests require PostgreSQL 18, reached {server_version}"
         );
-        let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-        sqlx::query(sqlx::AssertSqlSafe(create_database))
-            .execute(&admin_pool)
-            .await?;
+        crate::common::create_postgres_database(
+            &admin_pool,
+            &database_name,
+            "CC_LB_PG_SCHED_TEMPLATE",
+        )
+        .await?;
         let test_result = timeout(
             Duration::from_secs(45),
             AssertUnwindSafe(async {

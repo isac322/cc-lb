@@ -26,18 +26,27 @@ fn main() {
     emit_migration_rerun_paths(&migrations_dir);
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let snapshot = out_dir.join("fast_init.sql");
+    let staging = out_dir.join("fast_init.sql.tmp");
     let status = Command::new("python3")
         .arg("-c")
         .arg(PYTHON_GENERATOR)
         .arg(&migrations_dir)
-        .arg(&snapshot)
+        .arg(&staging)
         .status();
 
-    match status {
-        Ok(status) if status.success() => {}
-        Ok(_) | Err(_) => {
-            fs::write(&snapshot, "").expect("write empty SQLite fast-init snapshot");
+    let generated = match status {
+        Ok(status) if status.success() => {
+            let bytes = fs::read(&staging).expect("read generated SQLite fast-init snapshot");
+            let _ = fs::remove_file(&staging);
+            bytes
         }
+        Ok(_) | Err(_) => {
+            let _ = fs::remove_file(&staging);
+            Vec::new()
+        }
+    };
+    if fs::read(&snapshot).ok().as_deref() != Some(generated.as_slice()) {
+        fs::write(&snapshot, &generated).expect("write SQLite fast-init snapshot");
     }
 }
 

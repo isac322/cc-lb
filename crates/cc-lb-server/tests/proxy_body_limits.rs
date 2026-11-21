@@ -13,7 +13,7 @@ const MESSAGES_CAP_BYTES: usize = 256;
 #[tokio::test]
 async fn oversized_content_length_returns_413_before_the_client_sends_a_body() -> TestResult<()> {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let mut stream = connect_proxy(server.proxy_addr).await?;
     let request = format!(
         "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: {}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -35,7 +35,7 @@ async fn oversized_content_length_returns_413_before_the_client_sends_a_body() -
 async fn chunked_body_over_cap_returns_413_before_the_client_finishes_streaming() -> TestResult<()>
 {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let mut stream = connect_proxy(server.proxy_addr).await?;
     let request = format!(
         "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: {}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
@@ -60,7 +60,7 @@ async fn chunked_body_over_cap_returns_413_before_the_client_finishes_streaming(
 #[tokio::test]
 async fn body_exactly_at_messages_cap_reaches_the_real_upstream() -> TestResult<()> {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let body = messages_body_with_len(MESSAGES_CAP_BYTES);
 
     // When
@@ -82,7 +82,7 @@ async fn body_exactly_at_messages_cap_reaches_the_real_upstream() -> TestResult<
 #[tokio::test]
 async fn messages_cap_is_enforced_and_files_path_is_rejected() -> TestResult<()> {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let body = messages_body_with_len(MESSAGES_CAP_BYTES + 1);
 
     // When

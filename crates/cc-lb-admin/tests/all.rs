@@ -58,6 +58,8 @@ mod internal_partials;
 mod new_admin_modules_smoke;
 #[path = "oauth_post_commit_completion.rs"]
 mod oauth_post_commit_completion;
+#[path = "pg_template_helper.rs"]
+mod pg_template_helper;
 #[path = "plugin_admin_audit_completion.rs"]
 mod plugin_admin_audit_completion;
 #[path = "principal_keys.rs"]

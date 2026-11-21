@@ -5,17 +5,16 @@
 // payload over the internal HTTP endpoint, then republishes it to its local bus.
 
 use std::error::Error;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
 use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
-use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_engine::{PartialRetentionCache, PgListener, PgNotifier};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
-use cc_lb_storage_api::MetaStore;
-use cc_lb_storage_postgres::PostgresStorage;
+use futures_util::FutureExt as _;
 use metrics_exporter_prometheus::PrometheusHandle;
 use secrecy::SecretString;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -96,96 +95,107 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
                 "fallback-wrong-token",
             )
         };
-    let Some(database_url) = ci_postgres_url() else {
+    let Some(admin_url) = ci_postgres_url() else {
         eprintln!("SKIP: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
-
-    reset_request_event_tables(&database_url).await?;
-    let handle = metrics_handle();
-    let producer_pool = pg_pool(&database_url, 4).await?;
-    let consumer_pool = pg_pool(&database_url, 4).await?;
-    let retention = PartialRetentionCache::new(Duration::from_secs(300), 256);
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let producer_url = format!("http://{}", listener.local_addr()?);
-    let app = internal_partials_router(InternalPartialsState {
-        retention: Arc::new(TestRetainedPartialPort::new(retention.clone())),
-        cluster_token: producer_token.to_owned(),
-    });
-    let (http_shutdown_tx, http_shutdown_rx) = oneshot::channel();
-    let http_task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = http_shutdown_rx.await;
-            })
-            .await
-    });
-    // Each test run uses a unique NOTIFY channel so a concurrently-running sibling
-    // test's producer cannot deliver into this consumer over the shared Postgres
-    // database (Postgres NOTIFY broadcasts to every session listening on a channel).
-    let channel = format!("cc_lb_test_partial_{}", uuid::Uuid::now_v7().simple());
-    let (producer_tx, producer_rx) = mpsc::channel(16);
-    let (notifier_shutdown_tx, notifier_shutdown_rx) = watch::channel(false);
-    let notifier_task = PgNotifier::spawn_with_channel(
-        producer_pool.clone(),
-        producer_rx,
-        retention,
-        producer_url,
-        channel.clone(),
-        notifier_shutdown_rx,
-    );
-    let consumer_bus = Arc::new(InMemoryBus::new());
-    let mut consumer_rx = consumer_bus.subscribe();
-    let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::new();
-    let listener_task = PgListener::spawn_with_channel(
-        consumer_pool.clone(),
-        consumer_bus,
-        client,
-        SecretString::new(consumer_token.to_owned().into()),
-        channel,
-        "http://consumer.local".to_owned(),
-        listener_shutdown_rx,
-    );
-
-    publish_until_received(
-        &producer_tx,
-        &mut consumer_rx,
-        small_partial("listener-ready"),
+    let db = crate::common::IsolatedPostgresDb::create(
+        &admin_url,
+        "cc_lb_partial",
+        "CC_LB_PG_FULL_TEMPLATE",
     )
     .await?;
+    let database_url = db.url.clone();
 
-    let before = labeled_counter_value(handle, metric_name, metric_outcome);
-    let partial = large_partial(partial_name);
-    let expected_event_id = partial.event_id.clone();
-    let update = RequestEventUpdate::Partial(partial);
-    let payload = serde_json::to_vec(&update)?;
-    assert!(
-        payload.len() >= LARGE_PAYLOAD_MIN_BYTES,
-        "large partial fixture serialized to {} bytes, below {LARGE_PAYLOAD_MIN_BYTES}",
-        payload.len()
-    );
+    let outcome = AssertUnwindSafe(async move {
+        let handle = metrics_handle();
+        let producer_pool = pg_pool(&database_url, 4).await?;
+        let consumer_pool = pg_pool(&database_url, 4).await?;
+        let retention = PartialRetentionCache::new(Duration::from_secs(300), 256);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let producer_url = format!("http://{}", listener.local_addr()?);
+        let app = internal_partials_router(InternalPartialsState {
+            retention: Arc::new(TestRetainedPartialPort::new(retention.clone())),
+            cluster_token: producer_token.to_owned(),
+        });
+        let (http_shutdown_tx, http_shutdown_rx) = oneshot::channel();
+        let http_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = http_shutdown_rx.await;
+                })
+                .await
+        });
+        let channel = format!("cc_lb_test_partial_{}", uuid::Uuid::now_v7().simple());
+        let (producer_tx, producer_rx) = mpsc::channel(16);
+        let (notifier_shutdown_tx, notifier_shutdown_rx) = watch::channel(false);
+        let notifier_task = PgNotifier::spawn_with_channel(
+            producer_pool.clone(),
+            producer_rx,
+            retention,
+            producer_url,
+            channel.clone(),
+            notifier_shutdown_rx,
+        );
+        let consumer_bus = Arc::new(InMemoryBus::new());
+        let mut consumer_rx = consumer_bus.subscribe();
+        let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::new();
+        let listener_task = PgListener::spawn_with_channel(
+            consumer_pool.clone(),
+            consumer_bus,
+            client,
+            SecretString::new(consumer_token.to_owned().into()),
+            channel,
+            "http://consumer.local".to_owned(),
+            listener_shutdown_rx,
+        );
 
-    producer_tx.send(update).await?;
-    wait_for_partial(&mut consumer_rx, &expected_event_id, expect_delivery).await?;
-    // The producer increments the counter only after its `pg_notify` await, which
-    // is not ordered against the consumer-side delivery `wait_for_partial` sees, so
-    // under scheduler starvation delivery can beat the increment. Poll to a bound;
-    // the assertion stays exact (precisely `before + 1.0`).
-    let observed = wait_for_counter(handle, metric_name, metric_outcome, before + 1.0).await;
-    assert_eq!(observed, before + 1.0);
+        publish_until_received(
+            &producer_tx,
+            &mut consumer_rx,
+            small_partial("listener-ready"),
+        )
+        .await?;
 
-    notifier_shutdown_tx.send(true)?;
-    listener_shutdown_tx.send(true)?;
-    let _ = http_shutdown_tx.send(());
-    producer_pool.close().await;
-    consumer_pool.close().await;
-    notifier_task.await?;
-    listener_task.await?;
-    http_task.await??;
-    Ok(())
+        let before = labeled_counter_value(handle, metric_name, metric_outcome);
+        let partial = large_partial(partial_name);
+        let expected_event_id = partial.event_id.clone();
+        let update = RequestEventUpdate::Partial(partial);
+        let payload = serde_json::to_vec(&update)?;
+        assert!(
+            payload.len() >= LARGE_PAYLOAD_MIN_BYTES,
+            "large partial fixture serialized to {} bytes, below {LARGE_PAYLOAD_MIN_BYTES}",
+            payload.len()
+        );
+
+        producer_tx.send(update).await?;
+        wait_for_partial(&mut consumer_rx, &expected_event_id, expect_delivery).await?;
+        // The producer increments the counter only after its `pg_notify` await, which
+        // is not ordered against the consumer-side delivery `wait_for_partial` sees, so
+        // under scheduler starvation delivery can beat the increment. Poll to a bound;
+        // the assertion stays exact (precisely `before + 1.0`).
+        let observed = wait_for_counter(handle, metric_name, metric_outcome, before + 1.0).await;
+        assert_eq!(observed, before + 1.0);
+
+        notifier_shutdown_tx.send(true)?;
+        listener_shutdown_tx.send(true)?;
+        let _ = http_shutdown_tx.send(());
+        producer_pool.close().await;
+        consumer_pool.close().await;
+        notifier_task.await?;
+        listener_task.await?;
+        http_task.await??;
+        Ok(())
+    })
+    .catch_unwind()
+    .await;
+    let _ = db.drop().await;
+    match outcome {
+        Ok(res) => res,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn ci_postgres_url() -> Option<String> {
@@ -194,18 +204,6 @@ fn ci_postgres_url() -> Option<String> {
 
 fn metrics_handle() -> &'static PrometheusHandle {
     crate::common::install_prometheus()
-}
-
-async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
-    let pool = pg_pool(database_url, 1).await?;
-    let storage = PostgresStorage::new(pool.clone(), clock);
-    storage.initialize().await?;
-    sqlx::query("TRUNCATE request_events_v1 RESTART IDENTITY")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
-    Ok(())
 }
 
 async fn pg_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {

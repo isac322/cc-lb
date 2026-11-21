@@ -16,7 +16,6 @@ use cc_lb_control::api_keys::{
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
 use cc_lb_domain::Upstream;
-use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
@@ -53,12 +52,7 @@ pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<KeyStore> {
 }
 
 async fn open_storage(dir: &Path, filename: &str, clock: ClockHandle) -> Arc<SqliteStorage> {
-    let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
-        .await
-        .unwrap();
-    storage.initialize().await.unwrap();
-    Arc::new(storage)
+    crate::admin_test_common::sqlite_storage_with_clock(dir, filename, clock).await
 }
 
 pub fn minimal_config() -> Config {

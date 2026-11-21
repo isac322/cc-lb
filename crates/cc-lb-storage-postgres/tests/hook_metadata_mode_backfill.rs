@@ -2,13 +2,11 @@
 //! Migration 0130 stamps the former serde default (`active`) on those entries
 //! so registry reads keep decoding them now that `mode` is mandatory.
 
-use std::str::FromStr;
-
 use anyhow::Result;
 use cc_lb_plugin_wire::metadata::HookMode;
 use cc_lb_storage_api::{MetaStore, PluginRegistryStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const LEGACY_ID: Uuid = Uuid::from_u128(0x0130_0000_0000_0000_0000_0000_0000_0001);
@@ -517,56 +515,24 @@ async fn seed_registry_row(
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("hook_mode_backfill_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
-
-        Ok(Self {
-            schema,
-            admin_pool,
-            pool,
-        })
+        let isolated = crate::pg_test_support::IsolatedPg::create_empty(url).await?;
+        match isolated.pool(4).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
+            Err(error) => {
+                let _ = isolated.drop().await;
+                Err(error)
+            }
+        }
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

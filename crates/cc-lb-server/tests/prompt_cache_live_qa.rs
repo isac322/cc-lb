@@ -555,9 +555,13 @@ async fn opus_4_7_records_a_warm_entry_for_a_prefix_between_2048_and_4096_tokens
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server =
-        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
-    let pool = support::open_sqlite_pool(&server).await;
+    let server = common::spawn_inprocess_server_with_two_upstreams_and_clock(
+        DIAGNOSTICS_CONFIG,
+        fake_config,
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await;
+    let pool = support::open_sqlite_pool_at(&server.sqlite_path).await;
 
     let request = json!({
         "model": OPUS_4_7,

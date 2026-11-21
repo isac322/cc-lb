@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use cc_lb_aead::EncryptedOAuthTokens;
@@ -14,7 +14,7 @@ use cc_lb_storage_api::{
     UsageTokenInterval, UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -805,40 +805,36 @@ async fn insert_rollup(
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("quota_aggregates_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin_pool)
-            .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
-        Ok(Self {
-            schema,
-            admin_pool,
-            pool,
-        })
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        match isolated.pool(4).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
+            Err(error) => {
+                let _ = isolated.drop().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn create_empty(url: &str) -> Result<Self> {
+        let isolated = crate::pg_test_support::IsolatedPg::create_empty(url).await?;
+        match isolated.pool(4).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
+            Err(error) => {
+                let _ = isolated.drop().await;
+                Err(error)
+            }
+        }
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            self.schema
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
 }
 
@@ -848,7 +844,7 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
         eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
         return Ok(());
     };
-    let fixture = Fixture::create(&url).await?;
+    let fixture = Fixture::create_empty(&url).await?;
     let result: Result<()> = async {
         let mut connection = fixture.pool.acquire().await?;
         sqlx::migrate!("./migrations")

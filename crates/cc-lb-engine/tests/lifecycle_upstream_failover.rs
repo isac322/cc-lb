@@ -623,15 +623,13 @@ impl UpstreamDispatch for ScriptedDispatch {
 async fn sqlite_storage(
     dir: &tempfile::TempDir,
 ) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("failover-request-events.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
-    Ok(Arc::new(storage))
+    Ok(Arc::new(
+        crate::common::templated_sqlite_storage(
+            &dir.path().join("failover-request-events.sqlite"),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .await?,
+    ))
 }
 
 async fn wait_for_final_request_event(
@@ -699,7 +697,8 @@ fn rejected_five_hour_headers() -> HeaderMap {
 async fn oauth_429_fails_over_to_api_key_same_request() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let fixture = Fixture::new(vec![
         oauth(1, "oauth").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
@@ -708,6 +707,7 @@ async fn oauth_429_fails_over_to_api_key_same_request() -> Result<(), Box<dyn st
     .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
 
     let (status, _body) = fixture.send().await;
+    test_bus.shutdown().await;
     wait_for_final_request_event(&mut update_rx).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -729,7 +729,8 @@ async fn failover_final_row_uses_serving_custom_literal_bundle()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let mut official =
         oauth(1, "official").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
@@ -754,6 +755,7 @@ async fn failover_final_row_uses_serving_custom_literal_bundle()
     ));
 
     let (status, _body) = fixture.send_request(request).await;
+    test_bus.shutdown().await;
     wait_for_final_request_event(&mut update_rx).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -1266,7 +1268,8 @@ async fn single_oauth_429_without_alternative_relays_original_429()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let fixture = Fixture::new(vec![
         oauth(1, "oauth").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
@@ -1274,6 +1277,7 @@ async fn single_oauth_429_without_alternative_relays_original_429()
     .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
 
     let (status, body) = fixture.send().await;
+    test_bus.shutdown().await;
     wait_for_final_request_event(&mut update_rx).await;
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -1304,7 +1308,8 @@ async fn failover_signer_build_failure_does_not_inherit_prior_attempt()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let fixture = Fixture::new(vec![
         oauth(1, "oauth").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
@@ -1313,6 +1318,7 @@ async fn failover_signer_build_failure_does_not_inherit_prior_attempt()
     .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
 
     let (status, _body) = fixture.send().await;
+    test_bus.shutdown().await;
     let partials = tokio::time::timeout(Duration::from_secs(3), async {
         let mut partials = Vec::new();
         loop {
@@ -2167,11 +2173,13 @@ async fn send_recorded(
 ) -> Result<Recorded, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let fixture = Fixture::new(upstreams)
         .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
     let (status, body) = fixture.send_request(request).await;
+    test_bus.shutdown().await;
     wait_for_final_request_event(&mut update_rx).await;
     let events = stored_request_events(storage.as_ref()).await?;
     Ok(Recorded {

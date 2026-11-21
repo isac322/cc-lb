@@ -174,11 +174,59 @@ pub async fn postgres_fixture()
         .connect_with(options.clone())
         .await?;
     let db = format!("cc_lb_admin_scheduler_{}", uuid::Uuid::new_v4().simple());
-    if sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
-        .execute(&admin)
-        .await
-        .is_err()
+    let created = if let Ok(template_base) = std::env::var("CC_LB_PG_SCHED_TEMPLATE")
+        && !template_base.trim().is_empty()
     {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash as _, Hasher as _};
+
+        let template_base = template_base.trim();
+        let pool_size = std::env::var("CC_LB_PG_SCHED_TEMPLATE_POOL_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        let slot = {
+            let mut hasher = DefaultHasher::new();
+            db.hash(&mut hasher);
+            (hasher.finish() as usize) % pool_size
+        };
+        let template_name = if pool_size > 1 {
+            format!("{template_base}_{slot}")
+        } else {
+            template_base.to_owned()
+        };
+        let lock_key = 0x4343_4C42_5343_0000_i64 + i64::try_from(slot).unwrap_or(0);
+        let mut conn = admin.acquire().await?;
+        let _ = sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *conn)
+            .await;
+        let wal_sql =
+            format!(r#"CREATE DATABASE "{db}" TEMPLATE "{template_name}" STRATEGY = WAL_LOG"#);
+        let res = match sqlx::query(sqlx::AssertSqlSafe(wal_sql))
+            .execute(&mut *conn)
+            .await
+        {
+            Ok(done) => Ok(done),
+            Err(_) => {
+                let fallback_sql = format!(r#"CREATE DATABASE "{db}" TEMPLATE "{template_name}""#);
+                sqlx::query(sqlx::AssertSqlSafe(fallback_sql))
+                    .execute(&mut *conn)
+                    .await
+            }
+        };
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(lock_key)
+            .execute(&mut *conn)
+            .await;
+        res
+    } else {
+        sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
+            .execute(&admin)
+            .await
+    };
+    if created.is_err() {
         admin.close().await;
         return Ok(None);
     }

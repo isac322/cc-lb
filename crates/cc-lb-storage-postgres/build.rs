@@ -77,12 +77,14 @@ fn write_fast_init_ddl(manifest_dir: &Path) {
 
     let output_path = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is required"))
         .join("postgres_fast_init_ddl.sql");
-    fs::write(&output_path, ddl).unwrap_or_else(|error| {
-        panic!(
-            "failed to write generated Postgres fast-init DDL {}: {error}",
-            output_path.display()
-        )
-    });
+    if fs::read(&output_path).ok().as_deref() != Some(ddl.as_bytes()) {
+        fs::write(&output_path, ddl).unwrap_or_else(|error| {
+            panic!(
+                "failed to write generated Postgres fast-init DDL {}: {error}",
+                output_path.display()
+            )
+        });
+    }
 }
 
 fn emit_rerun_tree(manifest_dir: &Path, relative_path: &Path) {

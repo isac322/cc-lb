@@ -35,5 +35,6 @@ toml.workspace = true
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 insta.workspace = true
 tempfile.workspace = true

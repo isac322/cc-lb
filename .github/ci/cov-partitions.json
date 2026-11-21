@@ -1,0 +1,257 @@
+{
+  "excluded": [
+    "cc-lb-loadgen",
+    "cc-lb-stress-suite",
+    "cc-lb-workspace-hack"
+  ],
+  "partitions": [
+    {
+      "name": "server-lib",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--lib"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server-integ-1",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": true,
+      "test_threads": 10,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ],
+          "nextest_args": [
+            "--partition",
+            "hash:1/2"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server-integ-2",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": true,
+      "test_threads": 10,
+      "upload_objects": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ],
+          "nextest_args": [
+            "--partition",
+            "hash:2/2"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "engine-lib",
+      "needs_postgres": false,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 6,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-engine"
+          ],
+          "cargo_args": [
+            "--lib"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "engine-integ",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 6,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-engine"
+          ],
+          "cargo_args": [
+            "--tests"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ],
+          "filter_expr": "not test(authn_rail_typestate_contracts)"
+        }
+      ]
+    },
+    {
+      "name": "admin",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-admin"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "storage-postgres",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-storage-postgres"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "storage-conformance-sqlite",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-storage-conformance",
+            "cc-lb-storage-sqlite",
+            "cc-lb-storage-api",
+            "cc-lb-property-tests"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-engine/sqlite",
+            "cc-lb-engine/postgres"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sched-ext-integ",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": true,
+      "test_threads": 6,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-scheduler",
+            "cc-lb-tls-tests",
+            "tests-integration",
+            "tests-multi-replica"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "wasm-and-rest",
+      "needs_postgres": false,
+      "seed_sched_template": false,
+      "needs_wasm": true,
+      "test_threads": 6,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cache-aware-wasmtime",
+            "cc-lb-aead",
+            "cc-lb-clock",
+            "cc-lb-config",
+            "cc-lb-control",
+            "cc-lb-domain",
+            "cc-lb-lifecycle",
+            "cc-lb-oauth-protocol",
+            "cc-lb-observability",
+            "cc-lb-pdk-wasmtime",
+            "cc-lb-pdk-wasmtime-macros",
+            "cc-lb-plugin-conformance",
+            "cc-lb-plugin-wire",
+            "cc-lb-pricing",
+            "cc-lb-quota",
+            "cc-lb-request-log",
+            "cc-lb-routing",
+            "cc-lb-runtime-wasmtime",
+            "cc-lb-signer-anthropic-key",
+            "cc-lb-signer-anthropic-oauth",
+            "cc-lb-signer-vertex",
+            "cc-lb-upstream",
+            "cc-lb-vertex-auth",
+            "fake-anthropic",
+            "mock-anthropic-oauth-server",
+            "tests-loom",
+            "wasmtime-dual-slot",
+            "wasmtime-filter-openai",
+            "wasmtime-filter-service-tier",
+            "wasmtime-shape-passthrough"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,8 +1,10 @@
 use crate::admin_test_common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{StatusCode, header};
+use cc_lb_clock::TestClock;
 use cc_lb_storage_api::{
     AuditQueryScope, AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
     WasmBlob, WasmRegistryEntryInput,
@@ -260,14 +262,15 @@ async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
 
 #[tokio::test]
 async fn update_stale_if_match_returns_conflict() {
-    let server = admin_test_common::spawn_admin_server().await;
+    let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+    let server = admin_test_common::spawn_admin_server_with_clock(clock.clone()).await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    clock.advance(Duration::from_secs(1));
     let (status, _, first_update) = server
         .client
         .put_json(

@@ -186,14 +186,95 @@ async fn row_counts(storage: &PostgresStorage) -> (i64, i64, i64) {
     (events, turns, decisions)
 }
 
+enum PostgresFixtureBackend {
+    Database { db: String, admin_url: String },
+    Schema { schema: String, admin_pool: PgPool },
+}
+
 struct PostgresFixture {
-    schema: String,
-    admin_pool: PgPool,
+    backend: PostgresFixtureBackend,
     pool: PgPool,
 }
 
 impl PostgresFixture {
     async fn create(url: &str) -> Self {
+        if let Ok(template_base) = std::env::var("CC_LB_PG_APP_TEMPLATE")
+            && !template_base.trim().is_empty()
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash as _, Hasher as _};
+
+            let template_base = template_base.trim();
+            let db = format!("renewal_accounting_e2e_{}", Uuid::new_v4().simple());
+            let pool_size = std::env::var("CC_LB_PG_APP_TEMPLATE_POOL_SIZE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            let slot = {
+                let mut hasher = DefaultHasher::new();
+                db.hash(&mut hasher);
+                (hasher.finish() as usize) % pool_size
+            };
+            let template_name = if pool_size > 1 {
+                format!("{template_base}_{slot}")
+            } else {
+                template_base.to_owned()
+            };
+            let base_opts = PgConnectOptions::from_str(url).expect("parse postgres URL");
+            let admin_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(base_opts.clone().database("postgres"))
+                .await
+                .expect("connect postgres admin pool");
+            let lock_key = 0x4343_4C42_0000_0000_i64 + i64::try_from(slot).unwrap_or(0);
+            let mut conn = admin_pool.acquire().await.expect("acquire postgres admin");
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *conn)
+                .await
+                .expect("lock template slot");
+            let wal_sql = format!(
+                "CREATE DATABASE {} TEMPLATE {} STRATEGY = WAL_LOG",
+                quote_ident(&db),
+                quote_ident(&template_name)
+            );
+            let created = match sqlx::query(AssertSqlSafe(wal_sql))
+                .execute(&mut *conn)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(_) => sqlx::query(AssertSqlSafe(format!(
+                    "CREATE DATABASE {} TEMPLATE {}",
+                    quote_ident(&db),
+                    quote_ident(&template_name)
+                )))
+                .execute(&mut *conn)
+                .await
+                .map(|_| ()),
+            };
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(lock_key)
+                .execute(&mut *conn)
+                .await;
+            drop(conn);
+            admin_pool.close().await;
+            created.expect("create templated renewal postgres database");
+
+            let pool = PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(base_opts.database(&db))
+                .await
+                .expect("connect isolated postgres pool");
+            return Self {
+                backend: PostgresFixtureBackend::Database {
+                    db,
+                    admin_url: url.to_owned(),
+                },
+                pool,
+            };
+        }
+
         let schema = format!("renewal_accounting_e2e_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -216,22 +297,43 @@ impl PostgresFixture {
             .await
             .expect("connect isolated postgres pool");
         Self {
-            schema,
-            admin_pool,
+            backend: PostgresFixtureBackend::Schema { schema, admin_pool },
             pool,
         }
     }
 
     async fn drop_schema(self) {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await
-        .expect("drop isolated postgres schema");
-        self.admin_pool.close().await;
+        match self.backend {
+            PostgresFixtureBackend::Database { db, admin_url } => {
+                let admin_opts = PgConnectOptions::from_str(&admin_url)
+                    .expect("parse postgres URL")
+                    .database("postgres");
+                let admin_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(admin_opts)
+                    .await
+                    .expect("connect postgres admin pool");
+                sqlx::query(AssertSqlSafe(format!(
+                    "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                    quote_ident(&db)
+                )))
+                .execute(&admin_pool)
+                .await
+                .expect("drop isolated postgres database");
+                admin_pool.close().await;
+            }
+            PostgresFixtureBackend::Schema { schema, admin_pool } => {
+                sqlx::query(AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_ident(&schema)
+                )))
+                .execute(&admin_pool)
+                .await
+                .expect("drop isolated postgres schema");
+                admin_pool.close().await;
+            }
+        }
     }
 }
 

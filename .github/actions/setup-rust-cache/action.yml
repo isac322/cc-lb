@@ -94,11 +94,12 @@ runs:
 
         if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
           "$sccache_path" --stop-server >/dev/null 2>&1 || true
-          if probe_output="$("$sccache_path" "$rustc_path" -vV 2>&1)"; then
+          if "$sccache_path" --start-server </dev/null >/dev/null 2>&1 && "$sccache_path" --show-stats >/dev/null 2>&1; then
             echo "available=true" >> "$GITHUB_OUTPUT"
             echo "path=$sccache_path" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          probe_output="sccache --start-server or --show-stats failed"
         else
           probe_output="sccache or rustc was not found on PATH"
         fi

@@ -99,7 +99,13 @@ async fn messages_default(state: &AppState, headers: &HeaderMap, body: &Bytes) -
         return crate::sse::senpi_tools_response(model, &body_json, image_path);
     }
     if wants_stream(headers, &body_json) {
-        return streaming_response(model, mode, state.config.slow_mode_bps, weather);
+        return streaming_response(
+            model,
+            mode,
+            state.config.slow_mode_bps,
+            weather,
+            state.config.stream_pause_after_first_delta.clone(),
+        );
     }
     if let Some((stop_reason, stop_details)) = crate::sse::abnormal_stop(mode) {
         return json_response(

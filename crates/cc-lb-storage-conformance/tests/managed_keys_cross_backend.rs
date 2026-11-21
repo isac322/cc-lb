@@ -1,21 +1,17 @@
 #![cfg(all(feature = "sqlite", feature = "postgres"))]
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
 use cc_lb_storage_sqlite::open_sqlite;
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
 use tokio::runtime::Runtime;
 
 struct PostgresFixture {
-    url: String,
-    schema: String,
+    isolated: crate::pg_template_helper::IsolatedPg,
     pool: PgPool,
 }
 
@@ -54,63 +50,24 @@ async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
 }
 
 async fn create_postgres_fixture(url: String) -> anyhow::Result<PostgresFixture> {
-    let schema = schema_name();
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(PgConnectOptions::from_str(&url)?)
-        .await?;
-    sqlx::query(AssertSqlSafe(format!(
-        "CREATE SCHEMA {}",
-        quote_ident(&schema)
-    )))
-    .execute(&admin_pool)
-    .await?;
-    admin_pool.close().await;
-
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]))
-        .await?;
+    let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&url).await?;
+    let pool = match isolated.pool(8).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            let _ = isolated.drop().await;
+            return Err(error);
+        }
+    };
     PostgresStorage::new(pool.clone(), system_clock())
         .initialize()
         .await?;
 
-    Ok(PostgresFixture { url, schema, pool })
+    Ok(PostgresFixture { isolated, pool })
 }
 
 async fn teardown_postgres_fixture(fixture: PostgresFixture) -> anyhow::Result<()> {
     fixture.pool.close().await;
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(PgConnectOptions::from_str(&fixture.url)?)
-        .await?;
-    sqlx::query(AssertSqlSafe(format!(
-        "DROP SCHEMA IF EXISTS {} CASCADE",
-        quote_ident(&fixture.schema)
-    )))
-    .execute(&admin_pool)
-    .await?;
-    admin_pool.close().await;
-    Ok(())
-}
-
-fn schema_name() -> String {
-    format!(
-        "managed_keys_cross_backend_{}",
-        uuid::Uuid::new_v4().simple()
-    )
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
+    fixture.isolated.drop().await
 }
 
 fn system_clock() -> ClockHandle {

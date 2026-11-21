@@ -1,8 +1,14 @@
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { type Browser, chromium, expect, type Locator, type Page } from '@playwright/test';
-import type { createServer as CreateViteServer } from 'vite';
+import type {
+  createServer as CreateViteServer,
+  PreviewServer,
+  preview as PreviewViteServer,
+  ViteDevServer,
+} from 'vite';
 import type {
   ApiKeyAccess,
   PricingCompleteness,
@@ -242,13 +248,10 @@ async function installApiKeyFixtures(
 
 const port = Number(portArg);
 // Load the selected base worktree's frozen Vite, not the head worktree's version.
-const { createServer }: { createServer: typeof CreateViteServer } = await import(
+const vite = (await import(
   pathToFileURL(resolve(appRoot, 'node_modules/vite/dist/node/index.js')).href
-);
-const server = await createServer({
-  root: appRoot,
-  server: { host: '127.0.0.1', port, strictPort: true },
-});
+)) as { createServer: typeof CreateViteServer; preview?: typeof PreviewViteServer };
+let server: ViteDevServer | PreviewServer | undefined;
 let browser: Browser | undefined;
 const deadline = Promise.withResolvers<never>();
 const readyTimer = setTimeout(
@@ -257,17 +260,33 @@ const readyTimer = setTimeout(
 );
 
 try {
-  await Promise.race([server.listen(), deadline.promise]);
+  if (typeof vite.preview === 'function' && existsSync(resolve(appRoot, 'dist/index.html'))) {
+    server = await Promise.race([
+      vite.preview({ root: appRoot, preview: { host: '127.0.0.1', port, strictPort: true } }),
+      deadline.promise,
+    ]);
+  } else {
+    const devServer = await vite.createServer({
+      root: appRoot,
+      server: { host: '127.0.0.1', port, strictPort: true },
+    });
+    server = devServer;
+    await Promise.race([devServer.listen(), deadline.promise]);
+  }
   clearTimeout(readyTimer);
   browser = await chromium.launch();
+  const launchedBrowser = browser;
   await mkdir(outputRoot, { recursive: true });
-  const captures = [];
   const scenarios = [
     { name: 'unpriced', state: 'unpriced' as const },
     { name: 'partial', state: 'partial' as const },
     { name: 'known_zero', state: 'known_zero' as const },
     ...RESIDUAL_SCENARIOS,
   ];
+  const tasks: Array<
+    | { kind: 'overview'; viewport: { width: number; height: number }; theme: 'dark' | 'light'; scenario: (typeof scenarios)[number] }
+    | { kind: 'api-key'; viewport: { width: number; height: number }; theme: 'dark' | 'light'; scenario: (typeof API_CAPTURE_SCENARIOS)[number] }
+  > = [];
   for (const viewport of [
     { width: 390, height: 844 },
     { width: 768, height: 900 },
@@ -275,12 +294,100 @@ try {
   ]) {
     for (const theme of ['dark', 'light'] as const) {
       for (const scenario of scenarios) {
-        const context = await browser.newContext({ viewport, colorScheme: theme, reducedMotion: 'reduce' });
-        try {
+        tasks.push({ kind: 'overview', viewport, theme, scenario });
+      }
+      for (const scenario of API_CAPTURE_SCENARIOS) {
+        tasks.push({ kind: 'api-key', viewport, theme, scenario });
+      }
+    }
+  }
+
+  type IndexedTask = { idx: number; task: (typeof tasks)[number] };
+  const groups = new Map<string, { viewport: { width: number; height: number }; theme: 'dark' | 'light'; items: IndexedTask[] }>();
+  for (let idx = 0; idx < tasks.length; idx += 1) {
+    const task = tasks[idx];
+    const key = `${task.viewport.width}x${task.viewport.height}-${task.theme}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { viewport: task.viewport, theme: task.theme, items: [] };
+      groups.set(key, group);
+    }
+    group.items.push({ idx, task });
+  }
+  const groupList = [...groups.values()];
+
+  const captures = new Array<Record<string, unknown>>(tasks.length);
+  const concurrency = Math.max(1, Number(process.env.CAPTURE_CONCURRENCY ?? 4));
+  let nextGroupIdx = 0;
+  async function worker() {
+    while (true) {
+      const gIdx = nextGroupIdx;
+      nextGroupIdx += 1;
+      if (gIdx >= groupList.length) return;
+      const { viewport, theme, items } = groupList[gIdx];
+      // Reuse one BrowserContext per (viewport, theme) group so Vite hashed assets stay cached
+      // while each task gets an isolated Page with explicit addInitScript localStorage state.
+      const context = await launchedBrowser.newContext({ viewport, colorScheme: theme, reducedMotion: 'reduce' });
+      try {
+        for (const { idx, task } of items) {
           const page = await context.newPage();
-          const residual = RESIDUAL_SCENARIOS.find(({ name }) => name === scenario.name);
-          const buckets = residual
-            ? [{
+          try {
+            const origin = `http://127.0.0.1:${port}`;
+            const { width, height } = viewport;
+            if (task.kind === 'overview') {
+              const { scenario } = task;
+              const residual = RESIDUAL_SCENARIOS.find(({ name }) => name === scenario.name);
+              const buckets = residual
+                ? [{
+                    bucket_start_unix_secs: NOW - 3600,
+                    request_count: 1,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    error_count: 0,
+                    latency_ms_sum: 10,
+                    latency_count: 1,
+                    virtual_cost_micros: 0,
+                    priced_request_count: 0,
+                    unpriced_request_count: 0,
+                    unmetered_request_count: 0,
+                    pricing_completeness: scenario.state,
+                    ...residual.overrides,
+                  } satisfies UsageBucket]
+                : undefined;
+              await installPricingFixtures(page, scenario.state, theme, buckets);
+              await page.goto(`${origin}/providers/anthropic?range=24h`);
+              await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+              // Until the upstream inventory loads, /providers/$provider renders the
+              // unscoped overview and then remounts as the provider page, which
+              // refetches every panel. Measure only the final provider page.
+              await expect(page.locator('#overview-usage-title')).toHaveText('Anthropic');
+              const cost = page.getByTestId('overview-kpi-cost');
+              await expect(cost.locator('[data-slot="value"]')).not.toBeEmpty();
+              await expect(page.getByTestId('top-principal-row')).toHaveCount(1);
+              await page.evaluate(() => document.fonts.ready);
+              const costText = await cost.innerText();
+              await centerAndAssertUsableViewport(page, cost, `Cost KPI ${scenario.name} ${width}px ${theme}`);
+              const overviewFile = `overview-${scenario.name}-${width}-${theme}.png`;
+              await page.screenshot({ path: resolve(outputRoot, overviewFile), fullPage: false, animations: 'disabled' });
+              const principals = page.getByRole('region', { name: 'Top principals' });
+              await expect(principals).toBeVisible();
+              await expect(principals.getByTestId('top-principal-row')).toHaveCount(1);
+              await centerAndAssertUsableViewport(page, principals, `Top principals ${scenario.name} ${width}px ${theme}`);
+              const principalsFile = `principals-${scenario.name}-${width}-${theme}.png`;
+              await page.screenshot({ path: resolve(outputRoot, principalsFile), fullPage: false, animations: 'disabled' });
+
+              await page.goto(`${origin}/?range=24h`);
+              await page.getByRole('row', { name: 'View request pricing-event' }).getByText('pricing-model', { exact: true }).click();
+              const drawer = page.getByRole('dialog', { name: 'Request detail' });
+              await expect(drawer).toBeVisible();
+              const drawerFile = `drawer-${scenario.name}-${width}-${theme}.png`;
+              await page.screenshot({ path: resolve(outputRoot, drawerFile), animations: 'disabled' });
+              captures[idx] = { surface: 'overview', scenario: scenario.name, width, height, theme, overviewFile, principalsFile, drawerFile, costText, drawerText: await drawer.innerText() };
+            } else {
+              const { scenario } = task;
+              const buckets: UsageBucket[] = [{
                 bucket_start_unix_secs: NOW - 3600,
                 request_count: 1,
                 input_tokens: 0,
@@ -295,86 +402,32 @@ try {
                 unpriced_request_count: 0,
                 unmetered_request_count: 0,
                 pricing_completeness: scenario.state,
-                ...residual.overrides,
-              } satisfies UsageBucket]
-            : undefined;
-          await installPricingFixtures(page, scenario.state, theme, buckets);
-          const origin = `http://127.0.0.1:${port}`;
-          const { width, height } = viewport;
-          await page.goto(`${origin}/providers/anthropic?range=24h`);
-          await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-          // Until the upstream inventory loads, /providers/$provider renders the
-          // unscoped overview and then remounts as the provider page, which
-          // refetches every panel. Measure only the final provider page.
-          await expect(page.locator('#overview-usage-title')).toHaveText('Anthropic');
-          const cost = page.getByTestId('overview-kpi-cost');
-          await expect(cost.locator('[data-slot="value"]')).not.toBeEmpty();
-          await expect(page.getByTestId('top-principal-row')).toHaveCount(1);
-          await page.evaluate(() => document.fonts.ready);
-          const costText = await cost.innerText();
-          await centerAndAssertUsableViewport(page, cost, `Cost KPI ${scenario.name} ${width}px ${theme}`);
-          const overviewFile = `overview-${scenario.name}-${width}-${theme}.png`;
-          await page.screenshot({ path: resolve(outputRoot, overviewFile), fullPage: false, animations: 'disabled' });
-          const principals = page.getByRole('region', { name: 'Top principals' });
-          await expect(principals).toBeVisible();
-          await expect(principals.getByTestId('top-principal-row')).toHaveCount(1);
-          await centerAndAssertUsableViewport(page, principals, `Top principals ${scenario.name} ${width}px ${theme}`);
-          const principalsFile = `principals-${scenario.name}-${width}-${theme}.png`;
-          await page.screenshot({ path: resolve(outputRoot, principalsFile), fullPage: false, animations: 'disabled' });
-
-          await page.goto(`${origin}/?range=24h`);
-          await page.getByRole('row', { name: 'View request pricing-event' }).getByText('pricing-model', { exact: true }).click();
-          const drawer = page.getByRole('dialog', { name: 'Request detail' });
-          await expect(drawer).toBeVisible();
-          const drawerFile = `drawer-${scenario.name}-${width}-${theme}.png`;
-          await page.screenshot({ path: resolve(outputRoot, drawerFile), animations: 'disabled' });
-          captures.push({ surface: 'overview', scenario: scenario.name, width, height, theme, overviewFile, principalsFile, drawerFile, costText, drawerText: await drawer.innerText() });
-        } finally {
-          await context.close();
+                ...scenario.overrides,
+              }];
+              await installApiKeyFixtures(page, scenario.state, theme, buckets, scenario.modelKey);
+              await page.goto(`${origin}/upstreams?selectedId=${API_KEY_UPSTREAM_ID}`);
+              const usageCard = page.getByTestId('api-usage-card');
+              await expect(usageCard).toBeVisible();
+              await usageCard.getByRole('radiogroup', { name: 'Metric' }).getByRole('radio', { name: 'Cost' }).click();
+              await page.evaluate(() => document.fonts.ready);
+              const credits = usageCard.locator('[data-cell="Credits used"]');
+              await expect(credits).toBeVisible();
+              const creditsText = await credits.innerText();
+              await centerAndAssertUsableViewport(page, credits, `API credits ${scenario.name} ${width}px ${theme}`);
+              const apiKeyFile = `api-key-${scenario.name}-${width}-${theme}.png`;
+              await page.screenshot({ path: resolve(outputRoot, apiKeyFile), fullPage: false, animations: 'disabled' });
+              captures[idx] = { surface: 'api-key-estimated', scenario: scenario.name, modelKey: scenario.modelKey ?? 'claude-sonnet-4', expectedCaption: scenario.caption, creditsText, width, height, theme, apiKeyFile };
+            }
+          } finally {
+            await page.close();
+          }
         }
-      }
-      for (const scenario of API_CAPTURE_SCENARIOS) {
-        const context = await browser.newContext({ viewport, colorScheme: theme, reducedMotion: 'reduce' });
-        try {
-          const page = await context.newPage();
-          const buckets: UsageBucket[] = [{
-            bucket_start_unix_secs: NOW - 3600,
-            request_count: 1,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            error_count: 0,
-            latency_ms_sum: 10,
-            latency_count: 1,
-            virtual_cost_micros: 0,
-            priced_request_count: 0,
-            unpriced_request_count: 0,
-            unmetered_request_count: 0,
-            pricing_completeness: scenario.state,
-            ...scenario.overrides,
-          }];
-          await installApiKeyFixtures(page, scenario.state, theme, buckets, scenario.modelKey);
-          const origin = `http://127.0.0.1:${port}`;
-          const { width, height } = viewport;
-          await page.goto(`${origin}/upstreams?selectedId=${API_KEY_UPSTREAM_ID}`);
-          const usageCard = page.getByTestId('api-usage-card');
-          await expect(usageCard).toBeVisible();
-          await usageCard.getByRole('radiogroup', { name: 'Metric' }).getByRole('radio', { name: 'Cost' }).click();
-          await page.evaluate(() => document.fonts.ready);
-          const credits = usageCard.locator('[data-cell="Credits used"]');
-          await expect(credits).toBeVisible();
-          const creditsText = await credits.innerText();
-          await centerAndAssertUsableViewport(page, credits, `API credits ${scenario.name} ${width}px ${theme}`);
-          const apiKeyFile = `api-key-${scenario.name}-${width}-${theme}.png`;
-          await page.screenshot({ path: resolve(outputRoot, apiKeyFile), fullPage: false, animations: 'disabled' });
-          captures.push({ surface: 'api-key-estimated', scenario: scenario.name, modelKey: scenario.modelKey ?? 'claude-sonnet-4', expectedCaption: scenario.caption, creditsText, width, height, theme, apiKeyFile });
-        } finally {
-          await context.close();
-        }
+      } finally {
+        await context.close();
       }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(concurrency, groupList.length) }, () => worker()));
   await writeFile(resolve(outputRoot, 'capture.json'), JSON.stringify({
     sourceSha,
     actualServedTreeSha: sourceSha,
@@ -393,6 +446,6 @@ try {
   try {
     await browser?.close();
   } finally {
-    await server.close();
+    await server?.close();
   }
 }

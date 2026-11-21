@@ -73,6 +73,29 @@ impl Drop for RunningTlsApp {
 }
 
 pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
+    let fake_config = AppConfig {
+        slow_mode_bps,
+        files_cap_bytes: 104_857_600,
+        tokens_expire_in: 3600,
+        ..AppConfig::default()
+    };
+    start_tls_app_with_fake_config(fake_config).await
+}
+
+pub async fn start_tls_app_with_stream_pause(
+    pause: fake_anthropic::OAuthRefreshPause,
+) -> RunningTlsApp {
+    let fake_config = AppConfig {
+        slow_mode_bps: 10_485_760,
+        files_cap_bytes: 104_857_600,
+        tokens_expire_in: 3600,
+        stream_pause_after_first_delta: Some(pause),
+        ..AppConfig::default()
+    };
+    start_tls_app_with_fake_config(fake_config).await
+}
+
+async fn start_tls_app_with_fake_config(fake_config: AppConfig) -> RunningTlsApp {
     let dir = tempfile::tempdir().expect("temp dir");
     let cert_path = dir.path().join("server-cert.pem");
     let key_path = dir.path().join("server-key.pem");
@@ -83,12 +106,6 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         .await
         .expect("bind fake listener");
     let upstream_addr = fake_listener.local_addr().expect("fake addr");
-    let fake_config = AppConfig {
-        slow_mode_bps,
-        files_cap_bytes: 104_857_600,
-        tokens_expire_in: 3600,
-        ..AppConfig::default()
-    };
     let fake =
         tokio::spawn(
             async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
@@ -230,7 +247,7 @@ pub async fn wait_for_reloaded_cert(
             Instant::now() < deadline,
             "new certificate not observed; last={last}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -254,7 +271,7 @@ pub async fn wait_tls_status(
             Instant::now() < deadline,
             "TLS server not ready; last={last}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -270,7 +287,7 @@ pub async fn wait_plain_status(addr: SocketAddr, path: &str, status: u16) {
             Instant::now() < deadline,
             "plain HTTP server not ready; last={last}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

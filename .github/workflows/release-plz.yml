@@ -51,6 +51,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       # Hosted runners do not provide runner-pod S3 cache environment.
       # setup-rust-cache therefore uses its local/uncached fallback while

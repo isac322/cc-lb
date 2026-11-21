@@ -135,10 +135,7 @@ fn connection_drop_mid_commit() {
 
 #[derive(Clone)]
 struct CrashFixture {
-    url: String,
-    database: String,
-    schema: String,
-    app_name: String,
+    isolated: crate::pg_test_support::IsolatedPg,
     checkpoint_lock_key: i32,
     admin_pool: PgPool,
     pool: PgPool,
@@ -148,61 +145,58 @@ struct CrashFixture {
 impl CrashFixture {
     async fn create(
         url: &str,
-        schema: &str,
+        _schema: &str,
         scenario: &str,
         checkpoint_sleep_secs: f64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Advisory locks and xmin horizons are database-scoped; isolate this
         // crash injection from other tests running in the same PostgreSQL service.
-        let database = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let mut admin_url = Url::parse(url)?;
         admin_url.set_path("/postgres");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(admin_url.as_str())
             .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE DATABASE {}",
-            quote_ident(&database)
-        )))
-        .execute(&admin_pool)
-        .await?;
-
-        let mut database_url = Url::parse(url)?;
-        database_url.set_path(&format!("/{database}"));
-        let setup_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(database_url.as_str())
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(schema)
-        )))
-        .execute(&setup_pool)
-        .await?;
-        setup_pool.close().await;
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let checkpoint_lock_key = (u32::from_be_bytes(Uuid::new_v4().as_bytes()[..4].try_into()?)
             & 0x7fff_ffff)
             .max(1) as i32;
-        let pool = schema_pool(database_url.as_str(), schema, &app_name, 1).await?;
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated_or_empty_db(url)
+            .await?
+            .with_application_name(app_name);
+        let pool = match isolated.pool(1).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                admin_pool.close().await;
+                return Err(error.into());
+            }
+        };
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
-        storage.initialize().await?;
-        // A fresh schema may spend its first rollup pass completing the
-        // pending Gemini model-reconciliation migration. Finish that pass
-        // before installing the checkpoint fault trigger so the crash tests
-        // exercise the intended checkpoint transaction.
-        storage.rollup_usage_once().await?;
-        install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs, checkpoint_lock_key).await?;
-        seed_request_events(&storage).await?;
+        if let Err(error) = async {
+            storage.initialize().await?;
+            // A fresh schema may spend its first rollup pass completing the
+            // pending Gemini model-reconciliation migration. Finish that pass
+            // before installing the checkpoint fault trigger so the crash tests
+            // exercise the intended checkpoint transaction.
+            storage.rollup_usage_once().await?;
+            install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs, checkpoint_lock_key)
+                .await?;
+            seed_request_events(&storage).await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }
+        .await
+        {
+            pool.close().await;
+            let _ = isolated.drop().await;
+            admin_pool.close().await;
+            return Err(error);
+        }
 
         Ok(Self {
-            url: database_url.to_string(),
-            database,
-            schema: schema.to_owned(),
-            app_name,
+            isolated,
             checkpoint_lock_key,
             admin_pool,
             pool,
@@ -211,14 +205,11 @@ impl CrashFixture {
     }
 
     async fn reconnect(&self) -> Result<Self, Box<dyn std::error::Error>> {
-        let pool = schema_pool(&self.url, &self.schema, &self.app_name, 1).await?;
+        let pool = self.isolated.pool(1).await?;
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
         Ok(Self {
-            url: self.url.clone(),
-            database: self.database.clone(),
-            schema: self.schema.clone(),
-            app_name: self.app_name.clone(),
+            isolated: self.isolated.clone(),
             checkpoint_lock_key: self.checkpoint_lock_key,
             admin_pool: self.admin_pool.clone(),
             pool,
@@ -309,21 +300,16 @@ impl CrashFixture {
         }
 
         Err(format!(
-            "timed out waiting for seeded events to fall below the snapshot xmin horizon for {}",
-            self.app_name
+            "timed out waiting for seeded events to fall below the snapshot xmin horizon (lock_key={})",
+            self.checkpoint_lock_key
         )
         .into())
     }
 
-    async fn drop_database(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn drop_database(self) -> Result<(), Box<dyn std::error::Error>> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {}",
-            quote_ident(&self.database)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
         self.admin_pool.close().await;
+        self.isolated.drop().await?;
         Ok(())
     }
 }
@@ -363,36 +349,6 @@ impl Consistency {
             }
         }
     }
-}
-
-async fn schema_pool(
-    url: &str,
-    schema: &str,
-    app_name: &str,
-    max_connections: u32,
-) -> Result<PgPool, sqlx::Error> {
-    let search_path = format!("{}, public", quote_ident(schema));
-    let app_name = app_name.to_owned();
-
-    PgPoolOptions::new()
-        .max_connections(max_connections)
-        .after_connect(move |connection, _metadata| {
-            let search_path = search_path.clone();
-            let app_name = app_name.clone();
-            Box::pin(async move {
-                sqlx::query("SELECT set_config('search_path', $1, false)")
-                    .bind(&search_path)
-                    .execute(&mut *connection)
-                    .await?;
-                sqlx::query("SELECT set_config('application_name', $1, false)")
-                    .bind(&app_name)
-                    .execute(&mut *connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(url)
-        .await
 }
 
 async fn install_checkpoint_sleep_trigger(
@@ -494,18 +450,6 @@ fn expected_rollups_visible(rollups: &[UsageRollup]) -> bool {
 
 fn schema_name(scenario: &str, iter: usize) -> String {
     format!("cc_lb_crash_{scenario}_{iter}_{}", Uuid::new_v4().simple())
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }
 
 fn rollup_result_label<T>(result: &Result<T, time::error::Elapsed>) -> &'static str {

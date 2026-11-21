@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_control::api_keys::secret;
-use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_api::{ApiKeyMutation, KeyStatus, Limit, LimitKind};
 
 #[tokio::test]
@@ -93,11 +92,11 @@ async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error
 
 async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let database_url = format!("sqlite://{}", dir.path().join("key_store.sqlite").display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
+    let storage = crate::common::templated_sqlite_storage(
+        &dir.path().join("key_store.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?;
     Ok((dir, KeyStore::new(Arc::new(storage))))
 }
 

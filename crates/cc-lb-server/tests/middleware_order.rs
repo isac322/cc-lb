@@ -2,7 +2,7 @@ use crate::common;
 
 #[tokio::test]
 async fn middleware_order() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let body = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"this body is intentionally larger than the configured cap because it repeats text text text text text text text text text text text text text text text text text text text text text text text text"}],"max_tokens":1}"#;
     let response = common::http_post(
         server.proxy_addr,

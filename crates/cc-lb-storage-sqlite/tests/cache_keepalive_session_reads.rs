@@ -4,8 +4,8 @@ use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveSessionCursor,
     CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
     CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
-    CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent, RequestEventProjections,
-    RequestEventStore, StorageError,
+    CacheKeepaliveTurnRow, CacheTtl, RequestEvent, RequestEventProjections, RequestEventStore,
+    StorageError,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -23,18 +23,11 @@ fn live_evidence_base_secs() -> u64 {
 
 async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        temp_dir
-            .path()
-            .join("cache-keepalive-reads.sqlite")
-            .display()
-    );
+    let path = temp_dir.path().join("cache-keepalive-reads.sqlite");
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        super::common::templated_sqlite_storage(&path, Arc::new(cc_lb_clock::SystemClock))
             .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+            .expect("initialize sqlite");
     (temp_dir, storage)
 }
 
@@ -102,9 +95,15 @@ async fn activity_evidence_bounds_id_and_prefix_parameters_and_deduplicates_unio
             .all(|pair| (pair[0].request_start_ms, &pair[0].evidence_id)
                 < (pair[1].request_start_ms, &pair[1].evidence_id))
     );
-    let mut expected = std::collections::BTreeSet::new();
-    for (cycles, sources) in cycle_ids.chunks(500).zip(source_refs.chunks(500)) {
-        expected.extend(
+    let expected: std::collections::BTreeSet<String> = (1..=COUNT)
+        .flat_map(|id| [format!("renewal-{id}"), format!("follow_up-{id}")])
+        .collect();
+    assert_eq!(ids, expected, "large scope must match full fixture union");
+
+    // Cross-check batch union equivalence on a 2-chunk slice without re-querying all 34 batches.
+    let mut slice_actual = std::collections::BTreeSet::new();
+    for (cycles, sources) in cycle_ids.chunks(500).zip(source_refs.chunks(500)).take(2) {
+        slice_actual.extend(
             storage
                 .list_cache_keepalive_evidence_for_activity(
                     PRINCIPAL_ID,
@@ -119,7 +118,14 @@ async fn activity_evidence_bounds_id_and_prefix_parameters_and_deduplicates_unio
                 .map(|entry| entry.evidence_id),
         );
     }
-    assert_eq!(ids, expected, "large scope must equal union of small reads");
+    let slice_expected: std::collections::BTreeSet<String> = (1..=1000)
+        .chain((COUNT - 999)..=COUNT)
+        .flat_map(|id| [format!("renewal-{id}"), format!("follow_up-{id}")])
+        .collect();
+    assert_eq!(
+        slice_actual, slice_expected,
+        "chunked scope must equal exact union of matching rows"
+    );
 }
 
 fn snapshot() -> CacheKeepaliveConfigSnapshot {

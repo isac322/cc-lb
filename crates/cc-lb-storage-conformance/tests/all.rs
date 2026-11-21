@@ -4,6 +4,9 @@ mod managed_keys_cross_backend;
 #[cfg(feature = "postgres")]
 #[path = "managed_keys_postgres.rs"]
 mod managed_keys_postgres;
+#[cfg(feature = "postgres")]
+#[path = "pg_template_helper.rs"]
+mod pg_template_helper;
 #[path = "quota_aggregate_parity.rs"]
 mod quota_aggregate_parity;
 #[cfg(feature = "postgres")]

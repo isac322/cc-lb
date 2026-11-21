@@ -1,0 +1,93 @@
+name: Start native PostgreSQL on /dev/shm
+description: Initialize and start PostgreSQL in RAM (/dev/shm/pgdata), apply migrations to template DBs, and export test env vars.
+
+inputs:
+  async:
+    description: Start PostgreSQL and seed template databases in the background, emitting sentinel files.
+    required: false
+    default: "false"
+  seed-sched-template:
+    description: Seed cc_lb_sched_template{,_0..7} with apalis and cc_lb_scheduler migrations when cached.
+    required: false
+    default: "false"
+  ready-file:
+    description: Path written atomically when PostgreSQL and template DBs are ready.
+    required: false
+    default: "/dev/shm/cc-lb-pg.ready"
+  fail-file:
+    description: Path written atomically if background PostgreSQL startup or seeding fails.
+    required: false
+    default: "/dev/shm/cc-lb-pg.failed"
+  log-file:
+    description: Log path when starting PostgreSQL asynchronously.
+    required: false
+    default: "/dev/shm/cc-lb-pg-setup.log"
+
+runs:
+  using: composite
+  steps:
+    - name: Start native PostgreSQL and seed migrated template databases
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v sqlx >/dev/null 2>&1; then
+          echo "::error::sqlx CLI is required before starting native PostgreSQL" >&2
+          exit 1
+        fi
+        pg_bin="$(dirname "$(find /usr/lib/postgresql -maxdepth 3 -name initdb 2>/dev/null | sort -V | tail -n 1)")"
+        if [ -z "$pg_bin" ] || [ ! -x "$pg_bin/initdb" ] || [ ! -x "$pg_bin/pg_ctl" ]; then
+          echo "::error::PostgreSQL server binaries (initdb/pg_ctl) not found under /usr/lib/postgresql" >&2
+          exit 1
+        fi
+
+        ready_file="${{ inputs.ready-file }}"
+        fail_file="${{ inputs.fail-file }}"
+        log_file="${{ inputs.log-file }}"
+        seed_sched="${{ inputs.seed-sched-template }}"
+        rm -f "$ready_file" "${ready_file}.tmp" "$fail_file" "${fail_file}.tmp" "$log_file"
+
+        apalis_dir=""
+        export_sched="false"
+        if [ "$seed_sched" = "true" ] && [ -f Cargo.lock ]; then
+          apalis_ver="$(awk '/^name = "apalis-postgres"$/{getline; if ($1 == "version" && $2 == "=") {gsub(/"/, "", $3); print $3; exit}}' Cargo.lock || true)"
+          cargo_reg_src="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+          if [ -n "$apalis_ver" ] && [ -d "$cargo_reg_src" ]; then
+            apalis_dir="$(find "$cargo_reg_src" -maxdepth 2 -mindepth 2 -type d -name "apalis-postgres-${apalis_ver}" 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -n "$apalis_dir" ] && [ -d "${apalis_dir}/migrations" ] && [ -f "${apalis_dir}/sqlx.toml" ]; then
+            export_sched="true"
+          else
+            apalis_dir=""
+          fi
+        fi
+
+        test_url="postgres://postgres:testpw@127.0.0.1:5432/cc_lb_test"
+        {
+          echo "CI_POSTGRES_URL=$test_url"
+          echo "DATABASE_URL=$test_url"
+          echo "DATABASE_URL_TEST=$test_url"
+          echo "CC_LB_PG_APP_TEMPLATE=cc_lb_app_template"
+          echo "CC_LB_PG_APP_TEMPLATE_POOL_SIZE=8"
+          echo "CC_LB_PG_READY_FILE=$ready_file"
+          echo "CC_LB_PG_FAIL_FILE=$fail_file"
+          echo "CC_LB_PG_SETUP_LOG=$log_file"
+          if [ "$export_sched" = "true" ]; then
+            echo "CC_LB_PG_SCHED_TEMPLATE=cc_lb_sched_template"
+            echo "CC_LB_PG_SCHED_TEMPLATE_POOL_SIZE=8"
+            echo "CC_LB_PG_FULL_TEMPLATE=cc_lb_full_template"
+            echo "CC_LB_PG_FULL_TEMPLATE_POOL_SIZE=8"
+          fi
+        } >> "$GITHUB_ENV"
+
+        export PG_BIN="$pg_bin"
+        export SEED_SCHED="$export_sched"
+        export APALIS_DIR="$apalis_dir"
+        export READY_FILE="$ready_file"
+        export FAIL_FILE="$fail_file"
+
+        if [ "${{ inputs.async }}" = "true" ]; then
+          setsid bash "${{ github.action_path }}/seed-postgres.sh" </dev/null >"$log_file" 2>&1 &
+          echo "CC_LB_PG_SETUP_PID=$!" >> "$GITHUB_ENV"
+        else
+          bash "${{ github.action_path }}/seed-postgres.sh"
+        fi

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cert_reload_mid_traffic_keeps_in_flight_stream_alive() {
-    let app = common::start_tls_app(8_192).await;
+    let stream_pause = fake_anthropic::OAuthRefreshPause::new();
+    let app = common::start_tls_app_with_stream_pause(stream_pause.clone()).await;
 
     let before = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models", &app.api_key)
         .await
@@ -21,6 +22,7 @@ async fn cert_reload_mid_traffic_keeps_in_flight_stream_alive() {
         .read_until("content_block_delta", Duration::from_secs(10))
         .await;
     assert!(partial.contains(" 200 "));
+    stream_pause.wait_until_entered().await;
 
     common::overwrite_pair(&app.cert_path, &app.key_path, "cert-b.pem", "key-b.pem");
     common::send_sighup().await;
@@ -35,6 +37,7 @@ async fn cert_reload_mid_traffic_keeps_in_flight_stream_alive() {
     assert_eq!(after.status, 200);
     assert_eq!(after.peer_fingerprint, app.cert_b_fingerprint);
 
+    stream_pause.release();
     let completed = stream.read_to_end(Duration::from_secs(20)).await;
     assert!(completed.contains("message_stop"));
 

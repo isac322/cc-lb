@@ -4,7 +4,7 @@ use serde_json::Value;
 
 #[tokio::test]
 async fn api_oauth_usage_returns_anthropic_usage_shape() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
 
     let response = common::proxy_get(
         server.proxy_addr,

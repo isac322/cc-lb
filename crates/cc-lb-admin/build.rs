@@ -214,15 +214,8 @@ fn validate_dist(dist_dir: &Path, source: &str) {
 }
 
 fn write_skip_placeholder(dist_dir: &Path) {
-    if dist_dir.exists() {
-        fs::remove_dir_all(dist_dir).expect("failed to clear cc-lb-admin SPA dist directory");
-    }
-    fs::create_dir_all(dist_dir).expect("failed to create cc-lb-admin SPA dist directory");
-    let assets_dir = dist_dir.join("assets");
-    fs::create_dir_all(&assets_dir).expect("failed to create cc-lb-admin SPA assets directory");
-    fs::write(
-        dist_dir.join("index.html"),
-        r#"<!DOCTYPE html>
+    println!("cargo:rerun-if-changed=web/dist/index.html");
+    const INDEX_HTML: &[u8] = br#"<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -235,14 +228,61 @@ fn write_skip_placeholder(dist_dir: &Path) {
     <script type="module" src="/assets/index-skip.js"></script>
   </body>
 </html>
-"#,
-    )
-    .expect("failed to write cc-lb-admin SPA skip placeholder");
-    fs::write(
-        assets_dir.join("index-skip.css"),
-        "#root{font-family:sans-serif;}\n",
-    )
-    .expect("failed to write cc-lb-admin SPA skip stylesheet");
-    fs::write(assets_dir.join("index-skip.js"), "export {};\n")
+"#;
+    const INDEX_CSS: &[u8] = b"#root{font-family:sans-serif;}\n";
+    const INDEX_JS: &[u8] = b"export {};\n";
+
+    let assets_dir = dist_dir.join("assets");
+    let expected_top_only = fs::read_dir(dist_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .all(|e| matches!(e.file_name().to_str(), Some("index.html" | "assets")))
+        })
+        .unwrap_or(false);
+    let expected_assets_only = fs::read_dir(&assets_dir)
+        .map(|entries| {
+            entries.filter_map(Result::ok).all(|e| {
+                matches!(
+                    e.file_name().to_str(),
+                    Some("index-skip.css" | "index-skip.js")
+                )
+            })
+        })
+        .unwrap_or(false);
+    let already_matches = expected_top_only
+        && expected_assets_only
+        && fs::read(dist_dir.join("index.html")).ok().as_deref() == Some(INDEX_HTML)
+        && fs::read(assets_dir.join("index-skip.css")).ok().as_deref() == Some(INDEX_CSS)
+        && fs::read(assets_dir.join("index-skip.js")).ok().as_deref() == Some(INDEX_JS);
+    if already_matches {
+        return;
+    }
+
+    if dist_dir.exists() {
+        fs::remove_dir_all(dist_dir).expect("failed to clear cc-lb-admin SPA dist directory");
+    }
+    fs::create_dir_all(dist_dir).expect("failed to create cc-lb-admin SPA dist directory");
+    fs::create_dir_all(&assets_dir).expect("failed to create cc-lb-admin SPA assets directory");
+    fs::write(dist_dir.join("index.html"), INDEX_HTML)
+        .expect("failed to write cc-lb-admin SPA skip placeholder");
+    fs::write(assets_dir.join("index-skip.css"), INDEX_CSS)
+        .expect("failed to write cc-lb-admin SPA skip stylesheet");
+    fs::write(assets_dir.join("index-skip.js"), INDEX_JS)
         .expect("failed to write cc-lb-admin SPA skip script");
+
+    // Backdate newly created placeholder files so `cargo:rerun-if-changed=web/dist/index.html`
+    // does not compare newer than the current build script's `run/stdout` mtime.
+    if let Some(past) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2))
+    {
+        for path in [
+            dist_dir.join("index.html"),
+            assets_dir.join("index-skip.css"),
+            assets_dir.join("index-skip.js"),
+        ] {
+            if let Ok(file) = fs::File::options().write(true).open(path) {
+                let _ = file.set_modified(past);
+            }
+        }
+    }
 }

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    str::FromStr,
     sync::Arc,
 };
 
@@ -13,7 +12,7 @@ use cc_lb_storage_api::{
     RequestEventStore, RequestEventStreamFilters,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
 const BASE_TS_SECS: u64 = 1_800_000_000;
@@ -1089,36 +1088,17 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("request_events_cursor_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        match schema_pool(url, &schema).await {
-            Ok(pool) => Ok(Self {
-                schema,
-                admin_pool,
-                pool,
-            }),
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        match isolated.pool(4).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
             Err(error) => {
-                sqlx::query(AssertSqlSafe(format!(
-                    "DROP SCHEMA IF EXISTS {} CASCADE",
-                    quote_ident(&schema)
-                )))
-                .execute(&admin_pool)
-                .await
-                .context("drop schema after isolated pool creation failed")?;
-                admin_pool.close().await;
+                let _ = isolated.drop().await;
                 Err(error)
             }
         }
@@ -1126,33 +1106,8 @@ impl Fixture {
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-async fn schema_pool(url: &str, schema: &str) -> Result<PgPool> {
-    let options = PgConnectOptions::from_str(url)?.options([("search_path", schema)]);
-    Ok(PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
-        .await?)
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        }),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }
 
 /// Waits (bounded) until every row in this schema's `request_events_v1` is

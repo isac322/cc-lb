@@ -33,6 +33,7 @@ uuid = { workspace = true }
 tracing.workspace = true
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

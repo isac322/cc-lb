@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_control::{AuditEntry, spawn_audit_writer};
-use cc_lb_storage_api::{AuditQueryScope, AuditStore, MetaStore};
+use cc_lb_storage_api::{AuditQueryScope, AuditStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 
 #[tokio::test(flavor = "current_thread")]
@@ -70,14 +70,11 @@ async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
 async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("audit-writer.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await?;
-    storage.initialize().await?;
+    let storage = crate::common::templated_sqlite_storage(
+        &dir.path().join("audit-writer.sqlite"),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await?;
     Ok((dir, Arc::new(storage)))
 }
 

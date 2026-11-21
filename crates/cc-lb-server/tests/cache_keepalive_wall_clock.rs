@@ -13,7 +13,12 @@ use super::keepalive_support::harness::{
     Backend, ClockMode, Harness, HarnessOptions, JobTiming, KeepaliveOptions, request_body,
 };
 
-const IDLE_AFTER_WORKER_START: Duration = Duration::from_secs(3);
+fn idle_after_worker_start(backend: Backend) -> Duration {
+    match backend {
+        Backend::Sqlite => Duration::from_secs(1),
+        Backend::Postgres => Duration::from_secs(2),
+    }
+}
 const WORKER_START_WAIT: Duration = Duration::from_secs(5);
 const JOB_LOCK_WAIT: Duration = Duration::from_secs(30);
 const RENEWAL_WAIT: Duration = Duration::from_secs(10);
@@ -97,7 +102,7 @@ async fn run_wall_clock(backend: Backend, lock_delay_bound_secs: i64) {
         worker_age
     );
     tokio::time::sleep_until(tokio::time::Instant::from_std(
-        worker_anchor + IDLE_AFTER_WORKER_START,
+        worker_anchor + idle_after_worker_start(backend),
     ))
     .await;
     let worker_after_idle = harness

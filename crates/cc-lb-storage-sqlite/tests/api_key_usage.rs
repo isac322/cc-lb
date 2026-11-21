@@ -3,7 +3,7 @@ use std::sync::Arc;
 use cc_lb_clock::TestClock;
 use cc_lb_storage_api::{
     ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery,
-    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult, MetaStore,
+    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult,
 };
 use uuid::Uuid;
 
@@ -15,15 +15,13 @@ async fn storage() -> (
     cc_lb_storage_sqlite::SqliteStorage,
 ) {
     let directory = tempfile::tempdir().expect("tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        directory.path().join("usage.sqlite").display()
-    );
     let clock = Arc::new(TestClock::new_at_secs(NOW));
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
-        .await
-        .expect("open sqlite");
-    storage.initialize().await.expect("migrate sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &directory.path().join("usage.sqlite"),
+        clock.clone(),
+    )
+    .await
+    .expect("migrate sqlite");
     (directory, clock, storage)
 }
 

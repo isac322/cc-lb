@@ -7,11 +7,13 @@ use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::any};
+use cc_lb_clock::{Clock, SystemClock, TestClock, unix_secs};
 use serde_json::{Value, json};
+use sqlx::sqlite::SqlitePoolOptions;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use crate::common::{self, TestServer};
+use crate::common::{self, InProcessServer};
 
 #[derive(Clone, Debug)]
 pub struct RecordedResponseRequest {
@@ -105,7 +107,7 @@ impl StrictOpenAiMock {
                 "timed out waiting for {count} strict OpenAI requests; saw {}",
                 self.requests().len()
             );
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }
@@ -262,7 +264,8 @@ async fn openai_handler(State(state): State<MockState>, request: Request) -> Res
 }
 
 pub struct OpenAiFixture {
-    pub server: TestServer,
+    pub server: InProcessServer,
+    pub clock: Arc<TestClock>,
     pub mock: StrictOpenAiMock,
     pub principal_id: String,
     pub upstream_id: String,
@@ -273,9 +276,12 @@ pub struct OpenAiFixture {
 impl OpenAiFixture {
     pub async fn start() -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let server = common::spawn_test_server_with_two_upstreams(
+        let now = unix_secs(SystemClock.now()) + 86_400;
+        let clock = Arc::new(TestClock::new_at_secs(now));
+        let server = common::spawn_inprocess_server_with_two_upstreams_and_clock(
             "[price_catalog]\nurl = \"http://127.0.0.1:9/price-catalog.json\"\n",
             fake_anthropic::AppConfig::default(),
+            clock.clone(),
         )
         .await;
         let mock = StrictOpenAiMock::start().await;
@@ -302,12 +308,63 @@ impl OpenAiFixture {
             .to_owned();
         Self {
             server,
+            clock,
             mock,
             principal_id,
             upstream_id,
             key,
             client,
         }
+    }
+
+    pub async fn advance_and_dispatch_due_openai(
+        &self,
+        delta: Duration,
+        session_hash: &str,
+        generation: u64,
+    ) {
+        let scheduler_path = self.server.sqlite_path.with_extension("scheduler.sqlite");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", scheduler_path.display()))
+            .await
+            .expect("open OpenAI scheduler SQLite");
+        let key = cc_lb_storage_api::cache_keepalive_job_key(session_hash, generation);
+        let (id, run_at) = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some((id, run_at, status)) =
+                    sqlx::query_as::<_, (String, Option<i64>, String)>(
+                        "SELECT id, run_at, status FROM Jobs WHERE idempotency_key = ? LIMIT 1",
+                    )
+                    .bind(&key)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("read scheduled OpenAI keepalive job")
+                    && status == "Pending"
+                {
+                    return (id, run_at);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for pending OpenAI keepalive job");
+
+        self.clock.advance(delta);
+        let now = i64::try_from(unix_secs(self.clock.now())).expect("now fits i64");
+        assert!(
+            run_at.is_some_and(|scheduled| scheduled <= now),
+            "expected job {key} is not due: run_at={run_at:?}, now={now}"
+        );
+        sqlx::query(
+            "UPDATE Jobs SET run_at = 0 WHERE id = ? AND idempotency_key = ? AND status = 'Pending'",
+        )
+        .bind(id)
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("release exact due OpenAI keepalive job");
+        pool.close().await;
     }
 
     pub async fn configure_keepalive(&self, enabled: bool, openai_enabled: bool, lead_secs: u32) {
@@ -342,7 +399,7 @@ impl OpenAiFixture {
                 "http://{}/admin/v1/principals/{}",
                 self.server.admin_addr, self.principal_id
             ))
-            .header("authorization", "Bearer admin-token")
+            .bearer_auth(self.server.admin_token)
             .header("if-match", etag.expect("principal ETag"))
             .json(&body)
             .send()
@@ -382,7 +439,7 @@ impl OpenAiFixture {
                 "http://{}/admin/v1/principals/{}/cache-keepalive",
                 self.server.admin_addr, self.principal_id
             ))
-            .header("authorization", "Bearer admin-token")
+            .bearer_auth(self.server.admin_token)
             .send()
             .await
             .expect("list cache keepalive")
@@ -402,14 +459,14 @@ impl OpenAiFixture {
 
 async fn admin_json(
     client: &reqwest::Client,
-    server: &TestServer,
+    server: &InProcessServer,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
 ) -> reqwest::Response {
     let mut request = client
         .request(method, format!("http://{}{}", server.admin_addr, path))
-        .header("authorization", "Bearer admin-token");
+        .bearer_auth(server.admin_token);
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -418,7 +475,7 @@ async fn admin_json(
 
 async fn disable_seeded_and_create_openai(
     client: &reqwest::Client,
-    server: &TestServer,
+    server: &InProcessServer,
     base_url: &str,
 ) -> String {
     let response = admin_json(
@@ -453,7 +510,7 @@ async fn disable_seeded_and_create_openai(
                 "http://{}/admin/v1/upstreams/{id}/disable",
                 server.admin_addr
             ))
-            .header("authorization", "Bearer admin-token")
+            .bearer_auth(server.admin_token)
             .header("if-match", etag)
             .send()
             .await
@@ -487,7 +544,7 @@ async fn disable_seeded_and_create_openai(
 
 async fn principal_get(
     client: &reqwest::Client,
-    server: &TestServer,
+    server: &InProcessServer,
     id: &str,
 ) -> (StatusCode, Value, Option<String>) {
     let response = admin_json(
@@ -510,7 +567,7 @@ async fn principal_get(
 
 async fn configure_principal(
     client: &reqwest::Client,
-    server: &TestServer,
+    server: &InProcessServer,
     upstream_id: &str,
 ) -> String {
     let response = admin_json(
@@ -535,7 +592,7 @@ async fn configure_principal(
             "http://{}/admin/v1/principals/{id}",
             server.admin_addr
         ))
-        .header("authorization", "Bearer admin-token")
+        .bearer_auth(server.admin_token)
         .header("if-match", etag.expect("principal ETag"))
         .json(&json!({
             "allowed_upstreams": [upstream_id],

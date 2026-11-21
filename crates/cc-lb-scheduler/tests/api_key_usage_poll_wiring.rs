@@ -257,11 +257,8 @@ mod postgres {
         };
         let database = format!("cclb_pol10_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new().connect(&admin_url).await?;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"CREATE DATABASE "{database}""#
-        )))
-        .execute(&admin)
-        .await?;
+        crate::common::create_postgres_database(&admin, &database, "CC_LB_PG_SCHED_TEMPLATE")
+            .await?;
         let result = run(&admin_url, &database).await;
         sqlx::query(sqlx::AssertSqlSafe(format!(
             r#"DROP DATABASE "{database}" WITH (FORCE)"#
