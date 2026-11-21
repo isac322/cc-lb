@@ -338,7 +338,7 @@ jobs:
     steps:
       - name: Download arm64 digest (live)
         if: needs.prepare.outputs.dry_run != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: docker-digest-arm64
           path: ${{ runner.temp }}/digests
@@ -377,7 +377,7 @@ jobs:
 
       - name: Download dry-run arm64 binary
         if: needs.prepare.outputs.dry_run == 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: arm64-dryrun-bin
           path: ${{ runner.temp }}/arm64-bin
@@ -545,7 +545,7 @@ jobs:
 
       - name: Download platform digests
         if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.already_published != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: docker-digest-*
           path: ${{ runner.temp }}/digests
