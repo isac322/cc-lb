@@ -1,0 +1,249 @@
+name: Build and Push Release Platform
+description: Compile static musl cc-lb binary with fat LTO, cache release deps, and package/push platform OCI digest.
+
+inputs:
+  key:
+    description: Matrix architecture key (amd64, arm64, armv7, ppc64le)
+    required: true
+  platform:
+    description: OCI target platform (e.g. linux/amd64)
+    required: true
+  smoke:
+    description: Whether to run native smoke test on host (true or false)
+    required: true
+  version:
+    description: Semver version without leading v
+    required: true
+  sha:
+    description: Expected resolved commit SHA
+    required: true
+  rust_version:
+    description: Rust toolchain channel from rust-toolchain.toml
+    required: true
+  deps_hash:
+    description: Third-party dependencies + toolchain/profile hash from scripts/cd-deps-hash.mjs
+    required: true
+  dry_run:
+    description: Dry-run mode flag (true or false)
+    required: true
+  github_token:
+    description: GitHub token for pruning superseded release deps caches
+    required: true
+  build_time_epoch:
+    description: Commit Unix epoch timestamp formatted into CC_LB_BUILD_TIME (ADR-0009)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve release deps cache keys
+      id: cache-meta
+      shell: bash
+      env:
+        KEY_NAME: ${{ inputs.key }}
+        RUST_VERSION: ${{ inputs.rust_version }}
+        DEPS_HASH: ${{ inputs.deps_hash }}
+        DRY_RUN: ${{ inputs.dry_run }}
+      run: |
+        set -euo pipefail
+        mode_prefix=""
+        if [ "$DRY_RUN" = "true" ]; then
+          mode_prefix="dryrun-"
+        fi
+        cache_prefix="cd-deps-fat-v2-${mode_prefix}${KEY_NAME}-${RUST_VERSION}"
+        prune_prefix="cd-deps-fat-v2-${mode_prefix}${KEY_NAME}-"
+        legacy_prefix="cd-deps-fat-v1-${mode_prefix}${KEY_NAME}-"
+        cache_key="${cache_prefix}-${DEPS_HASH}"
+        {
+          echo "cache_prefix=$cache_prefix"
+          echo "prune_prefix=$prune_prefix"
+          echo "legacy_prefix=$legacy_prefix"
+          echo "cache_key=$cache_key"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Download prebuilt Admin SPA dist
+      uses: actions/download-artifact@v7
+      with:
+        name: admin-spa-dist
+        path: crates/cc-lb-admin/web/dist
+
+    - name: Cache shared Cargo registry and git db (amd64 primary)
+      if: inputs.key == 'amd64'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore shared Cargo registry and git db
+      if: inputs.key != 'amd64'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore release Cargo deps target cache
+      id: deps-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: target
+        key: ${{ steps.cache-meta.outputs.cache_key }}
+        restore-keys: |
+          ${{ steps.cache-meta.outputs.cache_prefix }}-
+
+    - name: Compile static binary with fat LTO
+      shell: bash
+      env:
+        TARGET_PLATFORM: ${{ inputs.platform }}
+        OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
+        CARGO_BUILD_JOBS: "4"
+        GIT_SHA: ${{ inputs.sha }}
+        BUILD_TIME_EPOCH: ${{ inputs.build_time_epoch }}
+      run: ./scripts/docker-build-musl.sh
+
+    - name: Smoke-test native amd64 static binary
+      if: inputs.smoke == 'true'
+      shell: bash
+      env:
+        BIN_PATH: ${{ runner.temp }}/stage-ctx/cc-lb
+        EXPECTED_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        out=$("$BIN_PATH" --version)
+        printf '%s\n' "$out"
+        grep -Fq "$EXPECTED_VERSION" <<<"$out"
+
+    - name: Upload dry-run arm64 binary for remote smoke
+      if: inputs.dry_run == 'true' && inputs.key == 'arm64'
+      uses: actions/upload-artifact@v7
+      with:
+        name: arm64-dryrun-bin
+        path: ${{ runner.temp }}/stage-ctx/cc-lb
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: Log in to ghcr.io
+      if: inputs.dry_run != 'true'
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github_token }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+      id: buildx
+      with:
+        driver: docker-container
+
+    - name: Derive exact labels
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ghcr.io/isac322/cc-lb
+        flavor: latest=false
+        labels: |
+          org.opencontainers.image.revision=${{ inputs.sha }}
+
+    - name: Package and push platform digest
+      id: build_push
+      uses: docker/build-push-action@v7
+      with:
+        builder: ${{ steps.buildx.outputs.name }}
+        file: ${{ github.workspace }}/Dockerfile
+        context: ${{ runner.temp }}/stage-ctx
+        target: distroless-prebuilt
+        platforms: ${{ inputs.platform }}
+        provenance: true
+        sbom: true
+        outputs: ${{ inputs.dry_run == 'true' && 'type=cacheonly' || 'type=image,name=ghcr.io/isac322/cc-lb,push-by-digest=true,name-canonical=true,push=true' }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+    - name: Write pushed platform digest
+      if: inputs.dry_run != 'true'
+      shell: bash
+      env:
+        DIGEST: ${{ steps.build_push.outputs.digest }}
+        KEY_NAME: ${{ inputs.key }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "::error::invalid digest for $KEY_NAME: '$DIGEST'" >&2
+          exit 1
+        fi
+        printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest-$KEY_NAME.txt"
+
+    - name: Upload platform digest
+      if: inputs.dry_run != 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: docker-digest-${{ inputs.key }}
+        path: ${{ runner.temp }}/digest-${{ inputs.key }}.txt
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: Prune release deps target cache
+      if: steps.deps-restore.outputs.cache-hit != 'true' && (inputs.dry_run == 'true' || github.ref == 'refs/heads/master')
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "=== target size before prune ==="
+        du -sh target || true
+        du -sh target/*/release/* 2>/dev/null || true
+        du -sh target/release 2>/dev/null || true
+        node scripts/prune-rust-target.mjs \
+          --target-dir target \
+          --metadata-file target/.cargo-metadata.json \
+          --prune-build-objects
+        echo "=== target size after prune ==="
+        du -sh target || true
+        du -sh target/*/release/* 2>/dev/null || true
+        du -sh target/release 2>/dev/null || true
+
+    - name: Save release deps target cache
+      if: steps.deps-restore.outputs.cache-hit != 'true' && (inputs.dry_run == 'true' || github.ref == 'refs/heads/master')
+      uses: actions/cache/save@v6
+      with:
+        path: target
+        key: ${{ steps.cache-meta.outputs.cache_key }}
+
+    - name: Prune superseded release deps caches
+      if: steps.deps-restore.outputs.cache-hit != 'true' && (inputs.dry_run == 'true' || github.ref == 'refs/heads/master')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        CURRENT_KEY: ${{ steps.cache-meta.outputs.cache_key }}
+        PRUNE_PREFIX: ${{ steps.cache-meta.outputs.prune_prefix }}
+        LEGACY_PREFIX: ${{ steps.cache-meta.outputs.legacy_prefix }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        KEY_NAME: ${{ inputs.key }}
+        TARGET_REF: ${{ github.ref }}
+      run: |
+        set -euo pipefail
+        stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
+          --jq '
+            .actions_caches[]
+            | select(
+                (
+                  (.key | startswith(env.PRUNE_PREFIX)) or
+                  (.key | startswith(env.LEGACY_PREFIX)) or
+                  (env.DRY_RUN != "true" and (.key | startswith("docker-mounts-fat-" + env.KEY_NAME + "-")))
+                )
+                and .key != env.CURRENT_KEY
+              )
+            | .id
+          ') || true
+        for id in $stale_ids; do
+          gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
+        done

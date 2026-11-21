@@ -202,6 +202,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write
     with:
       version: ${{ needs.prepare.outputs.version }}
       source_ref: ${{ needs.prepare.outputs.tag }}
@@ -224,7 +225,7 @@ jobs:
     name: publish GitHub Release
     needs: [prepare, publish-docker, publish-chart]
     if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions:
       contents: write
     steps:

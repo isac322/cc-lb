@@ -1,0 +1,88 @@
+name: Setup Admin SPA dist
+description: Restore cached Vite admin dashboard build matching Cargo.toml version and SPA inputs, or build with Bun on miss.
+
+inputs:
+  working-directory:
+    description: Web package directory containing bun.lock
+    required: false
+    default: crates/cc-lb-admin/web
+
+outputs:
+  version:
+    description: Resolved cc-lb workspace version passed to VITE_CC_LB_VERSION
+    value: ${{ steps.meta.outputs.version }}
+  cache-hit:
+    description: Whether prebuilt web/dist matched the exact version+source cache key
+    value: ${{ steps.dist-restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute Admin SPA cache metadata
+      id: meta
+      shell: bash
+      env:
+        WEB_DIR: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+        if [ -z "$version" ]; then
+          echo "::error::could not determine workspace version from Cargo.toml"
+          exit 1
+        fi
+        # Hash exact tracked/untracked SPA inputs excluding generated node_modules/dist outputs.
+        input_hash=$(
+          python3 - "$WEB_DIR" <<'PY'
+        import hashlib, os, subprocess, sys
+
+        web_dir = sys.argv[1].rstrip("/")
+        raw = subprocess.check_output(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", web_dir],
+        )
+        paths = sorted(p.decode("utf-8") for p in raw.split(b"\0") if p)
+        h = hashlib.sha256()
+        for rel in paths:
+            if not os.path.isfile(rel):
+                continue
+            h.update(rel.encode("utf-8"))
+            h.update(b"\0")
+            with open(rel, "rb") as f:
+                while chunk := f.read(65536):
+                    h.update(chunk)
+            h.update(b"\0")
+        print(h.hexdigest())
+        PY
+        )
+        printf 'version=%s\ncache_key=web-dist-v1-%s-%s\n' "$version" "$version" "$input_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached Admin SPA dist
+      id: dist-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ inputs.working-directory }}/dist
+        key: ${{ steps.meta.outputs.cache_key }}
+
+    - name: Setup Bun and web dependencies on SPA cache miss
+      if: steps.dist-restore.outputs.cache-hit != 'true'
+      uses: ./.github/actions/setup-web
+      with:
+        working-directory: ${{ inputs.working-directory }}
+
+    - name: Build Admin SPA on cache miss
+      if: steps.dist-restore.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        VITE_CC_LB_VERSION: ${{ steps.meta.outputs.version }}
+      run: |
+        set -euo pipefail
+        bun run --shell=bun build
+        test -s dist/index.html
+        find dist/assets -type f | grep -q .
+
+    - name: Save Admin SPA dist cache
+      if: steps.dist-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ inputs.working-directory }}/dist
+        key: ${{ steps.meta.outputs.cache_key }}

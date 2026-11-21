@@ -15,7 +15,8 @@ fn on_demand_store_limits_reject_initial_memory_above_configured_cap() {
     store.limiter(|state| state.limits());
 
     let wat = r#"(module (memory 2))"#;
-    let module = Module::new(&engine, wat).expect("compile wat");
+    let wasm = wat::parse_str(wat).expect("parse wat");
+    let module = Module::new(&engine, &wasm).expect("compile wasm");
 
     let err = Instance::new(&mut store, &module, &[])
         .expect_err("StoreLimits must reject initial memory above memory_max_pages");

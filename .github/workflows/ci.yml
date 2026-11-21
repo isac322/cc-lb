@@ -141,7 +141,7 @@ jobs:
       - name: Validate coverage partitions and helpers
         run: |
           node scripts/check-cov-partitions.mjs
-          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
 
   guard-crate-versions:
     name: guard crate versions
@@ -234,11 +234,6 @@ jobs:
           git checkout -B release-plz-validation HEAD
           git branch --set-upstream-to="origin/$GITHUB_BASE_REF" release-plz-validation
 
-
-      - uses: docker/setup-buildx-action@v4
-        id: buildx
-        with:
-          driver: docker-container
       - uses: ./.github/actions/setup-actionlint
 
       - uses: azure/setup-helm@v5
@@ -255,8 +250,10 @@ jobs:
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 |
             jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
-          printf 'version=%s\ntarget_sha=%s\nsource_date_epoch=%s\n' \
-            "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
+          rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          deps_hash=$(node scripts/cd-deps-hash.mjs)
+          printf 'version=%s\ntarget_sha=%s\nbuild_time_epoch=%s\nrust_version=%s\ndeps_hash=%s\n' \
+            "$version" "$(git rev-parse HEAD)" "$(git log -1 --format=%ct)" "$rust_version" "$deps_hash" \
             >> "$GITHUB_OUTPUT"
 
       # release-plz 0.3.172 supports git-only releases, but its release command
@@ -313,58 +310,49 @@ jobs:
           git diff --exit-code -- crates/cc-lb-server/Cargo.toml
 
 
-      - name: Restore BuildKit cache mounts
-        id: cache-restore
+      - name: Setup Admin SPA dist
+        uses: ./.github/actions/setup-admin-spa
+
+      - name: Restore shared Cargo registry and git db
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/docker-mounts.tar
-          key: docker-mounts-fat-amd64-${{ steps.release.outputs.target_sha }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            docker-mounts-fat-amd64-
+            cargo-registry-v2-${{ runner.os }}-
 
-      - name: Inject restored BuildKit cache mounts
-        if: steps.cache-restore.outputs.cache-matched-key != ''
+      - name: Restore amd64 release Cargo deps cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target
+          key: cd-deps-fat-v2-amd64-${{ steps.release.outputs.rust_version }}-${{ steps.release.outputs.deps_hash }}
+          restore-keys: |
+            cd-deps-fat-v2-amd64-${{ steps.release.outputs.rust_version }}-
+
+      - name: Compile and package static amd64 release image
         env:
-          BUILDER: ${{ steps.buildx.outputs.name }}
+          TARGET_PLATFORM: linux/amd64
+          OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
+          CARGO_BUILD_JOBS: "4"
+          GIT_SHA: ${{ steps.release.outputs.target_sha }}
+          BUILD_TIME_EPOCH: ${{ steps.release.outputs.build_time_epoch }}
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          ctx="$RUNNER_TEMP/buildkit-cache-inject"
-          rm -rf "$ctx"
-          mkdir -p "$ctx"
-          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
-          cat > "$ctx/Dockerfile" <<'EOF'
-          # syntax=docker/dockerfile:1
-          FROM alpine:3.24 AS inject
-          COPY docker-mounts.tar /docker-mounts.tar
-          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-              --mount=type=cache,id=bun-linux-amd64,target=/bun \
-              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
-              tar -C / -xf /docker-mounts.tar && \
-              mkdir -p /out && \
-              du -sk /cargo-home /bun /sccache > /out/restored.txt
-          FROM scratch
-          COPY --from=inject /out/ /
-          EOF
-          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
-          cat "$ctx/out/restored.txt"
-          rm -rf "$ctx"
-
-      - name: Build and smoke-test production image
-        uses: docker/build-push-action@v7
-        env:
-          DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          target: smoke
-          outputs: type=cacheonly
-          build-args: |
-            CARGO_BUILD_JOBS=4
-            SCCACHE_LOCAL_MOUNT=1
-            REQUIRE_SCCACHE=1
-            GIT_SHA=${{ steps.release.outputs.target_sha }}
-            SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
-            EXPECTED_VERSION=${{ steps.release.outputs.version }}
+          ./scripts/docker-build-musl.sh
+          DOCKER_BUILDKIT=1 docker build \
+            --file "${GITHUB_WORKSPACE}/Dockerfile" \
+            --target distroless-prebuilt \
+            --label "org.opencontainers.image.revision=${GIT_SHA}" \
+            --tag "cc-lb:release-pr-smoke" \
+            "${RUNNER_TEMP}/stage-ctx"
+          out=$(docker run --rm "cc-lb:release-pr-smoke" --version)
+          printf '%s\n' "$out"
+          grep -Fq "$EXPECTED_VERSION" <<<"$out"
       - name: Lint and verify release chart
         env:
           SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
@@ -398,6 +386,7 @@ jobs:
           actionlint
           .github/workflows/ci.yml
           .github/workflows/cd.yml
+          .github/workflows/dev-image.yml
           .github/workflows/docker-build.yml
           .github/workflows/publish-chart.yml
           .github/workflows/release-server.yml
@@ -1034,13 +1023,13 @@ jobs:
           exit "$rc"
 
   prune-master-caches:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
     needs:
       - seed-cov-cache
       - clippy
       - e2e
       - typestate-contracts
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions:
       actions: write
     timeout-minutes: 5
@@ -1057,7 +1046,7 @@ jobs:
           [ -n "$caches_json" ] || exit 0
           old_ids=$(jq -sr '
             [ .[] | select(.key | startswith("target-ws-v4-")) ]
-            | map(. + {prefix: (.key | capture("^(?<p>target-ws-v4-.+?-1\\.99\\.1-)").p)})
+            | map(. + {prefix: (.key | capture("^(?<p>target-ws-v4-.+?-[0-9]+\\.[0-9]+\\.[0-9]+-)").p)})
             | group_by(.prefix)
             | map(sort_by(.created_at) | reverse | .[1:][] | .id)
             | .[]

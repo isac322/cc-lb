@@ -224,12 +224,12 @@ mod postgres {
     #[derive(Clone)]
     struct FixedTicks(std::vec::IntoIter<DateTime<Utc>>);
 
-    impl apalis_cron::Schedule<Utc> for FixedTicks {
-        fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
+    impl cc_lb_scheduler::cron::Schedule for FixedTicks {
+        fn next_tick(&mut self) -> Option<cc_lb_scheduler::cron::Tick> {
             self.0
                 .next()
                 .and_then(|dt| u64::try_from(dt.timestamp()).ok())
-                .map(apalis_cron::Tick::new)
+                .map(cc_lb_scheduler::cron::Tick::new)
         }
     }
 

@@ -31,6 +31,9 @@ jobs:
     # each BuildKit worker compiles a single target with persisted cache mounts.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -68,7 +71,7 @@ jobs:
           set -euo pipefail
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          echo "build_time_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
           echo "CACHE_KEY=docker-mounts-off-${{ matrix.key }}-$sha" >> "$GITHUB_ENV"
 
       - name: Restore BuildKit cache mounts
@@ -129,7 +132,7 @@ jobs:
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            BUILD_TIME_EPOCH=${{ steps.source.outputs.build_time_epoch }}
 
       - name: Smoke-test native binary
         if: matrix.smoke
@@ -147,7 +150,7 @@ jobs:
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            BUILD_TIME_EPOCH=${{ steps.source.outputs.build_time_epoch }}
 
       - name: Extract populated BuildKit cache mounts
         if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
@@ -183,3 +186,18 @@ jobs:
         with:
           path: ${{ runner.temp }}/docker-mounts.tar
           key: ${{ env.CACHE_KEY }}
+
+      - name: Prune superseded BuildKit cache mounts
+        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_KEY: ${{ env.CACHE_KEY }}
+          KEY_NAME: ${{ matrix.key }}
+          TARGET_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
+            --jq '.actions_caches[] | select(((.key | startswith("docker-mounts-off-" + env.KEY_NAME + "-")) or (.key | startswith("docker-mounts-thin-" + env.KEY_NAME + "-"))) and .key != env.CURRENT_KEY) | .id') || true
+          for id in $stale_ids; do
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
+          done

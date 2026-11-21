@@ -66,17 +66,141 @@ function isKeepableWorkspaceLib(entryName) {
   );
 }
 
+function getMtimeMs(entryPath) {
+  try {
+    return statSync(entryPath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function pruneIncrementalCrateDir(crateDirPath) {
+  let removed = 0;
+  const sessions = [];
+  for (const entry of readdirSync(crateDirPath, { withFileTypes: true })) {
+    const fullPath = path.join(crateDirPath, entry.name);
+    if (entry.name.endsWith('.lock') || entry.name.endsWith('-working')) {
+      removeEntry(fullPath);
+      removed += 1;
+    } else if (entry.isDirectory() && entry.name.startsWith('s-')) {
+      sessions.push({ name: entry.name, fullPath, mtimeMs: getMtimeMs(fullPath) });
+    }
+  }
+  sessions.sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+  for (const stale of sessions.slice(1)) {
+    removeEntry(stale.fullPath);
+    removed += 1;
+  }
+  return removed;
+}
+
+function pruneIncrementalDir(incrementalDir, allowedNames) {
+  if (!existsSync(incrementalDir)) return 0;
+  let removed = 0;
+  const byCrate = new Map();
+
+  for (const entry of readdirSync(incrementalDir, { withFileTypes: true })) {
+    const fullPath = path.join(incrementalDir, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      removeEntry(fullPath);
+      removed += 1;
+      continue;
+    }
+    const match = entry.name.match(/^(.+)-([0-9a-zA-Z]+)$/);
+    const crateName = match?.[1];
+    if (!crateName || !allowedNames.has(crateName)) {
+      removeEntry(fullPath);
+      removed += 1;
+      continue;
+    }
+    if (!byCrate.has(crateName)) byCrate.set(crateName, []);
+    byCrate.get(crateName).push({ name: entry.name, fullPath, mtimeMs: getMtimeMs(fullPath) });
+  }
+
+  for (const candidates of byCrate.values()) {
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+    for (const stale of candidates.slice(1)) {
+      removeEntry(stale.fullPath);
+      removed += 1;
+    }
+    if (candidates[0]) {
+      removed += pruneIncrementalCrateDir(candidates[0].fullPath);
+    }
+  }
+  return removed;
+}
+
+function pruneBuildOutObjectsInDir(dir) {
+  let removed = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      removed += pruneBuildOutObjectsInDir(fullPath);
+    } else if (entry.isFile() && entry.name.endsWith('.o')) {
+      removeEntry(fullPath);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function pruneBuildDirObjects(buildDir) {
+  if (!existsSync(buildDir)) return 0;
+  let removed = 0;
+  for (const pkgEntry of readdirSync(buildDir, { withFileTypes: true })) {
+    if (!pkgEntry.isDirectory() || pkgEntry.isSymbolicLink()) continue;
+    const pkgPath = path.join(buildDir, pkgEntry.name);
+    const directOut = path.join(pkgPath, 'out');
+    if (existsSync(directOut)) {
+      removed += pruneBuildOutObjectsInDir(directOut);
+      continue;
+    }
+    for (const hashEntry of readdirSync(pkgPath, { withFileTypes: true })) {
+      if (!hashEntry.isDirectory() || hashEntry.isSymbolicLink()) continue;
+      const nestedOut = path.join(pkgPath, hashEntry.name, 'out');
+      if (existsSync(nestedOut)) {
+        removed += pruneBuildOutObjectsInDir(nestedOut);
+      }
+    }
+  }
+  return removed;
+}
+
+function buildAllowedIncrementalNames(allNames, incrementalCrates) {
+  if (!incrementalCrates || incrementalCrates.length === 0) return allNames;
+  const allowed = new Set();
+  for (const raw of incrementalCrates) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    allowed.add(trimmed);
+    allowed.add(trimmed.replaceAll('-', '_'));
+    allowed.add(trimmed.replaceAll('_', '-'));
+  }
+  return allowed;
+}
+
 function pruneProfileDir(profileDir, pkgPrefixes, targetPrefixes, options = {}) {
-  const { keepWorkspaceLibs = false } = options;
+  const {
+    keepWorkspaceLibs = false,
+    keepLatestIncremental = false,
+    incrementalCrates = null,
+    pruneBuildObjects = false,
+  } = options;
   const stats = { removedEntries: 0 };
   const allNames = new Set([...pkgPrefixes, ...targetPrefixes]);
+  const allowedIncremental = buildAllowedIncrementalNames(allNames, incrementalCrates);
   const depMatcher = buildHashMatcher(allNames, true);
   const metaMatcher = buildHashMatcher(allNames, false);
 
   const incrementalDir = path.join(profileDir, 'incremental');
   if (existsSync(incrementalDir)) {
-    removeEntry(incrementalDir);
-    stats.removedEntries += 1;
+    if (keepLatestIncremental) {
+      stats.removedEntries += pruneIncrementalDir(incrementalDir, allowedIncremental);
+    } else {
+      removeEntry(incrementalDir);
+      stats.removedEntries += 1;
+    }
   }
 
   for (const subdir of ['deps', 'examples']) {
@@ -117,6 +241,10 @@ function pruneProfileDir(profileDir, pkgPrefixes, targetPrefixes, options = {}) 
         }
       }
     }
+  }
+
+  if (pruneBuildObjects) {
+    stats.removedEntries += pruneBuildDirObjects(path.join(profileDir, 'build'));
   }
 
   // Prune root-level workspace executables and their sidecars inside profileDir.
@@ -180,6 +308,9 @@ function main() {
   let targetDir = 'target';
   let metadataFile = null;
   let keepWorkspaceLibs = false;
+  let keepLatestIncremental = false;
+  let pruneBuildObjects = false;
+  const incrementalCrates = [];
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--target-dir' && args[i + 1]) {
       targetDir = args[++i];
@@ -187,8 +318,16 @@ function main() {
       metadataFile = args[++i];
     } else if (args[i] === '--keep-workspace-libs') {
       keepWorkspaceLibs = true;
+    } else if (args[i] === '--keep-latest-incremental') {
+      keepLatestIncremental = true;
+    } else if (args[i] === '--incremental-crates' && args[i + 1]) {
+      incrementalCrates.push(...args[++i].split(',').map((s) => s.trim()).filter(Boolean));
+    } else if (args[i] === '--prune-build-objects') {
+      pruneBuildObjects = true;
     } else {
-      console.error(`Usage: node scripts/prune-rust-target.mjs --target-dir <dir> [--metadata-file <json>] [--keep-workspace-libs]`);
+      console.error(
+        'Usage: node scripts/prune-rust-target.mjs --target-dir <dir> [--metadata-file <json>] [--keep-workspace-libs] [--keep-latest-incremental] [--incremental-crates <list>] [--prune-build-objects]',
+      );
       process.exit(2);
     }
   }
@@ -197,8 +336,15 @@ function main() {
     ? readFileSync(metadataFile, 'utf8')
     : execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], { encoding: 'utf8' });
   const metadata = JSON.parse(rawMeta);
-  const { removedEntries } = pruneTargetDir(path.resolve(targetDir), metadata, { keepWorkspaceLibs });
-  console.log(`prune-rust-target: pruned ${removedEntries} workspace/scratch entries from ${targetDir} (keepWorkspaceLibs=${keepWorkspaceLibs})`);
+  const { removedEntries } = pruneTargetDir(path.resolve(targetDir), metadata, {
+    keepWorkspaceLibs,
+    keepLatestIncremental,
+    incrementalCrates: incrementalCrates.length > 0 ? incrementalCrates : null,
+    pruneBuildObjects,
+  });
+  console.log(
+    `prune-rust-target: pruned ${removedEntries} workspace/scratch entries from ${targetDir} (keepWorkspaceLibs=${keepWorkspaceLibs}, keepLatestIncremental=${keepLatestIncremental}, pruneBuildObjects=${pruneBuildObjects})`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_wire::metadata::PluginMetadata;
 use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion, host_supports};
-use wasmparser::{ExternalKind, Parser, Payload};
+use wasmtime::wasmparser::{ExternalKind, Parser, Payload};
 
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const QUALIFIED_PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";

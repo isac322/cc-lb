@@ -141,6 +141,11 @@ async fn write_admin_response(response: reqwest::Response) -> Result<(), AdminCl
 }
 
 fn main() -> ExitCode {
+    cc_lb_server::build_meta::init(
+        option_env!("CC_LB_GIT_SHA"),
+        option_env!("CC_LB_BUILD_TIME"),
+    );
+
     if version_requested() {
         println!("{}", cc_lb_server::version::compact_version());
         return ExitCode::SUCCESS;
