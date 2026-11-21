@@ -423,3 +423,15 @@ Follow these steps to diagnose and resolve a sudden drop in the prompt cache hit
 4. **Review recent config changes**
    Check if the cache threshold or queue capacity was recently modified.
    Verify if any new upstreams or models were added that might not support prompt caching.
+
+## Vertex token mint metric
+
+`cclb_vertex_token_mint_total{credential_type,outcome}` counts in-process Vertex credential token mints. `credential_type` is `service_account`, `authorized_user`, or `impersonated_service_account`; `outcome` is `success`, `terminal`, or `transient`. The metric never labels by upstream ID, project, location, principal, token, or credential material.
+
+```promql
+sum by (credential_type, outcome) (
+  rate(cclb_vertex_token_mint_total[5m])
+)
+```
+
+Use this metric with preflight and terminal-status events. A terminal increase means replacement is required; transient increases should be correlated with provider availability, quota, IAM, or timeout signals. Do not infer billing stops from generic Vertex `FAILED_PRECONDITION`.

@@ -97,6 +97,19 @@ async fn captured_provider_costs_match_durable_rows() {
     );
     assert!(loader.install_latest_local().await.unwrap());
     let mut failures = Vec::new();
+    let vertex_lifecycle_cost = run_case(
+        Provider::Gemini,
+        "gemini-3-flash",
+        false,
+        GEMINI,
+        false,
+        13,
+        7,
+        0,
+        Some(UpstreamKind::VertexApiKey),
+    )
+    .await;
+    assert_eq!(vertex_lifecycle_cost.0, Some(27));
     for (provider, model, input, output, cached, expected_cost) in [
         (Provider::Openai, "gpt-6.1-sol", 309, 8, 0, 325),
         (Provider::Gemini, "gemini-3-flash", 13, 7, 0, 27),
@@ -137,6 +150,7 @@ async fn captured_provider_costs_match_durable_rows() {
                     input,
                     output,
                     cached,
+                    None,
                 )
                 .await;
                 let expected = priced.then_some(expected_cost);
@@ -159,6 +173,7 @@ async fn captured_provider_costs_match_durable_rows() {
         0,
         0,
         0,
+        None,
     )
     .await;
     assert_eq!((cost, metric), (None, None), "countTokens is unmetered");
@@ -179,6 +194,7 @@ async fn run_case(
     input: u64,
     output: u64,
     cached: u64,
+    kind_override: Option<UpstreamKind>,
 ) -> (Option<i64>, Option<u64>) {
     let recorder = DebuggingRecorder::new();
     let snapshot = recorder.snapshotter();
@@ -201,13 +217,27 @@ async fn run_case(
         bus.bus_arc(),
     );
     let authn = TestAuthn::new(TestState::default());
-    let kind = match provider {
+    let kind = kind_override.unwrap_or(match provider {
         Provider::Openai => UpstreamKind::OpenaiApiKey,
         Provider::Gemini => UpstreamKind::GeminiApiKey,
         _ => UpstreamKind::AnthropicApiKey,
-    };
+    });
+    let vertex = matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    )
+    .then(|| cc_lb_domain::VertexUpstreamConfig {
+        target: cc_lb_domain::VertexTarget::Regional {
+            project_id: "project-123456".into(),
+            location: "us-central1".into(),
+        },
+        api_version: Default::default(),
+    });
     let upstream = storage
         .create(UpstreamCreate {
+            vertex,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: uuid::Uuid::from_u128(1299),
             name: "cost-oracle".into(),
             kind,

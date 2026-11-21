@@ -184,6 +184,8 @@ fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
         UpstreamKind::AnthropicOauth => "anthropic_oauth",
         UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => "openai_key",
         UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => "gemini_key",
+        UpstreamKind::VertexApiKey => "vertex_key",
+        UpstreamKind::VertexCredential => "vertex_credential",
     }
 }
 

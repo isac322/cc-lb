@@ -46,6 +46,368 @@ fn realtime_request(address: SocketAddr, path: &str) -> http::Request<()> {
     request
 }
 
+#[derive(Clone)]
+struct LiveTestSignerFactory {
+    fail_name: Option<String>,
+    attempts: Arc<std::sync::Mutex<Vec<String>>>,
+    name: Option<String>,
+}
+
+impl ApiKeyAwareSignerFactory for LiveTestSignerFactory {
+    fn with_router_choice(&self, name: String) -> Arc<dyn SignerFactory> {
+        self.attempts.lock().unwrap().push(name.clone());
+        Arc::new(Self {
+            fail_name: self.fail_name.clone(),
+            attempts: Arc::clone(&self.attempts),
+            name: Some(name),
+        })
+    }
+}
+
+#[async_trait]
+impl SignerFactory for LiveTestSignerFactory {
+    async fn build(
+        &self,
+        _upstream: &cc_lb_domain::Upstream,
+    ) -> Result<Arc<dyn Signer>, SignerError> {
+        Ok(Arc::new(LiveTestSigner {
+            fail: self.name.as_deref() == self.fail_name.as_deref(),
+        }))
+    }
+}
+
+struct LiveTestSigner {
+    fail: bool,
+}
+
+#[async_trait]
+impl Signer for LiveTestSigner {
+    async fn sign(
+        &self,
+        mut shaped: ShapedRequest,
+        capability: &mut SigningCapability,
+    ) -> Result<SignedRequest, SignerError> {
+        if self.fail {
+            return Err(SignerError::SigningFailed {
+                reason: "test mint failure".to_owned(),
+            });
+        }
+        for name in ["authorization", "x-api-key", "x-goog-api-key"] {
+            shaped.headers_mut().remove(name);
+        }
+        shaped.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_static("Bearer vertex-test-token"),
+        );
+        Ok(SignedRequest::from_shaped(shaped, capability))
+    }
+
+    async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+        RetryDecision::Fail
+    }
+}
+
+fn vertex_live_upstream(
+    id: u128,
+    name: &str,
+    base_url: &str,
+    kind: UpstreamKind,
+    target: cc_lb_domain::VertexTarget,
+) -> UpstreamRecord {
+    let mut record = websocket_upstream(id, name, Url::parse(base_url).unwrap());
+    record.kind = kind;
+    record.vertex = Some(cc_lb_domain::VertexUpstreamConfig {
+        target,
+        api_version: cc_lb_domain::VertexApiVersion::V1Beta1,
+    });
+    record
+}
+
+fn regional_vertex_target() -> cc_lb_domain::VertexTarget {
+    cc_lb_domain::VertexTarget::Regional {
+        project_id: "project-123".into(),
+        location: "us-central1".into(),
+    }
+}
+
+#[tokio::test]
+async fn qa_live_1_vertex_credential_live_uses_regional_bearer_endpoint_and_strips_client_auth() {
+    let record = vertex_live_upstream(
+        1,
+        "vertex-credential",
+        "http://vertex.local/",
+        UpstreamKind::VertexCredential,
+        regional_vertex_target(),
+    );
+    let state = websocket_test_state(
+        vec![record],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(LiveTestSignerFactory {
+            fail_name: None,
+            attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            name: None,
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let mut request = websocket_request("127.0.0.1:1".parse().unwrap());
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_static("Bearer client-token"),
+    );
+    request
+        .headers_mut()
+        .insert("x-goog-api-key", HeaderValue::from_static("client-key"));
+    let auth = state
+        .lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("fixture authentication");
+    let observation = state
+        .lifecycle
+        .begin_realtime_websocket(&auth, "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent");
+    let session = state
+        .lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            observation,
+            RealtimeWebSocketKind::Gemini,
+            request.headers(),
+            RealtimeWebSocketTarget {
+                path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                query: Some("key=client-key&alt=json"),
+                model: Some("gemini-live"),
+            },
+            Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
+        )
+        .await
+        .expect("Vertex Live session");
+    assert_eq!(session.url.scheme(), "wss");
+    assert_eq!(session.url.host_str(), Some("vertex.local"));
+    assert_eq!(
+        session.url.path(),
+        "/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent"
+    );
+    assert_eq!(
+        session.headers.get("authorization").unwrap(),
+        "Bearer vertex-test-token"
+    );
+    assert!(session.headers.get("x-api-key").is_none());
+    assert!(session.headers.get("x-goog-api-key").is_none());
+    assert!(session.vertex_config().is_some());
+}
+
+#[tokio::test]
+async fn qa_live_2_vertex_live_rewrites_text_and_binary_setup_models_only() {
+    let record = vertex_live_upstream(
+        2,
+        "vertex-credential",
+        "http://vertex.local/",
+        UpstreamKind::VertexCredential,
+        regional_vertex_target(),
+    );
+    let state = websocket_test_state(
+        vec![record],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(LiveTestSignerFactory {
+            fail_name: None,
+            attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            name: None,
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let request = websocket_request("127.0.0.1:1".parse().unwrap());
+    let auth = state
+        .lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("fixture authentication");
+    let observation = state.lifecycle.begin_realtime_websocket(
+        &auth,
+        "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+    );
+    let session = state
+        .lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            observation,
+            RealtimeWebSocketKind::Gemini,
+            request.headers(),
+            RealtimeWebSocketTarget {
+                path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                query: None,
+                model: Some("gemini-live"),
+            },
+            Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
+        )
+        .await
+        .expect("Vertex Live session");
+    let cfg = session.vertex_config().expect("session retains Vertex config");
+    let expected = r#"{"setup":{"model":"projects/project-123/locations/us-central1/publishers/google/models/gemini-live","generationConfig":{"temperature":0.3}}}"#;
+    let text = UpstreamMessage::Text(
+        r#"{"setup":{"model":"models/gemini-live","generationConfig":{"temperature":0.3}}}"#.into(),
+    );
+    let rewritten_text =
+        crate::app::realtime_websocket::rewrite_vertex_live_setup_message(text, cfg)
+            .expect("text rewrite");
+    assert_eq!(rewritten_text.to_text().expect("text frame"), expected);
+    let binary = UpstreamMessage::Binary(Bytes::from_static(
+        br#"{"setup":{"model":"models/gemini-live","generationConfig":{"temperature":0.3}}}"#,
+    ));
+    let rewritten_binary =
+        crate::app::realtime_websocket::rewrite_vertex_live_setup_message(binary, cfg)
+            .expect("binary rewrite");
+    assert_eq!(rewritten_binary.into_data(), expected.as_bytes());
+}
+
+#[tokio::test]
+async fn qa_live_3_express_vertex_pool_is_rejected_before_upgrade() {
+    let record = vertex_live_upstream(
+        3,
+        "vertex-express",
+        "http://127.0.0.1:1/",
+        UpstreamKind::VertexApiKey,
+        cc_lb_domain::VertexTarget::Express,
+    );
+    let router = websocket_test_router(vec![record], TerminalStrategy::FirstPick).await;
+    let (proxy, task) = spawn_proxy_router(router).await;
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(proxy, native_websocket_path(true))),
+    )
+    .await
+    .expect("Express rejection arrives")
+    .expect_err("Express Vertex must not upgrade");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("HTTP rejection expected");
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_slice(response.body().as_ref().expect("error body")).unwrap();
+    assert_eq!(body["error"]["type"], "route_no_upstream_after_filter");
+    task.abort();
+}
+
+#[tokio::test]
+async fn qa_live_4_vertex_live_retries_one_alternate_after_mint_failure() {
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first = vertex_live_upstream(
+        4,
+        "vertex-first",
+        "http://first.vertex.local/",
+        UpstreamKind::VertexCredential,
+        regional_vertex_target(),
+    );
+    let second = vertex_live_upstream(
+        5,
+        "vertex-second",
+        "http://second.vertex.local/",
+        UpstreamKind::VertexCredential,
+        regional_vertex_target(),
+    );
+    let state = websocket_test_state(
+        vec![first, second],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(LiveTestSignerFactory {
+            fail_name: Some("vertex-first".to_owned()),
+            attempts: Arc::clone(&attempts),
+            name: None,
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let request = websocket_request("127.0.0.1:1".parse().unwrap());
+    let auth = state
+        .lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("fixture authentication");
+    let observation = state.lifecycle.begin_realtime_websocket(
+        &auth,
+        "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+    );
+    let session = state
+        .lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            observation,
+            RealtimeWebSocketKind::Gemini,
+            request.headers(),
+            RealtimeWebSocketTarget {
+                path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                query: None,
+                model: Some("gemini-live"),
+            },
+            Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
+        )
+        .await
+        .expect("alternate Vertex Live session");
+    assert_eq!(session.candidate.upstream_id, Uuid::from_u128(5));
+    assert_eq!(
+        &*attempts.lock().unwrap(),
+        &["vertex-first".to_owned(), "vertex-second".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn qa_live_5_gemini_api_key_live_route_remains_unchanged() {
+    let mut record = websocket_upstream(
+        6,
+        "gemini-api-key",
+        Url::parse("http://gemini.local/").unwrap(),
+    );
+    record.kind = UpstreamKind::GeminiApiKey;
+    let state = websocket_test_state(
+        vec![record],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(RealtimeKeySignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let request = websocket_request("127.0.0.1:1".parse().unwrap());
+    let auth = state
+        .lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("fixture authentication");
+    let observation = state.lifecycle.begin_realtime_websocket(
+        &auth,
+        "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+    );
+    let session = state
+        .lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            observation,
+            RealtimeWebSocketKind::Gemini,
+            request.headers(),
+            RealtimeWebSocketTarget {
+                path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                query: None,
+                model: Some("gemini-live"),
+            },
+            Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
+        )
+        .await
+        .expect("Gemini API-key Live session");
+    assert_eq!(session.candidate.upstream_id, Uuid::from_u128(6));
+    assert_eq!(session.url.scheme(), "ws");
+    assert_eq!(
+        session.headers.get("x-goog-api-key").unwrap(),
+        "provider-test-credential"
+    );
+    assert!(session.vertex_config().is_none());
+}
+
 #[tokio::test]
 async fn realtime_and_live_reject_authentication_before_upgrade_or_connect() {
     for (path, provider) in [

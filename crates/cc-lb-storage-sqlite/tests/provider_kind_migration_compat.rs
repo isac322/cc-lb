@@ -166,6 +166,9 @@ async fn assert_provider_writes(storage: &SqliteStorage) -> TestResult {
         let record = UpstreamStore::create(
             storage,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("provider-{}", kind.as_str()),
                 kind,
@@ -250,6 +253,13 @@ async fn historical_database_initializes_and_preserves_upstreams() -> TestResult
     .fetch_all(storage.pool())
     .await?;
     assert_eq!(applied, vec![99, 100]);
+    for id in [Uuid::from_u128(1), Uuid::from_u128(2)] {
+        let record = storage.get_by_id(id).await?.expect("legacy record");
+        assert!(
+            record.vertex.is_none(),
+            "legacy records must keep vertex=None"
+        );
+    }
     assert_provider_writes(&storage).await?;
     assert_reinitialize_is_noop(&database_url, storage).await
 }

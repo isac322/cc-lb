@@ -966,6 +966,8 @@ export const ApiKeyAccessSchema = z.object({
   workspace_list: z.enum(['ok', 'denied', 'error', 'not_applicable']),
   usage_report: z.enum(['ok', 'denied', 'error', 'not_applicable']),
   key_type: z.enum(['personal', 'service_account', 'workspace']).nullable(),
+  /** Recognizable non-secret fragment, when the provider supplies one. */
+  key_hint: z.string().nullable().optional(),
   /** Last probe failure, already phrased for operators. */
   last_error: z.string().nullable(),
   provider: ApiKeyProviderSchema.nullable().optional(),
@@ -1022,10 +1024,19 @@ export interface PreflightRequest {
   api_key_value?: string;
   kind?: Extract<
     UpstreamKind,
-    'anthropic_api_key' | 'openai_api_key' | 'gemini_api_key'
+    | 'anthropic_api_key'
+    | 'openai_api_key'
+    | 'gemini_api_key'
+    | 'vertex_api_key'
+    | 'vertex_credential'
   >;
   workspace_id?: string;
   base_url?: string;
+  project_id?: string;
+  location?: string;
+  express?: boolean;
+  google_credential?: string;
+  api_version?: 'v1' | 'v1beta1';
 }
 
 export type PreflightVerdict =
@@ -1314,8 +1325,28 @@ export const UpstreamKindSchema = z.enum([
   'openai_oauth',
   'gemini_api_key',
   'gemini_oauth',
+  'vertex_api_key',
+  'vertex_credential',
 ]);
 export type UpstreamKind = z.infer<typeof UpstreamKindSchema>;
+
+export const VertexCredentialTypeSchema = z.enum([
+  'service_account',
+  'authorized_user',
+  'impersonated_service_account',
+]);
+export type VertexCredentialType = z.infer<typeof VertexCredentialTypeSchema>;
+
+export const VertexResponseSchema = z.object({
+  project_id: z.string().nullable(),
+  location: z.string().nullable(),
+  api_version: z.enum(['v1', 'v1beta1']).optional(),
+  express: z.boolean(),
+  credential_type: VertexCredentialTypeSchema.nullable(),
+  principal_hint: z.string().nullable(),
+  quota_project_id: z.string().nullable(),
+});
+export type VertexResponse = z.infer<typeof VertexResponseSchema>;
 
 export const UpstreamSchema = z.object({
   id: z.string(),
@@ -1324,6 +1355,8 @@ export const UpstreamSchema = z.object({
   enabled: z.boolean(),
 
   base_url: z.string().nullable(),
+
+  vertex: VertexResponseSchema.nullable().optional(),
 
   /** All API-key upstream kinds; absent on rows never checked. */
   api_key_access: ApiKeyAccessSchema.nullable().optional(),
@@ -1345,17 +1378,32 @@ export const UpstreamSchema = z.object({
 
 export type UpstreamProvider = 'Anthropic' | 'OpenAI' | 'Gemini';
 
+const UPSTREAM_PROVIDERS: Record<UpstreamKind, UpstreamProvider> = {
+  anthropic_api_key: 'Anthropic',
+  anthropic_oauth: 'Anthropic',
+  openai_api_key: 'OpenAI',
+  openai_oauth: 'OpenAI',
+  gemini_api_key: 'Gemini',
+  gemini_oauth: 'Gemini',
+  vertex_api_key: 'Gemini',
+  vertex_credential: 'Gemini',
+};
+
 export function upstreamProvider(kind: UpstreamKind): UpstreamProvider {
-  if (kind.startsWith('openai_')) return 'OpenAI';
-  if (kind.startsWith('gemini_')) return 'Gemini';
-  return 'Anthropic';
+  return UPSTREAM_PROVIDERS[kind];
 }
 
 export function upstreamKindLabel(kind: UpstreamKind): string {
-  const provider = upstreamProvider(kind);
-  return kind.endsWith('_oauth')
-    ? `${provider} Subscription`
-    : `${provider} API key`;
+  if (kind === 'vertex_api_key') return 'Vertex API key';
+  if (kind === 'vertex_credential') return 'Vertex credential';
+  if (
+    kind === 'anthropic_oauth' ||
+    kind === 'openai_oauth' ||
+    kind === 'gemini_oauth'
+  ) {
+    return `${upstreamProvider(kind)} Subscription`;
+  }
+  return `${upstreamProvider(kind)} API key`;
 }
 
 export type Upstream = z.infer<typeof UpstreamSchema>;
@@ -1370,6 +1418,7 @@ export const API_KEY_ACCESS_NOT_CHECKED: ApiKeyAccess = {
   workspace_list: 'not_applicable',
   usage_report: 'not_applicable',
   key_type: null,
+  key_hint: null,
   last_error: null,
 };
 
@@ -1382,6 +1431,8 @@ export function apiKeyAccessOf(upstream: Upstream): ApiKeyAccess | null {
     case 'anthropic_api_key':
     case 'openai_api_key':
     case 'gemini_api_key':
+    case 'vertex_api_key':
+    case 'vertex_credential':
       return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
     default:
       return null;

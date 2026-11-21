@@ -41,6 +41,7 @@ import {
   capabilitiesOf,
   type ProviderFamily,
   providerOf,
+  upstreamAuthMode,
 } from '../../lib/providers';
 import {
   type Upstream,
@@ -394,7 +395,7 @@ export function sortUpstreamRowsByUsage(
             ? 1
             : !row.upstream.enabled
               ? 4
-              : row.upstream.kind.endsWith('_oauth')
+              : upstreamAuthMode(row.upstream.kind) === 'subscription'
                 ? 2
                 : 3;
       return { row, group, used: rowMaxUsedPct(row) };
@@ -695,7 +696,7 @@ function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
   }
   const snap = row.windows.find((candidate) => candidate.window === window);
   return (
-    row.upstream.kind.endsWith('_oauth') &&
+    upstreamAuthMode(row.upstream.kind) === 'subscription' &&
     snap != null &&
     snap.state !== 'absent' &&
     (providerOf(row.upstream.kind) === 'anthropic' ||
@@ -770,7 +771,7 @@ function sharedColumnSlots(
   row: UpstreamUsageRow,
   column: SharedUsageColumn,
 ): SharedUsageSlot[] {
-  if (!row.upstream.kind.endsWith('_oauth')) return [];
+  if (upstreamAuthMode(row.upstream.kind) !== 'subscription') return [];
   const provider = providerOf(row.upstream.kind);
   if (provider === 'gemini') {
     return GEMINI_GROUP_SLOTS.flatMap(
@@ -1041,7 +1042,7 @@ function RowBody({
       >
         <NameCell row={row} />
       </div>
-      {row.upstream.kind.endsWith('_oauth') ? (
+      {upstreamAuthMode(row.upstream.kind) === 'subscription' ? (
         windows.map((w) => {
           if (layout === 'shared' && isSharedUsageColumn(w)) {
             return (
@@ -1265,9 +1266,7 @@ function UpstreamUsageRows({
   const shown =
     collapsible && !expanded ? sorted.slice(0, collapsedRows) : sorted;
   const hasQuotaRows = sorted.some(
-    (row) =>
-      row.upstream.kind.endsWith('_oauth') &&
-      providerOf(row.upstream.kind) !== 'gemini',
+    (row) => upstreamAuthMode(row.upstream.kind) === 'subscription',
   );
   const hasCouponColumn = shown.some(
     (row) => capabilitiesOf(row.upstream.kind).limitReset,

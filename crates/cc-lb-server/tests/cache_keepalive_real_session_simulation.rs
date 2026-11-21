@@ -140,6 +140,9 @@ async fn successful_keepalive_publishes_observation_before_reschedule_cap() {
         UpstreamStore::create(
             &storage,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: cold_id,
                 name: "real-session-cold-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

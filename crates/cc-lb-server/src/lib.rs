@@ -34,6 +34,8 @@ pub mod subscription_quota_cache;
 pub mod tls;
 pub mod validate;
 pub mod version;
+pub(crate) mod vertex_status;
+pub(crate) mod vertex_transport;
 pub mod warmup;
 pub mod wasm_host;
 

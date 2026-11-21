@@ -3,8 +3,8 @@ import { dirname, normalize, posix, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..', '..');
 const siteRoot = resolve(import.meta.dir, '..');
-const blockedTerms = /Bedrock|Vertex|official|endorsed|\/Users\/|\/data\/|\.omo\/|~\/\.config\/|production-grade|enterprise-grade|battle-tested|highly available|99\.999%|\bSLA\b|\bD-(?:arch|cut|ido|meta)-\d+\b|\buniversal multi-provider(?: LLM)? gateway\b|\b(?:full|complete) (?:(?:OpenAI|Gemini|provider) )?API (?:support|compatibility)\b/i;
-const providerTerms = /OpenAI|Gemini/i;
+const blockedTerms = /Bedrock|SigV4|ambient ADC|metadata-server|external-account|official|endorsed|\/Users\/|\/data\/|\.omo\/|~\/\.config\/|production-grade|enterprise-grade|battle-tested|highly available|99\.999%|\bSLA\b|\bD-(?:arch|cut|ido|meta)-\d+\b|\buniversal multi-provider(?: LLM)? gateway\b|\b(?:full|complete) (?:(?:OpenAI|Gemini|provider) )?API (?:support|compatibility)\b|\bsix(?:\s|-)+(?:shipped\s+)?(?:upstream\s+)?kinds?\b|\bVertex(?:\s+AI)?\b[^\n.!?]{0,120}\b(?:is|are|remains?|stays?)\s+(?:unsupported|not supported|out of scope|outside the supported scope)\b/i;
+const providerTerms = /OpenAI|Gemini|Vertex/i;
 const providerReferenceSources: Record<string, true> = {
   'docs/runtime-management.md': true,
   'docs/upstream-warmup.md': true,

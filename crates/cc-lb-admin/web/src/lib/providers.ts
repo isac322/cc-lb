@@ -61,24 +61,76 @@ export function providersForRequestEventKind(
   );
 }
 
+const UPSTREAM_AUTH_MODES: Record<
+  UpstreamKind,
+  'subscription' | 'api_key' | 'google_credential'
+> = {
+  anthropic_oauth: 'subscription',
+  anthropic_api_key: 'api_key',
+  openai_oauth: 'subscription',
+  openai_api_key: 'api_key',
+  gemini_oauth: 'subscription',
+  gemini_api_key: 'api_key',
+  vertex_api_key: 'api_key',
+  vertex_credential: 'google_credential',
+};
+
+export type UpstreamAuthMode = (typeof UPSTREAM_AUTH_MODES)[UpstreamKind];
+
+export function upstreamAuthMode(kind: UpstreamKind): UpstreamAuthMode {
+  return UPSTREAM_AUTH_MODES[kind];
+}
+
+export type UpstreamAuthFilter = 'oauth' | 'api_key' | 'credential';
+
+export function upstreamMatchesAuthFilter(
+  kind: UpstreamKind,
+  filter: UpstreamAuthFilter,
+): boolean {
+  const mode = upstreamAuthMode(kind);
+  return (
+    (filter === 'oauth' && mode === 'subscription') ||
+    (filter === 'api_key' && mode === 'api_key') ||
+    (filter === 'credential' && mode === 'google_credential')
+  );
+}
+
 export function providerOf(kind: UpstreamKind): ProviderFamily {
-  if (kind === 'openai_oauth' || kind === 'openai_api_key') return 'openai';
-  if (kind === 'gemini_oauth' || kind === 'gemini_api_key') return 'gemini';
+  if (kind === 'openai_oauth' || kind === 'openai_api_key') {
+    return 'openai';
+  }
+  if (
+    kind === 'gemini_oauth' ||
+    kind === 'gemini_api_key' ||
+    kind === 'vertex_api_key' ||
+    kind === 'vertex_credential'
+  ) {
+    return 'gemini';
+  }
   return 'anthropic';
 }
 
 export function isOAuthUpstreamKind(kind: UpstreamKind): boolean {
-  return kind.endsWith('_oauth');
+  return upstreamAuthMode(kind) === 'subscription';
 }
+
 export function upstreamTypeLabel(
   kind: UpstreamKind,
-): 'Subscription' | 'API key' {
-  return kind.endsWith('_oauth') ? 'Subscription' : 'API key';
+): 'Subscription' | 'API key' | 'Google credential' {
+  switch (upstreamAuthMode(kind)) {
+    case 'subscription':
+      return 'Subscription';
+    case 'google_credential':
+      return 'Google credential';
+    case 'api_key':
+      return 'API key';
+  }
 }
 
 export function upstreamKindLabel(kind: UpstreamKind): string {
-  const type = kind.endsWith('_oauth') ? 'subscription' : 'API key';
-  return `${PROVIDER_LABELS[providerOf(kind)]} ${type}`;
+  if (kind === 'vertex_api_key') return 'Vertex API key';
+  if (kind === 'vertex_credential') return 'Vertex credential';
+  return `${PROVIDER_LABELS[providerOf(kind)]} ${upstreamTypeLabel(kind)}`;
 }
 
 /** Canonical order also makes URL parameters and query-cache identities stable. */
@@ -142,7 +194,10 @@ export const PROVIDER_CAPABILITIES: Record<
     warmup: true,
   },
   gemini_api_key: NONE,
+  vertex_api_key: NONE,
+  vertex_credential: NONE,
 };
+
 export function capabilitiesOf(
   kind: UpstreamKind,
 ): Readonly<ProviderCapabilities> {
@@ -154,18 +209,53 @@ export const PROVIDER_DEFAULT_ENDPOINTS: Record<ProviderFamily, string> = {
   openai: 'https://api.openai.com',
   gemini: 'https://generativelanguage.googleapis.com',
 };
+
+export function vertexHostFor(location: string | null | undefined): string {
+  const normalized = location?.trim().toLowerCase() || 'global';
+  if (normalized === 'global') return 'aiplatform.googleapis.com';
+  if (normalized === 'us' || normalized === 'eu') {
+    return `aiplatform.${normalized}.rep.googleapis.com`;
+  }
+  return `${normalized}-aiplatform.googleapis.com`;
+}
+
 export function isDefaultProviderEndpoint(
   kind: UpstreamKind,
   value: string,
+  vertexLocation?: string | null,
 ): boolean {
-  return value.trim().replace(/\/+$/, '') === defaultEndpointFor(kind);
+  return (
+    value.trim().replace(/\/+$/, '') ===
+    defaultEndpointFor(kind, vertexLocation)
+  );
 }
+
 /** Proxy defaults differ for imported OAuth credentials (Codex / Code Assist). */
-export function defaultEndpointFor(kind: UpstreamKind): string {
+export function defaultEndpointFor(
+  kind: UpstreamKind,
+  vertexLocation?: string | null,
+): string {
   if (kind === 'openai_oauth') return 'https://chatgpt.com/backend-api/codex';
   if (kind === 'gemini_oauth')
     return 'https://cloudcode-pa.googleapis.com/v1internal';
+  if (kind === 'vertex_api_key' || kind === 'vertex_credential') {
+    return `https://${vertexHostFor(vertexLocation)}`;
+  }
   return PROVIDER_DEFAULT_ENDPOINTS[providerOf(kind)];
+}
+
+export type VertexCredentialHealth = 'ok' | 'warning' | 'rejected';
+
+export function classifyVertexCredential(
+  reason: string | null | undefined,
+): VertexCredentialHealth {
+  if (
+    reason === 'vertex_credential_invalid_grant' ||
+    reason === 'vertex_credential_invalid_client'
+  ) {
+    return 'rejected';
+  }
+  return reason?.startsWith('vertex_credential_') ? 'warning' : 'ok';
 }
 
 export type UpstreamAttentionReason =

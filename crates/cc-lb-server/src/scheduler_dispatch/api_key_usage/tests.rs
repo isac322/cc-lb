@@ -402,6 +402,9 @@ impl Fixture {
     fn dispatch(&self) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
             upstreams: self.storage_dyn.clone(),
+            vertex_state: Arc::new(crate::dynamic_view_builder::VertexState::new(
+                self.storage_dyn.clone(),
+            )),
             principals: self.storage_dyn.clone(),
             plugin_registry: self.storage_dyn.clone(),
             upstream_rate_limits: self.storage_dyn.clone(),
@@ -491,6 +494,9 @@ impl Fixture {
         let created = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -525,6 +531,9 @@ impl Fixture {
         let created = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "openai".to_owned(),
                 kind: UpstreamKind::OpenaiApiKey,
@@ -1190,6 +1199,9 @@ async fn pol02_oau03_candidate_set() {
     let oauth = UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -2285,6 +2297,9 @@ async fn pol15_idle_ticks_cost_nothing() {
     let oauth = UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-only".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 32] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 33] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -195,6 +195,12 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 32] = [
         description: "Current SQLx pool in-use connection count by store.",
         labels: &["store"],
     },
+    MetricDefinition {
+        name: "cclb_vertex_token_mint_total",
+        kind: MetricKind::Counter,
+        description: "Vertex credential token mint outcomes by credential type.",
+        labels: &["credential_type", "outcome"],
+    },
 ];
 
 pub(crate) fn register_prometheus14_metrics() {
@@ -358,6 +364,11 @@ pub(crate) fn register_prometheus14_metrics() {
         Unit::Count,
         "Current SQLx pool in-use connection count by store."
     );
+    metrics::describe_counter!(
+        "cclb_vertex_token_mint_total",
+        Unit::Count,
+        "Vertex credential token mint outcomes by credential type."
+    );
 }
 
 pub fn prometheus14_metric_definitions() -> &'static [MetricDefinition] {
@@ -488,6 +499,12 @@ pub fn touch_prometheus14_metrics() {
     metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "sqlite").set(1.0);
     metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "sqlite").set(1.0);
     metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "sqlite").set(0.0);
+    metrics::counter!(
+        "cclb_vertex_token_mint_total",
+        "credential_type" => "service_account",
+        "outcome" => "success"
+    )
+    .increment(1);
 }
 
 /// Zero-initialize only label-free series and series whose labels come from a
@@ -537,7 +554,12 @@ pub(crate) fn touch_prometheus14_metric_handles() {
     metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(0);
     metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(0);
     metrics::gauge!("cc_lb_compiled_module_cache_entries").set(0.0);
-    metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(0.0);
+    metrics::counter!(
+        "cclb_vertex_token_mint_total",
+        "credential_type" => "service_account",
+        "outcome" => "success"
+    )
+    .increment(0);
 }
 
 /// Fixed `outcome` vocabulary of `cc_lb_cache_prediction_total`; must match
@@ -564,3 +586,17 @@ const REQUEST_DIAGNOSTICS_DROP_REASONS: [&str; 7] = [
     "request_diagnostics_worker_panic",
     "request_diagnostics_shutdown_timeout",
 ];
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qa_obs_1_vertex_mint_metric_definition_is_bounded_and_secret_free() {
+        let definition = prometheus14_metric_definitions()
+            .iter()
+            .find(|definition| definition.name == "cclb_vertex_token_mint_total")
+            .expect("Vertex mint metric definition");
+        assert_eq!(definition.kind, MetricKind::Counter);
+        assert_eq!(definition.labels, &["credential_type", "outcome"]);
+    }
+}

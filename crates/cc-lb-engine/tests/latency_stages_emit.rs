@@ -282,6 +282,10 @@ fn active_record() -> StoredApiKeyRecord {
 
 fn upstream_record(base_url: Url) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: default_upstream_id(),
         name: "test-upstream".to_owned(),
         kind: StorageUpstreamKind::AnthropicApiKey,

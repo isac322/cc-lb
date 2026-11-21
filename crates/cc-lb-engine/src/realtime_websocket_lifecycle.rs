@@ -209,18 +209,14 @@ impl Lifecycle {
                 id: auth.principal_id().to_owned(),
                 kind: PrincipalKind::InternalKey,
             };
-            let request_kind = match kind {
+            let routing_request_kind = match kind {
                 RealtimeWebSocketKind::Openai => RequestKind::OpenaiResponses,
                 RealtimeWebSocketKind::Gemini => RequestKind::GeminiGenerateContent,
-            };
-            let required_kind = match kind {
-                RealtimeWebSocketKind::Openai => None,
-                RealtimeWebSocketKind::Gemini => Some(CandidateUpstreamKind::GeminiApiKey),
             };
             let mut candidates = build_candidates(
                 &view,
                 auth.principal_id(),
-                request_kind,
+                routing_request_kind,
                 &[],
                 &HashMap::new(),
                 &*self.clock,
@@ -234,15 +230,25 @@ impl Lifecycle {
                                 | CandidateUpstreamKind::OpenaiOauth
                         )
                 });
-            } else if let Some(required_kind) = required_kind {
-                candidates.retain(|candidate| candidate.kind == required_kind);
             } else {
-                candidates.retain(|candidate| {
-                    matches!(
-                        candidate.kind,
-                        CandidateUpstreamKind::OpenaiApiKey | CandidateUpstreamKind::OpenaiOauth
-                    )
-                });
+                match kind {
+                    RealtimeWebSocketKind::Openai => candidates.retain(|candidate| {
+                        matches!(
+                            candidate.kind,
+                            CandidateUpstreamKind::OpenaiApiKey
+                                | CandidateUpstreamKind::OpenaiOauth
+                        )
+                    }),
+                    RealtimeWebSocketKind::Gemini => {
+                        let records = view.upstreams_snapshot();
+                        candidates.retain(|candidate| {
+                            records
+                                .iter()
+                                .find(|record| record.id == candidate.upstream_id)
+                                .is_some_and(live_eligible)
+                        });
+                    }
+                }
             }
             let started = Instant::now();
             let mut filtered = execute_filter_pipeline(
@@ -268,13 +274,9 @@ impl Lifecycle {
             }
             let terminal =
                 self.select_terminal_upstream(pipeline.terminal.clone(), &filtered.candidates);
-            let id = terminal.upstream_id.ok_or_else(|| {
+            let first_id = terminal.upstream_id.ok_or_else(|| {
                 if sideband_upstream_id.is_some() {
-                    WebSocketError::new(
-                        404,
-                        "realtime_call_not_found",
-                        "realtime call is not bound to an available upstream",
-                    )
+                    realtime_call_not_found()
                 } else {
                     WebSocketError::new(
                         503,
@@ -283,37 +285,165 @@ impl Lifecycle {
                     )
                 }
             })?;
-            let record = view
-                .upstreams_snapshot()
-                .iter()
-                .find(|record| record.id == id)
-                .ok_or_else(|| {
-                    if sideband_upstream_id.is_some() {
-                        WebSocketError::new(
-                            404,
-                            "realtime_call_not_found",
-                            "realtime call is not bound to an available upstream",
-                        )
-                    } else {
+            let body =
+                Arc::new(serde_json::json!({"model": model.unwrap_or_default(), "stream": true}));
+            let body_view = RequestBodyView {
+                parsed: Ok(body),
+                json_parse_ms: 0.0,
+            };
+            let mut attempted_id = None;
+            let mut last_signing_error = None;
+            let (routed, signed, url) = loop {
+                let id = match attempted_id {
+                    None => first_id,
+                    Some(failed_id) => filtered
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.upstream_id != failed_id)
+                        .map(|candidate| candidate.upstream_id)
+                        .ok_or_else(|| {
+                            last_signing_error.unwrap_or_else(|| {
+                                WebSocketError::new(
+                                    502,
+                                    "upstream_signing_failed",
+                                    "could not sign provider WebSocket request",
+                                )
+                            })
+                        })?,
+                };
+                attempted_id = Some(id);
+                let record = view
+                    .upstreams_snapshot()
+                    .iter()
+                    .find(|record| record.id == id)
+                    .ok_or_else(|| {
+                        if sideband_upstream_id.is_some() {
+                            return realtime_call_not_found();
+                        }
                         WebSocketError::new(
                             503,
                             error_codes::ROUTE_NOT_CONFIGURED,
                             "selected upstream is unavailable",
                         )
-                    }
+                    })?;
+                let (route, base_url) = route_for_record(record, cached).map_err(|message| {
+                    WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
                 })?;
-            let (route, base_url) = route_for_record(record, cached).map_err(|message| {
-                WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
-            })?;
-            let routed = RoutedUpstream::new(
-                record,
-                route,
-                base_url,
-                &filtered,
-                terminal,
-                None,
-                duration_to_ms(started.elapsed()),
-            );
+                let routed = RoutedUpstream::new(
+                    record,
+                    route,
+                    base_url,
+                    &filtered,
+                    TerminalDecision {
+                        upstream_id: Some(id),
+                        strategy: terminal.strategy.clone(),
+                    },
+                    None,
+                    duration_to_ms(started.elapsed()),
+                );
+                let upstream = upstream_for_record(record).map_err(|message| {
+                    WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
+                })?;
+                let shaped = raw_passthrough_request(
+                    record.base_url.as_ref(),
+                    &ctx,
+                    &principal,
+                    &upstream,
+                    false,
+                )
+                .map_err(|_| {
+                    WebSocketError::new(
+                        502,
+                        "upstream_signing_failed",
+                        "could not shape provider WebSocket request",
+                    )
+                })?;
+                let factory = view.signer_factory.with_router_choice(record.name.clone());
+                let signer = match factory.build(&upstream).await {
+                    Ok(signer) => signer,
+                    Err(_) => {
+                        let error = WebSocketError::new(
+                            502,
+                            "upstream_signing_failed",
+                            "could not load provider credentials",
+                        );
+                        if attempted_id == Some(first_id)
+                            && filtered
+                                .candidates
+                                .iter()
+                                .any(|candidate| candidate.upstream_id != id)
+                        {
+                            last_signing_error = Some(error);
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
+                let signed = match sign_request(signer.as_ref(), shaped).await {
+                    Ok(signed) => signed,
+                    Err(_) => {
+                        let error = WebSocketError::new(
+                            502,
+                            "upstream_signing_failed",
+                            "could not sign provider WebSocket request",
+                        );
+                        if attempted_id == Some(first_id)
+                            && filtered
+                                .candidates
+                                .iter()
+                                .any(|candidate| candidate.upstream_id != id)
+                        {
+                            last_signing_error = Some(error);
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
+                let mut url = signed.url().clone();
+                if matches!(kind, RealtimeWebSocketKind::Gemini)
+                    && matches!(
+                        record.kind,
+                        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
+                    )
+                {
+                    let cfg = record.vertex.as_ref().ok_or_else(|| {
+                        WebSocketError::new(
+                            502,
+                            error_codes::ROUTE_NOT_CONFIGURED,
+                            "Vertex upstream is missing target configuration",
+                        )
+                    })?;
+                    url = cc_lb_signer_vertex::vertex_live_target(cfg, record.base_url.as_ref())
+                        .map_err(|_| {
+                            WebSocketError::new(
+                                502,
+                                "invalid_upstream_url",
+                                "invalid Vertex Live URL",
+                            )
+                        })?;
+                } else {
+                    if record.kind == StorageUpstreamKind::OpenaiOauth {
+                        url = self.config.openai_realtime_origin.clone();
+                        url.set_path("/v1/realtime");
+                        url.set_query(public_query.as_deref());
+                    }
+                    let scheme = match url.scheme() {
+                        "https" | "wss" => "wss",
+                        "http" | "ws" => "ws",
+                        _ => {
+                            return Err(WebSocketError::new(
+                                502,
+                                "invalid_upstream_url",
+                                "unsupported WebSocket URL scheme",
+                            ));
+                        }
+                    };
+                    url.set_scheme(scheme).map_err(|_| {
+                        WebSocketError::new(502, "invalid_upstream_url", "invalid WebSocket URL")
+                    })?;
+                }
+                break (routed, signed, url);
+            };
             if let Some(observer) = observer.as_ref() {
                 let info = route_info_for_routed(&routed, model);
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -322,12 +452,8 @@ impl Lifecycle {
                     result: Ok(info),
                 });
             }
-            let body =
-                Arc::new(serde_json::json!({"model": model.unwrap_or_default(), "stream": true}));
-            let body_view = RequestBodyView {
-                parsed: Ok(body),
-                json_parse_ms: 0.0,
-            };
+            let record = routed.record;
+            let id = routed.route.upstream_id;
             let mut limit = match self
                 .reserve_limit(
                     &view.principal_view,
@@ -389,58 +515,6 @@ impl Lifecycle {
                     },
                 });
             }
-            let upstream = upstream_for_record(record).map_err(|message| {
-                WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
-            })?;
-            let shaped = raw_passthrough_request(
-                record.base_url.as_ref(),
-                &ctx,
-                &principal,
-                &upstream,
-                false,
-            )
-            .map_err(|_| {
-                WebSocketError::new(
-                    502,
-                    "upstream_signing_failed",
-                    "could not shape provider WebSocket request",
-                )
-            })?;
-            let factory = view.signer_factory.with_router_choice(record.name.clone());
-            let signer = factory.build(&upstream).await.map_err(|_| {
-                WebSocketError::new(
-                    502,
-                    "upstream_signing_failed",
-                    "could not load provider credentials",
-                )
-            })?;
-            let signed = sign_request(signer.as_ref(), shaped).await.map_err(|_| {
-                WebSocketError::new(
-                    502,
-                    "upstream_signing_failed",
-                    "could not sign provider WebSocket request",
-                )
-            })?;
-            let mut url = signed.url().clone();
-            if record.kind == cc_lb_storage_api::UpstreamKind::OpenaiOauth {
-                url = self.config.openai_realtime_origin.clone();
-                url.set_path("/v1/realtime");
-                url.set_query(public_query.as_deref());
-            }
-            let scheme = match url.scheme() {
-                "https" | "wss" => "wss",
-                "http" | "ws" => "ws",
-                _ => {
-                    return Err(WebSocketError::new(
-                        502,
-                        "invalid_upstream_url",
-                        "unsupported WebSocket URL scheme",
-                    ));
-                }
-            };
-            url.set_scheme(scheme).map_err(|_| {
-                WebSocketError::new(502, "invalid_upstream_url", "invalid WebSocket URL")
-            })?;
             let mut signed_headers = signed.headers().clone();
             strip_hop_by_hop(&mut signed_headers);
             Ok(RealtimeWebSocketSession {
@@ -488,6 +562,7 @@ impl Lifecycle {
                 limit_engine: self.limit_engine.clone(),
                 model: model.unwrap_or_default().to_owned(),
                 principal: principal.clone(),
+                vertex_config: record.vertex.clone(),
                 upstream: routed.route.upstream.clone(),
                 path: path.to_owned(),
                 dialect: routed.route.dialect.clone(),
@@ -508,6 +583,25 @@ impl Lifecycle {
         }
         result
     }
+}
+
+/// Returns whether a stored upstream may receive a Gemini Live connection.
+///
+/// Vertex API keys are excluded: the Live endpoint requires OAuth credentials
+/// that assert a principal, just like the cache and model-catalog RPCs.
+fn realtime_call_not_found() -> WebSocketError {
+    WebSocketError::new(
+        404,
+        "realtime_call_not_found",
+        "realtime call is not bound to an available upstream",
+    )
+}
+
+pub fn live_eligible(record: &UpstreamRecord) -> bool {
+    matches!(
+        record.kind,
+        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::VertexCredential
+    )
 }
 
 fn realtime_use_image_rates(kind: RealtimeWebSocketKind) -> bool {

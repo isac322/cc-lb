@@ -48,3 +48,5 @@ mod request_events_tool_use_prompt_tokens;
 mod upstream_affinity;
 #[path = "usage_rollup_pricing_completeness_migration.rs"]
 mod usage_rollup_pricing_completeness_migration;
+#[path = "vertex_storage_contract.rs"]
+mod vertex_storage_contract;

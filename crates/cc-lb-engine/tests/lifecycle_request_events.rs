@@ -150,6 +150,9 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
     let upstream_id = uuid::Uuid::from_u128(1_204_001);
     let upstream = storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: "gemini-identity-events".to_owned(),
             kind: StorageUpstreamKind::GeminiApiKey,

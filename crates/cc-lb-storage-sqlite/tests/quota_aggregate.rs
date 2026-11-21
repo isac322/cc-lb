@@ -78,6 +78,9 @@ async fn quota_poll_fence(storage: &SqliteStorage) -> SubscriptionQuotaPollFence
     let upstream_id = Uuid::new_v4();
     let upstream = storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: format!("quota-poll-{upstream_id}"),
             kind: UpstreamKind::AnthropicOauth,

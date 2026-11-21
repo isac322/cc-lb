@@ -275,6 +275,9 @@ async fn create_oauth_upstream(h: &ApiKeyHarness, name: &str) -> Uuid {
     UpstreamStore::create(
         h.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -966,6 +969,9 @@ async fn usg_provider_api_keys_use_local_estimated_request_events() {
         let created = UpstreamStore::create(
             h.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("provider-{index}"),
                 kind,
@@ -1040,6 +1046,9 @@ async fn usg_all_oauth_kinds_remain_not_api_key_upstream() {
         let id = UpstreamStore::create(
             h.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("oauth-{index}"),
                 kind,

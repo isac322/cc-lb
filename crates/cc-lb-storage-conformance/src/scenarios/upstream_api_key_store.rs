@@ -214,6 +214,9 @@ scenario!(
             UpstreamUpdate {
                 enabled: Some(true),
                 workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 ..UpstreamUpdate::default()
             },
         )
@@ -1225,6 +1228,9 @@ scenario!(sto04_poll_candidate_query_filters, |storage| async move {
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         },
     )
@@ -2257,6 +2263,9 @@ fn api_key_create(name: &str) -> UpstreamCreate {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         workspace_id: None,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         api_key_access: None,
     }
 }

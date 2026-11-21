@@ -27,6 +27,8 @@ pub(crate) struct ResponseTransformContext {
     pub(crate) request_path: String,
     pub(crate) dialect: Arc<dyn UpstreamDialect>,
     pub(crate) gemini_oauth: bool,
+    pub(crate) vertex: bool,
+    pub(crate) vertex_location: Option<String>,
 }
 
 pub(crate) struct BufferedTransformParts {
@@ -161,6 +163,119 @@ impl SseEventTransformHook for ComposedSseResponseTransformHook<'_> {
             })
         }
     }
+}
+/// Translate the buffered Vertex response into the Gemini Developer API shape.
+///
+/// This must run before usage parsing, affinity extraction, response hooks, and
+/// delivery so all downstream observers see the same client-visible resource.
+pub(crate) fn translate_vertex_response(
+    body: &[u8],
+    request_path: &str,
+    capability: ProviderCapability,
+    configured_location: Option<&str>,
+) -> Result<Option<Bytes>, &'static str> {
+    let is_cached = request_path.contains("/cachedContents");
+    let is_catalog = capability == ProviderCapability::GeminiModels
+        && request_path.starts_with("/v1")
+        && request_path.contains("/models");
+    if !is_cached && !is_catalog {
+        return Ok(None);
+    }
+    let mut value = sonic_rs::from_slice::<Value>(body).map_err(|_| "invalid Vertex JSON")?;
+    if is_cached {
+        let object = value
+            .as_object_mut()
+            .ok_or("invalid cached content response")?;
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("invalid cached content name")?;
+        let (prefix, id) = name
+            .rsplit_once("/cachedContents/")
+            .ok_or("invalid cached content name")?;
+        let mut prefix_parts = prefix.split('/');
+        if prefix_parts.next() != Some("projects")
+            || prefix_parts.next().is_none()
+            || prefix_parts.next() != Some("locations")
+        {
+            return Err("invalid cached content name");
+        }
+        let location = prefix_parts.next().ok_or("invalid cached content name")?;
+        if prefix_parts.next().is_some()
+            || configured_location.is_some_and(|expected| expected != location)
+            || id.is_empty()
+            || id.contains('/')
+        {
+            return Err("invalid cached content name");
+        }
+        object.insert(
+            "name".to_owned(),
+            Value::String(format!("cachedContents/{id}")),
+        );
+        if let Some(model) = object.get("model").and_then(Value::as_str)
+            && let Some(model_id) = model
+                .strip_prefix("projects/")
+                .and_then(|rest| rest.split_once("/locations/"))
+                .and_then(|(_, rest)| rest.split_once("/publishers/google/models/"))
+                .map(|(_, id)| id)
+                .filter(|id| !id.is_empty() && !id.contains('/'))
+        {
+            object.insert(
+                "model".to_owned(),
+                Value::String(format!("models/{model_id}")),
+            );
+        }
+    } else {
+        let object = value.as_object().ok_or("invalid Vertex model catalog")?;
+        let model_get = request_path
+            .split_once("/models/")
+            .is_some_and(|(_, id)| !id.is_empty() && !id.contains('/'));
+        if model_get {
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(|name| name.strip_prefix("publishers/google/models/"))
+                .filter(|id| !id.is_empty() && !id.contains('/'))
+                .ok_or("invalid Vertex model catalog")?;
+            let mut projected = serde_json::Map::new();
+            projected.insert("name".to_owned(), Value::String(format!("models/{name}")));
+            if let Some(version) = object.get("versionId") {
+                projected.insert("version".to_owned(), version.clone());
+            }
+            value = Value::Object(projected);
+        } else {
+            let publisher_models = object
+                .get("publisherModels")
+                .and_then(Value::as_array)
+                .ok_or("invalid Vertex model catalog")?;
+            let mut models = Vec::with_capacity(publisher_models.len());
+            for model in publisher_models {
+                let model = model.as_object().ok_or("invalid Vertex model catalog")?;
+                let name = model
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .and_then(|name| name.strip_prefix("publishers/google/models/"))
+                    .filter(|id| !id.is_empty() && !id.contains('/'))
+                    .ok_or("invalid Vertex model catalog")?;
+                let mut projected = serde_json::Map::new();
+                projected.insert("name".to_owned(), Value::String(format!("models/{name}")));
+                if let Some(version) = model.get("versionId") {
+                    projected.insert("version".to_owned(), version.clone());
+                }
+                models.push(Value::Object(projected));
+            }
+            let mut projected = serde_json::Map::new();
+            projected.insert("models".to_owned(), Value::Array(models));
+            if let Some(token) = object.get("nextPageToken") {
+                projected.insert("nextPageToken".to_owned(), token.clone());
+            }
+            value = Value::Object(projected);
+        }
+    }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map(Some)
+        .map_err(|_| "failed to encode Vertex response")
 }
 pub(crate) fn apply_buffered_transform_result(
     upstream_status: StatusCode,
@@ -386,5 +501,138 @@ pub(crate) fn make_response_transform_error_frame(
             &error.to_string(),
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::translate_vertex_response;
+    use crate::provider_capability::ProviderCapability;
+
+    #[test]
+    fn qa_resp_2_translates_cached_content_before_hooks() {
+        let body = br#"{"name":"projects/123456/locations/us-central1/cachedContents/abc","model":"projects/demo/locations/us-central1/publishers/google/models/gemini-2.5-flash","expireTime":"2026-12-01T00:00:00Z"}"#;
+        let translated = translate_vertex_response(
+            body,
+            "/v1beta/cachedContents",
+            ProviderCapability::GeminiCachedContentsCreate,
+            Some("us-central1"),
+        )
+        .expect("valid cached response")
+        .expect("translation");
+        let value: serde_json::Value = sonic_rs::from_slice(&translated).expect("json");
+        assert_eq!(value["name"], "cachedContents/abc");
+        assert_eq!(value["model"], "models/gemini-2.5-flash");
+        assert_eq!(value["expireTime"], "2026-12-01T00:00:00Z");
+    }
+    #[test]
+    fn qa_resp_1_vertex_cached_response_preserves_expiry_and_client_model() {
+        let translated = translate_vertex_response(
+            br#"{"name":"projects/p/locations/us/cachedContents/id","model":"projects/p/locations/us/publishers/google/models/gemini-2.5-flash","expireTime":"2026-12-01T00:00:00Z"}"#,
+            "/v1beta/cachedContents",
+            ProviderCapability::GeminiCachedContentsCreate,
+            Some("us"),
+        )
+        .expect("valid response")
+        .expect("Vertex response is translated");
+        let value: serde_json::Value = sonic_rs::from_slice(&translated).expect("json");
+        assert_eq!(value["name"], "cachedContents/id");
+        assert_eq!(value["model"], "models/gemini-2.5-flash");
+        assert_eq!(value["expireTime"], "2026-12-01T00:00:00Z");
+    }
+
+    #[test]
+    fn qa_resp_3_streaming_and_non_vertex_responses_are_untouched() {
+        assert!(
+            translate_vertex_response(
+                br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#,
+                "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+                ProviderCapability::GeminiGenerateContent,
+                Some("us"),
+            )
+            .expect("streaming response")
+            .is_none()
+        );
+        assert!(
+            translate_vertex_response(
+                br#"{"name":"cachedContents/client-id"}"#,
+                "/v1beta/models/gemini-2.5-flash:generateContent",
+                ProviderCapability::GeminiGenerateContent,
+                None,
+            )
+            .expect("non-Vertex response")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn qa_resp_4_unexpected_cached_response_shape_fails_closed() {
+        assert!(
+            translate_vertex_response(
+                br#"{"name":"publishers/google/models/gemini-2.5-flash"}"#,
+                "/v1beta/cachedContents",
+                ProviderCapability::GeminiCachedContentsCreate,
+                Some("us"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn qa_aff_3_rejects_unexpected_cached_content_location() {
+        let body = br#"{"name":"projects/123456/locations/eu/cachedContents/abc"}"#;
+        assert!(
+            translate_vertex_response(
+                body,
+                "/v1beta/cachedContents",
+                ProviderCapability::GeminiCachedContentsCreate,
+                Some("us-central1"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn qa_model_1_projects_publisher_models_with_pagination() {
+        let body = br#"{"publisherModels":[{"name":"publishers/google/models/gemini-2.5-flash","versionId":"001"}],"nextPageToken":"next"}"#;
+        let translated = translate_vertex_response(
+            body,
+            "/v1beta/models",
+            ProviderCapability::GeminiModels,
+            Some("us-central1"),
+        )
+        .expect("valid catalog")
+        .expect("translation");
+        let value: serde_json::Value = sonic_rs::from_slice(&translated).expect("json");
+        assert_eq!(value["models"][0]["name"], "models/gemini-2.5-flash");
+        assert_eq!(value["models"][0]["version"], "001");
+        assert_eq!(value["nextPageToken"], "next");
+    }
+
+    #[test]
+    fn qa_resp_4_rejects_malformed_catalog() {
+        assert!(
+            translate_vertex_response(
+                br#"{"publisherModels":[{"name":"publishers/google/models/x/y"}]}"#,
+                "/v1beta/models",
+                ProviderCapability::GeminiModels,
+                None,
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn qa_model_2_projects_publisher_model_get() {
+        let translated = translate_vertex_response(
+            br#"{"name":"publishers/google/models/gemini-2.5-flash","versionId":"001"}"#,
+            "/v1beta/models/gemini-2.5-flash",
+            ProviderCapability::GeminiModels,
+            None,
+        )
+        .expect("valid model")
+        .expect("translation");
+        let value: serde_json::Value = sonic_rs::from_slice(&translated).expect("json");
+        assert_eq!(value["name"], "models/gemini-2.5-flash");
+        assert_eq!(value["version"], "001");
     }
 }

@@ -107,6 +107,10 @@ type Props = {
    * rejected), so "Get reported usage" has somewhere to point.
    */
   usageModeShown?: boolean;
+  /**
+   * Vertex AI uses Google Cloud billing rather than Gemini API Studio.
+   */
+  isVertex?: boolean;
 };
 
 export function ApiUsageCard({
@@ -121,6 +125,7 @@ export function ApiUsageCard({
   monthLoading = false,
   monthError = null,
   usageModeShown = false,
+  isVertex = false,
 }: Props) {
   const showLoading = data === undefined && isLoading;
   const chartId = useChartId();
@@ -383,7 +388,7 @@ export function ApiUsageCard({
                 {month ? 'Usage not refreshed' : 'Usage unavailable'}
               </p>
             ) : null}
-            {provenance?.provider === 'gemini' ? (
+            {provenance?.provider === 'gemini' && !isVertex ? (
               <a
                 className={QUIET_LINK_CLASS}
                 href="https://aistudio.google.com/docs/billing#monitor-usage"
@@ -391,6 +396,15 @@ export function ApiUsageCard({
                 rel="noopener noreferrer"
               >
                 Gemini usage and billing in AI Studio
+              </a>
+            ) : isVertex ? (
+              <a
+                className={QUIET_LINK_CLASS}
+                href="https://console.cloud.google.com/billing"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Google Cloud billing
               </a>
             ) : null}
           </div>

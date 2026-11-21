@@ -244,6 +244,9 @@ async fn fixture() -> Fixture {
     let storage = Arc::new(storage);
     let stores = Arc::new(Stores {
         upstreams: storage.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
@@ -444,6 +447,9 @@ async fn cancel_during_rebuild_graceful() {
             Duration::from_millis(400),
             started_tx,
         )),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            fixture.storage.clone(),
+        )),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
@@ -475,6 +481,9 @@ async fn rebuild_failure_does_not_swap_view() {
     let cancel = CancellationToken::new();
     let stores = Arc::new(Stores {
         upstreams: Arc::new(ControlledUpstreamStore::failing(fixture.storage.clone())),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            fixture.storage.clone(),
+        )),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
@@ -515,6 +524,9 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
     let upstream = UpstreamStore::create(
         &*fixture.storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "hydrate-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

@@ -448,6 +448,17 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn qa_aff_1_get_cached_content_is_not_create_capability() {
+        assert_eq!(
+            classify(
+                &Method::GET,
+                "/v1beta/cachedContents/cached-1",
+                Some(cc_lb_domain::Provider::Gemini),
+            ),
+            None
+        );
+    }
 
     #[test]
     fn legacy_operations_require_matching_scope_when_present() {

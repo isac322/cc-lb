@@ -12,6 +12,8 @@ mod plan;
 mod quota;
 mod routing;
 mod upstream;
+/// Vertex AI endpoint and credential configuration types.
+pub mod vertex;
 
 pub use cache::{
     CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, CacheScore,
@@ -41,4 +43,10 @@ pub use upstream::{
     ANTHROPIC_IDENTITY_HEADERS, ANTHROPIC_WORKSPACE_ID_HEADER, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CredentialKind, Provider, Upstream, UpstreamCandidate,
     UpstreamIdentity, UpstreamKind,
+};
+pub use vertex::{
+    VERTEX_CREDENTIAL_INVALID_CLIENT, VERTEX_CREDENTIAL_INVALID_GRANT, VertexApiVersion,
+    VertexCredentialType, VertexTarget, VertexUpstreamConfig, VertexValidationError,
+    origin as vertex_origin, validate_location, validate_project_id,
+    vertex_credential_requires_replacement,
 };

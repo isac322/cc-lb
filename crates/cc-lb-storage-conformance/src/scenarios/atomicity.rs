@@ -147,6 +147,9 @@ where
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             workspace_id: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             api_key_access: None,
         })
         .await?;

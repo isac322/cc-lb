@@ -711,6 +711,10 @@ fn active_record() -> StoredApiKeyRecord {
 
 fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: name.to_owned(),
         kind: StorageUpstreamKind::AnthropicApiKey,

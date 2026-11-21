@@ -245,6 +245,9 @@ impl Fixture {
             AeadEncryptedField::encrypt(&self.aead, &bundle, id.as_bytes()).expect("encrypt");
         self.storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("existing-{id}"),
                 kind,

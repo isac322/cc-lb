@@ -145,6 +145,10 @@ pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
 
 pub(crate) fn upstream_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,

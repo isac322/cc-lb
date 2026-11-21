@@ -209,6 +209,9 @@ pub(super) async fn create_provider(
     UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: format!("provider-metadata-{id}"),
             kind,

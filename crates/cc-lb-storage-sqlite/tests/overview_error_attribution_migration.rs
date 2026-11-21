@@ -207,32 +207,41 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
 async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkpoint() {
     for prune_history in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let (url, connection) = open_templated_v125(&dir.path().join("identities.sqlite")).await;
+        let (url, mut connection) = open_templated_v125(&dir.path().join("identities.sqlite")).await;
+        for (id, name, kind) in [
+            (0x1300_u128, "named", "openai_oauth"),
+            (0x1301_u128, "other", "gemini_oauth"),
+        ] {
+            sqlx::query(
+                "INSERT INTO upstream_spec_v1
+                 (id,name,kind,base_url,enabled,warmup_enabled,warmup_dialect_plugin,
+                  spec_revision,created_at,updated_at,deleted_at,workspace_id,owner_epoch)
+                 VALUES (?,?,?,NULL,1,0,NULL,1,1800000000,1800000000,NULL,NULL,0)",
+            )
+            .bind(Uuid::from_u128(id).to_string())
+            .bind(name)
+            .bind(kind)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO overview_excluded_error_rollups_v1
+             (resolution,bucket_start_unix_secs,error_count,updated_at)
+             VALUES ('minute',1800000000,4,0),('hour',1800000000,4,0)",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(130), &mut connection, false)
+            .await
+            .unwrap();
         connection.close().await.unwrap();
         let storage =
             cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .unwrap();
-        for (id, name, kind) in [
-            (0x1300, "named", UpstreamKind::OpenaiOauth),
-            (0x1301, "other", UpstreamKind::GeminiOauth),
-        ] {
-            storage
-                .create(UpstreamCreate {
-                    id: Uuid::from_u128(id),
-                    name: name.to_owned(),
-                    kind,
-                    base_url: None,
-                    api_key_ciphertext: None,
-                    oauth_tokens: None,
-                    warmup_enabled: false,
-                    warmup_dialect_plugin: None,
-                    workspace_id: None,
-                    api_key_access: None,
-                })
-                .await
-                .unwrap();
-        }
         for (index, upstream_id, name, status) in [
             (0, Some(Uuid::from_u128(0x1300)), Some("named"), 401),
             (1, Some(Uuid::from_u128(0x1301)), Some("other"), 403),
@@ -263,10 +272,7 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                 .unwrap();
         }
         sqlx::raw_sql(
-            "INSERT INTO overview_excluded_error_rollups_v1
-             (resolution,bucket_start_unix_secs,error_count,updated_at)
-             VALUES ('minute',1800000000,4,0),('hour',1800000000,4,0);
-             INSERT INTO usage_rollup_checkpoints_v1 (id,value)
+            "INSERT INTO usage_rollup_checkpoints_v1 (id,value)
              VALUES ('high_water',4),('cost_components_backfill_upper',4),
                     ('cost_components_backfill_cursor',4);
              UPDATE usage_rollup_reconciliations_v1 SET status='complete';
@@ -304,6 +310,14 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
             })
             .await
             .unwrap();
+        sqlx::query(
+            "UPDATE overview_excluded_error_attribution_v1
+             SET upper_bound=4,cursor=0,phase='copy'
+             WHERE id=1",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
         storage.initialize().await.unwrap();
         let mut expected = Vec::new();
         for resolution in ["hour", "minute"] {
@@ -533,13 +547,28 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
         "hour-fallback",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (url, connection) = open_templated_v125(&dir.path().join("name-reuse.sqlite")).await;
+        let (url, mut connection) = open_templated_v125(&dir.path().join("name-reuse.sqlite")).await;
+        sqlx::query(
+            "INSERT INTO overview_excluded_error_rollups_v1
+             (resolution,bucket_start_unix_secs,error_count,updated_at)
+             VALUES ('minute',1800000000,1,0),('hour',1800000000,1,0)",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(130), &mut connection, false)
+            .await
+            .unwrap();
         connection.close().await.unwrap();
         let storage =
             cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .unwrap();
         let create = |id, name: &str, kind| UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: name.to_owned(),
             kind,
@@ -698,10 +727,15 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
              SELECT id,(SELECT MAX(id) FROM request_events_v1)
              FROM (SELECT 'high_water' AS id UNION ALL SELECT 'cost_components_backfill_upper'
                    UNION ALL SELECT 'cost_components_backfill_cursor');
-             INSERT INTO overview_excluded_error_rollups_v1
-             (resolution,bucket_start_unix_secs,error_count,updated_at)
-             VALUES ('minute',1800000000,1,0),('hour',1800000000,1,0);
              UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE overview_excluded_error_attribution_v1
+             SET upper_bound=(SELECT MAX(id) FROM request_events_v1),cursor=0,phase='copy'
+             WHERE id=1",
         )
         .execute(storage.pool())
         .await

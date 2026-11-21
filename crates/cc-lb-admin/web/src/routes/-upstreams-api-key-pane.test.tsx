@@ -42,7 +42,11 @@ vi.mock('@tanstack/react-router', async () => {
     string,
     unknown
   >;
-  return { ...actual, useNavigate: () => vi.fn() };
+  return {
+    ...actual,
+    Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a>,
+    useNavigate: () => vi.fn(),
+  };
 });
 
 vi.mock('../lib/useRequestEventsFeed', () => ({
@@ -642,5 +646,125 @@ describe('OAU-02 / UI-O-01 the OAuth pane', () => {
     expect(row.textContent).toContain('https://proxy.example.com');
     expect(row.textContent).toContain('Requests go here instead of Anthropic.');
     expect(screen.queryByText('Use a custom endpoint')).toBeNull();
+  });
+});
+
+describe('Vertex admin web QA', () => {
+  function vertex(overrides: Partial<Upstream> = {}): Upstream {
+    return keyUpstream(null, {
+      kind: 'vertex_api_key',
+      vertex: {
+        project_id: 'runbear',
+        location: 'global',
+        api_version: 'v1beta1',
+        express: false,
+        credential_type: null,
+        principal_hint: null,
+        quota_project_id: null,
+      },
+      ...overrides,
+    });
+  }
+
+  test('QA-WEB-5 shows Express limited mode only for Express Vertex keys', () => {
+    renderPane(
+      vertex({
+        vertex: {
+          project_id: null,
+          location: null,
+          api_version: 'v1beta1',
+          express: true,
+          credential_type: null,
+          principal_hint: null,
+          quota_project_id: null,
+        },
+      }),
+    );
+    expect(screen.getByText('Express: generate and count only')).toBeDefined();
+    expect(
+      screen.getByText(
+        'Use a project key or a credential → get caching, model list and Live.',
+      ),
+    ).toBeDefined();
+    cleanup();
+
+    renderPane(vertex());
+    expect(screen.queryByText('Express: generate and count only')).toBeNull();
+    expect(
+      screen.queryByText(
+        'Use a project key or a credential → get caching, model list and Live.',
+      ),
+    ).toBeNull();
+  });
+
+  test('QA-WEB-6 renders terminal replacement copy, transient warning, and no OAuth reconnect', () => {
+    renderPane(
+      vertex({
+        kind: 'vertex_credential',
+        status: {
+          last_apply_error: 'vertex_credential_invalid_grant',
+          last_apply_at_unix_secs: null,
+          last_warmup_at_unix_secs: null,
+        },
+        vertex: {
+          project_id: 'runbear',
+          location: 'global',
+          api_version: 'v1beta1',
+          express: false,
+          credential_type: 'authorized_user',
+          principal_hint: 'operator@example.com',
+          quota_project_id: null,
+        },
+      }),
+    );
+    expect(screen.getAllByText('Credential rejected').length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getByRole('button', { name: 'Replace credential' }),
+    ).toBeDefined();
+    expect(
+      screen.getByText('Replace the credential → get requests routing again.'),
+    ).toBeDefined();
+    expect(screen.getByText('Quota project: not set')).toBeDefined();
+    expect(
+      screen.getByText(
+        'Add a quota project to the credential file → get requests billed to your project.',
+      ),
+    ).toBeDefined();
+    expect(screen.getByText(/roles\/aiplatform\.user/)).toBeDefined();
+    expect(screen.queryByText(/Reconnect/)).toBeNull();
+    cleanup();
+
+    renderPane(
+      vertex({
+        kind: 'vertex_credential',
+        status: {
+          last_apply_error: 'vertex_credential_transient',
+          last_apply_at_unix_secs: null,
+          last_warmup_at_unix_secs: null,
+        },
+        vertex: {
+          project_id: 'runbear',
+          location: 'global',
+          api_version: 'v1beta1',
+          express: false,
+          credential_type: 'service_account',
+          principal_hint: 'svc@example.com',
+          quota_project_id: 'runbear',
+        },
+      }),
+    );
+    expect(screen.getByText('Credential check warning')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Re-check' })).toBeDefined();
+    expect(
+      screen.queryByText(
+        'Replace the credential → get requests routing again.',
+      ),
+    ).toBeNull();
+    // A healthy or warning credential can still be rotated from its section.
+    expect(
+      screen.getAllByRole('button', { name: 'Replace credential' }),
+    ).toHaveLength(1);
   });
 });

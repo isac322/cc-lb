@@ -386,6 +386,10 @@ pub fn lifecycle_with_cache(
 
 fn default_upstream_record() -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
             .expect("default upstream id parses"),
         name: "test-upstream".to_owned(),

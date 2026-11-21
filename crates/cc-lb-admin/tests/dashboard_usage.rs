@@ -51,6 +51,9 @@ async fn usage_principal_filter_precedes_every_grouping_and_intersects_provider_
         UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: name.to_owned(),
                 kind,
@@ -1122,6 +1125,9 @@ async fn summary_captured_provider_scope_matches_global_error_oracle() {
         UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: name.to_owned(),
                 kind,
@@ -1219,6 +1225,9 @@ async fn summary_anthropic_without_excluded_statuses_is_unchanged() {
     UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: "healthy-anthropic".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -1484,6 +1493,9 @@ async fn mixed_and_legacy_pricing_preserve_full_totals_parity_with_filters() {
     UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: "pricing-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

@@ -48,6 +48,9 @@ impl RenewalFixture {
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "renewal-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

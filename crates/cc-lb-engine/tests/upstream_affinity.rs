@@ -354,6 +354,10 @@ fn affinity_key(ciphertext: &str) -> UpstreamAffinityKey {
 
 fn upstream_record(id: Uuid, name: &str, enabled: bool) -> cc_lb_storage_api::UpstreamRecord {
     cc_lb_storage_api::UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: name.to_owned(),
         kind: cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey,
@@ -914,6 +918,12 @@ async fn stale_owner_epoch_binding_is_treated_as_unbound() {
     .expect("stale affinity request handled");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let (_, _, body) = collect_body(response).await;
+    let body: Value = serde_json::from_slice(&body).expect("error JSON");
+    assert!(
+        body.to_string().contains("api_error") || body.to_string().contains("affinity"),
+        "stale affinity response: {body}"
+    );
     assert_eq!(dispatch.call_count(), 0);
 }
 
@@ -2232,6 +2242,9 @@ async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
     );
     let old_record = storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "gemini-stale-view".to_owned(),
             kind: UpstreamKind::GeminiApiKey,

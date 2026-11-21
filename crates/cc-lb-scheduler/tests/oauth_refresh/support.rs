@@ -67,6 +67,10 @@ impl OAuthRefreshUpstreams for FakeUpstreams {
 
 pub fn refreshable_record(upstream_id: Uuid, generation: u64) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: upstream_id,
         name: "oauth-upstream".to_owned(),
         kind: UpstreamKind::AnthropicOauth,

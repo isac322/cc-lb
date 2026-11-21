@@ -523,6 +523,10 @@ fn provider_upstream_record(id: Uuid, name: &str, kind: StorageUpstreamKind) -> 
 
 fn test_upstream_record() -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: default_upstream_id(),
         name: "test-upstream".to_owned(),
         kind: StorageUpstreamKind::AnthropicApiKey,

@@ -57,10 +57,13 @@ where
     let plan_tiers: Arc<dyn PlanTierStore> = storage.clone();
     let prompt_cache_observations: Arc<dyn PromptCacheObservationStore> = storage.clone();
     let anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore> = storage.clone();
-    let audit: Arc<dyn AuditStore> = storage;
+    let audit: Arc<dyn AuditStore> = storage.clone();
 
     Arc::new(Stores {
         upstreams,
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals,
         plugin_registry,
         upstream_rate_limits,
@@ -84,6 +87,9 @@ where
 {
     let record = storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "lazy-proactive-race".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

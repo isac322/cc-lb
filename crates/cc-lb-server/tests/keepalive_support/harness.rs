@@ -236,6 +236,9 @@ impl Harness {
         let upstream = UpstreamStore::create(
             storage_ref,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: upstream_id,
                 name: "real-session-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

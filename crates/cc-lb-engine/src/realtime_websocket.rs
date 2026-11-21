@@ -438,6 +438,7 @@ pub struct RealtimeWebSocketSession {
     pub(crate) limit_engine: Option<Arc<LimitEngine>>,
     pub(crate) model: String,
     pub(crate) principal: cc_lb_domain::Principal,
+    pub(crate) vertex_config: Option<cc_lb_domain::VertexUpstreamConfig>,
     pub(crate) upstream: cc_lb_domain::Upstream,
     pub(crate) path: String,
     pub(crate) dialect: Arc<dyn cc_lb_upstream::UpstreamDialect>,
@@ -447,6 +448,9 @@ pub struct RealtimeWebSocketSession {
 impl RealtimeWebSocketSession {
     pub fn has_frame_transform(&self) -> bool {
         self.dialect.realtime_frame_transform_hook().is_some()
+    }
+    pub fn vertex_config(&self) -> Option<&cc_lb_domain::VertexUpstreamConfig> {
+        self.vertex_config.as_ref()
     }
 
     /// Transforms a provider WebSocket frame using the configured upstream hook.
@@ -1258,6 +1262,7 @@ mod tests {
                         id: DIRECT_PRINCIPAL.to_owned(),
                         kind: cc_lb_domain::PrincipalKind::InternalKey,
                     },
+                    vertex_config: None,
                     upstream: match kind {
                         RealtimeWebSocketKind::Openai => {
                             cc_lb_domain::Upstream::OpenaiDirect { base_url: None }

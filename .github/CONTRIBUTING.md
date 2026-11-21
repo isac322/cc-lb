@@ -32,7 +32,7 @@ The web workflow runs in the official Playwright container with browsers, fonts,
 
 ## Documentation and public claims
 
-Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic, OpenAI, and Gemini API-key and OAuth, with operation and credential limits in [`runtime management`](../docs/runtime-management.md). Bedrock and Vertex remain unsupported; do not add claims or guarantees without source evidence.
+Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic, OpenAI, Gemini API-key/OAuth, and the two Vertex AI Gemini kinds (`vertex_api_key` and `vertex_credential`) with operation and credential limits in [`runtime management`](../docs/runtime-management.md). Bedrock, AWS SigV4, ambient ADC/metadata-server credentials, and external-account credential files remain unsupported. Do not claim Vertex is “verified” or “official”; consult [`vertex-ai-qa.md`](../docs/vertex-ai-qa.md) for evidence and blocked live rows.
 
 When a change alters behavior, configuration, or a supported claim, update the code, the repository docs, the documentation site, and the registry and repository listings together so they describe the same contract.
 

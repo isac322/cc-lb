@@ -1222,6 +1222,10 @@ fn upstream_record(index: u8) -> UpstreamRecord {
     let mut bytes = [0u8; 16];
     bytes[15] = index + 1;
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: Uuid::from_bytes(bytes),
         name: format!("upstream-{index}"),
         kind: StorageUpstreamKind::AnthropicApiKey,

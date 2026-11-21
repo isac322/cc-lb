@@ -4,50 +4,31 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-pub use cc_lb_domain::{CredentialKind, Provider};
+pub use cc_lb_domain::{
+    CredentialKind, Provider, VertexApiVersion, VertexCredentialType, VertexTarget,
+    VertexUpstreamConfig,
+};
 
 use crate::StorageResult;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpstreamKind {
-    #[default]
-    AnthropicApiKey,
-    AnthropicOauth,
-    OpenaiApiKey,
-    OpenaiOauth,
-    GeminiApiKey,
-    GeminiOauth,
+pub use cc_lb_domain::UpstreamKind;
+/// Returns whether a credential failure reason is terminal for an upstream kind.
+pub fn credential_failure_is_terminal(kind: UpstreamKind, reason: Option<&str>) -> bool {
+    match kind {
+        UpstreamKind::VertexCredential => {
+            cc_lb_domain::vertex_credential_requires_replacement(reason)
+        }
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+            cc_lb_oauth_protocol::refresh_requires_reconnect(reason)
+        }
+        _ => false,
+    }
 }
 
-impl UpstreamKind {
-    pub const fn provider(self) -> Provider {
-        match self {
-            Self::AnthropicApiKey | Self::AnthropicOauth => Provider::Anthropic,
-            Self::OpenaiApiKey | Self::OpenaiOauth => Provider::Openai,
-            Self::GeminiApiKey | Self::GeminiOauth => Provider::Gemini,
-        }
-    }
-
-    pub const fn credential_kind(self) -> CredentialKind {
-        match self {
-            Self::AnthropicApiKey | Self::OpenaiApiKey | Self::GeminiApiKey => {
-                CredentialKind::ApiKey
-            }
-            Self::AnthropicOauth | Self::OpenaiOauth | Self::GeminiOauth => CredentialKind::Oauth,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AnthropicApiKey => "anthropic_api_key",
-            Self::AnthropicOauth => "anthropic_oauth",
-            Self::OpenaiApiKey => "openai_api_key",
-            Self::OpenaiOauth => "openai_oauth",
-            Self::GeminiApiKey => "gemini_api_key",
-            Self::GeminiOauth => "gemini_oauth",
-        }
-    }
+/// Returns whether the current credential failure must not be cleared by a
+/// later non-terminal status update.
+pub fn has_sticky_credential_failure(kind: UpstreamKind, reason: Option<&str>) -> bool {
+    credential_failure_is_terminal(kind, reason)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,11 +48,6 @@ pub struct UpstreamRecord {
     pub base_url: Option<Url>,
     pub enabled: bool,
     pub oauth_credentials: Option<EncryptedOAuthTokens>,
-    /// Mirrors `OAuthTokenBundle.never_refresh` for the stored credential.
-    ///
-    /// Persisted as its own column so list enumeration can filter on the
-    /// credential mode without decrypting every upstream's AEAD bundle.
-    /// Always `false` for non-OAuth or credential-less upstreams.
     #[serde(default)]
     pub oauth_never_refresh: bool,
     pub api_key_ciphertext: Option<Vec<u8>>,
@@ -79,6 +55,8 @@ pub struct UpstreamRecord {
     pub last_apply_at_unix_secs: Option<u64>,
     pub deleted_at_unix_secs: Option<u64>,
     pub revision: u64,
+    #[serde(default)]
+    pub owner_epoch: u64,
     pub oauth_token_generation: u64,
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
@@ -86,15 +64,16 @@ pub struct UpstreamRecord {
     pub warmup_enabled: bool,
     #[serde(default)]
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
-    /// Wall-clock unix seconds when the most recent successful warmup HTTP call
-    /// completed. Used by the admin UI to render "Last cycle ran <X> ago".
     #[serde(default)]
     pub last_warmup_at_unix_secs: Option<u64>,
-    /// Anthropic workspace this API-key upstream sends as
-    /// `anthropic-workspace-id`. `None` for OAuth upstreams, bound keys, and
-    /// org keys used without a workspace.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub vertex: Option<VertexUpstreamConfig>,
+    #[serde(default)]
+    pub vertex_credential_type: Option<VertexCredentialType>,
+    #[serde(default)]
+    pub vertex_quota_project_id: Option<String>,
 }
 
 impl UpstreamRecord {
@@ -145,6 +124,9 @@ pub struct UpstreamCreate {
     pub workspace_id: Option<String>,
     /// Capability/access snapshot written in the same transaction as the spec
     /// row. `None` creates no details row (reads as "not checked").
+    pub vertex: Option<VertexUpstreamConfig>,
+    pub vertex_credential_type: Option<VertexCredentialType>,
+    pub vertex_quota_project_id: Option<String>,
     pub api_key_access: Option<crate::upstream_api_key::ApiKeyAccessWrite>,
 }
 
@@ -166,6 +148,10 @@ pub struct UpstreamUpdate {
     /// Capability/access snapshot written in the same transaction as the spec
     /// update. `None` leaves the details row untouched.
     pub api_key_access: Option<crate::upstream_api_key::ApiKeyAccessWrite>,
+    /// Vertex connection configuration; `Some(None)` clears it.
+    pub vertex: Option<Option<VertexUpstreamConfig>>,
+    pub vertex_credential_type: Option<Option<VertexCredentialType>>,
+    pub vertex_quota_project_id: Option<Option<String>>,
     /// Zeroes usage-poll failures and clears the usage-poll schedule and
     /// success/attempt timestamps. Usage rows are kept.
     pub reset_api_key_poll_state: bool,
@@ -184,6 +170,7 @@ pub struct UpstreamStatusUpdate {
     /// When `Some(value)`, only apply the status update if the stored OAuth
     /// token generation still equals `value`; a mismatch is a conflict.
     pub expected_oauth_token_generation: Option<u64>,
+    pub expected_spec_revision: Option<u64>,
 }
 
 #[async_trait]

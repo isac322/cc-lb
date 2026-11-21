@@ -359,8 +359,12 @@ try {
               await installPricingFixtures(page, scenario.state, theme, buckets);
               await page.goto(`${origin}/providers/anthropic?range=24h`);
               await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+              // Until the upstream inventory loads, /providers/$provider renders the
+              // unscoped overview and then remounts as the provider page, which
+              // refetches every panel. Measure only the final provider page.
+              await expect(page.locator('#overview-usage-title')).toHaveText('Anthropic');
               const cost = page.getByTestId('overview-kpi-cost');
-              await expect(cost).toBeVisible();
+              await expect(cost.locator('[data-slot="value"]')).not.toBeEmpty();
               await expect(page.getByTestId('top-principal-row')).toHaveCount(1);
               await page.evaluate(() => document.fonts.ready);
               const costText = await cost.innerText();

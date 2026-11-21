@@ -37,7 +37,7 @@ use crate::dashboard::{
     UsageGroupBy, UsageProjection, UsageSeries, auto_step, build_dashboard_usage_projected_checked,
     build_window_for_step, empty_bucket, parse_range, parse_step, validate_step_for_range,
 };
-use crate::v1::upstreams::{UpstreamError, storage, upstream_base_url};
+use crate::v1::upstreams::{UpstreamError, storage};
 
 const HOUR_SECS: u64 = 3_600;
 const DAY_SECS: u64 = 86_400;
@@ -109,21 +109,37 @@ pub(crate) async fn get_upstream_usage(
                 .as_ref()
                 .and_then(|details| details.project_id.clone()),
         ),
-        _ => {
-            let on_org_origin = state
-                .anthropic_org_api
-                .applies_to(&upstream_base_url(&record)?);
-            (
-                derive_provenance(on_org_origin, &record, details.as_ref()),
-                details.as_ref().and_then(|details| details.provider),
-                details
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential => (
+            derive_gemini_provenance(),
+            Some(Provider::Gemini),
+            Some(ProviderReportState::NotApplicable),
+            details
+                .as_ref()
+                .and_then(|details| details.project_id.clone()),
+        ),
+        UpstreamKind::AnthropicApiKey => (
+            derive_provenance(
+                record
+                    .base_url
                     .as_ref()
-                    .and_then(|details| details.provider_report_state),
-                details
-                    .as_ref()
-                    .and_then(|details| details.project_id.clone()),
-            )
-        }
+                    .is_none_or(|url| state.anthropic_org_api.applies_to(url)),
+                &record,
+                details.as_ref(),
+            ),
+            None,
+            provider_report_state_for_response(record.kind, details.as_ref()),
+            details
+                .as_ref()
+                .and_then(|details| details.project_id.clone()),
+        ),
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => (
+            Provenance::estimated(None),
+            None,
+            Some(ProviderReportState::NotApplicable),
+            details
+                .as_ref()
+                .and_then(|details| details.project_id.clone()),
+        ),
     };
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
@@ -185,7 +201,7 @@ pub(crate) async fn get_upstream_usage(
         .await?
         .and_then(|outcome| {
             classify_billing_stop(
-                provider.unwrap_or(Provider::Anthropic),
+                record.kind,
                 outcome.status,
                 outcome.upstream_error_type.as_deref(),
                 outcome.upstream_error_code.as_deref(),

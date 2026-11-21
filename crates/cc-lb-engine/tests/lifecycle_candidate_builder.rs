@@ -385,6 +385,10 @@ fn upstream(
     deleted_at_unix_secs: Option<u64>,
 ) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: format!("upstream-{id}"),
         kind,

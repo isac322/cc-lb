@@ -21,7 +21,16 @@ describe('source documentation policy', () => {
   ])('allows implemented provider facts in provider reference sources: %s', (source) => {
     expect(findBlockedTerm('OpenAI Responses', source)).toBeUndefined();
     expect(findBlockedTerm('Gemini generation', source)).toBeUndefined();
+    expect(findBlockedTerm('Vertex AI Gemini generation', source)).toBeUndefined();
   });
+
+  test('qa_doc_2_synced_provider_sources_allow_vertex_only_in_approved_sources', () => {
+    expect(findBlockedTerm('Vertex AI Gemini generation', 'docs/runtime-management.md'))
+      .toBeUndefined();
+    expect(findBlockedTerm('Vertex AI Gemini generation', 'docs/scheduler.md'))
+      .toBe('Vertex');
+  });
+
 
   test.each([
     'docs/scheduler.md',
@@ -32,9 +41,10 @@ describe('source documentation policy', () => {
 
   test.each([
     ['Bedrock generation', 'Bedrock'],
-    ['Vertex generation', 'Vertex'],
     ['official OpenAI integration', 'official'],
     ['Gemini endorsed integration', 'endorsed'],
+    ['Vertex is unsupported', 'Vertex is unsupported'],
+    ['six kinds', 'six kinds'],
     ['/Users/operator/secret', '/Users/'],
     ['/data/private/secret', '/data/'],
     ['.omo/evidence/private.json', '.omo/'],
@@ -163,8 +173,13 @@ describe('source documentation consumers', () => {
     expect(rendered).not.toContain('/data/private/');
   });
 
+  test('qa_doc_3_metadata_surfaces_reject_unsupported_vertex_verification_claims', () => {
+    const source = '## Admin v1 REST API\n\nVertex official integration\n';
+    expect(() => renderSourceNotes(source, runtimeSource)).toThrow('Sync filter rejected');
+  });
+
   test.each([
-    'Vertex generation',
+    'Vertex official integration',
     'Bedrock generation',
     'official OpenAI integration',
     'Full Gemini API compatibility',
