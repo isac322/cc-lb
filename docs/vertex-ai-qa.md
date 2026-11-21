@@ -44,7 +44,7 @@ The matrix below records the exact automated and manual checks for this contract
 12. **QA-STO-8** — Given peer terminal write, when reconciliation material is computed, then hash changes without revision bump. `[auto: server reconcile tests]`
 13. **QA-CRD-1** — Given three valid credential fixtures, when parsed, then canonical forms and non-secret hints result. `[auto: cc-lb-vertex-auth]`
 14. **QA-CRD-2** — Given forbidden/unknown credential forms, when parsed, then static rejection codes return without secret/value echo. `[auto: cc-lb-vertex-auth]`
-15. **QA-CRD-3** — Given malformed, duplicate, BOM/CRLF, PKCS#1, and size-bound inputs, when parsed, then exact frozen behavior occurs including 16 KiB acceptance and +1 rejection. `[auto: cc-lb-vertex-auth]`
+15. **QA-CRD-3** — Given malformed, duplicate, BOM/CRLF, PKCS#1, and size-bound inputs, when parsed, then exact frozen behavior occurs including 16 KiB acceptance and +1 rejection; a valid PKCS#1 service-account key is stored as the same PKCS#8 bytes as its Google-issued form, and a malformed one is `credential_invalid_private_key`. `[auto: cc-lb-vertex-auth]`
 16. **QA-CRD-4** — Given Vertex ciphertext, when opened with wrong AAD or generic API-key resolution, then decryption fails closed. `[auto: control credential tests]`
 17. **QA-JWT-1** — Given a test RSA key, when service JWT mints, then RS256, audience, scope, issuer, and sub-hour lifetime are correct. `[auto: cc-lb-vertex-auth]`
 18. **QA-MNT-1** — Given fake transport/service account, when minting occurs, then exactly one fixed token-endpoint request occurs. `[auto: cc-lb-vertex-auth]`
@@ -87,7 +87,7 @@ The matrix below records the exact automated and manual checks for this contract
 55. **QA-ERR-1** — Given Vertex 400/403, when routed, then response relays and no failover occurs. `[auto: engine failover]`
 56. **QA-ERR-2** — Given credential 401, when handled, then one refresh/retry occurs; API keys never refresh. `[auto: server signer factory]`
 57. **QA-ERR-3** — Given hintless 429, when observed, then `RESOURCE_EXHAUSTED`, no retry delay, bounded failover. `[auto: usage/lifecycle]`
-58. **QA-ERR-4** — Given preflight statuses, when mapped, then verdicts match the frozen mapping. `[auto: admin upstream tests]`
+58. **QA-ERR-4** — Given preflight statuses, when mapped, then verdicts match the frozen mapping; preflight sends exactly one `countTokens` request and no generation request, so a generation endpoint that never answers cannot fail a valid create. `[auto: admin upstream tests]`
 59. **QA-ADM-1** — Given five valid create types, when submitted, then metadata returns without secrets; real cases are pass or BLOCKED. `[auto: admin upstream tests]`
 60. **QA-ADM-2** — Given invalid combinations, when submitted, then static validation rejects and nothing persists. `[auto: admin upstream tests]`
 61. **QA-ADM-3** — Given counting AEAD, when list/get runs, then zero decryptions occur and metadata is present. `[auto: admin upstream tests]`

@@ -201,10 +201,22 @@ mod tests {
             parse_credential(b"not-json"),
             Err(CredentialError::InvalidJson)
         ));
-        let pkcs1 = br#"{"type":"service_account","client_email":"x@project.iam.gserviceaccount.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nAA==\n-----END RSA PRIVATE KEY-----"}"#;
+        // Google's client libraries accept PKCS#1 service-account keys, and
+        // keys re-exported by other proxies arrive in that form. The same key
+        // must yield the same stored PKCS#8 bytes as the Google-issued form.
+        let pkcs1_key = include_str!("testdata/key-a-pkcs1.pem");
+        assert!(pkcs1_key.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        let pkcs1 = sa_json().replace(&format!("{SA_KEY:?}"), &format!("{pkcs1_key:?}"));
+        let from_pkcs1 = parse_credential(pkcs1.as_bytes()).expect("PKCS#1 key accepted");
+        let from_pkcs8 = parse_credential(sa_json().as_bytes()).expect("PKCS#8 key");
+        assert_eq!(
+            serde_json::to_value(&from_pkcs1).expect("serialize")["private_key"],
+            serde_json::to_value(&from_pkcs8).expect("serialize")["private_key"]
+        );
+        let malformed_pkcs1 = br#"{"type":"service_account","client_email":"x@project.iam.gserviceaccount.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nAA==\n-----END RSA PRIVATE KEY-----"}"#;
         assert!(matches!(
-            parse_credential(pkcs1),
-            Err(CredentialError::Pkcs1PrivateKey)
+            parse_credential(malformed_pkcs1),
+            Err(CredentialError::InvalidPrivateKey)
         ));
         let mut exact = user_json().to_vec();
         let padding = MAX_CREDENTIAL_BYTES - exact.len();

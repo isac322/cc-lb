@@ -473,16 +473,6 @@ pub(crate) async fn vertex_preflight(
     Ok(outcome)
 }
 
-fn vertex_generate_probe_payload() -> Value {
-    json!({
-        "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-        "generationConfig": {
-            "maxOutputTokens": 1,
-            "thinkingConfig": {"thinkingLevel": "MINIMAL"}
-        }
-    })
-}
-
 async fn vertex_probe(
     state: &AdminState,
     base_url: &Url,
@@ -508,39 +498,24 @@ async fn vertex_probe(
         ),
         _ => format!("{prefix}publishers/google/models/gemini-3.5-flash"),
     };
-    let mut generate = base_url.clone();
-    generate.set_path(&format!("{path}:generateContent"));
-    generate.set_query(None);
+    // countTokens proves authentication, project access, and API enablement
+    // without a billed model call. Generation was dropped from the probe:
+    // its server-side latency has an unbounded tail, so a slow but valid
+    // credential was rejected as unreachable (#1366).
     let mut count = base_url.clone();
     count.set_path(&format!("{path}:countTokens"));
     count.set_query(None);
-    let requests = [
-        (generate, vertex_generate_probe_payload()),
-        (
-            count,
-            json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}),
-        ),
-    ];
-    let mut results = Vec::new();
-    for (url, payload) in requests {
-        results.push(
-            provider_request(
-                state,
-                Method::POST,
-                url,
-                header_name,
-                header_value.clone(),
-                Some(payload),
-            )
-            .await
-            .map(|(status, body)| vertex_status_result(status, &body))
-            .unwrap_or_else(|error| error),
-        );
-    }
-    combine_provider_results(results.try_into().unwrap_or([
-        ProviderProbeResult::Unreachable { timed_out: false },
-        ProviderProbeResult::Unreachable { timed_out: false },
-    ]))
+    provider_request(
+        state,
+        Method::POST,
+        count,
+        header_name,
+        header_value,
+        Some(json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}]})),
+    )
+    .await
+    .map(|(status, body)| vertex_status_result(status, &body))
+    .unwrap_or_else(|error| error)
 }
 
 pub(crate) async fn provider_native_preflight(
@@ -1916,17 +1891,6 @@ mod tests {
         );
         assert_eq!(count["contents"][0]["parts"][0]["text"], "ping");
         assert!(count.get("generationConfig").is_none());
-    }
-
-    #[test]
-    fn qa_elig_5_vertex_preflight_generate_probe_is_bounded() {
-        let payload = vertex_generate_probe_payload();
-        assert_eq!(payload["contents"][0]["parts"][0]["text"], "ping");
-        assert_eq!(payload["generationConfig"]["maxOutputTokens"], 1);
-        assert_eq!(
-            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "MINIMAL"
-        );
     }
 
     #[test]

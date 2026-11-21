@@ -434,6 +434,62 @@ async fn qa_err_4_vertex_preflight_maps_provider_statuses() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
 }
 
+/// #1366: a slow generation must not fail a valid credential. Preflight sends
+/// only the free countTokens request; a generation endpoint that never
+/// answers proves no generation request is made.
+#[tokio::test]
+async fn qa_err_4_vertex_preflight_sends_count_tokens_only() {
+    #[derive(Clone)]
+    struct Seen(Arc<std::sync::Mutex<Vec<String>>>);
+    async fn record(
+        State(seen): State<Seen>,
+        request: Request<Body>,
+    ) -> (StatusCode, &'static str) {
+        let path = request.uri().path().to_owned();
+        seen.0.lock().unwrap().push(path.clone());
+        if path.ends_with(":countTokens") {
+            return (StatusCode::OK, r#"{"totalTokens":1}"#);
+        }
+        std::future::pending::<()>().await;
+        unreachable!()
+    }
+    let harness = spawn_api_key_harness().await;
+    let seen = Seen(Arc::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/{*path}", any(record))
+                .with_state(seen.clone()),
+        )
+        .into_future(),
+    );
+    let (status, created, _) = request(
+        &harness.app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "qa-err-4-count-only",
+            "kind": "vertex_api_key",
+            "project_id": "project-qa-err-4",
+            "location": "us-central1",
+            "api_key_value": "AIza-qa-err-4-count-only",
+            "base_url": format!("http://{address}/"),
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        *seen.0.lock().unwrap(),
+        [
+            "/v1beta1/projects/project-qa-err-4/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn qa_adm_vertex_unreachable_create_uses_probe_remediation() {
     let harness = spawn_api_key_harness().await;
