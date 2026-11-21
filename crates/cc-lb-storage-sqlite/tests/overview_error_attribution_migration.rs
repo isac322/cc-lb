@@ -207,7 +207,8 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
 async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkpoint() {
     for prune_history in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let (url, mut connection) = open_templated_v125(&dir.path().join("identities.sqlite")).await;
+        let (url, mut connection) =
+            open_templated_v125(&dir.path().join("identities.sqlite")).await;
         for (id, name, kind) in [
             (0x1300_u128, "named", "openai_oauth"),
             (0x1301_u128, "other", "gemini_oauth"),
@@ -547,7 +548,8 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
         "hour-fallback",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (url, mut connection) = open_templated_v125(&dir.path().join("name-reuse.sqlite")).await;
+        let (url, mut connection) =
+            open_templated_v125(&dir.path().join("name-reuse.sqlite")).await;
         sqlx::query(
             "INSERT INTO overview_excluded_error_rollups_v1
              (resolution,bucket_start_unix_secs,error_count,updated_at)

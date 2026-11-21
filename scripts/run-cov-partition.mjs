@@ -11,7 +11,6 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -75,8 +74,11 @@ function removeProfrawFiles(dirs) {
 function parseShowEnv(stdout) {
   const parsed = {};
   for (const rawLine of stdout.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('info:')) continue;
+    let line = rawLine.trim();
+    if (!line || line.startsWith('info:') || line.startsWith('warning:')) continue;
+    if (line.startsWith('export ')) {
+      line = line.slice('export '.length);
+    }
     const eq = line.indexOf('=');
     if (eq === -1) continue;
     const key = line.slice(0, eq);
@@ -266,48 +268,55 @@ async function main() {
   mkdirSync(targetDir, { recursive: true });
   mkdirSync(llvmTargetDir, { recursive: true });
 
-  const profrawLinks = [
-    path.join(targetDir, 'profraw-ram'),
-    path.join(llvmTargetDir, 'profraw-ram'),
-  ];
-  for (const profrawLink of profrawLinks) {
-    rmSync(profrawLink, { recursive: true, force: true });
-    symlinkSync(profrawDir, profrawLink, 'dir');
-  }
-
   const stageDir = path.join(shmBase, `cc-lb-cov-stage-${partName}`);
   rmSync(stageDir, { recursive: true, force: true });
   mkdirSync(stageDir, { recursive: true });
 
-  const profilePattern = `profraw-ram/part-${partName}-%4m.profraw`;
-  const env = {
+  const baseEnv = {
     ...process.env,
     TMPDIR: shmTmp,
-    LLVM_PROFILE_FILE_NAME: profilePattern,
     LLVM_COV: tools.cov,
     LLVM_PROFDATA: tools.profdata,
   };
 
   removeProfrawFiles([profrawDir, targetDir, llvmTargetDir]);
 
-  const covArgs = ['llvm-cov', 'nextest', '--no-clean', '--no-report'];
   const pkgArgs = [];
   for (const pkg of run.packages ?? []) {
     pkgArgs.push('--package', pkg);
   }
   const cargoArgs = run.cargo_args ?? [];
-  covArgs.push(...pkgArgs, ...cargoArgs, '--all-features', '--test-threads=4');
+  const nextestArgs = [
+    'nextest',
+    'run',
+    ...pkgArgs,
+    ...cargoArgs,
+    '--all-features',
+    '--test-threads=4',
+  ];
   if (run.filter_expr) {
-    covArgs.push('-E', run.filter_expr);
+    nextestArgs.push('-E', run.filter_expr);
   }
   for (const narg of run.nextest_args ?? []) {
-    covArgs.push(narg);
+    nextestArgs.push(narg);
   }
 
   try {
-    console.log(`::group::cargo ${covArgs.join(' ')}`);
+    const showEnvOut = execFileSync('cargo', ['llvm-cov', 'show-env', '--sh'], {
+      cwd: ROOT,
+      env: baseEnv,
+      encoding: 'utf8',
+    });
+    const covEnv = {
+      ...baseEnv,
+      ...parseShowEnv(showEnvOut),
+      CARGO_TARGET_DIR: llvmTargetDir,
+      LLVM_PROFILE_FILE: path.join(profrawDir, `part-${partName}-%4m.profraw`),
+    };
+
+    console.log(`::group::cargo ${nextestArgs.join(' ')}`);
     try {
-      execFileSync('cargo', covArgs, { cwd: ROOT, env, stdio: 'inherit' });
+      execFileSync('cargo', nextestArgs, { cwd: ROOT, env: covEnv, stdio: 'inherit' });
     } finally {
       console.log('::endgroup::');
     }
@@ -329,17 +338,6 @@ async function main() {
 
     let objCount = 0;
     if (part.upload_objects !== false) {
-      const showEnvOut = execFileSync('cargo', ['llvm-cov', 'show-env'], {
-        cwd: ROOT,
-        env,
-        encoding: 'utf8',
-      });
-      const covEnv = {
-        ...env,
-        ...parseShowEnv(showEnvOut),
-        CARGO_TARGET_DIR: llvmTargetDir,
-      };
-      delete covEnv.CARGO_LLVM_COV_SHOW_ENV;
       const listArgs = ['nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', ...pkgArgs, ...cargoArgs, '--all-features'];
       const listStdout = execFileSync('cargo', listArgs, {
         cwd: ROOT,
@@ -364,9 +362,6 @@ async function main() {
   } finally {
     rmSync(stageDir, { recursive: true, force: true });
     rmSync(profrawDir, { recursive: true, force: true });
-    for (const profrawLink of profrawLinks) {
-      rmSync(profrawLink, { recursive: true, force: true });
-    }
   }
 }
 

@@ -376,7 +376,6 @@ jobs:
           stable-build-metadata: "true"
       - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
       - name: Save rolling Rust target cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
@@ -430,11 +429,13 @@ jobs:
           stable-build-metadata: "true"
       - name: Build instrumented workspace coverage binaries
         if: steps.decide.outputs.need_seed == 'true'
-        run: >-
-          cargo llvm-cov nextest --no-run --workspace
-          --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
+        run: |
+          set -euo pipefail
+          eval "$(cargo llvm-cov show-env --sh)"
+          export CARGO_TARGET_DIR="$PWD/target/llvm-cov-target"
+          cargo nextest run --no-run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
       - name: Save rolling coverage workspace cache
-        if: ${{ !cancelled() && steps.decide.outputs.need_seed == 'true' }}
+        if: steps.decide.outputs.need_seed == 'true'
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/llvm-cov-target/debug
@@ -561,6 +562,7 @@ jobs:
       - name: Run compile-fail contract tests
         run: |
           set -euo pipefail
+          cargo fetch --locked
           unset RUSTFLAGS
           CC_LB_TRYBUILD_UNIFIED=1
           CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' --cfg trybuild --verbose -A dead_code --diagnostic-width=140)"
@@ -571,7 +573,6 @@ jobs:
             --all-features \
             -- --exact authn_rail_trybuild::authn_rail_typestate_contracts --nocapture
       - name: Save rolling trybuild cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
@@ -695,7 +696,6 @@ jobs:
           wait "$pid_lifecycle" || rc=1
           exit "$rc"
       - name: Save rolling Rust target cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
