@@ -42,9 +42,8 @@ jobs:
       packages: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
-      source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
       rust_version: ${{ steps.source.outputs.rust_version }}
-      lock_hash: ${{ steps.source.outputs.lock_hash }}
+      deps_hash: ${{ steps.source.outputs.deps_hash }}
       already_published: ${{ steps.existing.outputs.already_published }}
       dry_run: ${{ steps.mode.outputs.dry_run }}
     steps:
@@ -174,16 +173,14 @@ jobs:
 
       - name: Resolve source revision
         id: source
-        env:
-          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
         run: |
           set -euo pipefail
           rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          deps_hash=$(node scripts/cd-deps-hash.mjs)
           {
             echo "sha=$(git rev-parse HEAD)"
-            echo "source_date_epoch=$(git log -1 --format=%ct)"
             echo "rust_version=$rust_version"
-            echo "lock_hash=$LOCK_HASH"
+            echo "deps_hash=$deps_hash"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate version and source ref
@@ -266,192 +263,62 @@ jobs:
         include:
           - key: amd64
             platform: linux/amd64
-            smoke: true
-          - key: arm64
-            platform: linux/arm64
-            smoke: false
+            smoke: 'true'
           - key: armv7
             platform: linux/arm/v7
-            smoke: false
+            smoke: 'false'
           - key: ppc64le
             platform: linux/ppc64le
-            smoke: false
+            smoke: 'false'
     env:
       DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
-      CACHE_PREFIX: cd-deps-fat-v1-${{ needs.prepare.outputs.dry_run == 'true' && 'dryrun-' || '' }}${{ matrix.key }}-${{ needs.prepare.outputs.rust_version }}
-      CACHE_KEY: cd-deps-fat-v1-${{ needs.prepare.outputs.dry_run == 'true' && 'dryrun-' || '' }}${{ matrix.key }}-${{ needs.prepare.outputs.rust_version }}-${{ needs.prepare.outputs.lock_hash }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Build and push release platform
+        uses: ./.github/actions/build-release-platform
         with:
-          ref: ${{ needs.prepare.outputs.dry_run == 'true' && needs.prepare.outputs.sha || inputs.source_ref }}
-          persist-credentials: false
+          key: ${{ matrix.key }}
+          platform: ${{ matrix.platform }}
+          smoke: ${{ matrix.smoke }}
+          version: ${{ inputs.version }}
+          source_ref: ${{ inputs.source_ref }}
+          sha: ${{ needs.prepare.outputs.sha }}
+          rust_version: ${{ needs.prepare.outputs.rust_version }}
+          deps_hash: ${{ needs.prepare.outputs.deps_hash }}
+          dry_run: ${{ needs.prepare.outputs.dry_run }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download prebuilt Admin SPA dist
-        uses: actions/download-artifact@v7
+  build-arm64:
+    name: build & push digest (arm64)
+    needs: prepare
+    if: needs.prepare.outputs.already_published != 'true'
+    # Decoupled from matrix so smoke-arm64 runs as soon as arm64 finishes.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    env:
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
+    steps:
+      - name: Build and push arm64 release platform
+        uses: ./.github/actions/build-release-platform
         with:
-          name: admin-spa-dist
-          path: crates/cc-lb-admin/web/dist
-
-      - name: Cache shared Cargo registry and git db (amd64 primary)
-        if: matrix.key == 'amd64'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/src
-            ~/.cargo/git/db
-          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-v2-${{ runner.os }}-
-
-      - name: Restore shared Cargo registry and git db
-        if: matrix.key != 'amd64'
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/src
-            ~/.cargo/git/db
-          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-v2-${{ runner.os }}-
-
-      - name: Restore release Cargo deps target cache
-        id: deps-restore
-        uses: actions/cache/restore@v6
-        with:
-          path: target
-          key: ${{ env.CACHE_KEY }}
-          restore-keys: |
-            ${{ env.CACHE_PREFIX }}-
-
-      - name: Compile static binary with fat LTO
-        env:
-          TARGET_PLATFORM: ${{ matrix.platform }}
-          OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
-          CARGO_BUILD_JOBS: "4"
-          GIT_SHA: ${{ needs.prepare.outputs.sha }}
-          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
-        run: ./scripts/docker-build-musl.sh
-
-      - name: Smoke-test native amd64 static binary
-        if: matrix.smoke
-        env:
-          BIN_PATH: ${{ runner.temp }}/stage-ctx/cc-lb
-          EXPECTED_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          out=$("$BIN_PATH" --version)
-          printf '%s\n' "$out"
-          grep -Fq "$EXPECTED_VERSION" <<<"$out"
-
-      - name: Upload dry-run arm64 binary for remote smoke
-        if: needs.prepare.outputs.dry_run == 'true' && matrix.key == 'arm64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: arm64-dryrun-bin
-          path: ${{ runner.temp }}/stage-ctx/cc-lb
-          retention-days: 1
-          if-no-files-found: error
-
-      - name: Log in to ghcr.io
-        if: needs.prepare.outputs.dry_run != 'true'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v4
-        id: buildx
-        with:
-          driver: docker-container
-
-      - name: Derive exact labels
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/isac322/cc-lb
-          flavor: latest=false
-          labels: |
-            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
-
-      - name: Package and push platform digest
-        id: build_push
-        uses: docker/build-push-action@v7
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          file: ${{ github.workspace }}/Dockerfile
-          context: ${{ runner.temp }}/stage-ctx
-          target: distroless-prebuilt
-          platforms: ${{ matrix.platform }}
-          provenance: true
-          sbom: true
-          outputs: ${{ needs.prepare.outputs.dry_run == 'true' && 'type=cacheonly' || 'type=image,name=ghcr.io/isac322/cc-lb,push-by-digest=true,name-canonical=true,push=true' }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Write pushed platform digest
-        if: needs.prepare.outputs.dry_run != 'true'
-        env:
-          DIGEST: ${{ steps.build_push.outputs.digest }}
-          KEY: ${{ matrix.key }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::invalid digest for $KEY: '$DIGEST'" >&2
-            exit 1
-          fi
-          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest-$KEY.txt"
-
-      - name: Upload platform digest
-        if: needs.prepare.outputs.dry_run != 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: docker-digest-${{ matrix.key }}
-          path: ${{ runner.temp }}/digest-${{ matrix.key }}.txt
-          retention-days: 1
-          if-no-files-found: error
-
-      - name: Prune release deps target cache
-        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
-        run: |
-          set -euo pipefail
-          echo "=== target size before prune ==="
-          du -sh target target/*/release || true
-          node scripts/prune-rust-target.mjs \
-            --target-dir target \
-            --metadata-file target/.cargo-metadata.json
-          echo "=== target size after prune ==="
-          du -sh target target/*/release || true
-
-      - name: Save release deps target cache
-        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
-        uses: actions/cache/save@v6
-        with:
-          path: target
-          key: ${{ env.CACHE_KEY }}
-
-      - name: Prune superseded release deps caches
-        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_KEY: ${{ env.CACHE_KEY }}
-          CACHE_PREFIX: ${{ env.CACHE_PREFIX }}-
-          TARGET_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
-            --jq '.actions_caches[] | select((.key | startswith(env.CACHE_PREFIX)) and .key != env.CURRENT_KEY) | .id') || true
-          for id in $stale_ids; do
-            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
-          done
+          key: arm64
+          platform: linux/arm64
+          smoke: 'false'
+          version: ${{ inputs.version }}
+          source_ref: ${{ inputs.source_ref }}
+          sha: ${{ needs.prepare.outputs.sha }}
+          rust_version: ${{ needs.prepare.outputs.rust_version }}
+          deps_hash: ${{ needs.prepare.outputs.deps_hash }}
+          dry_run: ${{ needs.prepare.outputs.dry_run }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   smoke-arm64:
     name: smoke-test native arm64 binary
-    needs: [prepare, build]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.already_published != 'true' && needs.build.result == 'success' }}
+    needs: [prepare, build-arm64]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.already_published != 'true' && needs.build-arm64.result == 'success' }}
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     permissions:
@@ -504,8 +371,8 @@ jobs:
 
   publish:
     name: assemble & verify image
-    needs: [prepare, build, smoke-arm64]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || (needs.build.result == 'success' && needs.smoke-arm64.result == 'success')) }}
+    needs: [prepare, build, build-arm64, smoke-arm64]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || (needs.build.result == 'success' && needs.build-arm64.result == 'success' && needs.smoke-arm64.result == 'success')) }}
     runs-on: ubuntu-slim
     timeout-minutes: 30
     permissions:

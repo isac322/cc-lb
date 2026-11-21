@@ -250,8 +250,10 @@ jobs:
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 |
             jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
-          printf 'version=%s\ntarget_sha=%s\nsource_date_epoch=%s\n' \
-            "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
+          rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          deps_hash=$(node scripts/cd-deps-hash.mjs)
+          printf 'version=%s\ntarget_sha=%s\nrust_version=%s\ndeps_hash=%s\n' \
+            "$version" "$(git rev-parse HEAD)" "$rust_version" "$deps_hash" \
             >> "$GITHUB_OUTPUT"
 
       # release-plz 0.3.172 supports git-only releases, but its release command
@@ -327,9 +329,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: target
-          key: cd-deps-fat-v1-amd64-1.99.1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: cd-deps-fat-v2-amd64-${{ steps.release.outputs.rust_version }}-${{ steps.release.outputs.deps_hash }}
           restore-keys: |
-            cd-deps-fat-v1-amd64-1.99.1-
+            cd-deps-fat-v2-amd64-${{ steps.release.outputs.rust_version }}-
 
       - name: Compile and package static amd64 release image
         env:
@@ -337,7 +339,6 @@ jobs:
           OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
           CARGO_BUILD_JOBS: "4"
           GIT_SHA: ${{ steps.release.outputs.target_sha }}
-          SOURCE_DATE_EPOCH: ${{ steps.release.outputs.source_date_epoch }}
           EXPECTED_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail

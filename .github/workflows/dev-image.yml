@@ -37,20 +37,21 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref }}
-          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml', 'scripts/docker-build-musl.sh') }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
-          source_date_epoch=$(git log -1 --format=%ct)
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
           if [ "$REF_NAME" = "refs/heads/dev" ]; then
             dry_run=false
-            cache_prefix="dev-target-v1-arm64-${rust_version}"
+            cache_prefix="dev-target-v2-arm64-${rust_version}"
+            legacy_prefix="dev-target-v1-arm64-"
             image_tag="ghcr.io/isac322/cc-lb:dev"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             dry_run=true
-            cache_prefix="dev-target-dryrun-v1-arm64-${rust_version}"
+            cache_prefix="dev-target-dryrun-v2-arm64-${rust_version}"
+            legacy_prefix="dev-target-dryrun-v1-arm64-"
             image_tag="cc-lb:dev-dry-run"
           else
             echo "::error::unexpected ref '$REF_NAME' for event '$EVENT_NAME'"
@@ -61,11 +62,11 @@ jobs:
           {
             echo "sha=$sha"
             echo "short_sha=${sha:0:7}"
-            echo "source_date_epoch=$source_date_epoch"
             echo "version=$version"
             echo "rust_version=$rust_version"
             echo "dry_run=$dry_run"
             echo "cache_prefix=$cache_prefix"
+            echo "legacy_prefix=$legacy_prefix"
             echo "lock_prefix=$lock_prefix"
             echo "cache_key=$cache_key"
             echo "image_tag=$image_tag"
@@ -119,10 +120,9 @@ jobs:
           TARGET_PLATFORM: linux/arm64
           OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
           GIT_SHA: ${{ steps.source.outputs.sha }}
-          SOURCE_DATE_EPOCH: ${{ steps.source.outputs.source_date_epoch }}
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
           CARGO_PROFILE_RELEASE_LTO: "off"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "64"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
           CARGO_INCREMENTAL: "1"
           CARGO_BUILD_JOBS: "4"
         run: ./scripts/docker-build-musl.sh
@@ -169,11 +169,15 @@ jobs:
             --target-dir target \
             --metadata-file target/.cargo-metadata.json \
             --keep-workspace-libs \
-            --keep-latest-incremental
+            --keep-latest-incremental \
+            --incremental-crates cc-lb-server,cc-lb-engine,cc-lb-admin,cc-lb-storage-postgres,cc-lb-storage-sqlite,cc-lb-control,cc-lb-scheduler \
+            --prune-build-objects
           node scripts/ws-mtimes.mjs record \
             --out target/aarch64-unknown-linux-musl/release/.ws-mtimes.json \
             --extra-dir crates/cc-lb-admin/web/dist
-          du -sh target target/aarch64-unknown-linux-musl/release target/aarch64-unknown-linux-musl/release/incremental || true
+          du -sh target || true
+          du -sh target/aarch64-unknown-linux-musl/release/* 2>/dev/null || true
+          du -sh target/release 2>/dev/null || true
 
       - name: Upload dev Cargo target cache
         if: steps.target-restore.outputs.cache-hit != 'true'
@@ -188,6 +192,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CURRENT_KEY: ${{ steps.source.outputs.cache_key }}
           CACHE_PREFIX: ${{ steps.source.outputs.cache_prefix }}-
+          LEGACY_PREFIX: ${{ steps.source.outputs.legacy_prefix }}
           DRY_RUN: ${{ steps.source.outputs.dry_run }}
           TARGET_REF: ${{ github.ref }}
         run: |
@@ -198,6 +203,7 @@ jobs:
               | select(
                   (
                     (.key | startswith(env.CACHE_PREFIX)) or
+                    (.key | startswith(env.LEGACY_PREFIX)) or
                     (env.DRY_RUN != "true" and ((.key | startswith("docker-mounts-off-arm64-")) or (.key | startswith("docker-mounts-thin-arm64-"))))
                   )
                   and .key != env.CURRENT_KEY

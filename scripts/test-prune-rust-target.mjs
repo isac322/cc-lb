@@ -157,6 +157,41 @@ test('pruneTargetDir with keepLatestIncremental keeps only newest workspace hash
     assert.equal(existsSync(workingSess), false);
     assert.equal(existsSync(crateLock), false);
     assert.equal(existsSync(path.join(newSess, 'dep-graph.bin')), true);
+
+    // Filter incremental crates with --incremental-crates and strip *.o under build/*/out/.
+    const smallCrate = path.join(incDir, 'cc_lb_domain-4444dddd');
+    const keepCrate = path.join(incDir, 'cc_lb_engine-5555eeee');
+    const buildOutObj = path.join(releaseDir, 'build', 'ring-0123456789abcdef', 'out', 'nested', 'aes.o');
+    const buildOutArchive = path.join(releaseDir, 'build', 'ring-0123456789abcdef', 'out', 'libring.a');
+    const buildOutHeader = path.join(releaseDir, 'build', 'ring-0123456789abcdef', 'out', 'generated.h');
+    const buildOutRust = path.join(releaseDir, 'build', 'cc_lb_server-9999ffff', 'out', 'meta.rs');
+    const newLayoutObj = path.join(releaseDir, 'build', 'zstd-sys', 'abcdef0123456789', 'out', 'zstd.o');
+    const newLayoutLib = path.join(releaseDir, 'build', 'zstd-sys', 'abcdef0123456789', 'out', 'libzstd.a');
+    touch(path.join(smallCrate, 's-1000-01', 'work.bin'));
+    touch(path.join(keepCrate, 's-1000-01', 'work.bin'));
+    touch(buildOutObj);
+    touch(buildOutArchive);
+    touch(buildOutHeader);
+    touch(buildOutRust);
+    touch(newLayoutObj);
+    touch(newLayoutLib);
+
+    const filteredRes = pruneTargetDir(root, SAMPLE_METADATA, {
+      keepWorkspaceLibs: true,
+      keepLatestIncremental: true,
+      incrementalCrates: ['cc-lb-server', 'cc-lb-engine'],
+      pruneBuildObjects: true,
+    });
+    assert.ok(filteredRes.removedEntries >= 3);
+    assert.equal(existsSync(smallCrate), false);
+    assert.equal(existsSync(path.join(keepCrate, 's-1000-01', 'work.bin')), true);
+    assert.equal(existsSync(path.join(newSess, 'dep-graph.bin')), true);
+    assert.equal(existsSync(buildOutObj), false);
+    assert.equal(existsSync(newLayoutObj), false);
+    assert.equal(existsSync(buildOutArchive), true);
+    assert.equal(existsSync(buildOutHeader), true);
+    assert.equal(existsSync(buildOutRust), true);
+    assert.equal(existsSync(newLayoutLib), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

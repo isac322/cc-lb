@@ -71,7 +71,6 @@ trap cleanup EXIT
 # Build ephemeral local Alpine cross-builder image using host Docker BuildKit.
 builder_tag="cc-lb-musl-builder:$(echo "${TARGET_PLATFORM}-${rust_version}-${xx_version}" | tr '/:' '--')"
 cat > "$tmp_dir/Dockerfile" <<EOF
-# syntax=docker/dockerfile:1
 FROM tonistiigi/xx:${xx_version} AS xx
 FROM rust:${rust_version}-alpine
 RUN apk add --no-cache clang lld git make su-exec file
@@ -88,14 +87,20 @@ DOCKER_BUILDKIT=1 docker build \
 builder_t1=$(date +%s)
 echo "=== timing: builder image ready in $((builder_t1 - builder_t0))s ==="
 
-read -r triple host_toolchain <<EOF
-$(docker run --rm -e "TARGETPLATFORM=${TARGET_PLATFORM}" "$builder_tag" /bin/ash -eu -c 'printf "%s %s\n" "$(xx-cargo --print-target-triple)" "$(rustup default | cut -d" " -f1)"')
-EOF
-if [ -z "$triple" ] || [ -z "$host_toolchain" ]; then
-  echo "ERROR: failed to determine target triple ($triple) or toolchain ($host_toolchain) for ${TARGET_PLATFORM}" >&2
+case "$TARGET_PLATFORM" in
+  linux/amd64) triple="x86_64-unknown-linux-musl" ;;
+  linux/arm64|linux/arm64/v8) triple="aarch64-unknown-linux-musl" ;;
+  linux/arm/v7) triple="armv7-unknown-linux-musleabihf" ;;
+  linux/ppc64le) triple="powerpc64le-unknown-linux-musl" ;;
+  *)
+    triple="$(docker run --rm -e "TARGETPLATFORM=${TARGET_PLATFORM}" "$builder_tag" /bin/ash -eu -c 'xx-cargo --print-target-triple')"
+    ;;
+esac
+if [ -z "$triple" ]; then
+  echo "ERROR: failed to determine target triple for ${TARGET_PLATFORM}" >&2
   exit 1
 fi
-echo "Resolved target triple: ${triple} (toolchain: ${host_toolchain})"
+echo "Resolved target triple: ${triple}"
 
 target_profile_dir="${CARGO_TARGET_DIR_HOST}/${triple}/release"
 mkdir -p "$CARGO_HOME_DIR" "$target_profile_dir"
@@ -176,7 +181,6 @@ env_args=(
   -e "HOST_GID=${host_gid}"
   -e "TARGETPLATFORM=${TARGET_PLATFORM}"
   -e "TARGET_TRIPLE=${triple}"
-  -e "RUSTUP_TOOLCHAIN=${host_toolchain}"
   -e "FEATURES=${FEATURES}"
   -e "SKIP_SPA=${SKIP_SPA}"
   -e "GIT_SHA=${GIT_SHA}"
@@ -218,6 +222,14 @@ else
   export CC_LB_ADMIN_PREBUILT_SPA=1
 fi
 
+RUSTUP_TOOLCHAIN="$(cd /tmp && rustup default | cut -d' ' -f1)"
+export RUSTUP_TOOLCHAIN
+actual_triple="$(xx-cargo --print-target-triple)"
+if [ "$actual_triple" != "$TARGET_TRIPLE" ]; then
+  echo "ERROR: target triple mismatch (expected ${TARGET_TRIPLE}, got ${actual_triple})" >&2
+  exit 1
+fi
+
 RUSTC="$(rustup which rustc)"
 export RUSTC
 PATH="$(dirname "$RUSTC"):${PATH}"
@@ -233,7 +245,7 @@ cargo metadata --no-deps --format-version 1 > /target/.cargo-metadata.json
 set -- build --release --locked \
   -p cc-lb-server --bin cc-lb \
   --no-default-features --features "${FEATURES}" \
-  --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
+  --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=4"]' \
   --target-dir /target
 
 if [ "${CARGO_TIMINGS}" = "1" ]; then
