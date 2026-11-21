@@ -1,14 +1,10 @@
-name: Setup Rust target and sccache caches
-description: Restore shared Cargo registry, pruned Cargo target dependencies, and sccache without server FD hangs.
+name: Setup Rust target caches
+description: Restore shared Cargo registry and rolling workspace target dependencies with mtime preservation.
 
 inputs:
   cache-job-key:
-    description: Job-specific identifier for Layer 1 pruned target dependencies.
+    description: Job-specific identifier for Layer 1 rolling workspace cache.
     required: true
-  sccache-scope:
-    description: Shared scope key for sccache Layer 2 (defaults to cache-job-key).
-    required: false
-    default: ""
   target-dir:
     description: Cargo target directory path to restore.
     required: false
@@ -17,28 +13,25 @@ inputs:
     description: Optional newline-separated extra paths to restore with target-dir.
     required: false
     default: ""
+  restore-ws-mtimes:
+    description: Whether to restore recorded workspace file and directory mtimes after cache restore.
+    required: false
+    default: "true"
   stable-build-metadata:
     description: Whether to fix GIT_SHA and SOURCE_DATE_EPOCH for reproducible caching.
     required: false
     default: "true"
-  sccache-size:
-    description: Maximum local sccache directory size.
-    required: false
-    default: "1G"
 
 outputs:
   target-cache-hit:
-    description: Whether the exact Layer 1 target cache matched.
+    description: Whether the exact Layer 1 SHA cache matched.
     value: ${{ steps.target-restore.outputs.cache-hit }}
+  lock-cache-hit:
+    description: Whether a Layer 1 cache matching the current dependency lock hash was restored.
+    value: ${{ steps.match-status.outputs.lock_cache_hit }}
   target-cache-key:
     description: Computed exact Layer 1 cache key for save-rust-target-cache.
     value: ${{ steps.key-meta.outputs.target_key }}
-  sccache-exact-hit:
-    description: Whether the exact Layer 2 sccache cache matched.
-    value: ${{ steps.sccache-restore.outputs.cache-hit }}
-  sccache-key:
-    description: Computed exact Layer 2 sccache key for save-rust-target-cache.
-    value: ${{ steps.key-meta.outputs.sccache_key }}
 
 runs:
   using: composite
@@ -48,29 +41,20 @@ runs:
       shell: bash
       env:
         JOB_KEY: ${{ inputs.cache-job-key }}
-        SCCACHE_SCOPE_INPUT: ${{ inputs.sccache-scope }}
         STABLE_META: ${{ inputs.stable-build-metadata }}
-        SCCACHE_MAX_SIZE: ${{ inputs.sccache-size }}
         TARGET_DIR_INPUT: ${{ inputs.target-dir }}
         EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
         LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}
       run: |
         set -euo pipefail
-        rustc_hash="$(rustc -vV | tr '\n' ';' | sha256sum | cut -c1-16)"
-        sccache_scope="${SCCACHE_SCOPE_INPUT:-$JOB_KEY}"
-        target_prefix="target-deps-v2-${RUNNER_OS}-${RUNNER_ARCH}-${JOB_KEY}-${rustc_hash}"
-        target_key="${target_prefix}-${LOCK_HASH}"
-        sccache_prefix="sccache-v2-${RUNNER_OS}-${RUNNER_ARCH}-${sccache_scope}-${rustc_hash}"
-        sccache_key="${sccache_prefix}-${LOCK_HASH}"
+        base_prefix="target-ws-v3-${RUNNER_OS}-${RUNNER_ARCH}-${JOB_KEY}-1.99.1"
+        lock_prefix="${base_prefix}-${LOCK_HASH}"
+        target_key="${lock_prefix}-${GITHUB_SHA}"
 
         {
           echo "CARGO_INCREMENTAL=0"
           echo "CARGO_PROFILE_DEV_DEBUG=0"
           echo "CARGO_PROFILE_TEST_DEBUG=0"
-          echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache"
-          echo "SCCACHE_CACHE_SIZE=${SCCACHE_MAX_SIZE}"
-          echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}"
-          echo "SCCACHE_IDLE_TIMEOUT=3600"
           if [ "$STABLE_META" = "true" ]; then
             echo "GIT_SHA=0000000"
             echo "SOURCE_DATE_EPOCH=0"
@@ -80,12 +64,12 @@ runs:
         } >> "$GITHUB_ENV"
 
         {
-          echo "target_prefix=$target_prefix"
+          echo "base_prefix=$base_prefix"
+          echo "lock_prefix=$lock_prefix"
           echo "target_key=$target_key"
-          echo "sccache_prefix=$sccache_prefix"
-          echo "sccache_key=$sccache_key"
           echo "restore_paths<<__EOF__"
           echo "$TARGET_DIR_INPUT"
+          echo "crates/cc-lb-admin/web/dist"
           if [ -n "$EXTRA_PATHS_INPUT" ]; then
             printf '%s\n' "$EXTRA_PATHS_INPUT"
           fi
@@ -100,43 +84,35 @@ runs:
           ~/.cargo/registry/cache
           ~/.cargo/registry/src
           ~/.cargo/git/db
-        key: cargo-registry-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
-          cargo-registry-v1-${{ runner.os }}-
+          cargo-registry-v2-${{ runner.os }}-
 
-    - name: Restore Layer 1 pruned Cargo target dependencies
+    - name: Restore Layer 1 rolling Cargo target dependencies
       id: target-restore
       uses: actions/cache/restore@v6
       with:
         path: ${{ steps.key-meta.outputs.restore_paths }}
         key: ${{ steps.key-meta.outputs.target_key }}
         restore-keys: |
-          ${{ steps.key-meta.outputs.target_prefix }}-
+          ${{ steps.key-meta.outputs.lock_prefix }}-
+          ${{ steps.key-meta.outputs.base_prefix }}-
 
-    - name: Restore Layer 2 sccache directory
-      id: sccache-restore
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ runner.temp }}/sccache
-        key: ${{ steps.key-meta.outputs.sccache_key }}
-        restore-keys: |
-          ${{ steps.key-meta.outputs.sccache_prefix }}-
-
-    - name: Start and validate sccache daemon without FD hang
+    - name: Evaluate lock cache hit and restore workspace mtimes
+      id: match-status
       shell: bash
+      env:
+        MATCHED_KEY: ${{ steps.target-restore.outputs.cache-matched-key }}
+        LOCK_PREFIX: ${{ steps.key-meta.outputs.lock_prefix }}-
+        RESTORE_MTIMES: ${{ inputs.restore-ws-mtimes }}
+        TARGET_DIR_INPUT: ${{ inputs.target-dir }}
       run: |
         set -euo pipefail
-        mkdir -p "${RUNNER_TEMP}/sccache"
-        sccache_path="$(command -v sccache || true)"
-        if [ -z "$sccache_path" ]; then
-          echo "::warning::sccache binary not found on PATH; continuing without compiler wrapper"
-          exit 0
-        fi
-        "$sccache_path" --stop-server >/dev/null 2>&1 || true
-        if "$sccache_path" --start-server </dev/null >/dev/null 2>&1 && "$sccache_path" --show-stats >/dev/null 2>&1; then
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_PATH=$sccache_path" >> "$GITHUB_ENV"
+        if [ -n "$MATCHED_KEY" ] && [[ "$MATCHED_KEY" == "$LOCK_PREFIX"* ]]; then
+          echo "lock_cache_hit=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning::sccache failed to start; continuing without compiler wrapper"
-          "$sccache_path" --stop-server >/dev/null 2>&1 || true
+          echo "lock_cache_hit=false" >> "$GITHUB_OUTPUT"
+        fi
+        if [ "$RESTORE_MTIMES" = "true" ]; then
+          node scripts/ws-mtimes.mjs restore --in "${TARGET_DIR_INPUT}/.ws-mtimes.json"
         fi

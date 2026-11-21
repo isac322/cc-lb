@@ -255,6 +255,19 @@ if [ -z "${REAL_CLIENT_ONLY:-}" ] && [ "${REAL_CLIENT_SKIP_INSTALL:-0}" != "1" ]
   export OPENCODE_BIN="$TARGET_DIR/opencode/node_modules/.bin/opencode"
   export PI_BIN="$TARGET_DIR/pi/node_modules/.bin/pi"
   export SENPI_BIN="$TARGET_DIR/senpi/node_modules/.bin/senpi"
+
+  # opencode-ai installs both AVX2 and baseline/musl optional packages on Linux x64 (~177 MB dead weight).
+  if [ "$(uname -s)" = "Linux" ] && grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
+    for unused_opencode_dir in \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-baseline" \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-musl" \
+      "$TARGET_DIR/opencode/node_modules/opencode-linux-x64-baseline-musl"; do
+      if [ -d "$unused_opencode_dir" ]; then
+        rm -rf "$unused_opencode_dir"
+      fi
+    done
+    "$OPENCODE_BIN" --version >/dev/null
+  fi
 else
   install_requested claude-code @anthropic-ai/claude-code 2.1.303 claude CLAUDE_CODE_BIN
   install_requested opencode opencode-ai 1.19.3 opencode OPENCODE_BIN

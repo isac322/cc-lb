@@ -18,9 +18,11 @@ trap cleanup_matrix EXIT INT TERM
 failures=0
 
 export CC_LB_ADMIN_SKIP_SPA="${CC_LB_ADMIN_SKIP_SPA:-1}"
-cargo build \
-  -p cc-lb-server \
-  -p fake-anthropic
+if [ "${REAL_CLIENT_SKIP_BUILD:-0}" != "1" ]; then
+  cargo build \
+    -p cc-lb-server \
+    -p fake-anthropic
+fi
 
 # Install and verify all 4 client binaries once upfront (in parallel) so
 # concurrent run.sh invocations do not repeat checks or contend on node_modules.

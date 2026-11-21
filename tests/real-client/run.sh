@@ -336,9 +336,8 @@ model: $senpi_provider/$senpi_model
 ---
 Answer the delegated request directly.
 EOF
-fi
-
-python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
+  if [ "$upstream" = "custom" ]; then
+    python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
 import binascii
 import struct
 import sys
@@ -365,6 +364,9 @@ png = (
 with open(sys.argv[1], "wb") as output:
     output.write(png)
 PY
+  fi
+fi
+
 cat > "$gcp_credentials" <<'JSON'
 {"type":"authorized_user","client_id":"fake-client","client_secret":"fake-secret","refresh_token":"fake-refresh"}
 JSON

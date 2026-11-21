@@ -1,5 +1,5 @@
-name: Save Rust target and sccache caches
-description: Prune workspace artifacts and save Layer 1 target dependencies and Layer 2 sccache on misses.
+name: Save Rust target caches
+description: Prune transient executables, record workspace mtimes, and update rolling Layer 1 target cache.
 
 inputs:
   target-dir:
@@ -13,53 +13,62 @@ inputs:
   target-cache-hit:
     description: Value of setup-rust-target-cache.outputs.target-cache-hit
     required: true
+  lock-cache-hit:
+    description: Value of setup-rust-target-cache.outputs.lock-cache-hit
+    required: true
   target-cache-key:
     description: Value of setup-rust-target-cache.outputs.target-cache-key
     required: true
+  keep-workspace-libs:
+    description: Whether to preserve compiled workspace libraries and fingerprints when pruning.
+    required: false
+    default: "true"
   save-target:
-    description: Whether this job should prune and save Layer 1 target cache on miss.
+    description: Whether this job should prune and save Layer 1 target cache.
     required: false
     default: "true"
-  save-sccache:
-    description: Whether this job should save sccache Layer 2 on cache miss.
+  force-save:
+    description: Save rolling seed even when a matching dependency lock cache already exists (e.g. master pushes).
     required: false
-    default: "true"
-  sccache-exact-hit:
-    description: Value of setup-rust-target-cache.outputs.sccache-exact-hit
-    required: true
-  sccache-key:
-    description: Value of setup-rust-target-cache.outputs.sccache-key
-    required: true
+    default: "false"
 
 runs:
   using: composite
   steps:
-    - name: Show sccache stats
-      if: always()
-      shell: bash
-      run: |
-        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-          "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable"
-        elif command -v sccache >/dev/null 2>&1; then
-          sccache --show-stats || echo "::warning::sccache stats unavailable"
-        fi
-
-    - name: Prune workspace artifacts from Layer 1 target directory
-      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true'
+    - name: Prune artifacts and record workspace mtimes
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true' && (inputs.lock-cache-hit != 'true' || inputs.force-save == 'true')
       id: prune
       shell: bash
       env:
         TARGET_DIR_INPUT: ${{ inputs.target-dir }}
         EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
+        KEEP_LIBS: ${{ inputs.keep-workspace-libs }}
       run: |
         set -euo pipefail
+        prune_flags=()
+        if [ "$KEEP_LIBS" = "true" ]; then
+          prune_flags+=(--keep-workspace-libs)
+        fi
         if [ -d "$TARGET_DIR_INPUT" ]; then
-          node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT"
+          node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT" "${prune_flags[@]}"
+          node scripts/ws-mtimes.mjs record --out "${TARGET_DIR_INPUT}/.ws-mtimes.json" --extra-dir crates/cc-lb-admin/web/dist
+        fi
+        if [ -n "$EXTRA_PATHS_INPUT" ]; then
+          while IFS= read -r extra_path; do
+            [ -n "$extra_path" ] || continue
+            if [ -d "$extra_path" ]; then
+              node scripts/prune-rust-target.mjs --target-dir "$extra_path" "${prune_flags[@]}"
+              find "$extra_path" -name 'trybuild.lock' -delete || true
+            fi
+          done <<<"$EXTRA_PATHS_INPUT"
         fi
         {
           echo "save_paths<<__EOF__"
           if [ -e "$TARGET_DIR_INPUT" ]; then
             echo "$TARGET_DIR_INPUT"
+          fi
+          if [ -e "crates/cc-lb-admin/web/dist" ]; then
+            echo "crates/cc-lb-admin/web/dist"
           fi
           if [ -n "$EXTRA_PATHS_INPUT" ]; then
             while IFS= read -r extra_path; do
@@ -69,33 +78,9 @@ runs:
           echo "__EOF__"
         } >> "$GITHUB_OUTPUT"
 
-    - name: Save Layer 1 pruned Cargo target dependencies
-      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true'
+    - name: Save Layer 1 rolling Cargo target cache
+      if: success() && inputs.save-target == 'true' && inputs.target-cache-hit != 'true' && (inputs.lock-cache-hit != 'true' || inputs.force-save == 'true')
       uses: actions/cache/save@v6
       with:
         path: ${{ steps.prune.outputs.save_paths }}
         key: ${{ inputs.target-cache-key }}
-
-    - name: Stop sccache before saving Layer 2 cache
-      if: success() && inputs.save-sccache == 'true' && inputs.sccache-exact-hit != 'true'
-      id: sccache-prep
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-          "$SCCACHE_PATH" --stop-server >/dev/null 2>&1 || true
-        elif command -v sccache >/dev/null 2>&1; then
-          sccache --stop-server >/dev/null 2>&1 || true
-        fi
-        if [ -d "${RUNNER_TEMP}/sccache" ] && [ -n "$(ls -A "${RUNNER_TEMP}/sccache" 2>/dev/null)" ]; then
-          echo "has_files=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "has_files=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Save Layer 2 sccache directory
-      if: success() && inputs.save-sccache == 'true' && inputs.sccache-exact-hit != 'true' && steps.sccache-prep.outputs.has_files == 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ runner.temp }}/sccache
-        key: ${{ inputs.sccache-key }}

@@ -11,6 +11,10 @@ autotests = false
 name = "integration"
 path = "tests/all.rs"
 
+[[test]]
+name = "typestate_contracts"
+path = "tests/typestate_contracts/main.rs"
+
 [features]
 sqlite = []
 postgres = []

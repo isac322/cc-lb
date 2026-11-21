@@ -40,6 +40,30 @@ function runSelectsTarget(cargoArgs, targetKind) {
   return false;
 }
 
+function parsePartitionShard(nextestArgs = []) {
+  for (let i = 0; i < nextestArgs.length; i += 1) {
+    const arg = nextestArgs[i];
+    let spec = null;
+    if (arg === '--partition' && nextestArgs[i + 1]) {
+      spec = nextestArgs[i + 1];
+    } else if (arg.startsWith('--partition=')) {
+      spec = arg.slice('--partition='.length);
+    }
+    if (!spec) continue;
+    const match = /^(hash|count):(\d+)\/(\d+)$/.exec(spec);
+    if (!match) {
+      return { invalid: spec };
+    }
+    const index = Number(match[2]);
+    const total = Number(match[3]);
+    if (total < 2 || index < 1 || index > total) {
+      return { invalid: spec };
+    }
+    return { kind: match[1], index, total };
+  }
+  return null;
+}
+
 export function validatePartitions(config, metadata, gatedPackages) {
   const errors = [];
   const excluded = new Set(config.excluded ?? []);
@@ -68,6 +92,7 @@ export function validatePartitions(config, metadata, gatedPackages) {
 
   const partitionNames = new Set();
   const seenTargetsByPkg = new Map();
+  const shardGroups = new Map();
 
   for (const part of partitions) {
     if (!part.name) errors.push('partition is missing a name');
@@ -81,6 +106,53 @@ export function validatePartitions(config, metadata, gatedPackages) {
       const pkgs = run.packages ?? [];
       if (pkgs.length === 0) errors.push(`partition '${part.name}' has a run with no packages`);
       const cargoArgs = run.cargo_args ?? [];
+      const shard = parsePartitionShard(run.nextest_args ?? []);
+      if (shard?.invalid) {
+        errors.push(`partition '${part.name}' has invalid nextest shard '${shard.invalid}'`);
+        continue;
+      }
+
+      if (shard) {
+        const shardKey = JSON.stringify({
+          kind: shard.kind,
+          total: shard.total,
+          packages: [...pkgs].sort(),
+          cargoArgs,
+          filterExpr: run.filter_expr ?? null,
+        });
+        let group = shardGroups.get(shardKey);
+        if (!group) {
+          group = {
+            shardKind: shard.kind,
+            total: shard.total,
+            packages: [...pkgs],
+            cargoArgs,
+            indices: new Map(),
+            hasObjectUploader: false,
+          };
+          shardGroups.set(shardKey, group);
+        }
+        if (group.indices.has(shard.index)) {
+          errors.push(`duplicate shard ${shard.kind}:${shard.index}/${shard.total} in partition '${part.name}'`);
+        } else {
+          group.indices.set(shard.index, part.name);
+        }
+        if (part.upload_objects !== false) {
+          group.hasObjectUploader = true;
+        }
+        for (const pkgName of pkgs) {
+          if (excluded.has(pkgName)) {
+            errors.push(`package '${pkgName}' in partition '${part.name}' is also listed in excluded`);
+          } else if (!workspacePkgs.has(pkgName)) {
+            errors.push(`package '${pkgName}' in partition '${part.name}' is not a workspace member`);
+          }
+        }
+        // Only record targets from shard 1 to avoid flagging sibling shards as duplicate coverage.
+        if (shard.index !== 1) continue;
+      } else if (part.upload_objects === false) {
+        errors.push(`unsharded partition '${part.name}' must not set upload_objects=false`);
+      }
+
       for (const pkgName of pkgs) {
         if (excluded.has(pkgName)) {
           errors.push(`package '${pkgName}' in partition '${part.name}' is also listed in excluded`);
@@ -112,6 +184,19 @@ export function validatePartitions(config, metadata, gatedPackages) {
         }
         seenTargetsByPkg.set(pkgName, recorded);
       }
+    }
+  }
+
+  for (const [, group] of shardGroups) {
+    for (let idx = 1; idx <= group.total; idx += 1) {
+      if (!group.indices.has(idx)) {
+        errors.push(
+          `missing shard ${group.shardKind}:${idx}/${group.total} for [${group.packages.join(', ')}]`,
+        );
+      }
+    }
+    if (!group.hasObjectUploader) {
+      errors.push(`shard group for [${group.packages.join(', ')}] has no partition with upload_objects=true`);
     }
   }
 
@@ -158,7 +243,11 @@ function main() {
   const ciPath = path.join(ROOT, '.github/workflows/ci.yml');
   try {
     const ciText = readFileSync(ciPath, 'utf8');
-    const matrixMatches = [...ciText.matchAll(/- partition:\s*([a-z0-9-]+)\s*\n\s*needs_postgres:\s*(true|false)\s*\n\s*needs_wasm:\s*(true|false)\s*\n\s*save_sccache:\s*"(true|false)"/g)];
+    const matrixMatches = [
+      ...ciText.matchAll(
+        /- partition:\s*([a-z0-9-]+)\s*\n\s*needs_postgres:\s*(true|false)\s*\n\s*needs_wasm:\s*(true|false)/g,
+      ),
+    ];
     if (matrixMatches.length === 0) {
       errors.push('could not find nextest-cov-part matrix entries in .github/workflows/ci.yml');
     } else {
@@ -166,13 +255,11 @@ function main() {
         name: m[1],
         needs_postgres: m[2] === 'true',
         needs_wasm: m[3] === 'true',
-        save_sccache: m[4] === 'true',
       }));
       const expectedMatrix = (config.partitions ?? []).map((p) => ({
         name: p.name,
         needs_postgres: Boolean(p.needs_postgres),
         needs_wasm: Boolean(p.needs_wasm),
-        save_sccache: Boolean(p.save_sccache),
       }));
       if (JSON.stringify(ciMatrix) !== JSON.stringify(expectedMatrix)) {
         errors.push('.github/workflows/ci.yml nextest-cov-part matrix does not match .github/ci/cov-partitions.json');

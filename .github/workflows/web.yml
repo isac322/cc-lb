@@ -107,7 +107,7 @@ jobs:
       - name: Run Vitest suite
         run: bunx --bun vitest run --passWithNoTests --maxWorkers=4
 
-  web-e2e-visuals:
+  web-visuals-a:
     runs-on: ubuntu-26.04
     # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
     # and shared libraries are baked in; CI must not depend on apt mirrors.
@@ -135,16 +135,13 @@ jobs:
           bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
       - name: Build static web bundle
         run: bun run --shell=bun build
-      - name: Verify and capture credit and provider pool views
+      - name: Verify and capture Codex credit views
         env:
           PW_USE_PREVIEW: "1"
         run: |
           set -euo pipefail
           bun run e2e \
             e2e/codex-credits.spec.ts \
-            e2e/provider-pool-freshness.spec.ts \
-            e2e/upstream-quota-settled-states.spec.ts \
-            e2e/overview-shared-quota-columns.spec.ts \
             --retries=0 \
             --output="$RUNNER_TEMP/codex-credit-visuals/after"
           git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
@@ -167,8 +164,14 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
-          bun --cwd "$base_root/crates/cc-lb-admin/web" run --shell=bun build
+          if cmp -s bun.lock "$base_root/crates/cc-lb-admin/web/bun.lock" && \
+             cmp -s package.json "$base_root/crates/cc-lb-admin/web/package.json"; then
+            ln -s "$PWD/node_modules" "$base_root/crates/cc-lb-admin/web/node_modules"
+          else
+            bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+          fi
+          (cd "$base_root/crates/cc-lb-admin/web" && bun run --shell=bun build)
+          test -s "$base_root/crates/cc-lb-admin/web/dist/index.html"
 
           bun qa/capture-codex-credit-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
@@ -195,6 +198,56 @@ jobs:
             ${{ steps.container-setup.outputs.visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
+      - name: Publish keepalive and plugin visual evidence
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: keepalive-plugin-visuals-${{ github.sha }}
+          path: |
+            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/after/**/*.png
+            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/after-source.txt
+            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/*.png
+            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/capture.json
+          retention-days: 14
+          if-no-files-found: error
+
+  web-visuals-b:
+    runs-on: ubuntu-26.04
+    # Keep this version aligned with playwright in bun.lock. Browsers, fonts,
+    # and shared libraries are baked in; CI must not depend on apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure container workspace
+        id: container-setup
+        working-directory: .
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "visual-root=$RUNNER_TEMP/codex-credit-visuals" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-web
+      - name: Verify Playwright image version
+        run: |
+          bun -e 'import { strict as assert } from "node:assert"; assert.equal(require("playwright/package.json").version, "1.64.1", "Update the Playwright container image with bun.lock");'
+      - name: Build static web bundle
+        run: bun run --shell=bun build
+      - name: Verify and capture provider pool and settled quota views
+        env:
+          PW_USE_PREVIEW: "1"
+        run: |
+          set -euo pipefail
+          bun run e2e \
+            e2e/provider-pool-freshness.spec.ts \
+            e2e/upstream-quota-settled-states.spec.ts \
+            e2e/overview-shared-quota-columns.spec.ts \
+            --retries=0 \
+            --output="$RUNNER_TEMP/codex-credit-visuals/after"
+          git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
       - name: Publish provider pool visual evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -221,18 +274,6 @@ jobs:
             ${{ steps.container-setup.outputs.visual-root }}/after/**/overview-weekly-only-*.png
             ${{ steps.container-setup.outputs.visual-root }}/after/**/retained-*.png
             ${{ steps.container-setup.outputs.visual-root }}/after-source.txt
-          retention-days: 14
-          if-no-files-found: error
-      - name: Publish keepalive and plugin visual evidence
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: keepalive-plugin-visuals-${{ github.sha }}
-          path: |
-            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/after/**/*.png
-            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/after-source.txt
-            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/*.png
-            ${{ steps.container-setup.outputs.issue-1282-visual-root }}/before/capture.json
           retention-days: 14
           if-no-files-found: error
 
@@ -264,6 +305,7 @@ jobs:
       - name: Verify and capture pricing completeness views
         env:
           PW_USE_PREVIEW: "1"
+          CAPTURE_CONCURRENCY: "6"
           CI_MERGE_SHA: ${{ github.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
@@ -315,6 +357,7 @@ jobs:
       - name: Capture matching base-branch pricing views
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CAPTURE_CONCURRENCY: "6"
           CI_MERGE_SHA: ${{ github.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -324,8 +367,14 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
-          bun --cwd "$base_root/crates/cc-lb-admin/web" run --shell=bun build
+          if cmp -s bun.lock "$base_root/crates/cc-lb-admin/web/bun.lock" && \
+             cmp -s package.json "$base_root/crates/cc-lb-admin/web/package.json"; then
+            ln -s "$PWD/node_modules" "$base_root/crates/cc-lb-admin/web/node_modules"
+          else
+            bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+          fi
+          (cd "$base_root/crates/cc-lb-admin/web" && bun run --shell=bun build)
+          test -s "$base_root/crates/cc-lb-admin/web/dist/index.html"
           bun qa/capture-issue-1280-baseline.ts \
             "$base_root/crates/cc-lb-admin/web" \
             "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
@@ -346,7 +395,8 @@ jobs:
     name: bun-checks
     needs:
       - web-unit
-      - web-e2e-visuals
+      - web-visuals-a
+      - web-visuals-b
       - web-pricing-after
       - web-pricing-before
     if: ${{ always() }}
@@ -380,7 +430,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          for job in web-unit web-e2e-visuals web-pricing-after; do
+          for job in web-unit web-visuals-a web-visuals-b web-pricing-after; do
             result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
             echo "$job: $result"
             if [[ "$result" != "success" ]]; then

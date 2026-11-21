@@ -17,6 +17,10 @@ filter = 'test(cache_keepalive_wall_clock)'
 priority = 100
 
 [[profile.default.overrides]]
+filter = 'binary_id(cc-lb-server::integration) and test(/native_cached_input_pricing|native_image_admission/)'
+priority = 100
+
+[[profile.default.overrides]]
 filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(usage_rollup|upstream_subscription_quota_aggregate_store_postgres)/)'
 test-group = 'pg-usage-rollup'
 priority = 95

@@ -26,7 +26,7 @@ Run the narrowest relevant checks for your change and report the commands and re
 
 [`AGENTS.md`](../AGENTS.md) records repository rules that apply to every change, including the authentication ordering in the request path, the SQLite storage backend, CI failure handling, and the JSON library policy.
 
-Coverage jobs run across six crate-partitioned CI runners defined in `.github/ci/cov-partitions.json`, export one LCOV file per partition, and merge them in `nextest-cov` via `scripts/merge-lcov.mjs` before running `scripts/coverage-gate.sh`. When changing partitions or LCOV merging, run `node scripts/check-cov-partitions.mjs` and `node --test scripts/test-cov-partitions.mjs scripts/test-merge-lcov.mjs scripts/test-prune-rust-target.mjs`.
+Coverage jobs run across nine crate-partitioned CI runners defined in `.github/ci/cov-partitions.json`, upload sparse LLVM profraw/profdata and stripped coverage objects per partition, and merge them in `nextest-cov` via `scripts/export-merged-lcov.mjs` before running `scripts/coverage-gate.sh`. When changing partitions or coverage export, run `node scripts/check-cov-partitions.mjs` and `node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs`.
 
 The web workflow runs in the official Playwright container with browsers, fonts, and system libraries preinstalled. Keep its image tag aligned with the locked `playwright` package version; the workflow checks that match after dependency installation. Do not add runtime apt or browser installation steps. The existing visual tests and base-branch captures use the image's browsers and publish the same evidence artifacts.
 

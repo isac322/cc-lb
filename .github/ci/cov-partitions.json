@@ -6,30 +6,52 @@
   ],
   "partitions": [
     {
-      "name": "server-integ",
+      "name": "server-integ-1",
       "needs_postgres": true,
       "needs_wasm": true,
-      "save_sccache": true,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
-            "cc-lb-server",
-            "cc-lb-tls-tests",
-            "tests-integration",
-            "tests-multi-replica"
+            "cc-lb-server"
           ],
           "cargo_args": [
             "--test",
             "integration"
+          ],
+          "nextest_args": [
+            "--partition",
+            "hash:1/2"
           ]
         }
       ]
     },
     {
-      "name": "server-unit-sched",
+      "name": "server-integ-2",
+      "needs_postgres": true,
+      "needs_wasm": true,
+      "upload_objects": false,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ],
+          "nextest_args": [
+            "--partition",
+            "hash:2/2"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server-unit",
       "needs_postgres": true,
       "needs_wasm": false,
-      "save_sccache": false,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
@@ -39,10 +61,21 @@
             "--lib",
             "--bins"
           ]
-        },
+        }
+      ]
+    },
+    {
+      "name": "sched-ext-integ",
+      "needs_postgres": true,
+      "needs_wasm": true,
+      "upload_objects": true,
+      "runs": [
         {
           "packages": [
-            "cc-lb-scheduler"
+            "cc-lb-scheduler",
+            "cc-lb-tls-tests",
+            "tests-integration",
+            "tests-multi-replica"
           ],
           "cargo_args": []
         }
@@ -52,7 +85,7 @@
       "name": "engine",
       "needs_postgres": true,
       "needs_wasm": false,
-      "save_sccache": false,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
@@ -68,7 +101,7 @@
       "name": "admin",
       "needs_postgres": true,
       "needs_wasm": false,
-      "save_sccache": false,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
@@ -82,11 +115,24 @@
       "name": "storage-pg",
       "needs_postgres": true,
       "needs_wasm": false,
-      "save_sccache": false,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
-            "cc-lb-storage-postgres",
+            "cc-lb-storage-postgres"
+          ],
+          "cargo_args": []
+        }
+      ]
+    },
+    {
+      "name": "storage-conformance",
+      "needs_postgres": true,
+      "needs_wasm": false,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
             "cc-lb-storage-conformance"
           ],
           "cargo_args": []
@@ -97,7 +143,7 @@
       "name": "sqlite-and-rest",
       "needs_postgres": false,
       "needs_wasm": true,
-      "save_sccache": false,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [

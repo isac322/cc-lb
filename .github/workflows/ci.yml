@@ -144,7 +144,7 @@ jobs:
       - name: Validate coverage partitions and helpers
         run: |
           node scripts/check-cov-partitions.mjs
-          node --test scripts/test-cov-partitions.mjs scripts/test-merge-lcov.mjs scripts/test-prune-rust-target.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs
       - name: Test client capture and coverage harness
         run: node --test tests/real-client/provider-e2e/client-harness/*.test.mjs tests/real-client/provider-e2e/codex169/*.test.mjs tests/real-client/provider-e2e/agy159/*.test.mjs
       - uses: actions/setup-go@v7
@@ -372,21 +372,78 @@ jobs:
         id: rust-cache
         with:
           cache-job-key: clippy-${{ matrix.features }}
-          sccache-scope: std
           target-dir: target/debug
           stable-build-metadata: "true"
       - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
-      - name: Show sccache stats and save caches
+      - name: Save rolling Rust target cache
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
           save-target: "true"
-          save-sccache: "false"
-          sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
-          sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+  seed-cov-cache:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check whether coverage workspace cache exists for lock hash
+        id: cov-lookup
+        uses: actions/cache/restore@v6
+        with:
+          lookup-only: true
+          path: target/llvm-cov-target/debug
+          key: target-ws-v3-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-exact
+          restore-keys: |
+            target-ws-v3-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-
+      - name: Decide whether coverage seed is required
+        id: decide
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
+            echo "need_seed=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${{ steps.cov-lookup.outputs.cache-matched-key }}" ]; then
+            echo "need_seed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_seed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: ./.github/actions/setup-rust-tools
+        if: steps.decide.outputs.need_seed == 'true'
+        with:
+          profile: cov
+      - uses: ./.github/actions/setup-rust-target-cache
+        if: steps.decide.outputs.need_seed == 'true'
+        id: rust-cache
+        with:
+          cache-job-key: cov
+          target-dir: target/llvm-cov-target/debug
+          stable-build-metadata: "true"
+      - name: Build instrumented workspace coverage binaries
+        if: steps.decide.outputs.need_seed == 'true'
+        run: >-
+          cargo llvm-cov nextest --no-run --workspace
+          --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
+      - name: Save rolling coverage workspace cache
+        if: ${{ !cancelled() && steps.decide.outputs.need_seed == 'true' }}
+        uses: ./.github/actions/save-rust-target-cache
+        with:
+          target-dir: target/llvm-cov-target/debug
+          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
+          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: "true"
 
   cargo-deny:
     needs: changes
@@ -423,30 +480,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - partition: server-integ
+          - partition: server-integ-1
             needs_postgres: true
             needs_wasm: true
-            save_sccache: "true"
-          - partition: server-unit-sched
+          - partition: server-integ-2
+            needs_postgres: true
+            needs_wasm: true
+          - partition: server-unit
             needs_postgres: true
             needs_wasm: false
-            save_sccache: "false"
+          - partition: sched-ext-integ
+            needs_postgres: true
+            needs_wasm: true
           - partition: engine
             needs_postgres: true
             needs_wasm: false
-            save_sccache: "false"
           - partition: admin
             needs_postgres: true
             needs_wasm: false
-            save_sccache: "false"
           - partition: storage-pg
             needs_postgres: true
             needs_wasm: false
-            save_sccache: "false"
+          - partition: storage-conformance
+            needs_postgres: true
+            needs_wasm: false
           - partition: sqlite-and-rest
             needs_postgres: false
             needs_wasm: true
-            save_sccache: "false"
     env:
       CARGO_BUILD_JOBS: "4"
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
@@ -461,7 +521,6 @@ jobs:
         id: rust-cache
         with:
           cache-job-key: cov
-          sccache-scope: cov
           target-dir: target/llvm-cov-target/debug
           stable-build-metadata: "true"
       - uses: ./.github/actions/setup-wasm-fixtures
@@ -472,21 +531,11 @@ jobs:
         run: node scripts/run-cov-partition.mjs "${{ matrix.partition }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: coverage-lcov-${{ matrix.partition }}
-          path: target/partition-${{ matrix.partition }}.lcov
+          name: coverage-part-${{ matrix.partition }}
+          path: target/cov-part-${{ matrix.partition }}.tar.zst
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
-      - name: Show sccache stats and save caches
-        if: ${{ !cancelled() }}
-        uses: ./.github/actions/save-rust-target-cache
-        with:
-          target-dir: target/llvm-cov-target/debug
-          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
-          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
-          save-target: ${{ matrix.save_sccache }}
-          save-sccache: ${{ matrix.save_sccache }}
-          sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
-          sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
 
   typestate-contracts:
     needs: changes
@@ -505,29 +554,34 @@ jobs:
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
-          cache-job-key: std
-          sccache-scope: std
+          cache-job-key: trybuild
           target-dir: target/debug
+          extra-cache-paths: target/tests/trybuild
           stable-build-metadata: "true"
       - name: Run compile-fail contract tests
-        run: >-
-          cargo nextest run
-          -p cc-lb-engine
-          --test integration
-          --all-features
-          -E 'test(authn_rail_typestate_contracts)'
-          --test-threads=2
-      - name: Show sccache stats and save caches
+        run: |
+          set -euo pipefail
+          unset RUSTFLAGS
+          CC_LB_TRYBUILD_UNIFIED=1
+          CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' --cfg trybuild --verbose -A dead_code --diagnostic-width=140)"
+          export CC_LB_TRYBUILD_UNIFIED CARGO_ENCODED_RUSTFLAGS
+          cargo test \
+            -p cc-lb-engine \
+            --test typestate_contracts \
+            --all-features \
+            -- --exact authn_rail_trybuild::authn_rail_typestate_contracts --nocapture
+      - name: Save rolling trybuild cache
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
+          extra-cache-paths: target/tests/trybuild
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
-          save-target: "false"
-          save-sccache: "false"
-          sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
-          sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
   nextest-cov:
     name: nextest-cov
@@ -546,30 +600,35 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Download partition LCOV reports
+      - uses: ./.github/actions/setup-rust-tools
+        with:
+          profile: cov
+      - name: Download partition coverage archives
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-lcov-*
-          path: target/lcov-parts
+          pattern: coverage-part-*
+          path: target/cov-parts
           merge-multiple: true
-      - name: Merge LCOV reports and check per-package coverage gates
+      - name: Merge LLVM profile data, export LCOV, and check per-package coverage gates
         run: |
           set -euo pipefail
-          parts=(
-            target/lcov-parts/partition-server-integ.lcov
-            target/lcov-parts/partition-server-unit-sched.lcov
-            target/lcov-parts/partition-engine.lcov
-            target/lcov-parts/partition-admin.lcov
-            target/lcov-parts/partition-storage-pg.lcov
-            target/lcov-parts/partition-sqlite-and-rest.lcov
-          )
-          for p in "${parts[@]}"; do
-            if [ ! -s "$p" ]; then
-              echo "::error::missing or empty partition LCOV: $p" >&2
+          for name in \
+            server-integ-1 \
+            server-integ-2 \
+            server-unit \
+            sched-ext-integ \
+            engine \
+            admin \
+            storage-pg \
+            storage-conformance \
+            sqlite-and-rest; do
+            archive="target/cov-parts/cov-part-${name}.tar.zst"
+            if [ ! -s "$archive" ]; then
+              echo "::error::missing or empty partition archive: $archive" >&2
               exit 1
             fi
           done
-          node scripts/merge-lcov.mjs -o target/coverage.lcov "${parts[@]}"
+          node scripts/export-merged-lcov.mjs target/cov-parts target/coverage.lcov
           scripts/coverage-gate.sh target/coverage.lcov
       - uses: actions/upload-artifact@v7
         with:
@@ -598,7 +657,6 @@ jobs:
         id: rust-cache
         with:
           cache-job-key: std
-          sccache-scope: std
           target-dir: target/debug
           stable-build-metadata: "true"
       - uses: ./.github/actions/setup-wasm-fixtures
@@ -606,37 +664,47 @@ jobs:
         uses: actions/cache@v6
         with:
           path: target/test-bins
-          key: real-client-bins-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
-      - name: Run real-client matrix
+          key: real-client-bins-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
+      - name: Run real-client matrix and plugin-slots suites in parallel
         run: |
+          set -euo pipefail
           mkdir -p /dev/shm/cc-lb-tmp
-          TMPDIR=/dev/shm/cc-lb-tmp tests/real-client/matrix.sh
-      - name: Verify independent plugin slots over HTTP
-        run: |
-          if [ ! -s target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm ]; then
-            cargo build --locked --release --target wasm32-unknown-unknown -p wasmtime-dual-slot
-          fi
+          cargo build --locked -p cc-lb-server -p fake-anthropic
+
+          TMPDIR=/dev/shm/cc-lb-tmp REAL_CLIENT_SKIP_BUILD=1 REAL_CLIENT_JOBS=6 \
+            tests/real-client/matrix.sh &
+          pid_matrix=$!
+
           CC_LB_BIN="$PWD/target/debug/cc-lb" \
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots" \
           CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
-            node tests/real-client/provider-e2e/plugin-slots.mjs
+            node tests/real-client/provider-e2e/plugin-slots.mjs &
+          pid_slots=$!
+
           CC_LB_BIN="$PWD/target/debug/cc-lb" \
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots-lifecycle" \
-          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
-            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs
-      - name: Show sccache stats and save caches
+          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots-lifecycle.ledger" \
+            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs &
+          pid_lifecycle=$!
+
+          rc=0
+          wait "$pid_matrix" || rc=1
+          wait "$pid_slots" || rc=1
+          wait "$pid_lifecycle" || rc=1
+          exit "$rc"
+      - name: Save rolling Rust target cache
         if: ${{ !cancelled() }}
         uses: ./.github/actions/save-rust-target-cache
         with:
           target-dir: target/debug
           target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
           target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
           save-target: "true"
-          save-sccache: "true"
-          sccache-exact-hit: ${{ steps.rust-cache.outputs.sccache-exact-hit }}
-          sccache-key: ${{ steps.rust-cache.outputs.sccache-key }}
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - name: Upload real-client evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -654,6 +722,7 @@ jobs:
       - guard-crate-versions
       - release-pr-artifacts
       - clippy
+      - seed-cov-cache
       - cargo-deny
       - promtool
       - nextest-cov-part
@@ -684,7 +753,7 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
-            cargo-deny promtool nextest-cov-part typestate-contracts nextest-cov e2e)
+            seed-cov-cache cargo-deny promtool nextest-cov-part typestate-contracts nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
             "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"

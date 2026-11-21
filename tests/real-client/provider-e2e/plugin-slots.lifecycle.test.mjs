@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import { describe, test } from 'node:test';
 
 // Uses the actual built binary and WASM. Missing inputs are failures, never skips.
 function required(name) {
@@ -70,105 +70,107 @@ async function runHarness(t, mode) {
   return { ...exit, output, runLedger, stdout, stderr };
 }
 
-for (const [mode, marker] of [
-  ['report', 'INJECTED_REPORT_WRITE_FAILURE'],
-  ['ledger-child', 'INJECTED_CHILD_LEDGER_FAILURE'],
-]) {
-  test(`${mode} failure exits nonzero and closes owned child/provider`, { concurrency: true }, async t => {
-    const result = await runHarness(t, mode);
-    assert.equal(result.code, 1, result.stderr);
-    assert.ok(result.stderr.includes(marker), result.stderr);
-    if (mode === 'report') {
-      assert.ok(result.stdout.includes('PASS: plugin slot HTTP regression'), result.stderr);
-    } else {
-      const evidence = JSON.parse(await readFile(path.join(result.output, 'results.json'), 'utf8'));
-      assert.equal(evidence.passed, false);
-      assert.ok(evidence.errors.some(error => error.message === marker));
+describe('plugin-slots lifecycle', { concurrency: true }, () => {
+  for (const [mode, marker] of [
+    ['report', 'INJECTED_REPORT_WRITE_FAILURE'],
+    ['ledger-child', 'INJECTED_CHILD_LEDGER_FAILURE'],
+  ]) {
+    test(`${mode} failure exits nonzero and closes owned child/provider`, async t => {
+      const result = await runHarness(t, mode);
+      assert.equal(result.code, 1, result.stderr);
+      assert.ok(result.stderr.includes(marker), result.stderr);
+      if (mode === 'report') {
+        assert.ok(result.stdout.includes('PASS: plugin slot HTTP regression'), result.stderr);
+      } else {
+        const evidence = JSON.parse(await readFile(path.join(result.output, 'results.json'), 'utf8'));
+        assert.equal(evidence.passed, false);
+        assert.ok(evidence.errors.some(error => error.message === marker));
+      }
+    });
+  }
+
+  test('successful harness records literal shell-quoted cleanup paths', async t => {
+    const result = await runHarness(t, 'normal');
+    assert.equal(result.code, 0, result.stderr);
+    const evidence = JSON.parse(await readFile(path.join(result.output, 'results.json'), 'utf8'));
+    assert.equal(evidence.passed, true);
+    const records = (await readFile(result.runLedger, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const scratch = records.find(record => record.kind === 'scratch-directory' && record.identifier === result.output);
+    const admin = records.filter(record => record.kind.startsWith('admin-') && record.identifier.endsWith(`config=${path.join(result.output, 'cc-lb.toml')}`));
+    assert.ok(scratch, 'scratch directory must have a cleanup record');
+    assert.ok(admin.length > 0, 'admin resources must have cleanup records');
+    for (const record of [scratch, ...admin]) {
+      const prefix = record.kind === 'scratch-directory' ? 'rm -r -- '
+        : '# Stop recorded processes first; then remove isolated store: rm -r -- ';
+      assert.ok(record.deleteCommand.startsWith(prefix));
+      const encoded = record.deleteCommand.slice(prefix.length);
+      assert.ok(encoded.startsWith("'") && encoded.endsWith("'"));
+      // Decode only our single-quoted token grammar; never evaluate shell text or delete evidence.
+      const decoded = encoded.slice(1, -1).replaceAll("'\\''", "'");
+      assert.equal(encoded, shellQuote(decoded), 'cleanup path must be one POSIX single-quoted token');
+      const argv = ['rm', '-r', '--', decoded];
+      assert.deepEqual(argv, ['rm', '-r', '--', result.output]);
     }
   });
-}
 
-test('successful harness records literal shell-quoted cleanup paths', { concurrency: true }, async t => {
-  const result = await runHarness(t, 'normal');
-  assert.equal(result.code, 0, result.stderr);
-  const evidence = JSON.parse(await readFile(path.join(result.output, 'results.json'), 'utf8'));
-  assert.equal(evidence.passed, true);
-  const records = (await readFile(result.runLedger, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  const scratch = records.find(record => record.kind === 'scratch-directory' && record.identifier === result.output);
-  const admin = records.filter(record => record.kind.startsWith('admin-') && record.identifier.endsWith(`config=${path.join(result.output, 'cc-lb.toml')}`));
-  assert.ok(scratch, 'scratch directory must have a cleanup record');
-  assert.ok(admin.length > 0, 'admin resources must have cleanup records');
-  for (const record of [scratch, ...admin]) {
-    const prefix = record.kind === 'scratch-directory' ? 'rm -r -- '
-      : '# Stop recorded processes first; then remove isolated store: rm -r -- ';
-    assert.ok(record.deleteCommand.startsWith(prefix));
-    const encoded = record.deleteCommand.slice(prefix.length);
-    assert.ok(encoded.startsWith("'") && encoded.endsWith("'"));
-    // Decode only our single-quoted token grammar; never evaluate shell text or delete evidence.
-    const decoded = encoded.slice(1, -1).replaceAll("'\\''", "'");
-    assert.equal(encoded, shellQuote(decoded), 'cleanup path must be one POSIX single-quoted token');
-    const argv = ['rm', '-r', '--', decoded];
-    assert.deepEqual(argv, ['rm', '-r', '--', result.output]);
+  for (const target of ['metadata', 'ledger']) {
+    test(`observer ${target} failure terminates child before ownership transfer`, async t => {
+      const blocked = path.join(root, `observer-${target}-directory`);
+      await mkdir(blocked);
+      const program = `
+        import cp from 'node:child_process';
+        import fs from 'node:fs';
+        import { once } from 'node:events';
+        import { syncBuiltinESMExports } from 'node:module';
+        let acquired;
+        const original = cp.spawn;
+        cp.spawn = (...args) => {
+          acquired = original(...args);
+          try {
+            fs.appendFileSync(process.env.OWNER_LEDGER, JSON.stringify({
+              kind: 'process', identifier: 'observer-test child pid=' + acquired.pid,
+              deleteCommand: 'kill -TERM ' + acquired.pid,
+              createdAt: new Date().toISOString()
+            }) + '\\n');
+          } catch (error) {
+            acquired.kill('SIGTERM');
+            throw error;
+          }
+          return acquired;
+        };
+        syncBuiltinESMExports();
+        await import(${JSON.stringify(new URL('./plugin-slots-failure-preload.mjs', import.meta.url).href)});
+        let recordingError;
+        try { cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']); }
+        catch (error) { recordingError = error.code; }
+        const closed = once(acquired, 'close');
+        const signaledBeforeTransfer = acquired.killed;
+        if (!signaledBeforeTransfer) acquired.kill('SIGTERM');
+        const [code, signal] = await closed;
+        console.log(JSON.stringify({ recordingError, signaledBeforeTransfer, code, signal }));
+      `;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', program], {
+        env: { ...process.env, OWNER_LEDGER: ledger,
+          CC_LB_QA_FAULT_METADATA: target === 'metadata' ? blocked : path.join(root, `observer-${target}-child.json`),
+          CC_LB_QA_LEDGER: target === 'ledger' ? blocked : ledger },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', data => { stdout += data; });
+      child.stderr.on('data', data => { stderr += data; });
+      const done = new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', code => resolve(code));
+      });
+      await appendFile(ledger, `${JSON.stringify({ kind: 'process', identifier: `observer-test harness pid=${child.pid}`,
+        deleteCommand: `kill -TERM ${child.pid}`, createdAt: new Date().toISOString() })}\n`);
+      assert.equal(await done, 0, stderr);
+      const outcome = JSON.parse(stdout);
+      assert.equal(outcome.recordingError, 'EISDIR');
+      assert.equal(outcome.signaledBeforeTransfer, true);
+      assert.equal(outcome.signal, 'SIGTERM');
+    });
   }
 });
-
-for (const target of ['metadata', 'ledger']) {
-  test(`observer ${target} failure terminates child before ownership transfer`, { concurrency: true }, async t => {
-    const blocked = path.join(root, `observer-${target}-directory`);
-    await mkdir(blocked);
-    const program = `
-      import cp from 'node:child_process';
-      import fs from 'node:fs';
-      import { once } from 'node:events';
-      import { syncBuiltinESMExports } from 'node:module';
-      let acquired;
-      const original = cp.spawn;
-      cp.spawn = (...args) => {
-        acquired = original(...args);
-        try {
-          fs.appendFileSync(process.env.OWNER_LEDGER, JSON.stringify({
-            kind: 'process', identifier: 'observer-test child pid=' + acquired.pid,
-            deleteCommand: 'kill -TERM ' + acquired.pid,
-            createdAt: new Date().toISOString()
-          }) + '\\n');
-        } catch (error) {
-          acquired.kill('SIGTERM');
-          throw error;
-        }
-        return acquired;
-      };
-      syncBuiltinESMExports();
-      await import(${JSON.stringify(new URL('./plugin-slots-failure-preload.mjs', import.meta.url).href)});
-      let recordingError;
-      try { cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']); }
-      catch (error) { recordingError = error.code; }
-      const closed = once(acquired, 'close');
-      const signaledBeforeTransfer = acquired.killed;
-      if (!signaledBeforeTransfer) acquired.kill('SIGTERM');
-      const [code, signal] = await closed;
-      console.log(JSON.stringify({ recordingError, signaledBeforeTransfer, code, signal }));
-    `;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', program], {
-      env: { ...process.env, OWNER_LEDGER: ledger,
-        CC_LB_QA_FAULT_METADATA: target === 'metadata' ? blocked : path.join(root, `observer-${target}-child.json`),
-        CC_LB_QA_LEDGER: target === 'ledger' ? blocked : ledger },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', data => { stdout += data; });
-    child.stderr.on('data', data => { stderr += data; });
-    const done = new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', code => resolve(code));
-    });
-    await appendFile(ledger, `${JSON.stringify({ kind: 'process', identifier: `observer-test harness pid=${child.pid}`,
-      deleteCommand: `kill -TERM ${child.pid}`, createdAt: new Date().toISOString() })}\n`);
-    assert.equal(await done, 0, stderr);
-    const outcome = JSON.parse(stdout);
-    assert.equal(outcome.recordingError, 'EISDIR');
-    assert.equal(outcome.signaledBeforeTransfer, true);
-    assert.equal(outcome.signal, 'SIGTERM');
-  });
-}

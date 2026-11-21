@@ -79,6 +79,24 @@ test('pruneTargetDir removes workspace artifacts paired with fingerprints and pr
     assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-aaaaaaaaaaaaaaaa.rlib')), false);
     assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'cc-lb-server-aaaaaaaaaaaaaaaa')), false);
     assert.equal(existsSync(path.join(debugDir, 'deps', 'libtokio-0123456789abcdef.rlib')), true);
+
+    // keepWorkspaceLibs=true preserves .rlib/.rmeta/.fingerprint/build while stripping executables & incremental.
+    touch(path.join(debugDir, 'cc-lb'));
+    touch(path.join(debugDir, 'incremental', 'inc-2', 'work'));
+    touch(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rlib'));
+    touch(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rmeta'));
+    touch(path.join(debugDir, 'deps', 'integration-2222222222222222'));
+    touch(path.join(debugDir, '.fingerprint', 'cc-lb-server-1111111111111111', 'lib-cc_lb_server'));
+    touch(path.join(debugDir, 'build', 'cc-lb-server-1111111111111111', 'out', 'meta.rs'));
+    const keepRes = pruneTargetDir(debugDir, SAMPLE_METADATA, { keepWorkspaceLibs: true });
+    assert.ok(keepRes.removedEntries >= 3);
+    assert.equal(existsSync(path.join(debugDir, 'cc-lb')), false);
+    assert.equal(existsSync(path.join(debugDir, 'incremental')), false);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'integration-2222222222222222')), false);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rlib')), true);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rmeta')), true);
+    assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'cc-lb-server-1111111111111111')), true);
+    assert.equal(existsSync(path.join(debugDir, 'build', 'cc-lb-server-1111111111111111', 'out', 'meta.rs')), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

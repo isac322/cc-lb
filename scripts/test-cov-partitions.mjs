@@ -27,11 +27,42 @@ const META = {
   ],
 };
 
-test('validatePartitions accepts exact split targets across partitions', () => {
+test('validatePartitions accepts exact split targets and nextest shards across partitions', () => {
   const cfg = {
     excluded: ['pkg-ex'],
     partitions: [
-      { name: 'p1', runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'] }] },
+      {
+        name: 'p1-s1',
+        upload_objects: true,
+        runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'], nextest_args: ['--partition', 'hash:1/2'] }],
+      },
+      {
+        name: 'p1-s2',
+        upload_objects: false,
+        runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'], nextest_args: ['--partition', 'hash:2/2'] }],
+      },
+      {
+        name: 'p2',
+        upload_objects: true,
+        runs: [
+          { packages: ['pkg-a'], cargo_args: ['--lib', '--bins'] },
+          { packages: ['pkg-b'], cargo_args: [] },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(validatePartitions(cfg, META, new Set(['pkg-a', 'pkg-b'])), []);
+});
+
+test('validatePartitions rejects missing shards or shard groups without object upload', () => {
+  const missingShard = {
+    excluded: ['pkg-ex'],
+    partitions: [
+      {
+        name: 'p1-s1',
+        upload_objects: true,
+        runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'], nextest_args: ['--partition', 'hash:1/2'] }],
+      },
       {
         name: 'p2',
         runs: [
@@ -41,7 +72,33 @@ test('validatePartitions accepts exact split targets across partitions', () => {
       },
     ],
   };
-  assert.deepEqual(validatePartitions(cfg, META, new Set(['pkg-a', 'pkg-b'])), []);
+  const errMissing = validatePartitions(missingShard, META, new Set(['pkg-a']));
+  assert.ok(errMissing.some((e) => e.includes('missing shard hash:2/2')));
+
+  const noUpload = {
+    excluded: ['pkg-ex'],
+    partitions: [
+      {
+        name: 'p1-s1',
+        upload_objects: false,
+        runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'], nextest_args: ['--partition', 'hash:1/2'] }],
+      },
+      {
+        name: 'p1-s2',
+        upload_objects: false,
+        runs: [{ packages: ['pkg-a'], cargo_args: ['--test', 'integration'], nextest_args: ['--partition', 'hash:2/2'] }],
+      },
+      {
+        name: 'p2',
+        runs: [
+          { packages: ['pkg-a'], cargo_args: ['--lib', '--bins'] },
+          { packages: ['pkg-b'], cargo_args: [] },
+        ],
+      },
+    ],
+  };
+  const errUpload = validatePartitions(noUpload, META, new Set(['pkg-a']));
+  assert.ok(errUpload.some((e) => e.includes('no partition with upload_objects=true')));
 });
 
 test('validatePartitions rejects missing target or duplicate target coverage', () => {

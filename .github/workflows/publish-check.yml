@@ -80,6 +80,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - uses: ./.github/actions/check-published-crates
         with:
