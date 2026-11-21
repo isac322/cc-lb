@@ -110,7 +110,7 @@ use crate::provider_input_estimate::estimate_provider_input;
 use crate::request_classification::{
     classify_client_request_kind_with_class, is_thread_sticky_subagent_seed,
 };
-use crate::request_context::{ProviderScope, RequestContext};
+use crate::request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
@@ -4567,9 +4567,12 @@ impl Lifecycle {
         );
     }
 
-    /// Route and reserve one logical create; never dispatch an HTTP request.
-    /// The gateway records authentication before parsing any client frame.
-    pub(crate) async fn prepare_websocket_turn(
+    #[allow(clippy::too_many_arguments)]
+    /// Route and reserve one logical Responses WebSocket turn.
+    ///
+    /// `codex_backend` selects the raw Codex backend surface; public
+    /// Responses turns retain the compatibility transformations.
+    pub(crate) async fn prepare_websocket_turn_with_surface(
         &self,
         auth: &crate::Authenticated,
         ingress: WebSocketIngress<'_>,
@@ -4577,6 +4580,7 @@ impl Lifecycle {
         owner: Option<Uuid>,
         observer: Option<LifecycleContext>,
         request_id: &str,
+        codex_backend: bool,
     ) -> Result<PreparedWebSocketTurn, WebSocketError> {
         let span = tracing::info_span!(
             "proxy.responses_websocket.turn",
@@ -4699,6 +4703,7 @@ impl Lifecycle {
                     body.as_ref(),
                     owner,
                     request_id.to_owned(),
+                    codex_backend,
                 )
                 .await
                 .inspect_err(|error| {
@@ -4919,6 +4924,7 @@ impl Lifecycle {
         ingress: WebSocketIngress<'_>,
         body: &Value,
         upstream_id: Uuid,
+        codex_backend: bool,
     ) -> Result<(), WebSocketError> {
         let view = self.dynamic_view.load();
         self.websocket_routing(
@@ -4928,11 +4934,13 @@ impl Lifecycle {
             body,
             Some(upstream_id),
             next_request_id(),
+            codex_backend,
         )
         .await
         .map(|_| ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn websocket_routing(
         &self,
         view: &DynamicView,
@@ -4941,6 +4949,7 @@ impl Lifecycle {
         body: &Value,
         owner: Option<Uuid>,
         request_id: String,
+        codex_backend: bool,
     ) -> Result<(RequestContext, FilterPipelineResult), WebSocketError> {
         use cc_lb_control::api_keys::principal_view::PrincipalStatus;
         if view.principal_view.principal_status(auth.principal_id()) != PrincipalStatus::Active {
@@ -5058,6 +5067,7 @@ impl Lifecycle {
             .thread_id(identity.thread_id)
             .downstream_headers(downstream_headers)
             .method(http::Method::GET)
+            .codex_backend(codex_backend)
             .path("/v1/responses".to_owned())
             .query(ingress.query.map(str::to_owned))
             .body_bytes(ingress.frame.clone())
@@ -5099,6 +5109,10 @@ impl Lifecycle {
             &*self.clock,
         )
         .0;
+        if codex_backend {
+            candidates
+                .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
+        }
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
@@ -5131,15 +5145,18 @@ impl Lifecycle {
         Ok((ctx, result))
     }
 
-    /// Match HTTP Responses shaping while keeping the WebSocket URL and method
-    /// host-owned. The returned headers apply only when opening a connection.
-    pub(crate) fn shape_websocket_frame(
+    /// Shape one WebSocket frame for its selected upstream.
+    ///
+    /// `codex_backend` forwards native Codex frames unchanged;
+    /// public frames use the Responses compatibility contract.
+    pub(crate) fn shape_websocket_frame_with_surface(
         &self,
         auth: &crate::Authenticated,
         ingress: WebSocketIngress<'_>,
         upstream_id: Uuid,
         request_id: &str,
         observer: Option<&LifecycleContext>,
+        codex_backend: bool,
     ) -> Result<Option<WebSocketPluginRequest>, WebSocketError> {
         let view = self.dynamic_view.load();
         let cached = view
@@ -5202,7 +5219,7 @@ impl Lifecycle {
         };
         let mut oauth_compat = false;
         let mut echo_metadata = None;
-        if openai_oauth {
+        if openai_oauth && !codex_backend {
             let (shaped_frame, public_shape, normalized_echo_metadata) =
                 self.normalize_oauth_websocket_frame(cached, &frame)?;
             frame = shaped_frame;
@@ -5222,6 +5239,7 @@ impl Lifecycle {
                 dialect: plugin_dialect.unwrap_or_else(|| native_route_dialect(record)),
                 gemini_oauth: false,
                 vertex: false,
+                codex_backend,
                 vertex_location: None,
             },
         }))
@@ -5709,8 +5727,11 @@ impl Lifecycle {
                 None,
             ));
         }
-        ctx.compat_api_key_only_features =
-            compat_request::api_key_only_features(body_view.value(), request_capability);
+        ctx.compat_api_key_only_features = if ctx.codex_backend {
+            Vec::new()
+        } else {
+            compat_request::api_key_only_features(body_view.value(), request_capability)
+        };
         let prompt_cache_token_scope = prompt_cache_token_scope(&ctx.downstream_headers);
         let prompt_cache_analysis = match body_view.value_arc() {
             // Prompt-cache tokenization models Anthropic `cache_control`
@@ -5993,7 +6014,7 @@ impl Lifecycle {
                 &native_cache_scores,
                 &*self.clock,
             );
-        if request_affinity.is_none() {
+        if request_affinity.is_none() && !ctx.codex_backend {
             retain_api_key_candidates(&mut candidates, &ctx.compat_api_key_only_features);
             if request_kind == RequestKind::OpenaiAudioTranscriptions
                 && ctx.openai_oauth_compat.is_some_and(|policy| {
@@ -6003,6 +6024,10 @@ impl Lifecycle {
                 candidates
                     .retain(|candidate| candidate.kind != cc_lb_domain::UpstreamKind::OpenaiOauth);
             }
+        }
+        if ctx.codex_backend {
+            candidates
+                .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
         }
         if let Some(affinity) = request_affinity.as_ref() {
             candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
@@ -6353,14 +6378,18 @@ impl Lifecycle {
                     capability,
                     request.fanout_multiplier,
                 );
-                let tier = compat_service_tier_for_upstream(
-                    capability.unwrap_or(ProviderCapability::OpenaiResponses),
-                    routed.record.kind,
-                    request.service_tier.as_deref(),
-                    ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
-                        policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
-                    }),
-                );
+                let tier = if ctx.codex_backend {
+                    request.service_tier.clone()
+                } else {
+                    compat_service_tier_for_upstream(
+                        capability.unwrap_or(ProviderCapability::OpenaiResponses),
+                        routed.record.kind,
+                        request.service_tier.as_deref(),
+                        ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
+                            policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
+                        }),
+                    )
+                };
                 (request != limit.request
                     || multiplier != limit.fanout_multiplier
                     || tier != limit.service_tier)
@@ -7204,6 +7233,7 @@ impl Lifecycle {
                         routed.record.kind,
                         StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
                     ),
+                    codex_backend: ctx.codex_backend,
                     vertex_location: routed
                         .record
                         .vertex
@@ -7282,15 +7312,19 @@ impl Lifecycle {
                 .saturating_mul(fanout_multiplier as u64);
             input
         });
-        let sent_service_tier = compat_service_tier_for_upstream(
-            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
-                .unwrap_or(ProviderCapability::OpenaiResponses),
-            upstream_record.kind,
-            limit_request.service_tier.as_deref(),
-            ctx.openai_oauth_compat
-                .as_ref()
-                .is_some_and(|policy| policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce),
-        );
+        let sent_service_tier = if ctx.codex_backend {
+            limit_request.service_tier.clone()
+        } else {
+            compat_service_tier_for_upstream(
+                classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
+                    .unwrap_or(ProviderCapability::OpenaiResponses),
+                upstream_record.kind,
+                limit_request.service_tier.as_deref(),
+                ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
+                    policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
+                }),
+            )
+        };
         let cost_estimate = if limit_request.model.is_empty() {
             Some(0)
         } else {
@@ -7928,6 +7962,40 @@ impl Lifecycle {
                         );
                     }
                 }
+            }
+        }
+        if !body_collect_failed
+            && transform_ctx.codex_backend
+            && parts.status.is_success()
+            && response_affinity_context.capability == ProviderCapability::OpenaiModels
+        {
+            let view = self.dynamic_view.load();
+            let principal_id = &transform_ctx.principal.id;
+            if view.principal_view.has_model_allowlist(principal_id) {
+                match filter_codex_models_catalog(
+                    &downstream_body,
+                    &view.principal_view,
+                    principal_id,
+                ) {
+                    Ok(filtered) => downstream_body = filtered,
+                    Err(()) => {
+                        parts.status = StatusCode::BAD_GATEWAY;
+                        downstream_body = provider_error_body(
+                            response_affinity_context.capability,
+                            parts.status,
+                            "server_error",
+                            "invalid models catalog",
+                            None,
+                        );
+                    }
+                }
+                // Both arms replace the body, so the upstream length and
+                // encoding headers no longer describe it.
+                parts.headers = sanitize_downstream_response_headers(
+                    std::mem::take(&mut parts.headers),
+                    downstream_body.len(),
+                    None,
+                );
             }
         }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
@@ -8699,6 +8767,7 @@ impl Lifecycle {
             .thread_id(None)
             .requested_service_tier(None)
             .provider_scope(provider_scope.map(|scope| scope.0))
+            .codex_backend(parts.extensions.get::<CodexBackendSurface>().is_some())
             .downstream_headers(downstream_headers)
             .method(parts.method)
             .path(path)
@@ -8757,6 +8826,7 @@ impl Lifecycle {
         let mut shaped_ctx = ctx.clone();
         let mut compat_response_plan = None;
         if upstream_kind == StorageUpstreamKind::OpenaiOauth
+            && !ctx.codex_backend
             && let Some(capability) =
                 classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
         {
@@ -8819,11 +8889,25 @@ impl Lifecycle {
                 );
             }
         }
+        if ctx.codex_backend
+            && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
+                == Some(ProviderCapability::OpenaiModels)
+            && self
+                .dynamic_view
+                .load()
+                .principal_view
+                .has_model_allowlist(authenticated.principal_id())
+        {
+            shaped_ctx
+                .downstream_headers
+                .remove(http::header::ACCEPT_ENCODING);
+        }
         let shape_context = shaped_ctx.dialect_shape_context();
         // Codex's backend has no hangup route. A public hangup goes to the
         // public Realtime origin with the OAuth token of the account that
         // created the call; affinity already pinned this attempt to it.
         let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
+            && !ctx.codex_backend
             && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
                 == Some(ProviderCapability::OpenaiRealtimeHangup);
         let (shaped, capture_shaped_body) = match tracing::info_span!("proxy.shape").in_scope(
@@ -13705,6 +13789,27 @@ fn request_cache_metadata_from_value(
     )
 }
 
+fn filter_codex_models_catalog(
+    body: &[u8],
+    principal_view: &cc_lb_control::api_keys::principal_view::PrincipalView,
+    principal_id: &str,
+) -> Result<Bytes, ()> {
+    let mut catalog: Value = sonic_rs::from_slice(body).map_err(|_| ())?;
+    let models = catalog
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or(())?;
+    models.retain(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| principal_view.is_model_allowed(principal_id, slug))
+    });
+    serde_json::to_vec(&catalog)
+        .map(Bytes::from)
+        .map_err(|_| ())
+}
+
 fn request_reasoning_metadata(
     value: &Value,
     capability: Option<ProviderCapability>,
@@ -14999,6 +15104,10 @@ impl<'a> FailoverRouter<'a> {
                 &*lifecycle.clock,
             );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
+        if self.ctx.codex_backend {
+            candidates
+                .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
+        }
         if matches!(reason, FailoverReason::RateLimited)
             && matches!(
                 failed.record.kind,
@@ -15032,7 +15141,8 @@ impl<'a> FailoverRouter<'a> {
         }
         // The last allowed attempt goes to an API key when one remains, so the
         // attempt cap never strands a request on exhausted OAuth accounts.
-        let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+        let last_attempt =
+            !self.ctx.codex_backend && self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
         if last_attempt
             && candidates
                 .iter()
@@ -18226,6 +18336,7 @@ mod tests {
             dialect: route.dialect,
             gemini_oauth: false,
             vertex: false,
+            codex_backend: false,
             vertex_location: None,
         };
         let affinity_ctx = ResponseAffinityContext {
@@ -22980,7 +23091,7 @@ mod tests {
             "allocating an observer is not a turn"
         );
         let turn = lifecycle
-            .prepare_websocket_turn(
+            .prepare_websocket_turn_with_surface(
                 &auth,
                 WebSocketIngress {
                     headers: request.headers(),
@@ -22991,6 +23102,7 @@ mod tests {
                 None,
                 observer,
                 &request_id,
+                false,
             )
             .await
             .expect("an eligible OpenAI upstream should be selected");
@@ -23062,7 +23174,7 @@ mod tests {
         let local_frame =
             Bytes::from(serde_json::to_vec(local_body.as_ref()).expect("test frame serializes"));
         let pinned = lifecycle
-            .prepare_websocket_turn(
+            .prepare_websocket_turn_with_surface(
                 &auth,
                 WebSocketIngress {
                     headers: request.headers(),
@@ -23073,6 +23185,7 @@ mod tests {
                 Some(first_id),
                 observer,
                 &next_request_id,
+                false,
             )
             .await
             .expect("a locally owned store:false response does not require durable lookup");
@@ -23093,6 +23206,7 @@ mod tests {
                 },
                 local_body.as_ref(),
                 first_id,
+                false,
             )
             .await
             .expect("retained connection is still eligible");
@@ -23147,6 +23261,7 @@ mod tests {
                     },
                     body.as_ref(),
                     first_id,
+                    false,
                 )
                 .await
                 .is_err(),
@@ -23173,6 +23288,7 @@ mod tests {
                 },
                 body.as_ref(),
                 first_id,
+                false,
             )
             .await
             .expect_err("a retained connection cannot bypass a changed model allowlist");
@@ -23296,7 +23412,7 @@ mod tests {
             Arc::new(serde_json::from_slice::<Value>(&frame).expect("original frame parses"));
         let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         let turn = lifecycle
-            .prepare_websocket_turn(
+            .prepare_websocket_turn_with_surface(
                 &auth,
                 WebSocketIngress {
                     headers: request.headers(),
@@ -23307,6 +23423,7 @@ mod tests {
                 Some(owner),
                 observer,
                 &request_id,
+                false,
             )
             .await
             .expect("owner passes the current filters");
@@ -23327,6 +23444,7 @@ mod tests {
                 },
                 body.as_ref(),
                 owner,
+                false,
             )
             .await
             .expect_err("a retained connection does not bypass changed filter eligibility");
@@ -23335,7 +23453,7 @@ mod tests {
         let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         assert!(
             lifecycle
-                .prepare_websocket_turn(
+                .prepare_websocket_turn_with_surface(
                     &auth,
                     WebSocketIngress {
                         headers: request.headers(),
@@ -23346,6 +23464,7 @@ mod tests {
                     Some(owner),
                     observer,
                     &request_id,
+                    false,
                 )
                 .await
                 .is_err(),
@@ -23401,7 +23520,7 @@ mod tests {
                 Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
             let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let prepared = lifecycle
-                .prepare_websocket_turn(
+                .prepare_websocket_turn_with_surface(
                     &auth,
                     WebSocketIngress {
                         headers: request.headers(),
@@ -23412,6 +23531,7 @@ mod tests {
                     None,
                     observer,
                     &request_id,
+                    false,
                 )
                 .await
                 .expect("Codex candidate is eligible");
@@ -23441,7 +23561,7 @@ mod tests {
             ));
             let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let turn = lifecycle
-                .prepare_websocket_turn(
+                .prepare_websocket_turn_with_surface(
                     &auth,
                     WebSocketIngress {
                         headers: request.headers(),
@@ -23452,6 +23572,7 @@ mod tests {
                     None,
                     observer,
                     &request_id,
+                    false,
                 )
                 .await
                 .expect("turn preparation does not sign any connection");

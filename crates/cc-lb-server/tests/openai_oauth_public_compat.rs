@@ -23,10 +23,10 @@ use tokio::{net::TcpListener, sync::Barrier, task::JoinHandle};
 type Recorded = (String, Vec<(String, String)>, Vec<u8>);
 
 #[derive(Clone, Default)]
-struct FakeState(Arc<Mutex<Vec<Recorded>>>);
-struct Fake {
-    base: String,
-    state: FakeState,
+pub(crate) struct FakeState(pub(crate) Arc<Mutex<Vec<Recorded>>>);
+pub(crate) struct Fake {
+    pub(crate) base: String,
+    pub(crate) state: FakeState,
     task: JoinHandle<Result<(), std::io::Error>>,
 }
 impl Drop for Fake {
@@ -37,28 +37,59 @@ impl Drop for Fake {
 
 async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
-    let has_client_version = req.uri().query().is_some_and(|query| {
-        query
-            .split('&')
-            .any(|pair| pair.starts_with("client_version="))
-    });
-    let headers = req
+    let query = req.uri().query().unwrap_or_default().to_owned();
+    let mut headers = req
         .headers()
         .iter()
         .filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_owned())))
-        .collect();
+        .collect::<Vec<_>>();
+    headers.push(("x-test-query".to_owned(), query.clone()));
     let body = to_bytes(req.into_body(), 2_000_000).await.unwrap().to_vec();
     state.0.lock().unwrap().push((path.clone(), headers, body));
+    if path == "/codex/models"
+        && !query
+            .split('&')
+            .any(|pair| pair.starts_with("client_version="))
+        && !state
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|(_, headers, _)| {
+                headers.iter().any(|(name, _)| name == "accept-encoding")
+            })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail":"client_version required"})),
+        )
+            .into_response();
+    }
     if path == "/codex/models" {
-        // The real backend rejects a catalog request without `client_version`.
-        if !has_client_version {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"detail":"client_version required"})),
-            )
-                .into_response();
+        if query
+            .split('&')
+            .any(|pair| pair == "client_version=invalid")
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(br#"{"catalog":[] }"#.as_slice()))
+                .unwrap();
         }
-        return Json(json!({"models":[{"slug":"gpt-test","display_name":"GPT Test","description":"test","capabilities":{}}]})).into_response();
+        return Body::from(
+            br#"{"models":[{"slug":"gpt-test","display_name":"GPT Test","description":"test","capabilities":{}},{"slug":"gpt-other","display_name":"GPT Other","description":"other","capabilities":{}}]}"#
+                .as_slice(),
+        )
+        .into_response();
+    }
+    if path == "/codex/responses/compact" {
+        return Body::from(b"{\"compacted\":true}".as_slice()).into_response();
+    }
+    if path == "/codex/alpha/search" {
+        return Json(json!({"results":[{"id":"native"}]})).into_response();
+    }
+    if path == "/codex/realtime/calls" {
+        return Body::from(b"native-sdp-response".as_slice()).into_response();
     }
     if path == "/codex/responses" {
         let body = state.0.lock().unwrap().last().unwrap().2.clone();
@@ -97,7 +128,7 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     }
     (StatusCode::NOT_FOUND, Json(json!({"detail":"not found"}))).into_response()
 }
-async fn spawn() -> Fake {
+pub(crate) async fn spawn() -> Fake {
     let state = FakeState::default();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
@@ -169,8 +200,12 @@ async fn spawn_fanout() -> FanoutFake {
         task,
     }
 }
-struct FailoverFake {
-    base: String,
+type RecordedHeaders = Vec<(String, String)>;
+type FailoverRequests = Arc<Mutex<Vec<RecordedHeaders>>>;
+pub(crate) struct FailoverFake {
+    pub(crate) base: String,
+    pub(crate) calls: Arc<AtomicUsize>,
+    pub(crate) requests: FailoverRequests,
     task: JoinHandle<Result<(), std::io::Error>>,
 }
 
@@ -183,11 +218,19 @@ impl Drop for FailoverFake {
 #[derive(Clone)]
 struct FailoverState {
     calls: Arc<AtomicUsize>,
+    requests: FailoverRequests,
     mixed_first_success: bool,
+    rate_limit_first_call: bool,
 }
 
 async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
+    let headers = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
+        .collect::<Vec<_>>();
+    state.requests.lock().unwrap().push(headers);
     let client_request = req.headers().contains_key("request-id");
     if path == "/codex/models" {
         return Json(json!({"models":[{"slug":"gpt-test","display_name":"GPT Test","description":"test","capabilities":{}}]})).into_response();
@@ -200,7 +243,9 @@ async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Resp
             usize::MAX
         };
         if client_request
-            && if state.mixed_first_success {
+            && if state.rate_limit_first_call {
+                call == 0
+            } else if state.mixed_first_success {
                 call == 1
             } else {
                 call < 2
@@ -222,10 +267,20 @@ async fn failover_fake(State(state): State<FailoverState>, req: Request) -> Resp
     (StatusCode::NOT_FOUND, Json(json!({"detail":"not found"}))).into_response()
 }
 
-async fn spawn_mixed_failover() -> FailoverFake {
+pub(crate) async fn spawn_mixed_failover() -> FailoverFake {
+    spawn_mixed_failover_with_first_rate_limit(false).await
+}
+
+pub(crate) async fn spawn_mixed_failover_with_first_rate_limit(
+    rate_limit_first_call: bool,
+) -> FailoverFake {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
     let state = FailoverState {
-        calls: Arc::new(AtomicUsize::new(0)),
+        calls: calls.clone(),
+        requests: requests.clone(),
         mixed_first_success: true,
+        rate_limit_first_call,
     };
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
@@ -234,11 +289,13 @@ async fn spawn_mixed_failover() -> FailoverFake {
     });
     FailoverFake {
         base: format!("http://{a}/codex"),
+        calls,
+        requests,
         task,
     }
 }
 
-async fn admin(
+pub(crate) async fn admin(
     c: &reqwest::Client,
     s: &common::TestServer,
     m: Method,
@@ -323,7 +380,7 @@ async fn wait_for_chat_usage_rows(s: &common::TestServer, expected: usize) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
-async fn setup(s: &common::TestServer, base: &str, c: &reqwest::Client) -> String {
+pub(crate) async fn setup(s: &common::TestServer, base: &str, c: &reqwest::Client) -> String {
     let (st, ups, _) = admin(c, s, Method::GET, "/admin/v1/upstreams", None, None).await;
     assert_eq!(st, 200);
     for u in ups["upstreams"].as_array().unwrap() {

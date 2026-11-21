@@ -7,6 +7,9 @@ use http::{HeaderMap, Method};
 /// Provider selected by a provider-prefixed proxy route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderScope(pub Provider);
+/// Marker for the native Codex backend API surface.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CodexBackendSurface;
 
 /// Parsed downstream request data passed into plugins.
 #[derive(Clone, Debug)]
@@ -27,6 +30,8 @@ pub struct RequestContext {
     pub method: Method,
     /// Provider selected by a prefixed proxy route, if any.
     pub provider_scope: Option<Provider>,
+    /// Whether this request arrived through the native Codex backend alias.
+    pub codex_backend: bool,
     /// Downstream request path, such as `/v1/messages`.
     pub path: String,
     /// Raw downstream query string without the leading `?`.
@@ -89,6 +94,7 @@ pub struct ParsedRequestBuilder {
     downstream_headers: HeaderMap,
     method: Method,
     provider_scope: Option<Provider>,
+    codex_backend: bool,
     path: String,
     query: Option<String>,
     body_bytes: Bytes,
@@ -109,6 +115,7 @@ impl ParsedRequestBuilder {
             downstream_headers: HeaderMap::new(),
             method: Method::GET,
             provider_scope: None,
+            codex_backend: false,
             path: String::new(),
             query: None,
             body_bytes: Bytes::new(),
@@ -152,6 +159,11 @@ impl ParsedRequestBuilder {
     /// Sets the provider selected by a prefixed proxy route.
     pub fn provider_scope(mut self, provider_scope: Option<Provider>) -> Self {
         self.provider_scope = provider_scope;
+        self
+    }
+    /// Sets whether this request arrived through the native Codex backend alias.
+    pub fn codex_backend(mut self, codex_backend: bool) -> Self {
+        self.codex_backend = codex_backend;
         self
     }
 
@@ -212,6 +224,7 @@ impl ParsedRequestBuilder {
             method: self.method,
             provider_scope: self.provider_scope,
             path: self.path,
+            codex_backend: self.codex_backend,
             query: self.query,
             body_bytes: self.body_bytes,
             openai_oauth_compat: self.openai_oauth_compat,

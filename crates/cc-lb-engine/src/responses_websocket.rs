@@ -331,6 +331,7 @@ struct Turn {
 pub struct ResponsesWebSocketGateway {
     lifecycle: Arc<Lifecycle>,
     provider: Option<cc_lb_domain::Provider>,
+    codex_backend: bool,
     headers: HeaderMap,
     query: Option<String>,
     byte_cap: usize,
@@ -360,6 +361,7 @@ impl ResponsesWebSocketGateway {
         Self {
             lifecycle,
             provider: None,
+            codex_backend: false,
             headers: original_headers,
             query: None,
             byte_cap: budget_bytes,
@@ -392,6 +394,10 @@ impl ResponsesWebSocketGateway {
 
     pub fn with_provider(mut self, provider: Option<cc_lb_domain::Provider>) -> Self {
         self.provider = provider;
+        self
+    }
+    pub fn with_codex_backend(mut self, codex_backend: bool) -> Self {
+        self.codex_backend = codex_backend;
         self
     }
 
@@ -586,7 +592,7 @@ impl ResponsesWebSocketGateway {
         });
         let prepared = self
             .lifecycle
-            .prepare_websocket_turn(
+            .prepare_websocket_turn_with_surface(
                 &auth,
                 WebSocketIngress {
                     headers: &self.headers,
@@ -597,6 +603,7 @@ impl ResponsesWebSocketGateway {
                 routing_owner,
                 observer,
                 request_id,
+                self.codex_backend,
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
@@ -763,7 +770,7 @@ impl ResponsesWebSocketGateway {
         self.check_admission(&lane, charge)?;
         let prepared = self
             .lifecycle
-            .prepare_websocket_turn(
+            .prepare_websocket_turn_with_surface(
                 &auth,
                 WebSocketIngress {
                     headers: &self.headers,
@@ -774,6 +781,7 @@ impl ResponsesWebSocketGateway {
                 Some(owner.upstream_id),
                 observer,
                 request_id,
+                self.codex_backend,
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
@@ -899,6 +907,7 @@ impl ResponsesWebSocketGateway {
                 },
                 &turn_body,
                 candidate.upstream_id,
+                self.codex_backend,
             )
             .await?;
         self.prepare_plugin_request(dispatch.turn_id, candidate.upstream_id)?;
@@ -947,7 +956,7 @@ impl ResponsesWebSocketGateway {
                     .map_or(0, |(_, request)| request.frame.len()),
             )
         };
-        let request = self.lifecycle.shape_websocket_frame(
+        let request = self.lifecycle.shape_websocket_frame_with_surface(
             &auth,
             WebSocketIngress {
                 headers: &self.headers,
@@ -957,6 +966,7 @@ impl ResponsesWebSocketGateway {
             upstream_id,
             &request_id,
             observer.as_ref(),
+            self.codex_backend,
         )?;
         let new_charge = request.as_ref().map_or(0, |request| request.frame.len());
         if new_charge
@@ -1163,6 +1173,7 @@ impl ResponsesWebSocketGateway {
                 },
                 &turn.body,
                 upstream_id,
+                self.codex_backend,
             )
             .await
             .map_err(|error| error.with_stream(turn.lane.clone()))?;
@@ -3739,6 +3750,7 @@ pub(crate) mod tests {
             }),
             gemini_oauth: false,
             vertex: false,
+            codex_backend: false,
             vertex_location: None,
         }
     }
