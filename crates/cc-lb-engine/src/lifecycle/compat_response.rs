@@ -184,7 +184,11 @@ pub(crate) async fn inspect_chat_stream_response(
 ) -> Result<ChatStreamInspection, CollectError> {
     let (parts, body) = response.into_parts();
     let mut body = body;
-    let mut held = Vec::new();
+    // Held frames keep their original `Bytes` (no copy). Only the unparsed
+    // tail is copied into `scan`, and the budget is checked before a frame is
+    // retained, so the prefix never holds more than `cap` bytes plus one frame.
+    let mut held: Vec<Bytes> = Vec::new();
+    let mut held_len = 0usize;
     let mut scan = Vec::new();
     let mut decided = false;
     while !decided {
@@ -195,8 +199,14 @@ pub(crate) async fn inspect_chat_stream_response(
         let Ok(data) = frame.into_data() else {
             continue;
         };
-        held.extend_from_slice(&data);
+        held_len += data.len();
+        if held_len > cap {
+            // Over budget: relay this frame unscanned and stop holding.
+            held.push(data);
+            break;
+        }
         scan.extend_from_slice(&data);
+        held.push(data);
         while let Some(end) = sse_event_end(&scan) {
             let event = scan.drain(..end).collect::<Vec<_>>();
             let Some(payload) = sse_data(&event) else {
@@ -248,13 +258,12 @@ pub(crate) async fn inspect_chat_stream_response(
                 break;
             }
         }
-        if held.len() > cap {
-            break;
-        }
     }
     let stream = async_stream::stream! {
-        if !held.is_empty() {
-            yield Ok::<Bytes, Infallible>(Bytes::from(held));
+        for data in held {
+            if !data.is_empty() {
+                yield Ok::<Bytes, Infallible>(data);
+            }
         }
         while let Some(frame) = body.frame().await {
             let Ok(frame) = frame else { break };
@@ -741,6 +750,32 @@ data: [DONE]\r\n\r\n";
             panic!("expected committed stream");
         };
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_prefix_oversized_frame_is_relayed_without_buffering() {
+        let frame = format!(
+            "data: {{\"type\":\"error\",\"padding\":\"{}\"}}\n\n",
+            "x".repeat(64)
+        );
+        let response = Response::builder()
+            .body(Body::from(frame.clone()))
+            .expect("response");
+        let result = inspect_chat_stream_response(response, 16)
+            .await
+            .expect("inspection");
+        // A frame past the hold budget is committed and relayed intact, not
+        // copied in for scanning first.
+        let ChatStreamInspection::Ready(response) = result else {
+            panic!("expected committed stream");
+        };
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body, Bytes::from(frame));
     }
 
     #[tokio::test]
