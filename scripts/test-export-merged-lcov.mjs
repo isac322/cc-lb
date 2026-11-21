@@ -44,30 +44,37 @@ test('buildIgnoreFilenameRegex excludes test files, target, cargo/rustup, and _t
   }
 });
 
-test('collectExtractedArtifacts deduplicates objects by basename and preserves sorted profdata', () => {
+test('collectExtractedArtifacts deduplicates byte-identical objects while preserving distinct objects with shared basenames', () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'cc-lb-export-test-'));
   try {
     mkdirSync(path.join(tmp, '01-server-unit', 'objs'), { recursive: true });
     mkdirSync(path.join(tmp, '02-server-integ-1', 'objs'), { recursive: true });
-    mkdirSync(path.join(tmp, '03-server-integ-2'), { recursive: true });
+    mkdirSync(path.join(tmp, '03-engine-integ', 'objs'), { recursive: true });
+    mkdirSync(path.join(tmp, '04-server-integ-2'), { recursive: true });
 
     writeFileSync(path.join(tmp, '01-server-unit', 'part-server-unit.profdata'), 'p1');
-    writeFileSync(path.join(tmp, '01-server-unit', 'objs', 'cc-lb'), 'bin1');
+    writeFileSync(path.join(tmp, '01-server-unit', 'objs', 'cc-lb'), 'bin-identical');
     writeFileSync(path.join(tmp, '01-server-unit', 'objs', 'cc_lb_server-aaaa'), 'unit');
 
     writeFileSync(path.join(tmp, '02-server-integ-1', 'part-server-integ-1.profdata'), 'p2');
-    writeFileSync(path.join(tmp, '02-server-integ-1', 'objs', 'cc-lb'), 'bin-dup');
-    writeFileSync(path.join(tmp, '02-server-integ-1', 'objs', 'integration-bbbb'), 'integ');
+    writeFileSync(path.join(tmp, '02-server-integ-1', 'objs', 'cc-lb'), 'bin-identical');
+    writeFileSync(path.join(tmp, '02-server-integ-1', 'objs', 'integration-bbbb'), 'integ-server');
 
-    writeFileSync(path.join(tmp, '03-server-integ-2', 'part-server-integ-2.profdata'), 'p3');
+    writeFileSync(path.join(tmp, '03-engine-integ', 'part-engine-integ.profdata'), 'p3');
+    writeFileSync(path.join(tmp, '03-engine-integ', 'objs', 'integration-bbbb'), 'integ-engine-distinct');
+
+    writeFileSync(path.join(tmp, '04-server-integ-2', 'part-server-integ-2.profdata'), 'p4');
 
     const { profdataFiles, objectFiles } = collectExtractedArtifacts(tmp);
-    assert.equal(profdataFiles.length, 3);
+    assert.equal(profdataFiles.length, 4);
     assert.deepEqual(
       objectFiles.map((f) => path.basename(f)),
-      ['cc-lb', 'cc_lb_server-aaaa', 'integration-bbbb'],
+      ['cc-lb', 'cc_lb_server-aaaa', 'integration-bbbb', 'integration-bbbb'],
     );
-    assert.ok(objectFiles.some((f) => f.includes('01-server-unit')));
+    assert.equal(objectFiles.filter((f) => f.endsWith(`${path.sep}cc-lb`)).length, 1);
+    assert.ok(objectFiles.some((f) => f.includes('01-server-unit') && f.endsWith('cc-lb')));
+    assert.ok(objectFiles.some((f) => f.includes('02-server-integ-1') && f.endsWith('integration-bbbb')));
+    assert.ok(objectFiles.some((f) => f.includes('03-engine-integ') && f.endsWith('integration-bbbb')));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

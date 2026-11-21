@@ -62,7 +62,7 @@ async fn settled_row_count(pool: &SqlitePool, where_clause: &str) -> i64 {
     let mut previous = count_request_events(pool, where_clause).await;
     let mut stable_streak: u32 = 0;
     loop {
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(50)).await;
         let current = count_request_events(pool, where_clause).await;
         if current == previous {
             stable_streak += 1;

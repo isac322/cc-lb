@@ -3,6 +3,7 @@
 // merges profile counters once with llvm-profdata, and exports merged LCOV
 // via llvm-cov export using cargo-llvm-cov's exact filename ignore regex.
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -136,9 +137,24 @@ function extractArchive(archivePath, destDir) {
   });
 }
 
+function hashFileSha256(filePath) {
+  const hash = createHash('sha256');
+  const buf = Buffer.allocUnsafe(65536);
+  const fd = openSync(filePath, 'r');
+  try {
+    let bytesRead;
+    while ((bytesRead = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, bytesRead));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
 export function collectExtractedArtifacts(extractRoot) {
   const profdataFiles = [];
-  const objsByName = new Map();
+  const objsByDigest = new Map();
   if (!existsSync(extractRoot)) {
     return { profdataFiles, objectFiles: [] };
   }
@@ -155,16 +171,23 @@ export function collectExtractedArtifacts(extractRoot) {
     }
     const objsDir = path.join(partDir, 'objs');
     if (existsSync(objsDir)) {
-      for (const entry of readdirSync(objsDir, { withFileTypes: true })) {
-        if (entry.isFile() && !objsByName.has(entry.name)) {
-          objsByName.set(entry.name, path.join(objsDir, entry.name));
+      const objEntries = readdirSync(objsDir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const entry of objEntries) {
+        const fullPath = path.join(objsDir, entry.name);
+        const digest = hashFileSha256(fullPath);
+        if (!objsByDigest.has(digest)) {
+          objsByDigest.set(digest, { name: entry.name, fullPath });
         }
       }
     }
   }
-  const objectFiles = [...objsByName.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .map(([, full]) => full);
+  const objectFiles = [...objsByDigest.values()]
+    .sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.fullPath < b.fullPath ? -1 : a.fullPath > b.fullPath ? 1 : 0,
+    )
+    .map((item) => item.fullPath);
   return { profdataFiles: profdataFiles.sort(), objectFiles };
 }
 
