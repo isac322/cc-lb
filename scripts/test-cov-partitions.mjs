@@ -173,3 +173,57 @@ test('extractGatedPackages parses scripts/coverage-gate.sh format', () => {
   const gated = extractGatedPackages('set("cc-lb-engine", 60); set("cc-lb-server", 60)');
   assert.deepEqual([...gated].sort(), ['cc-lb-engine', 'cc-lb-server']);
 });
+
+test('validatePartitions skips target.test === false and accepts zero-testable-target crates', () => {
+  const metaWithNoTestTargets = {
+    workspace_members: ['pkg-lib 1.0.0', 'pkg-bin-skip 1.0.0', 'pkg-fixture 1.0.0'],
+    packages: [
+      {
+        id: 'pkg-lib 1.0.0',
+        name: 'pkg-lib',
+        targets: [
+          { name: 'pkg_lib', kind: ['lib'], test: true },
+          { name: 'pkg-bin', kind: ['bin'], test: false },
+        ],
+      },
+      {
+        id: 'pkg-bin-skip 1.0.0',
+        name: 'pkg-bin-skip',
+        targets: [{ name: 'bin_only', kind: ['bin'], test: false }],
+      },
+      {
+        id: 'pkg-fixture 1.0.0',
+        name: 'pkg-fixture',
+        targets: [{ name: 'fixture_cdylib', kind: ['cdylib'], test: false }],
+      },
+    ],
+  };
+
+  const valid = {
+    excluded: [],
+    partitions: [
+      {
+        name: 'p1',
+        upload_objects: true,
+        runs: [
+          { packages: ['pkg-lib'], cargo_args: ['--lib'] },
+          { packages: ['pkg-bin-skip', 'pkg-fixture'], cargo_args: [] },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(validatePartitions(valid, metaWithNoTestTargets, new Set(['pkg-lib'])), []);
+
+  const missingFixture = {
+    excluded: [],
+    partitions: [
+      {
+        name: 'p1',
+        upload_objects: true,
+        runs: [{ packages: ['pkg-lib'], cargo_args: ['--lib'] }],
+      },
+    ],
+  };
+  const errMissing = validatePartitions(missingFixture, metaWithNoTestTargets, new Set(['pkg-lib']));
+  assert.ok(errMissing.some((e) => e.includes('pkg-fixture') && e.includes('missing from all partitions')));
+});

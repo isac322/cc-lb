@@ -42,7 +42,13 @@ async fn templated_sqlite_storage(path: &std::path::Path) -> anyhow::Result<Sqli
     }
     static TEMPLATE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
     let bytes = TEMPLATE_BYTES.get_or_init(|| {
-        std::thread::spawn(|| {
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+            && let Ok(cached) = std::fs::read(&shared)
+        {
+            return cached;
+        }
+        let generated = std::thread::spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -77,7 +83,22 @@ async fn templated_sqlite_storage(path: &std::path::Path) -> anyhow::Result<Sqli
             })
         })
         .join()
-        .expect("conformance template sqlite thread")
+        .expect("conformance template sqlite thread");
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+        {
+            let shared_path = PathBuf::from(shared);
+            if let Some(parent) = shared_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp_path =
+                shared_path.with_file_name(format!("template.sqlite.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp_path, &generated).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &shared_path);
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+        }
+        generated
     });
     std::fs::write(path, bytes)?;
     Ok(open_sqlite_existing(&url, system_clock()).await?)

@@ -2779,7 +2779,7 @@ async fn admission_native_images_increment_input_and_total_tokens_at_exact_bound
 
 #[tokio::test]
 async fn admission_compressed_same_geometry_image_pair_cannot_escape_allowance() {
-    let compressed = synthetic_png_base64(1568, flate2::Compression::best());
+    let compressed = synthetic_png_base64(1568, flate2::Compression::fast());
     let uncompressed = synthetic_png_base64(1568, flate2::Compression::none());
     assert!(
         compressed.len() * 100 < uncompressed.len(),

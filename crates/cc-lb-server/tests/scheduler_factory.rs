@@ -94,10 +94,12 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
         .connect(&admin_url)
         .await
         .expect("admin postgres connects");
-    let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
-        .execute(&admin_pool)
-        .await
+    if let Err(error) = crate::common::create_postgres_database(
+        &admin_pool,
+        &database_name,
+        "CC_LB_PG_APP_TEMPLATE",
+    )
+    .await
     {
         eprintln!("SKIP: could not create temporary postgres database: {error}");
         admin_pool.close().await;
@@ -266,10 +268,12 @@ where
         .connect(&admin_url)
         .await
         .expect("admin postgres connects");
-    let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
-        .execute(&admin_pool)
-        .await
+    if let Err(error) = crate::common::create_postgres_database(
+        &admin_pool,
+        &database_name,
+        "CC_LB_PG_APP_TEMPLATE",
+    )
+    .await
     {
         eprintln!("SKIP: could not create temporary postgres database: {error}");
         admin_pool.close().await;

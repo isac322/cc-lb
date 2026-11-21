@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 
-const SNAPSHOT_VERSION = 2;
+const SNAPSHOT_VERSION = 3;
 
 const PYTHON_SET_MTIMES_NS = `
 import json, os, sys
@@ -28,26 +28,24 @@ for target_path, ns_str in json.load(sys.stdin):
     os.utime(target_path, ns=(ns, ns))
 `;
 
-function hashBuffer(buf) {
+function hashBufferSha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-function hashFile(fullPath) {
-  return hashBuffer(readFileSync(fullPath));
+function hashFileSha256(fullPath) {
+  return hashBufferSha256(readFileSync(fullPath));
 }
 
-function listWorkspaceRelFiles(rootDir, extraDirs) {
-  const relFiles = new Set();
-  const out = execFileSync(
-    'git',
-    ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-    { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
-  );
-  for (const raw of out.toString('utf8').split('\0')) {
-    if (!raw) continue;
-    relFiles.add(raw.split(path.sep).join('/'));
-  }
+function hashGitBlobFile(fullPath) {
+  const buf = readFileSync(fullPath);
+  return createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+}
 
+function normalizeRel(rel) {
+  return rel.split(path.sep).join('/');
+}
+
+function walkExtraDirs(rootDir, extraDirs, visitFile) {
   for (const extra of extraDirs) {
     const absExtra = path.resolve(rootDir, extra);
     if (!existsSync(absExtra)) continue;
@@ -58,21 +56,112 @@ function listWorkspaceRelFiles(rootDir, extraDirs) {
         if (entry.isDirectory()) {
           walk(full);
         } else if (entry.isFile()) {
-          relFiles.add(path.relative(rootDir, full).split(path.sep).join('/'));
+          visitFile(normalizeRel(path.relative(rootDir, full)), full);
         }
       }
     };
-    const st = lstatSync(absExtra);
+    const st = lstatSync(absExtra, { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
       walk(absExtra);
     } else if (st.isFile()) {
-      relFiles.add(path.relative(rootDir, absExtra).split(path.sep).join('/'));
+      visitFile(normalizeRel(path.relative(rootDir, absExtra)), absExtra);
     }
   }
+}
+
+function listWorkspaceRelFilesV2(rootDir, extraDirs) {
+  const relFiles = new Set();
+  const out = execFileSync(
+    'git',
+    ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+    { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
+  );
+  for (const raw of out.toString('utf8').split('\0')) {
+    if (!raw) continue;
+    relFiles.add(normalizeRel(raw));
+  }
+  walkExtraDirs(rootDir, extraDirs, (rel) => {
+    relFiles.add(rel);
+  });
   return relFiles;
 }
 
-function computeDirDigests(rootDir, relFiles, fileHashes) {
+function parseGitIndexStageOids(rootDir) {
+  const indexOids = new Map();
+  const out = execFileSync('git', ['ls-files', '--stage', '-z'], {
+    cwd: rootDir,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  for (const token of out.toString('utf8').split('\0')) {
+    if (!token) continue;
+    const tabIdx = token.indexOf('\t');
+    if (tabIdx <= 0) continue;
+    const [mode, oid, stage] = token.slice(0, tabIdx).split(' ');
+    const relPath = normalizeRel(token.slice(tabIdx + 1));
+    if (!relPath) continue;
+    if ((mode === '100644' || mode === '100755') && stage === '0' && /^[0-9a-f]{40}$/.test(oid)) {
+      indexOids.set(relPath, oid);
+    }
+  }
+  return indexOids;
+}
+
+function parseGitDirtyPaths(rootDir) {
+  const dirtyPaths = new Set();
+  const out = execFileSync(
+    'git',
+    ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
+  );
+  const tokens = out.toString('utf8').split('\0');
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token) continue;
+    const x = token[0];
+    const y = token[1];
+    const rel1 = normalizeRel(token.slice(3));
+    if (rel1) dirtyPaths.add(rel1);
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      const next = tokens[i + 1];
+      if (next !== undefined) {
+        i += 1;
+        const rel2 = normalizeRel(next);
+        if (rel2) dirtyPaths.add(rel2);
+      }
+    }
+  }
+  return dirtyPaths;
+}
+
+function collectWorkspaceBlobOids(rootDir, extraDirs) {
+  const indexOids = parseGitIndexStageOids(rootDir);
+  const dirtyPaths = parseGitDirtyPaths(rootDir);
+  const fileOids = new Map();
+
+  for (const [relFile, oid] of indexOids) {
+    if (!dirtyPaths.has(relFile)) {
+      fileOids.set(relFile, oid);
+    }
+  }
+
+  for (const relFile of dirtyPaths) {
+    const full = path.join(rootDir, relFile);
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) continue;
+    fileOids.set(relFile, hashGitBlobFile(full));
+  }
+
+  walkExtraDirs(rootDir, extraDirs, (relFile, full) => {
+    if (!fileOids.has(relFile)) {
+      fileOids.set(relFile, hashGitBlobFile(full));
+    }
+  });
+
+  return fileOids;
+}
+
+function computeDirDigests(rootDir, relFiles, fileDigests) {
   const dirChildren = new Map();
   const ensureDir = (relDir) => {
     if (!dirChildren.has(relDir)) dirChildren.set(relDir, new Set());
@@ -82,7 +171,7 @@ function computeDirDigests(rootDir, relFiles, fileHashes) {
   for (const relFile of relFiles) {
     let cur = path.posix.dirname(relFile);
     let childName = path.posix.basename(relFile);
-    let childMarker = `f:${childName}:${fileHashes.get(relFile)}`;
+    let childMarker = `f:${childName}:${fileDigests.get(relFile)}`;
     while (cur && cur !== '.') {
       ensureDir(cur).add(childMarker);
       childName = path.posix.basename(cur);
@@ -97,7 +186,7 @@ function computeDirDigests(rootDir, relFiles, fileHashes) {
     if (!existsSync(absDir)) continue;
     const st = lstatSync(absDir, { bigint: true });
     if (!st.isDirectory()) continue;
-    const digest = hashBuffer(Buffer.from([...markers].sort().join('\n')));
+    const digest = hashBufferSha256(Buffer.from([...markers].sort().join('\n')));
     dirs.set(relDir, { digest, mtimeNs: st.mtimeNs.toString() });
   }
   return dirs;
@@ -128,24 +217,23 @@ function applyMtimesNs(utimeOps) {
 export function recordWorkspaceMtimes(rootDir, outPath, extraDirs = []) {
   const resolvedRoot = path.resolve(rootDir);
   const relExtraDirs = extraDirs
-    .map((d) => path.relative(resolvedRoot, path.resolve(resolvedRoot, d)).split(path.sep).join('/'))
+    .map((d) => normalizeRel(path.relative(resolvedRoot, path.resolve(resolvedRoot, d))))
     .filter((d) => d && !d.startsWith('..'));
 
-  const relFiles = listWorkspaceRelFiles(resolvedRoot, relExtraDirs);
+  const blobOids = collectWorkspaceBlobOids(resolvedRoot, relExtraDirs);
   const files = {};
-  const fileHashes = new Map();
+  const verifiedOids = new Map();
 
-  for (const relFile of [...relFiles].sort()) {
+  for (const relFile of [...blobOids.keys()].sort()) {
     const full = path.join(resolvedRoot, relFile);
-    if (!existsSync(full)) continue;
-    const st = lstatSync(full, { bigint: true });
-    if (!st.isFile() || st.isSymbolicLink()) continue;
-    const sha256 = hashFile(full);
-    fileHashes.set(relFile, sha256);
-    files[relFile] = { sha256, mtimeNs: st.mtimeNs.toString() };
+    const st = lstatSync(full, { bigint: true, throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) continue;
+    const oid = blobOids.get(relFile);
+    verifiedOids.set(relFile, oid);
+    files[relFile] = { oid, mtimeNs: st.mtimeNs.toString() };
   }
 
-  const dirMap = computeDirDigests(resolvedRoot, new Set(fileHashes.keys()), fileHashes);
+  const dirMap = computeDirDigests(resolvedRoot, new Set(verifiedOids.keys()), verifiedOids);
   const dirs = {};
   for (const relDir of [...dirMap.keys()].sort()) {
     dirs[relDir] = dirMap.get(relDir);
@@ -162,71 +250,7 @@ export function recordWorkspaceMtimes(rootDir, outPath, extraDirs = []) {
   return { fileCount: Object.keys(files).length, dirCount: Object.keys(dirs).length };
 }
 
-export function restoreWorkspaceMtimes(rootDir, inPath) {
-  if (!existsSync(inPath)) {
-    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, missing: true };
-  }
-  let snapshot;
-  try {
-    snapshot = JSON.parse(readFileSync(inPath, 'utf8'));
-  } catch {
-    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
-  }
-  if (!snapshot || snapshot.version !== SNAPSHOT_VERSION || typeof snapshot.files !== 'object') {
-    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
-  }
-
-  const resolvedRoot = path.resolve(rootDir);
-  const recordedFiles = snapshot.files ?? {};
-  const hashedInPass1 = new Map();
-  const utimeOps = [];
-  let restoredFiles = 0;
-  let skippedFiles = 0;
-
-  for (const [relFile, meta] of Object.entries(recordedFiles)) {
-    if (!meta || typeof meta.mtimeNs !== 'string' || !/^\d+$/.test(meta.mtimeNs)) {
-      skippedFiles += 1;
-      continue;
-    }
-    const full = path.join(resolvedRoot, relFile);
-    if (!existsSync(full)) {
-      skippedFiles += 1;
-      continue;
-    }
-    const st = lstatSync(full);
-    if (!st.isFile() || st.isSymbolicLink()) {
-      skippedFiles += 1;
-      continue;
-    }
-    const sha256 = hashFile(full);
-    hashedInPass1.set(relFile, sha256);
-    if (sha256 !== meta.sha256) {
-      skippedFiles += 1;
-      continue;
-    }
-    utimeOps.push([full, meta.mtimeNs]);
-    restoredFiles += 1;
-  }
-
-  // Re-scan current non-ignored + extraDirs files using cached Pass 1 hashes
-  // to avoid reading unchanged files twice while detecting added/deleted entries.
-  const currentRelFiles = listWorkspaceRelFiles(resolvedRoot, snapshot.extraDirs ?? []);
-  const currentHashes = new Map();
-  for (const relFile of currentRelFiles) {
-    const prevHash = hashedInPass1.get(relFile);
-    if (prevHash !== undefined) {
-      currentHashes.set(relFile, prevHash);
-      continue;
-    }
-    const full = path.join(resolvedRoot, relFile);
-    if (!existsSync(full)) continue;
-    const st = lstatSync(full, { throwIfNoEntry: false });
-    if (!st || !st.isFile() || st.isSymbolicLink()) continue;
-    currentHashes.set(relFile, hashFile(full));
-  }
-  const currentDirDigests = computeDirDigests(resolvedRoot, new Set(currentHashes.keys()), currentHashes);
-
-  const recordedDirs = snapshot.dirs ?? {};
+function restoreDirs(resolvedRoot, recordedDirs, currentDirDigests, utimeOps) {
   // Restore bottom-up (deepest path first) after all files so child touches
   // cannot reset parent dir mtimes.
   const sortedDirs = Object.keys(recordedDirs).sort((a, b) => {
@@ -254,7 +278,121 @@ export function restoreWorkspaceMtimes(rootDir, inPath) {
     utimeOps.push([fullDir, rec.mtimeNs]);
     restoredDirs += 1;
   }
+  return { restoredDirs, skippedDirs };
+}
 
+function restoreWorkspaceMtimesV2(resolvedRoot, snapshot) {
+  const recordedFiles = snapshot.files ?? {};
+  const hashedInPass1 = new Map();
+  const utimeOps = [];
+  let restoredFiles = 0;
+  let skippedFiles = 0;
+
+  for (const [relFile, meta] of Object.entries(recordedFiles)) {
+    if (!meta || typeof meta.mtimeNs !== 'string' || !/^\d+$/.test(meta.mtimeNs)) {
+      skippedFiles += 1;
+      continue;
+    }
+    const full = path.join(resolvedRoot, relFile);
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) {
+      skippedFiles += 1;
+      continue;
+    }
+    const sha256 = hashFileSha256(full);
+    hashedInPass1.set(relFile, sha256);
+    if (sha256 !== meta.sha256) {
+      skippedFiles += 1;
+      continue;
+    }
+    utimeOps.push([full, meta.mtimeNs]);
+    restoredFiles += 1;
+  }
+
+  const currentRelFiles = listWorkspaceRelFilesV2(resolvedRoot, snapshot.extraDirs ?? []);
+  const currentHashes = new Map();
+  for (const relFile of currentRelFiles) {
+    const prevHash = hashedInPass1.get(relFile);
+    if (prevHash !== undefined) {
+      currentHashes.set(relFile, prevHash);
+      continue;
+    }
+    const full = path.join(resolvedRoot, relFile);
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) continue;
+    currentHashes.set(relFile, hashFileSha256(full));
+  }
+  const currentDirDigests = computeDirDigests(resolvedRoot, new Set(currentHashes.keys()), currentHashes);
+  const { restoredDirs, skippedDirs } = restoreDirs(
+    resolvedRoot,
+    snapshot.dirs ?? {},
+    currentDirDigests,
+    utimeOps,
+  );
+  applyMtimesNs(utimeOps);
+  return { restoredFiles, skippedFiles, restoredDirs, skippedDirs };
+}
+
+export function restoreWorkspaceMtimes(rootDir, inPath) {
+  if (!existsSync(inPath)) {
+    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, missing: true };
+  }
+  let snapshot;
+  try {
+    snapshot = JSON.parse(readFileSync(inPath, 'utf8'));
+  } catch {
+    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
+  }
+  if (!snapshot || typeof snapshot.files !== 'object' || snapshot.files === null) {
+    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
+  }
+
+  const resolvedRoot = path.resolve(rootDir);
+  if (snapshot.version === 2) {
+    return restoreWorkspaceMtimesV2(resolvedRoot, snapshot);
+  }
+  if (snapshot.version !== SNAPSHOT_VERSION) {
+    return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
+  }
+
+  const recordedFiles = snapshot.files ?? {};
+  const currentOids = collectWorkspaceBlobOids(resolvedRoot, snapshot.extraDirs ?? []);
+  const utimeOps = [];
+  let restoredFiles = 0;
+  let skippedFiles = 0;
+
+  for (const [relFile, meta] of Object.entries(recordedFiles)) {
+    if (
+      !meta ||
+      typeof meta.oid !== 'string' ||
+      typeof meta.mtimeNs !== 'string' ||
+      !/^\d+$/.test(meta.mtimeNs)
+    ) {
+      skippedFiles += 1;
+      continue;
+    }
+    const curOid = currentOids.get(relFile);
+    if (curOid === undefined || curOid !== meta.oid) {
+      skippedFiles += 1;
+      continue;
+    }
+    const full = path.join(resolvedRoot, relFile);
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) {
+      skippedFiles += 1;
+      continue;
+    }
+    utimeOps.push([full, meta.mtimeNs]);
+    restoredFiles += 1;
+  }
+
+  const currentDirDigests = computeDirDigests(resolvedRoot, new Set(currentOids.keys()), currentOids);
+  const { restoredDirs, skippedDirs } = restoreDirs(
+    resolvedRoot,
+    snapshot.dirs ?? {},
+    currentDirDigests,
+    utimeOps,
+  );
   applyMtimesNs(utimeOps);
 
   return { restoredFiles, skippedFiles, restoredDirs, skippedDirs };

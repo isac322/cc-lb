@@ -6,17 +6,42 @@
   ],
   "partitions": [
     {
-      "name": "server-1",
+      "name": "server-lib",
       "needs_postgres": true,
-      "needs_wasm": true,
-      "upload_objects": true,
+      "seed_sched_template": true,
+      "needs_wasm": false,
       "test_threads": 8,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
             "cc-lb-server"
           ],
-          "cargo_args": [],
+          "cargo_args": [
+            "--lib"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server-integ-1",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": true,
+      "test_threads": 10,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-server"
+          ],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ],
           "extra_features": [
             "cc-lb-storage-api/dto-roundtrip"
           ],
@@ -28,17 +53,21 @@
       ]
     },
     {
-      "name": "server-2",
+      "name": "server-integ-2",
       "needs_postgres": true,
+      "seed_sched_template": true,
       "needs_wasm": true,
+      "test_threads": 10,
       "upload_objects": false,
-      "test_threads": 8,
       "runs": [
         {
           "packages": [
             "cc-lb-server"
           ],
-          "cargo_args": [],
+          "cargo_args": [
+            "--test",
+            "integration"
+          ],
           "extra_features": [
             "cc-lb-storage-api/dto-roundtrip"
           ],
@@ -50,16 +79,59 @@
       ]
     },
     {
-      "name": "storage-pg-conformance",
-      "needs_postgres": true,
+      "name": "engine-lib",
+      "needs_postgres": false,
+      "seed_sched_template": false,
       "needs_wasm": false,
+      "test_threads": 6,
       "upload_objects": true,
-      "test_threads": 8,
       "runs": [
         {
           "packages": [
-            "cc-lb-storage-postgres",
-            "cc-lb-storage-conformance"
+            "cc-lb-engine"
+          ],
+          "cargo_args": [
+            "--lib"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "engine-integ",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 6,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-engine"
+          ],
+          "cargo_args": [
+            "--tests"
+          ],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ],
+          "filter_expr": "not test(authn_rail_typestate_contracts)"
+        }
+      ]
+    },
+    {
+      "name": "admin",
+      "needs_postgres": true,
+      "seed_sched_template": true,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-admin"
           ],
           "cargo_args": [],
           "extra_features": [
@@ -69,11 +141,55 @@
       ]
     },
     {
+      "name": "storage-postgres",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-storage-postgres"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "storage-conformance-sqlite",
+      "needs_postgres": true,
+      "seed_sched_template": false,
+      "needs_wasm": false,
+      "test_threads": 8,
+      "upload_objects": true,
+      "runs": [
+        {
+          "packages": [
+            "cc-lb-storage-conformance",
+            "cc-lb-storage-sqlite",
+            "cc-lb-storage-api",
+            "cc-lb-property-tests"
+          ],
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-engine/sqlite",
+            "cc-lb-engine/postgres"
+          ]
+        }
+      ]
+    },
+    {
       "name": "sched-ext-integ",
       "needs_postgres": true,
+      "seed_sched_template": true,
       "needs_wasm": true,
-      "upload_objects": true,
       "test_threads": 6,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
@@ -90,49 +206,12 @@
       ]
     },
     {
-      "name": "admin",
-      "needs_postgres": true,
-      "needs_wasm": false,
-      "upload_objects": true,
-      "test_threads": 6,
-      "runs": [
-        {
-          "packages": [
-            "cc-lb-admin"
-          ],
-          "cargo_args": [],
-          "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
-          ]
-        }
-      ]
-    },
-    {
-      "name": "engine",
-      "needs_postgres": true,
-      "needs_wasm": false,
-      "upload_objects": true,
-      "test_threads": 4,
-      "runs": [
-        {
-          "packages": [
-            "cc-lb-engine",
-            "cc-lb-property-tests"
-          ],
-          "cargo_args": [],
-          "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
-          ],
-          "filter_expr": "not test(authn_rail_typestate_contracts)"
-        }
-      ]
-    },
-    {
-      "name": "sqlite-and-rest",
+      "name": "wasm-and-rest",
       "needs_postgres": false,
+      "seed_sched_template": false,
       "needs_wasm": true,
-      "upload_objects": true,
       "test_threads": 6,
+      "upload_objects": true,
       "runs": [
         {
           "packages": [
@@ -157,8 +236,6 @@
             "cc-lb-signer-anthropic-key",
             "cc-lb-signer-anthropic-oauth",
             "cc-lb-signer-vertex",
-            "cc-lb-storage-api",
-            "cc-lb-storage-sqlite",
             "cc-lb-upstream",
             "cc-lb-vertex-auth",
             "fake-anthropic",
@@ -169,7 +246,10 @@
             "wasmtime-filter-service-tier",
             "wasmtime-shape-passthrough"
           ],
-          "cargo_args": []
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
         }
       ]
     }

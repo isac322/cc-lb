@@ -39,13 +39,14 @@ jobs:
   changes:
     name: Detect code changes
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions:
       contents: read
       pull-requests: read
+      actions: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
-      cov_cache_hit: ${{ steps.cov-lookup.outputs.cache-matched-key != '' && 'true' || 'false' }}
+      cov_cache_hit: ${{ steps.cov-lookup.outputs.hit == 'true' && 'true' || 'false' }}
     steps:
       - name: Filter changed paths
         id: filter
@@ -101,13 +102,27 @@ jobs:
       - name: Check whether coverage workspace cache exists for lock hash
         id: cov-lookup
         if: steps.lockfiles.outputs.ok == 'true'
-        uses: actions/cache/restore@v6
-        with:
-          lookup-only: true
-          path: target/llvm-cov-target/debug
-          key: target-ws-v4-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-exact
-          restore-keys: |
-            target-ws-v4-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          prefix="target-ws-v4-${RUNNER_OS}-${RUNNER_ARCH}-cov-1.99.1-${LOCK_HASH}-"
+          if ! caches=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?key=${prefix}&per_page=100" 2>/dev/null); then
+            echo "::warning::gh api actions/caches lookup failed; falling back to cov_cache_hit=false"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          hit=$(jq -sr \
+            --arg cur "${GITHUB_REF}" \
+            --arg pr_ref "refs/pull/${PR_NUMBER}/merge" \
+            --arg base "refs/heads/${PR_BASE_REF}" \
+            --arg master "refs/heads/master" \
+            '[.[].actions_caches[]? | select(.ref == $cur or .ref == $pr_ref or ($base != "refs/heads/" and .ref == $base) or .ref == $master)] | if length > 0 then "true" else "false" end' \
+            <<<"$caches")
+          echo "hit=$hit" >> "$GITHUB_OUTPUT"
 
   fmt:
     needs: changes
@@ -518,34 +533,56 @@ jobs:
         run: scripts/validate-grafana-dashboard.sh
 
   nextest-cov-part:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - partition: server-1
+          - partition: server-lib
             needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: false
+          - partition: server-integ-1
+            needs_postgres: true
+            seed_sched_template: true
             needs_wasm: true
-          - partition: server-2
+          - partition: server-integ-2
             needs_postgres: true
+            seed_sched_template: true
             needs_wasm: true
-          - partition: storage-pg-conformance
+          - partition: engine-lib
+            needs_postgres: false
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: engine-integ
             needs_postgres: true
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: admin
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: false
+          - partition: storage-postgres
+            needs_postgres: true
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: storage-conformance-sqlite
+            needs_postgres: true
+            seed_sched_template: false
             needs_wasm: false
           - partition: sched-ext-integ
             needs_postgres: true
+            seed_sched_template: true
             needs_wasm: true
-          - partition: admin
-            needs_postgres: true
-            needs_wasm: false
-          - partition: engine
-            needs_postgres: true
-            needs_wasm: false
-          - partition: sqlite-and-rest
+          - partition: wasm-and-rest
             needs_postgres: false
+            seed_sched_template: false
             needs_wasm: true
     env:
       CARGO_BUILD_JOBS: "4"
@@ -553,23 +590,71 @@ jobs:
       CC_LB_TEST_READY_TIMEOUT_SECS: "240"
       SQLX_OFFLINE: "true"
     steps:
+      - name: Filter changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          code=false
+          page=1
+          while :; do
+            if ! resp=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100&page=${page}" 2>/dev/null); then
+              echo "::warning::gh api failed when listing PR files; falling back to code=true"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            count=$(jq 'length' <<<"$resp")
+            if [ "$count" -eq 0 ]; then
+              break
+            fi
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              case "$path" in
+                *.md|docs/*|LICENSE|.gitignore|.editorconfig) ;;
+                *)
+                  code=true
+                  break 2
+                  ;;
+              esac
+            done < <(jq -r '.[].filename' <<<"$resp")
+            if [ "$count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+          echo "code=$code" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
+        if: steps.filter.outputs.code != 'false'
       - uses: ./.github/actions/setup-rust-tools
+        if: steps.filter.outputs.code != 'false'
         with:
           profile: cov
+          save-caches: "false"
       - uses: ./.github/actions/setup-rust-target-cache
+        if: steps.filter.outputs.code != 'false'
         id: rust-cache
         with:
           cache-job-key: cov
           target-dir: target/llvm-cov-target/debug
           stable-build-metadata: "true"
+          save-caches: "false"
       - uses: ./.github/actions/setup-wasm-fixtures
-        if: ${{ matrix.needs_wasm }}
+        if: ${{ steps.filter.outputs.code != 'false' && matrix.needs_wasm }}
+        with:
+          save-caches: "false"
       - uses: ./.github/actions/start-native-postgres
-        if: ${{ matrix.needs_postgres }}
+        if: ${{ steps.filter.outputs.code != 'false' && matrix.needs_postgres }}
+        with:
+          async: "true"
+          seed-sched-template: "${{ matrix.seed_sched_template }}"
       - name: Run coverage partition ${{ matrix.partition }}
+        if: steps.filter.outputs.code != 'false'
         run: node scripts/run-cov-partition.mjs "${{ matrix.partition }}"
       - uses: actions/upload-artifact@v7
+        if: steps.filter.outputs.code != 'false'
         with:
           name: coverage-part-${{ matrix.partition }}
           path: target/cov-part-${{ matrix.partition }}.tar.zst
@@ -633,15 +718,37 @@ jobs:
       ${{
         !cancelled() &&
         needs.nextest-cov-part.result == 'success' &&
+        needs.nextest-cov-part.outputs.code != 'false' &&
         (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
       }}
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - name: Cache lightweight LLVM coverage binaries
+      - name: Fetch coverage merge scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p scripts .github/ci
+          fetch_raw() {
+            local p=$1
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${p}?ref=${GITHUB_SHA}" \
+              -H "Accept: application/vnd.github.raw" > "$p"
+          }
+          rc=0
+          fetch_raw scripts/export-merged-lcov.mjs & p1=$!
+          fetch_raw scripts/coverage-gate.sh & p2=$!
+          fetch_raw .github/ci/cov-partitions.json & p3=$!
+          wait "$p1" || rc=1
+          wait "$p2" || rc=1
+          wait "$p3" || rc=1
+          [ "$rc" -eq 0 ]
+          chmod +x scripts/coverage-gate.sh
+      - name: Restore lightweight LLVM coverage binaries
         id: llvm-bins-cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ~/.local/llvm-cov-bins
           key: llvm-cov-bins-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1
@@ -694,6 +801,12 @@ jobs:
           done
           "$out_dir/llvm-profdata" --version
           "$out_dir/llvm-cov" --version
+      - name: Save lightweight LLVM coverage binaries
+        if: steps.llvm-check.outputs.hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.local/llvm-cov-bins
+          key: llvm-cov-bins-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1
       - name: Export LLVM coverage tool paths
         run: |
           set -euo pipefail
@@ -726,6 +839,7 @@ jobs:
         with:
           name: coverage-lcov-merged
           path: target/coverage.lcov
+          compression-level: 1
           if-no-files-found: error
           retention-days: 1
 
@@ -825,7 +939,7 @@ jobs:
       - nextest-cov
       - e2e
     if: ${{ always() }}
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions: {}
     timeout-minutes: 5
     steps:
@@ -873,6 +987,7 @@ jobs:
           skip_ok() {
             case "$1" in
               changes) ! $is_pr ;;
+              nextest-cov-part) false ;;
               guard-crate-versions) $guard_skip_ok ;;
               seed-cov-cache) $docs_only || { $is_pr && [[ $changes == success && $code == true && $cov_cache_hit == true ]]; } ;;
               release-pr-artifacts)

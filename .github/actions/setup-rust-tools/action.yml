@@ -6,6 +6,10 @@ inputs:
     description: Optional compatibility profile label (ignored; unified toolchain + tools cache is used).
     required: false
     default: "all"
+  save-caches:
+    description: Whether to save the unified toolchain/tools cache on miss (set false on fan-out shards).
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -18,8 +22,19 @@ runs:
         echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
 
     - name: Cache unified Rust toolchain and Cargo CLI tools
+      if: inputs.save-caches != 'false'
       id: tools-cache
       uses: actions/cache@v6
+      with:
+        path: |
+          ${{ runner.temp }}/rustup
+          ~/.cargo/bin
+        key: rust-tools-v3-${{ runner.os }}-${{ runner.arch }}-1.99.1
+
+    - name: Restore unified Rust toolchain and Cargo CLI tools
+      if: inputs.save-caches == 'false'
+      id: tools-cache-restore
+      uses: actions/cache/restore@v6
       with:
         path: |
           ${{ runner.temp }}/rustup

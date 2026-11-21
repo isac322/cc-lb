@@ -463,7 +463,7 @@ fn png_pair() -> [String; 2] {
             // Valid 1024x1024 RGB, 8-bit, noninterlaced PNGs. Every scanline uses
             // filter zero and identical black pixels. Only zlib compression differs.
             let pixels = vec![0_u8; 1024 * (1 + 1024 * 3)];
-            let pair = [Compression::best(), Compression::none()].map(|compression| {
+            let pair = [Compression::fast(), Compression::none()].map(|compression| {
                 let mut encoder = ZlibEncoder::new(Vec::new(), compression);
                 encoder.write_all(&pixels).expect("compress RGB scanlines");
                 let compressed = encoder.finish().expect("finish RGB zlib stream");

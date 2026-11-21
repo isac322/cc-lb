@@ -17,8 +17,8 @@ use cc_lb_storage_api::upstream::{
 };
 use cc_lb_storage_api::{
     CacheKeepaliveConfig, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord,
-    CacheKeepaliveTurnRecord, ManagedKeyStore, MetaStore, PrincipalStore, RequestEvent,
-    RequestEventStore, Storage, UpstreamStore,
+    CacheKeepaliveTurnRecord, ManagedKeyStore, PrincipalStore, RequestEvent, RequestEventStore,
+    Storage, UpstreamStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use reqwest::{Client, Response};
@@ -29,6 +29,8 @@ use tokio::time::sleep;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(feature = "postgres")]
+use cc_lb_storage_api::MetaStore;
 #[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 #[cfg(feature = "postgres")]
@@ -1115,24 +1117,21 @@ impl Harness {
     }
 
     fn renewal_attempt_count(&self, prefix: &str) -> usize {
-        self.mock_events()
-            .iter()
-            .filter(|event| {
-                event.kind == "renewal"
-                    && event
-                        .body
-                        .get("system")
-                        .and_then(Value::as_array)
-                        .is_some_and(|blocks| {
-                            blocks.iter().any(|block| {
-                                block
-                                    .get("text")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|text| text.contains(prefix))
-                            })
+        self.mock.count_events(|event| {
+            event.kind == "renewal"
+                && event
+                    .body
+                    .get("system")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| text.contains(prefix))
                         })
-            })
-            .count()
+                    })
+        })
     }
 
     async fn storage_count(&self, cancelled: bool) -> i64 {
@@ -1266,14 +1265,10 @@ async fn setup_sqlite(
     let dir = tempdir().map_err(|error| HarnessError::Setup(error.to_string()))?;
     let path = dir.path().join("storage.sqlite");
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&format!("sqlite://{}", path.display()), clock.clone())
+        crate::common::templated_sqlite_storage(&path, clock.clone())
             .await
             .map_err(|error| HarnessError::Setup(error.to_string()))?,
     );
-    storage
-        .initialize()
-        .await
-        .map_err(|error| HarnessError::Setup(error.to_string()))?;
     let scheduler_path = path.with_extension("scheduler.sqlite");
     let scheduler_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -1316,7 +1311,7 @@ async fn setup_postgres(
         .await
         .map_err(|error| HarnessError::Setup(error.to_string()))?;
     if let Err(error) =
-        crate::common::create_postgres_database(&admin_pool, &database, "CC_LB_PG_APP_TEMPLATE")
+        crate::common::create_postgres_database(&admin_pool, &database, "CC_LB_PG_FULL_TEMPLATE")
             .await
     {
         admin_pool.close().await;
@@ -1454,8 +1449,8 @@ pub fn request_body(
             },
         ],
     });
-    let base = serde_json::to_vec(&value).expect("request JSON").len();
     if !oversized_prefix {
+        let base = serde_json::to_vec(&value).expect("request JSON").len();
         value["messages"][0]["content"][1]["text"] =
             Value::String("x".repeat(target_size.saturating_sub(base)));
     }

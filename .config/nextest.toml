@@ -20,8 +20,16 @@ filter = 'test(cache_keepalive_wall_clock)'
 priority = 100
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-server::integration) and test(/native_cached_input_pricing|native_image_admission/)'
+filter = 'binary_id(cc-lb-server::integration) and test(/sim_principal_b_multi_agent_interleaving|sim_principal_a_|scheduler_price_catalog_retry|native_cached_input_pricing|native_image_admission/)'
 priority = 100
+
+[[profile.default.overrides]]
+filter = 'package(cc-lb-server) and kind(lib) and test(postgres_idle_keepalive_worker_renews_session_before_expiry)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-scheduler::integration) and test(worker_restart_lifetime_postgres)'
+priority = 95
 
 [[profile.default.overrides]]
 filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(usage_rollup|upstream_subscription_quota_aggregate_store_postgres)/)'

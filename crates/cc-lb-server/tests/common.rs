@@ -33,22 +33,73 @@ pub async fn create_postgres_database(
     database: &str,
     template_env: &str,
 ) -> Result<(), sqlx::Error> {
-    const TEMPLATE_CLONE_LOCK: i64 = 0x4343_4C42_5047_544D;
-    if let Ok(template) = std::env::var(template_env)
-        && !template.trim().is_empty()
-    {
+    let selected = std::env::var(template_env)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .map(|base| (template_env, base))
+        .or_else(|| {
+            if template_env == "CC_LB_PG_FULL_TEMPLATE" {
+                std::env::var("CC_LB_PG_APP_TEMPLATE")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .map(|base| ("CC_LB_PG_APP_TEMPLATE", base))
+            } else {
+                None
+            }
+        });
+    if let Some((effective_env, template_base)) = selected {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash as _, Hasher as _};
+
+        let pool_size = std::env::var(format!("{effective_env}_POOL_SIZE"))
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        let slot = {
+            let mut hasher = DefaultHasher::new();
+            database.hash(&mut hasher);
+            (hasher.finish() as usize) % pool_size
+        };
+        let template_name = if pool_size > 1 {
+            format!("{template_base}_{slot}")
+        } else {
+            template_base.clone()
+        };
+        let lock_base = if template_base.contains("sched") {
+            0x4343_4C42_5343_0000_i64
+        } else if template_base.contains("full") {
+            0x4343_4C42_4655_0000_i64
+        } else {
+            0x4343_4C42_0000_0000_i64
+        };
+        let lock_key = lock_base + i64::try_from(slot).unwrap_or(0);
         let mut conn = admin_pool.acquire().await?;
         sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(TEMPLATE_CLONE_LOCK)
+            .bind(lock_key)
             .execute(&mut *conn)
             .await?;
-        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"CREATE DATABASE "{database}" TEMPLATE "{template}" STRATEGY = WAL_LOG"#
-        )))
-        .execute(&mut *conn)
-        .await;
+        let wal_sql = format!(
+            r#"CREATE DATABASE "{database}" TEMPLATE "{template_name}" STRATEGY = WAL_LOG"#
+        );
+        let res = match sqlx::query(sqlx::AssertSqlSafe(wal_sql))
+            .execute(&mut *conn)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let fallback_sql =
+                    format!(r#"CREATE DATABASE "{database}" TEMPLATE "{template_name}""#);
+                sqlx::query(sqlx::AssertSqlSafe(fallback_sql))
+                    .execute(&mut *conn)
+                    .await
+                    .map(|_| ())
+            }
+        };
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(TEMPLATE_CLONE_LOCK)
+            .bind(lock_key)
             .execute(&mut *conn)
             .await;
         res?;
@@ -73,6 +124,55 @@ pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection
         .execute(&mut connection)
         .await?;
     Ok(connection)
+}
+
+#[cfg(feature = "postgres")]
+pub struct IsolatedPostgresDb {
+    admin_url: String,
+    database: String,
+    pub url: String,
+}
+
+#[cfg(feature = "postgres")]
+impl IsolatedPostgresDb {
+    pub async fn create(
+        admin_url: &str,
+        prefix: &str,
+        template_env: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let database = format!("{prefix}_{}", Uuid::new_v4().simple());
+        let admin_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(admin_url)
+            .await?;
+        if let Err(error) = create_postgres_database(&admin_pool, &database, template_env).await {
+            admin_pool.close().await;
+            return Err(error.into());
+        }
+        admin_pool.close().await;
+        let mut parsed = Url::parse(admin_url)?;
+        parsed.set_path(&format!("/{database}"));
+        Ok(Self {
+            admin_url: admin_url.to_owned(),
+            database,
+            url: parsed.to_string(),
+        })
+    }
+
+    pub async fn drop(self) -> Result<(), sqlx::Error> {
+        let admin_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.admin_url)
+            .await?;
+        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.database
+        )))
+        .execute(&admin_pool)
+        .await;
+        admin_pool.close().await;
+        res.map(|_| ())
+    }
 }
 
 /// Runtime environment variable that Cargo-invoked tests inherit without
@@ -911,7 +1011,13 @@ pub async fn templated_sqlite_storage(
 ) -> StorageResult<SqliteStorage> {
     static TEMPLATE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
     let bytes = TEMPLATE_BYTES.get_or_init(|| {
-        std::thread::spawn(|| {
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+            && let Ok(cached) = std::fs::read(&shared)
+        {
+            return cached;
+        }
+        let generated = std::thread::spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -944,7 +1050,22 @@ pub async fn templated_sqlite_storage(
             })
         })
         .join()
-        .expect("template sqlite thread")
+        .expect("template sqlite thread");
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+        {
+            let shared_path = PathBuf::from(shared);
+            if let Some(parent) = shared_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp_path =
+                shared_path.with_file_name(format!("template.sqlite.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp_path, &generated).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &shared_path);
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+        }
+        generated
     });
     std::fs::write(path, bytes).map_err(|error| StorageError::Fatal {
         message: format!("write templated sqlite {}: {error}", path.display()),

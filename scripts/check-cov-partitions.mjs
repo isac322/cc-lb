@@ -17,6 +17,7 @@ export function extractGatedPackages(gateScriptText) {
 }
 
 function targetKindForTestSelection(target) {
+  if (target.test === false) return null;
   const kinds = new Set(target.kind ?? []);
   if (kinds.has('lib') || kinds.has('rlib') || kinds.has('cdylib') || kinds.has('proc-macro')) {
     return 'lib';
@@ -91,6 +92,7 @@ export function validatePartitions(config, metadata, gatedPackages) {
   }
 
   const partitionNames = new Set();
+  const seenPackages = new Set();
   const seenTargetsByPkg = new Map();
   const shardGroups = new Map();
 
@@ -159,6 +161,8 @@ export function validatePartitions(config, metadata, gatedPackages) {
             errors.push(`package '${pkgName}' in partition '${part.name}' is also listed in excluded`);
           } else if (!workspacePkgs.has(pkgName)) {
             errors.push(`package '${pkgName}' in partition '${part.name}' is not a workspace member`);
+          } else {
+            seenPackages.add(pkgName);
           }
         }
         // Only record targets from shard 1 to avoid flagging sibling shards as duplicate coverage.
@@ -177,6 +181,7 @@ export function validatePartitions(config, metadata, gatedPackages) {
           errors.push(`package '${pkgName}' in partition '${part.name}' is not a workspace member`);
           continue;
         }
+        seenPackages.add(pkgName);
         if (seenPkgInPart.has(pkgName) && cargoArgs.length === 0) {
           errors.push(`package '${pkgName}' appears multiple times with default targets in '${part.name}'`);
         }
@@ -216,14 +221,19 @@ export function validatePartitions(config, metadata, gatedPackages) {
 
   for (const [pkgName, pkg] of workspacePkgs) {
     if (excluded.has(pkgName)) continue;
+    if (!seenPackages.has(pkgName)) {
+      errors.push(`workspace package '${pkgName}' is missing from all partitions`);
+      continue;
+    }
     const expectedTargets = new Set();
     for (const t of pkg.targets ?? []) {
       const tk = targetKindForTestSelection(t);
       if (tk) expectedTargets.add(tk);
     }
+    if (expectedTargets.size === 0) continue;
     const covered = seenTargetsByPkg.get(pkgName) ?? new Set();
     if (covered.size === 0) {
-      errors.push(`workspace package '${pkgName}' is missing from all partitions`);
+      errors.push(`workspace package '${pkgName}' has no testable targets covered by any partition`);
       continue;
     }
     for (const tk of expectedTargets) {
@@ -259,7 +269,7 @@ function main() {
     const ciText = readFileSync(ciPath, 'utf8');
     const matrixMatches = [
       ...ciText.matchAll(
-        /- partition:\s*([a-z0-9-]+)\s*\n\s*needs_postgres:\s*(true|false)\s*\n\s*needs_wasm:\s*(true|false)/g,
+        /- partition:\s*([a-z0-9-]+)\s*\n\s*needs_postgres:\s*(true|false)\s*\n\s*seed_sched_template:\s*(true|false)\s*\n\s*needs_wasm:\s*(true|false)/g,
       ),
     ];
     if (matrixMatches.length === 0) {
@@ -268,11 +278,13 @@ function main() {
       const ciMatrix = matrixMatches.map((m) => ({
         name: m[1],
         needs_postgres: m[2] === 'true',
-        needs_wasm: m[3] === 'true',
+        seed_sched_template: m[3] === 'true',
+        needs_wasm: m[4] === 'true',
       }));
       const expectedMatrix = (config.partitions ?? []).map((p) => ({
         name: p.name,
         needs_postgres: Boolean(p.needs_postgres),
+        seed_sched_template: Boolean(p.seed_sched_template),
         needs_wasm: Boolean(p.needs_wasm),
       }));
       if (JSON.stringify(ciMatrix) !== JSON.stringify(expectedMatrix)) {

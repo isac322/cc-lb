@@ -840,6 +840,15 @@ async fn initialized_storage(url: &str) -> Result<(Fixture, PostgresStorage)> {
     Ok((fixture, storage))
 }
 
+async fn reset_keepalive_tables(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "TRUNCATE TABLE cache_keepalive_evidence, cache_keepalive_decisions, cache_keepalive_turns, cache_keepalive_sessions, request_events_v1 RESTART IDENTITY CASCADE",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 fn query(principal_id: &str, limit: u32) -> CacheKeepaliveSessionListQuery {
     CacheKeepaliveSessionListQuery {
         principal_id: principal_id.to_owned(),
@@ -3292,6 +3301,8 @@ fn activity_evidence_batches_session_hashes_and_deduplicates_both_identities() {
 #[test]
 fn counterfactual_summary_classifies_natural_expiry_and_caps_saved_tokens() {
     run_postgres_case("counterfactual summary", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let mut first = true;
         // (follow-up offset, explicit anchor, renewal read, renewal creation,
         //  expected avoided tokens, expected not-needed cycles, expected unknown cycles)
         for (name, follow_up, anchor, read, creation, avoided, not_needed, unknown) in [
@@ -3368,7 +3379,10 @@ fn counterfactual_summary_classifies_natural_expiry_and_caps_saved_tokens() {
                 0,
             ),
         ] {
-            let (fixture, storage) = initialized_storage(&url).await?;
+            if !first {
+                reset_keepalive_tables(storage.pool()).await?;
+            }
+            first = false;
             let cycle = Uuid::from_u128(90_001);
             let mut replace = request(name, 1_000, "agent-in-turn");
             replace.cycle_id = cycle;
@@ -3436,9 +3450,8 @@ fn counterfactual_summary_classifies_natural_expiry_and_caps_saved_tokens() {
                     .filter(|row| row.evidence_kind == "follow_up")
                     .all(|row| row.cycle_anchor_ms.is_none())
             );
-            fixture.drop_schema().await?;
         }
-        Ok(())
+        fixture.drop_schema().await
     });
 }
 
@@ -3496,6 +3509,8 @@ fn counterfactual_summary_credits_earliest_matching_renewal_and_all_spend() {
 #[test]
 fn counterfactual_summary_legacy_anchor_uses_session_snapshot_without_rewriting_rows() {
     run_postgres_case("legacy counterfactual anchor", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let mut first = true;
         for (index, ttl, lead) in [
             (0, CacheTtl::Ttl5m, 30),
             (1, CacheTtl::Ttl30m, 30),
@@ -3503,7 +3518,10 @@ fn counterfactual_summary_legacy_anchor_uses_session_snapshot_without_rewriting_
             (3, CacheTtl::Ttl12h, 300),
         ] {
             for snapshot_present in [true, false] {
-                let (fixture, storage) = initialized_storage(&url).await?;
+                if !first {
+                    reset_keepalive_tables(storage.pool()).await?;
+                }
+                first = false;
                 let cycle = Uuid::from_u128(90_010 + index);
                 let mut replace = request("legacy-anchor", 1_000, "agent-in-turn");
                 replace.cycle_id = cycle;
@@ -3592,10 +3610,9 @@ fn counterfactual_summary_legacy_anchor_uses_session_snapshot_without_rewriting_
                     persisted_anchors, 0,
                     "read-time fallback must not rewrite stored evidence"
                 );
-                fixture.drop_schema().await?;
             }
         }
-        Ok(())
+        fixture.drop_schema().await
     });
 }
 
@@ -3748,9 +3765,14 @@ fn counterfactual_summary_first_follow_up_remains_not_needed_after_purge() {
 #[test]
 fn counterfactual_summary_open_cycles_with_follow_up_are_not_pending() {
     run_postgres_case("open cycle follow-up settles pending", |url| async move {
+        let (fixture, storage) = initialized_storage(&url).await?;
+        let mut first = true;
         for in_request in [false, true] {
             for saved in [false, true] {
-                let (fixture, storage) = initialized_storage(&url).await?;
+                if !first {
+                    reset_keepalive_tables(storage.pool()).await?;
+                }
+                first = false;
                 let anchor = live_evidence_base_secs() - if saved { 550 } else { 270 };
                 let cycle = Uuid::from_u128(91_002);
                 let mut replace = request("open-followed-cycle", anchor, "agent-in-turn");
@@ -3804,10 +3826,9 @@ fn counterfactual_summary_open_cycles_with_follow_up_are_not_pending() {
                     summary.total_spent_micros,
                     if saved { 12_000 } else { 6_000 }
                 );
-                fixture.drop_schema().await?;
             }
         }
-        Ok(())
+        fixture.drop_schema().await
     });
 }
 
@@ -3870,8 +3891,11 @@ fn counterfactual_summary_groups_sum_identically_sized_saved_cycles() {
 #[test]
 fn counterfactual_summary_legacy_delay_has_one_second_minimum() {
     run_postgres_case("legacy delay minimum", |url| async move {
-        for lead in [300_u32, 301] {
-            let (fixture, storage) = initialized_storage(&url).await?;
+        let (fixture, storage) = initialized_storage(&url).await?;
+        for (idx, lead) in [300_u32, 301].into_iter().enumerate() {
+            if idx > 0 {
+                reset_keepalive_tables(storage.pool()).await?;
+            }
             let cycle = Uuid::from_u128(91_020);
             let mut projection =
                 economics_projection("minimum-delay-renewal", Some(cycle), 1_270, "hit", 6_000);
@@ -3901,9 +3925,8 @@ fn counterfactual_summary_legacy_delay_has_one_second_minimum() {
             assert_eq!(summary.not_needed_cycles, 0);
             assert_eq!(summary.groups.len(), 1);
             assert_eq!(summary.groups[0].avoided_cache_read_tokens, 20_000);
-            fixture.drop_schema().await?;
         }
-        Ok(())
+        fixture.drop_schema().await
     });
 }
 
@@ -3964,8 +3987,11 @@ fn legacy_cycle_anchor_ignores_replacement_session_snapshot() {
     run_postgres_case(
         "legacy anchor survives replacement session",
         |url| async move {
-            for own_snapshot in [true, false] {
-                let (fixture, storage) = initialized_storage(&url).await?;
+            let (fixture, storage) = initialized_storage(&url).await?;
+            for (idx, own_snapshot) in [true, false].into_iter().enumerate() {
+                if idx > 0 {
+                    reset_keepalive_tables(storage.pool()).await?;
+                }
                 let cycle = Uuid::from_u128(92_001);
                 let mut original = request("replaced-legacy-session", 1_000, "agent-in-turn");
                 original.cycle_id = cycle;
@@ -4024,9 +4050,8 @@ fn legacy_cycle_anchor_ignores_replacement_session_snapshot() {
                     .find(|row| row.evidence_kind == "renewal")
                     .expect("renewal");
                 assert_eq!(renewal.cycle_anchor_ms, own_snapshot.then_some(1_000_000));
-                fixture.drop_schema().await?;
             }
-            Ok(())
+            fixture.drop_schema().await
         },
     );
 }

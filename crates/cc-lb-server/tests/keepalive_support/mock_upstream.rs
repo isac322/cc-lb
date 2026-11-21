@@ -35,7 +35,7 @@ pub struct MockEvent {
     pub cache_key: String,
     pub synthetic: bool,
     pub hit: bool,
-    pub body: Value,
+    pub body: Arc<Value>,
     pub anthropic_beta: Option<String>,
     pub anthropic_version: Option<String>,
     pub status: u16,
@@ -176,6 +176,12 @@ impl MockAnthropic {
     }
     pub fn events(&self) -> Vec<MockEvent> {
         lock(&self.state.events).clone()
+    }
+    pub fn count_events(&self, mut pred: impl FnMut(&MockEvent) -> bool) -> usize {
+        lock(&self.state.events)
+            .iter()
+            .filter(|event| pred(event))
+            .count()
     }
     pub fn last(&self, kind: &'static str) -> Option<MockEvent> {
         lock(&self.state.events)
@@ -336,6 +342,7 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
         hit
     };
     let cached_tokens = prefix_tokens(&value);
+    let body = Arc::new(value);
     let event = MockEvent {
         kind,
         credential,
@@ -344,7 +351,7 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
         cache_key: deepest,
         synthetic,
         hit,
-        body: value.clone(),
+        body: Arc::clone(&body),
         anthropic_beta: header_value(&headers, "anthropic-beta"),
         anthropic_version: header_value(&headers, "anthropic-version"),
         status: 200,
@@ -352,9 +359,9 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
     };
     record(&state, event);
     if synthetic {
-        let body = lock(&state.next_renewal_response).take();
-        if let Some(body) = body {
-            return (StatusCode::OK, Json(body)).into_response();
+        let override_body = lock(&state.next_renewal_response).take();
+        if let Some(override_body) = override_body {
+            return (StatusCode::OK, Json(override_body)).into_response();
         }
     }
     let gate = if synthetic {
@@ -369,12 +376,12 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
                 let _ = gate.release.await;
             }
             ProxyPause::Streaming => {
-                assert_eq!(value["stream"], true, "streaming gate requires SSE");
-                return gated_stream(response_body(&value, &model, now, hit, cached_tokens), gate);
+                assert_eq!(body["stream"], true, "streaming gate requires SSE");
+                return gated_stream(response_body(&body, &model, now, hit, cached_tokens), gate);
             }
         }
     }
-    response(&value, &model, now, hit, cached_tokens)
+    response(&body, &model, now, hit, cached_tokens)
 }
 
 fn record_rejection(
@@ -398,7 +405,7 @@ fn record_rejection(
         cache_key: String::new(),
         synthetic: body.get("max_tokens").and_then(Value::as_u64) == Some(0),
         hit: false,
-        body,
+        body: Arc::new(body),
         anthropic_beta: header_value(headers, "anthropic-beta"),
         anthropic_version: header_value(headers, "anthropic-version"),
         status,

@@ -9,11 +9,13 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
+#[derive(Clone)]
 enum Backend {
     Database { db: String },
     Schema { schema: String, admin_pool: PgPool },
 }
 
+#[derive(Clone)]
 pub struct IsolatedPg {
     backend: Backend,
     admin_url: String,
@@ -100,6 +102,19 @@ impl IsolatedPg {
             schema_name: "public".to_owned(),
             application_name: None,
         })
+    }
+
+    /// Creates a pre-migrated isolated database when `CC_LB_PG_APP_TEMPLATE`
+    /// is configured, or falls back to an empty isolated database (preserving
+    /// DB-scoped `pg_snapshot_xmin` / advisory lock isolation locally).
+    pub async fn create_templated_or_empty_db(url: &str) -> Result<Self> {
+        if std::env::var("CC_LB_PG_APP_TEMPLATE")
+            .ok()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Self::create_templated(url).await;
+        }
+        Self::create_empty(url).await
     }
 
     /// Creates an empty isolated Postgres database (no migrations applied) so

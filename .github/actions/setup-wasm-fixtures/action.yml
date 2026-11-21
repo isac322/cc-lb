@@ -1,6 +1,12 @@
 name: Setup WASM plugin test fixtures
 description: Restore or build prebuilt wasm32-unknown-unknown fixture plugins.
 
+inputs:
+  save-caches:
+    description: Whether to save WASM fixtures cache on miss (set false on fan-out shards).
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
@@ -57,14 +63,23 @@ runs:
         echo "hash=$lock_hash" >> "$GITHUB_OUTPUT"
 
     - name: Cache prebuilt WASM plugin fixtures
+      if: inputs.save-caches != 'false'
       id: wasm-cache
       uses: actions/cache@v6
       with:
         path: target/wasm32-unknown-unknown/release/*.wasm
         key: wasm-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('plugins/**', 'crates/cc-lb-pdk-wasmtime/**', 'crates/cc-lb-pdk-wasmtime-macros/**', 'crates/cc-lb-plugin-wire/**') }}-${{ steps.wasm-lock.outputs.hash }}
 
+    - name: Restore prebuilt WASM plugin fixtures
+      if: inputs.save-caches == 'false'
+      id: wasm-cache-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: target/wasm32-unknown-unknown/release/*.wasm
+        key: wasm-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('plugins/**', 'crates/cc-lb-pdk-wasmtime/**', 'crates/cc-lb-pdk-wasmtime-macros/**', 'crates/cc-lb-plugin-wire/**') }}-${{ steps.wasm-lock.outputs.hash }}
+
     - name: Build WASM plugin fixtures on cache miss
-      if: steps.wasm-cache.outputs.cache-hit != 'true'
+      if: steps.wasm-cache.outputs.cache-hit != 'true' && steps.wasm-cache-restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail

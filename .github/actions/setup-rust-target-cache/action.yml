@@ -21,6 +21,10 @@ inputs:
     description: Whether to fix GIT_SHA and SOURCE_DATE_EPOCH for reproducible caching.
     required: false
     default: "true"
+  save-caches:
+    description: Whether to save the Cargo registry cache on miss (set false on fan-out shards).
+    required: false
+    default: "true"
 
 outputs:
   target-cache-hit:
@@ -79,7 +83,21 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Cache shared Cargo registry and git db
+      if: inputs.save-caches != 'false'
       uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+        key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore shared Cargo registry and git db
+      if: inputs.save-caches == 'false'
+      uses: actions/cache/restore@v6
       with:
         path: |
           ~/.cargo/registry/index

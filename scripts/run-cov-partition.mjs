@@ -137,7 +137,7 @@ function runPipeTarZstd(stageDir, archivePath) {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'inherit'],
     });
-    const zstd = spawn('zstd', ['-3', '-T0', '-f', '-o', archivePath], {
+    const zstd = spawn('zstd', ['-1', '-T0', '-f', '-o', archivePath], {
       cwd: ROOT,
       stdio: ['pipe', 'inherit', 'inherit'],
     });
@@ -168,7 +168,12 @@ function runPipeTarZstd(stageDir, archivePath) {
   });
 }
 
-async function stripObjects(binPaths, objsDir, profdataPath, tools) {
+async function punchHolesIfLinux(filePath) {
+  if (process.platform !== 'linux') return;
+  await execFileAsync('fallocate', ['-d', filePath]).catch(() => {});
+}
+
+async function stripObjects(binPaths, objsDir, tools) {
   mkdirSync(objsDir, { recursive: true });
   const usedNames = new Map();
   const mapped = binPaths.map((binPath) => {
@@ -189,43 +194,25 @@ async function stripObjects(binPaths, objsDir, profdataPath, tools) {
       outPath,
     ]);
     chmodSync(outPath, 0o755);
+    await punchHolesIfLinux(outPath);
   };
 
   const stripWithLlvmStrip = async ({ binPath, outPath }) => {
     await execFileAsync(tools.strip, ['--strip-all', binPath, '-o', outPath]);
     chmodSync(outPath, 0o755);
+    await punchHolesIfLinux(outPath);
   };
 
   let stripFn = stripWithObjcopy;
   if (mapped.length > 0) {
-    let smokeOk = false;
     try {
       await stripWithObjcopy(mapped[0]);
-      await execFileAsync(tools.cov, [
-        'export',
-        '--summary-only',
-        `-instr-profile=${profdataPath}`,
-        '-object',
-        mapped[0].outPath,
-      ]);
-      smokeOk = true;
     } catch (err) {
       console.warn(
-        `run-cov-partition: llvm-objcopy --only-section failed llvm-cov validation (${err.message}); falling back to llvm-strip --strip-all`,
+        `run-cov-partition: llvm-objcopy --only-section failed (${err.message}); falling back to llvm-strip --strip-all`,
       );
       stripFn = stripWithLlvmStrip;
       await stripWithLlvmStrip(mapped[0]);
-      await execFileAsync(tools.cov, [
-        'export',
-        '--summary-only',
-        `-instr-profile=${profdataPath}`,
-        '-object',
-        mapped[0].outPath,
-      ]);
-      smokeOk = true;
-    }
-    if (!smokeOk) {
-      throw new Error('Failed to validate stripped coverage object');
     }
   }
 
@@ -233,6 +220,32 @@ async function stripObjects(binPaths, objsDir, profdataPath, tools) {
     await mapLimit(mapped.slice(1), 4, stripFn);
   }
   return mapped.length;
+}
+
+async function waitForPostgresReady() {
+  const readyFile = process.env.CC_LB_PG_READY_FILE;
+  const failFile = process.env.CC_LB_PG_FAIL_FILE;
+  if (!readyFile && !failFile) return;
+
+  const logFile = process.env.CC_LB_PG_SETUP_LOG;
+  const deadline = Date.now() + 240_000;
+  const readLogTail = () => {
+    if (!logFile || !existsSync(logFile)) return '';
+    const lines = readFileSync(logFile, 'utf8').trimEnd().split('\n');
+    return `\n--- ${logFile} tail ---\n${lines.slice(-40).join('\n')}`;
+  };
+
+  while (Date.now() < deadline) {
+    if (failFile && existsSync(failFile)) {
+      const msg = readFileSync(failFile, 'utf8').trim();
+      throw new Error(`Async PostgreSQL bootstrap failed: ${msg}${readLogTail()}`);
+    }
+    if (readyFile && existsSync(readyFile)) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`Timed out waiting 240s for PostgreSQL readiness (${readyFile})${readLogTail()}`);
 }
 
 async function main() {
@@ -259,18 +272,20 @@ async function main() {
   const shmBase = existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
   const shmTmp = path.join(shmBase, 'cc-lb-tmp');
   const profrawDir = path.join(shmBase, `cc-lb-profraw-${partName}`);
+  const sqliteTemplateDir = path.join(shmBase, `cc-lb-sqlite-tpl-${partName}`);
+  const metaDir = path.join(shmBase, `cc-lb-cov-meta-${partName}`);
+  const stageDir = path.join(shmBase, `cc-lb-cov-stage-${partName}`);
   mkdirSync(shmTmp, { recursive: true });
-  rmSync(profrawDir, { recursive: true, force: true });
-  mkdirSync(profrawDir, { recursive: true });
+  for (const dir of [profrawDir, sqliteTemplateDir, metaDir, stageDir]) {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+  }
+  const sqliteTemplatePath = path.join(sqliteTemplateDir, 'template.sqlite');
 
   const targetDir = path.join(ROOT, 'target');
   const llvmTargetDir = path.join(targetDir, 'llvm-cov-target');
   mkdirSync(targetDir, { recursive: true });
   mkdirSync(llvmTargetDir, { recursive: true });
-
-  const stageDir = path.join(shmBase, `cc-lb-cov-stage-${partName}`);
-  rmSync(stageDir, { recursive: true, force: true });
-  mkdirSync(stageDir, { recursive: true });
 
   const baseEnv = {
     ...process.env,
@@ -289,21 +304,6 @@ async function main() {
   const extraFeatures = Array.isArray(run.extra_features) ? run.extra_features.filter(Boolean) : [];
   const featureArgs = extraFeatures.length > 0 ? ['--features', extraFeatures.join(',')] : [];
   const testThreads = Number.isInteger(part.test_threads) && part.test_threads > 0 ? part.test_threads : 4;
-  const nextestArgs = [
-    'nextest',
-    'run',
-    ...pkgArgs,
-    ...cargoArgs,
-    '--all-features',
-    ...featureArgs,
-    `--test-threads=${testThreads}`,
-  ];
-  if (run.filter_expr) {
-    nextestArgs.push('-E', run.filter_expr);
-  }
-  for (const narg of run.nextest_args ?? []) {
-    nextestArgs.push(narg);
-  }
 
   try {
     const showEnvOut = execFileSync('cargo', ['llvm-cov', 'show-env', '--sh'], {
@@ -315,12 +315,75 @@ async function main() {
       ...baseEnv,
       ...parseShowEnv(showEnvOut),
       CARGO_TARGET_DIR: llvmTargetDir,
+      CC_LB_SQLITE_TEMPLATE_PATH: sqliteTemplatePath,
       LLVM_PROFILE_FILE: path.join(profrawDir, `part-${partName}-%4m.profraw`),
     };
 
-    console.log(`::group::cargo ${nextestArgs.join(' ')}`);
+    const cargoMetadataPath = path.join(metaDir, 'cargo-metadata.json');
+    const binariesMetadataPath = path.join(metaDir, 'binaries-metadata.json');
+    const cargoMetadataJson = execFileSync('cargo', ['metadata', '--format-version', '1'], {
+      cwd: ROOT,
+      env: covEnv,
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    writeFileSync(cargoMetadataPath, cargoMetadataJson, 'utf8');
+
+    const listArgs = [
+      'nextest',
+      'list',
+      '--cargo-metadata',
+      cargoMetadataPath,
+      '--list-type',
+      'binaries-only',
+      '--message-format',
+      'json',
+      ...pkgArgs,
+      ...cargoArgs,
+      '--all-features',
+      ...featureArgs,
+    ];
+    console.log(`::group::cargo ${listArgs.join(' ')}`);
+    let listStdout;
     try {
-      execFileSync('cargo', nextestArgs, { cwd: ROOT, env: covEnv, stdio: 'inherit' });
+      listStdout = execFileSync('cargo', listArgs, {
+        cwd: ROOT,
+        env: covEnv,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+    } finally {
+      console.log('::endgroup::');
+    }
+    writeFileSync(binariesMetadataPath, listStdout, 'utf8');
+    const binariesJson = JSON.parse(listStdout);
+    const binPaths = collectBinaryPaths(binariesJson);
+    if (binPaths.length === 0) {
+      throw new Error(`No built binaries discovered for partition '${partName}'`);
+    }
+
+    await waitForPostgresReady();
+
+    const nextestRunArgs = [
+      'nextest',
+      'run',
+      '--cargo-metadata',
+      cargoMetadataPath,
+      '--binaries-metadata',
+      binariesMetadataPath,
+      `--test-threads=${testThreads}`,
+    ];
+    if (run.filter_expr) {
+      nextestRunArgs.push('-E', run.filter_expr);
+    }
+    for (const narg of run.nextest_args ?? []) {
+      nextestRunArgs.push(narg);
+    }
+
+    console.log(`::group::cargo ${nextestRunArgs.join(' ')}`);
+    try {
+      execFileSync('cargo', nextestRunArgs, { cwd: ROOT, env: covEnv, stdio: 'inherit' });
     } finally {
       console.log('::endgroup::');
     }
@@ -331,42 +394,21 @@ async function main() {
     }
 
     const profdataPath = path.join(stageDir, `part-${partName}.profdata`);
-    const profrawListPath = path.join(stageDir, 'profraw-files.txt');
+    const profrawListPath = path.join(metaDir, 'profraw-files.txt');
     writeFileSync(profrawListPath, `${profrawFiles.join('\n')}\n`, 'utf8');
-    execFileSync(tools.profdata, ['merge', '-sparse', '-f', profrawListPath, '-o', profdataPath], {
-      cwd: ROOT,
-      stdio: 'inherit',
-    });
-    rmSync(profrawListPath, { force: true });
-    removeProfrawFiles([profrawDir, targetDir, llvmTargetDir]);
 
-    let objCount = 0;
-    if (part.upload_objects !== false) {
-      const listArgs = [
-        'nextest',
-        'list',
-        '--list-type',
-        'binaries-only',
-        '--message-format',
-        'json',
-        ...pkgArgs,
-        ...cargoArgs,
-        '--all-features',
-        ...featureArgs,
-      ];
-      const listStdout = execFileSync('cargo', listArgs, {
-        cwd: ROOT,
-        env: covEnv,
-        encoding: 'utf8',
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      const binariesJson = JSON.parse(listStdout);
-      const binPaths = collectBinaryPaths(binariesJson);
-      if (binPaths.length === 0) {
-        throw new Error(`No built binaries discovered for partition '${partName}'`);
-      }
-      objCount = await stripObjects(binPaths, path.join(stageDir, 'objs'), profdataPath, tools);
-    }
+    const mergeTask = execFileAsync(
+      tools.profdata,
+      ['merge', '-sparse', '-f', profrawListPath, '-o', profdataPath],
+      { cwd: ROOT, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const stripTask =
+      part.upload_objects !== false
+        ? stripObjects(binPaths, path.join(stageDir, 'objs'), tools)
+        : Promise.resolve(0);
+
+    const [, objCount] = await Promise.all([mergeTask, stripTask]);
+    removeProfrawFiles([profrawDir, targetDir, llvmTargetDir]);
 
     const archivePath = path.join(targetDir, `cov-part-${partName}.tar.zst`);
     await runPipeTarZstd(stageDir, archivePath);
@@ -376,6 +418,8 @@ async function main() {
     );
   } finally {
     rmSync(stageDir, { recursive: true, force: true });
+    rmSync(metaDir, { recursive: true, force: true });
+    rmSync(sqliteTemplateDir, { recursive: true, force: true });
     rmSync(profrawDir, { recursive: true, force: true });
   }
 }
