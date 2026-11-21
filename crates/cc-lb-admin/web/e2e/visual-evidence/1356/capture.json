@@ -1,0 +1,42 @@
+{
+  "pr": 1356,
+  "afterSource": "7648cdb4b12073c8c0ef2a371447ec607c105799",
+  "surface": "Vertex AI upstream connect and detail",
+  "widths": [
+    390,
+    768,
+    1440
+  ],
+  "height": 900,
+  "fixture": "Vertex AI upstreams (API key and Google credential) created by a real-credential end-to-end run against a test Google Cloud project",
+  "backend": "Real SQLite admin API served by a local cc-lb build of afterSource; the Google Cloud project id is rendered as example-project",
+  "captureScript": "Out-of-tree Playwright (Chromium) script: opens each surface at each width, replaces the project id in rendered text, scrolls the credential section into view, and checks scrollWidth",
+  "browser": "Chromium",
+  "checks": [
+    {
+      "name": "No horizontal overflow",
+      "outcome": "passed",
+      "details": "All 15 captures: document.scrollingElement.scrollWidth <= innerWidth; scrollWidth equaled innerWidth at 390, 768, and 1440."
+    },
+    {
+      "name": "Project id redacted",
+      "outcome": "passed",
+      "details": "The real project id is replaced with example-project in rendered text before every screenshot."
+    },
+    {
+      "name": "Credential file is write-only",
+      "outcome": "passed",
+      "details": "Empty textarea shows Paste credential JSON; contents stay hidden and Stored encrypted. cc-lb never shows it again."
+    },
+    {
+      "name": "Credential section details visible",
+      "outcome": "passed",
+      "details": "Credential section scrolled into view; type, principal hint, quota-project-not-set hint, least-privilege warning, verdict, token health, and Replace credential are visible."
+    },
+    {
+      "name": "No secrets in screenshots",
+      "outcome": "passed",
+      "details": "All 15 PNGs were inspected; no token, API key, credential JSON, or real project id appears."
+    }
+  ]
+}

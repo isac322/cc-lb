@@ -21,6 +21,9 @@ use uuid::Uuid;
 fn stores(storage: Arc<SqliteStorage>) -> Stores {
     Stores {
         upstreams: storage.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
@@ -73,6 +76,9 @@ async fn create_api_key_upstream(
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -221,6 +227,9 @@ pub(super) async fn create_catalog_upstreams(
         let created = UpstreamStore::create(
             storage,
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::GeminiOauth,
@@ -368,6 +377,9 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
     let corrupt = UpstreamStore::create(
         &*storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "corrupt".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -452,6 +464,9 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("reconnect-{reason}"),
                 kind: UpstreamKind::AnthropicOauth,
@@ -618,6 +633,9 @@ async fn repaired_upstream_leaves_apply_error_and_becomes_routable() {
     let broken = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "api-key-broken".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

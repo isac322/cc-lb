@@ -1,0 +1,10 @@
+[
+  { "kind": "anthropic_api_key", "provider": "anthropic", "auth_mode": "api_key" },
+  { "kind": "anthropic_oauth", "provider": "anthropic", "auth_mode": "subscription" },
+  { "kind": "openai_api_key", "provider": "openai", "auth_mode": "api_key" },
+  { "kind": "openai_oauth", "provider": "openai", "auth_mode": "subscription" },
+  { "kind": "gemini_api_key", "provider": "gemini", "auth_mode": "api_key" },
+  { "kind": "gemini_oauth", "provider": "gemini", "auth_mode": "subscription" },
+  { "kind": "vertex_api_key", "provider": "gemini", "auth_mode": "api_key" },
+  { "kind": "vertex_credential", "provider": "gemini", "auth_mode": "google_credential" }
+]

@@ -45,6 +45,9 @@ async fn create_gemini_upstream(fixture: &Fixture, profile: GeminiOAuthProfile) 
     UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: format!("warmup-lane-{id}"),
             kind: UpstreamKind::GeminiOauth,

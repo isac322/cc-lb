@@ -93,6 +93,9 @@ async fn pool_quota_snapshot_tick_records_provider_freshness_and_cache_recovery(
         let upstream = UpstreamStore::create(
             fixture.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("snapshot-{kind:?}"),
                 kind,
@@ -619,6 +622,9 @@ async fn scoped_refresh_probe_record(
     Ok(UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: format!("{}-refresh-probe-{id}", kind.as_str()),
             kind,
@@ -981,6 +987,10 @@ async fn enqueue_metadata_refresh_for_long_lived_rekeys_each_bucket() {
 
 fn registered_oauth_upstream() -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: uuid::Uuid::new_v4(),
         name: "oauth-upstream".to_owned(),
         kind: UpstreamKind::AnthropicOauth,
@@ -1060,6 +1070,9 @@ impl DispatchFixture {
                 inner: storage.clone(),
                 get_by_id_calls: refresh_entry_calls.clone(),
             }),
+            vertex_state: Arc::new(crate::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -1089,6 +1102,9 @@ impl DispatchFixture {
         ));
         let dispatch_stores = Arc::new(Stores {
             upstreams: storage.clone(),
+            vertex_state: Arc::new(crate::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -1156,6 +1172,9 @@ impl DispatchFixture {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("oauth-upstream-{never_refresh}"),
                 kind: UpstreamKind::AnthropicOauth,

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::unix_secs;
-use cc_lb_oauth_protocol::refresh_requires_reconnect;
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
+use cc_lb_storage_api::upstream::{
+    UpstreamKind, UpstreamStatusUpdate, credential_failure_is_terminal,
+    has_sticky_credential_failure,
+};
 use cc_lb_storage_api::{
     OAuthTokensCreate, StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore,
     UpstreamUpdate, validate_identifier,
@@ -28,7 +30,7 @@ const CHANNEL: &str = "cclb_upstream_changed";
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, COALESCE(token.never_refresh, FALSE) AS oauth_never_refresh, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin, spec.workspace_id"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, spec.owner_epoch, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, COALESCE(token.never_refresh, FALSE) AS oauth_never_refresh, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin, spec.workspace_id, spec.vertex_project_id, spec.vertex_location, spec.vertex_api_version, spec.vertex_express, spec.vertex_credential_type, spec.vertex_quota_project_id"
     };
 }
 
@@ -190,7 +192,7 @@ async fn create_split(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     let id = create.id;
     sqlx::query(
-        "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, workspace_id, spec_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, 1, NOW(), NOW())",
+        "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, workspace_id, vertex_project_id, vertex_location, vertex_api_version, vertex_express, vertex_credential_type, vertex_quota_project_id, spec_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, NOW(), NOW())",
     )
     .bind(id)
     .bind(&create.name)
@@ -205,6 +207,12 @@ async fn create_split(
             .transpose()?,
     )
     .bind(create.workspace_id.as_deref())
+    .bind(create.vertex.as_ref().and_then(|v| match &v.target { cc_lb_domain::VertexTarget::Regional { project_id, .. } => Some(project_id.as_ref()), cc_lb_domain::VertexTarget::Express => None }))
+    .bind(create.vertex.as_ref().and_then(|v| match &v.target { cc_lb_domain::VertexTarget::Regional { location, .. } => Some(location.as_ref()), cc_lb_domain::VertexTarget::Express => None }))
+    .bind(create.vertex.as_ref().map(|v| v.api_version.as_str()))
+    .bind(create.vertex.as_ref().map(|v| matches!(v.target, cc_lb_domain::VertexTarget::Express)))
+    .bind(create.vertex_credential_type.map(|v| v.as_str()))
+    .bind(create.vertex_quota_project_id.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -336,6 +344,9 @@ async fn update_split(
         || update.warmup_enabled.is_some()
         || update.warmup_dialect_plugin.is_some()
         || update.workspace_id.is_some()
+        || update.vertex.is_some()
+        || update.vertex_credential_type.is_some()
+        || update.vertex_quota_project_id.is_some()
         || update.api_key_ciphertext.is_some();
     let credential_changed = update.api_key_ciphertext.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
@@ -463,8 +474,51 @@ async fn update_split_spec_in_tx(
         return Err(conflict("upstream not found"));
     };
     let base_url_changed = base_url_present && previous_base_url.as_deref() != base_url;
+    let previous_vertex: (Option<String>, Option<String>, Option<bool>) = sqlx::query_as(
+        "SELECT vertex_project_id, vertex_location, vertex_express
+           FROM upstream_spec_v1
+          WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
     let workspace_id_present = update.workspace_id.is_some();
     let workspace_id = update.workspace_id.as_ref().and_then(Option::as_deref);
+    let vertex_present = update.vertex.is_some();
+    let (vertex_project_id, vertex_location, vertex_api_version, vertex_express) = update
+        .vertex
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map_or((None, None, None, None), |config| match &config.target {
+            cc_lb_storage_api::VertexTarget::Express => {
+                (None, None, Some(config.api_version.as_str()), Some(true))
+            }
+            cc_lb_storage_api::VertexTarget::Regional {
+                project_id,
+                location,
+            } => (
+                Some(project_id.to_string()),
+                Some(location.to_string()),
+                Some(config.api_version.as_str()),
+                Some(false),
+            ),
+        });
+    let vertex_identity_changed = vertex_present
+        && (previous_vertex.0 != vertex_project_id
+            || previous_vertex.1 != vertex_location
+            || previous_vertex.2 != vertex_express);
+    let vertex_credential_type_present = update.vertex_credential_type.is_some();
+    let vertex_credential_type = update
+        .vertex_credential_type
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(|value| value.as_str());
+    let vertex_quota_project_id_present = update.vertex_quota_project_id.is_some();
+    let vertex_quota_project_id = update
+        .vertex_quota_project_id
+        .as_ref()
+        .and_then(Option::as_deref);
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET name = COALESCE($3, name),
@@ -473,6 +527,12 @@ async fn update_split_spec_in_tx(
                warmup_enabled = COALESCE($7, warmup_enabled),
                warmup_dialect_plugin = COALESCE($8, warmup_dialect_plugin),
                workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
+               vertex_project_id = CASE WHEN $11 THEN $12 ELSE vertex_project_id END,
+               vertex_location = CASE WHEN $13 THEN $14 ELSE vertex_location END,
+               vertex_api_version = CASE WHEN $15 THEN $16 ELSE vertex_api_version END,
+               vertex_express = CASE WHEN $17 THEN $18 ELSE vertex_express END,
+               vertex_credential_type = CASE WHEN $19 THEN $20 ELSE vertex_credential_type END,
+               vertex_quota_project_id = CASE WHEN $21 THEN $22 ELSE vertex_quota_project_id END,
                spec_revision = spec_revision + 1,
                updated_at = NOW()
          WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL
@@ -494,13 +554,25 @@ async fn update_split_spec_in_tx(
     )
     .bind(workspace_id_present)
     .bind(workspace_id)
+    .bind(vertex_present)
+    .bind(vertex_project_id)
+    .bind(vertex_present)
+    .bind(vertex_location)
+    .bind(vertex_present)
+    .bind(vertex_api_version)
+    .bind(vertex_present)
+    .bind(vertex_express)
+    .bind(vertex_credential_type_present)
+    .bind(vertex_credential_type)
+    .bind(vertex_quota_project_id_present)
+    .bind(vertex_quota_project_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
     if row.is_none() {
         return Err(conflict("stale upstream revision"));
     }
-    Ok(base_url_changed)
+    Ok(base_url_changed || vertex_identity_changed)
 }
 
 async fn update_split_api_key_secret(
@@ -534,6 +606,15 @@ async fn update_split_api_key_secret_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM upstream_spec_v1 WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    if kind.as_deref() == Some("vertex_credential") {
+        clear_split_apply_error_in_tx(tx, id).await?;
+    }
     Ok(())
 }
 
@@ -699,7 +780,7 @@ async fn bump_split_owner_epoch_in_tx(
 ) -> StorageResult<()> {
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
-           SET owner_epoch = owner_epoch + CASE WHEN kind = 'gemini_api_key' THEN 1 ELSE 0 END, updated_at = NOW()
+           SET owner_epoch = owner_epoch + CASE WHEN kind IN ('gemini_api_key','vertex_api_key','vertex_credential') THEN 1 ELSE 0 END, updated_at = NOW()
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING id",
     )
@@ -774,6 +855,9 @@ async fn set_split_status(
             return Err(conflict("stale oauth token generation"));
         }
     }
+    if let Some(expected_revision) = patch.expected_spec_revision {
+        ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
+    }
     let row = sqlx::query(
         "SELECT spec.kind, status.last_apply_error, status.last_apply_at, status.last_warmup_at
            FROM upstream_spec_v1 spec
@@ -787,12 +871,11 @@ async fn set_split_status(
 
     let kind = row
         .as_ref()
-        .map(|row| row.try_get::<&str, _>("kind"))
+        .map(|row| row.try_get::<String, _>("kind"))
         .transpose()
-        .map_err(map_sqlx_error)?;
-    let is_oauth = kind == Some(UpstreamKind::AnthropicOauth.as_str())
-        || kind == Some(UpstreamKind::OpenaiOauth.as_str())
-        || kind == Some(UpstreamKind::GeminiOauth.as_str());
+        .map_err(map_sqlx_error)?
+        .map(parse_kind)
+        .transpose()?;
     let mut last_apply_error = row
         .as_ref()
         .map(|row| row.try_get::<Option<String>, _>("last_apply_error"))
@@ -815,9 +898,9 @@ async fn set_split_status(
     )?;
 
     if let Some(value) = patch.last_apply_error
-        && (!is_oauth
-            || !refresh_requires_reconnect(last_apply_error.as_deref())
-            || refresh_requires_reconnect(value.as_deref()))
+        && (!kind
+            .is_some_and(|kind| has_sticky_credential_failure(kind, last_apply_error.as_deref()))
+            || kind.is_some_and(|kind| credential_failure_is_terminal(kind, value.as_deref())))
     {
         last_apply_error = value;
     }
@@ -941,6 +1024,10 @@ pub(crate) fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<U
             row.try_get("revision").map_err(map_sqlx_error)?,
             "upstream spec revision",
         )?,
+        owner_epoch: i64_to_u64(
+            row.try_get("owner_epoch").map_err(map_sqlx_error)?,
+            "upstream owner epoch",
+        )?,
         oauth_token_generation: i64_to_u64(
             row.try_get("oauth_token_generation")
                 .map_err(map_sqlx_error)?,
@@ -966,7 +1053,79 @@ pub(crate) fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<U
             "last_warmup_at",
         )?,
         workspace_id: row.try_get("workspace_id").map_err(map_sqlx_error)?,
+        vertex: vertex_config_from_row(&row, kind)?,
+        vertex_credential_type: row
+            .try_get::<Option<String>, _>("vertex_credential_type")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                cc_lb_domain::VertexCredentialType::parse(&value).ok_or_else(|| {
+                    StorageError::Corrupted {
+                        message: format!("invalid Vertex credential type: {value}"),
+                    }
+                })
+            })
+            .transpose()?,
+        vertex_quota_project_id: row
+            .try_get("vertex_quota_project_id")
+            .map_err(map_sqlx_error)?,
     })
+}
+
+fn vertex_config_from_row(
+    row: &sqlx::postgres::PgRow,
+    kind: UpstreamKind,
+) -> StorageResult<Option<cc_lb_domain::VertexUpstreamConfig>> {
+    if !matches!(
+        kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        return Ok(None);
+    }
+    let version = match row
+        .try_get::<Option<String>, _>("vertex_api_version")
+        .map_err(map_sqlx_error)?
+        .as_deref()
+    {
+        Some("v1") => cc_lb_domain::VertexApiVersion::V1,
+        Some("v1beta1") => cc_lb_domain::VertexApiVersion::V1Beta1,
+        None => {
+            return Err(StorageError::Corrupted {
+                message: "Vertex upstream has NULL api version".to_owned(),
+            });
+        }
+        Some(value) => {
+            return Err(StorageError::Corrupted {
+                message: format!("Vertex upstream has invalid api version: {value}"),
+            });
+        }
+    };
+    let express = row
+        .try_get::<Option<bool>, _>("vertex_express")
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| StorageError::Corrupted {
+            message: "Vertex upstream has NULL express flag".to_owned(),
+        })?;
+    if express {
+        return Ok(Some(cc_lb_domain::VertexUpstreamConfig {
+            target: cc_lb_domain::VertexTarget::Express,
+            api_version: version,
+        }));
+    }
+    let project_id = row
+        .try_get::<Option<String>, _>("vertex_project_id")
+        .map_err(map_sqlx_error)?;
+    let location = row
+        .try_get::<Option<String>, _>("vertex_location")
+        .map_err(map_sqlx_error)?;
+    Ok(project_id.zip(location).map(
+        |(project_id, location)| cc_lb_domain::VertexUpstreamConfig {
+            target: cc_lb_domain::VertexTarget::Regional {
+                project_id: project_id.into_boxed_str(),
+                location: location.into_boxed_str(),
+            },
+            api_version: version,
+        },
+    ))
 }
 
 fn optional_i64_to_u64(value: Option<i64>, field: &str) -> StorageResult<Option<u64>> {
@@ -987,6 +1146,8 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
         "openai_oauth" => Ok(UpstreamKind::OpenaiOauth),
         "gemini_api_key" => Ok(UpstreamKind::GeminiApiKey),
         "gemini_oauth" => Ok(UpstreamKind::GeminiOauth),
+        "vertex_api_key" => Ok(UpstreamKind::VertexApiKey),
+        "vertex_credential" => Ok(UpstreamKind::VertexCredential),
         other => Err(StorageError::Corrupted {
             message: format!("invalid upstream kind {other}"),
         }),

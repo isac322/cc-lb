@@ -133,6 +133,9 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "status-error-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -165,6 +168,9 @@ async fn export_contains_no_plaintext_oauth_tokens() {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-export-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -282,6 +288,9 @@ async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str
     UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

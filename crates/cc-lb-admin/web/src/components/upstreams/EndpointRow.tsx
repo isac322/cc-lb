@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { defaultEndpointFor } from '../../lib/providers';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
 import { undoToast } from '../../lib/undoToast';
 import { DetailRow } from '../ui/DetailPane';
@@ -44,7 +45,24 @@ const DEFAULT_ENDPOINTS = {
     label: 'Gemini',
     baseUrl: 'https://cloudcode-pa.googleapis.com/v1internal',
   },
-} satisfies Record<Upstream['kind'], { label: string; baseUrl: string }>;
+} satisfies Record<
+  Exclude<Upstream['kind'], 'vertex_api_key' | 'vertex_credential'>,
+  { label: string; baseUrl: string }
+>;
+
+function endpointFor(upstream: Upstream) {
+  if (
+    upstream.kind === 'vertex_api_key' ||
+    upstream.kind === 'vertex_credential'
+  ) {
+    const location = upstream.vertex?.location ?? 'global';
+    return {
+      label: `Vertex · ${upstream.vertex?.express ? 'Express' : location}`,
+      baseUrl: defaultEndpointFor(upstream.kind, location),
+    };
+  }
+  return DEFAULT_ENDPOINTS[upstream.kind];
+}
 
 function isDefaultBaseUrl(baseUrl: string, defaultBaseUrl: string) {
   if (defaultBaseUrl === DEFAULT_ENDPOINTS.anthropic_api_key.baseUrl) {
@@ -79,7 +97,7 @@ export function EndpointRow({
   onEditingChange,
 }: {
   upstream: Upstream;
-  kind: 'api_key' | 'oauth';
+  kind: 'api_key' | 'oauth' | 'credential';
   /**
    * Controlled editor, so the pane's parent can keep one inline editor (and
    * one primary Save) open at a time. Uncontrolled if omitted.
@@ -93,7 +111,7 @@ export function EndpointRow({
     setOwnEditing(next);
     onEditingChange?.(next);
   };
-  const endpoint = DEFAULT_ENDPOINTS[upstream.kind];
+  const endpoint = endpointFor(upstream);
   const hint =
     kind === 'api_key'
       ? `Requests and key checks go here instead of ${endpoint.label}.`

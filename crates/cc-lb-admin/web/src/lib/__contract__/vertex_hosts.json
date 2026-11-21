@@ -1,0 +1,8 @@
+[
+  { "location": "global", "host": "aiplatform.googleapis.com" },
+  { "location": "us", "host": "aiplatform.us.rep.googleapis.com" },
+  { "location": "eu", "host": "aiplatform.eu.rep.googleapis.com" },
+  { "location": "us-central1", "host": "us-central1-aiplatform.googleapis.com" },
+  { "location": "europe-west4", "host": "europe-west4-aiplatform.googleapis.com" },
+  { "location": "asia-northeast1", "host": "asia-northeast1-aiplatform.googleapis.com" }
+]

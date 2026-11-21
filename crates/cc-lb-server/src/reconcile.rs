@@ -276,11 +276,17 @@ fn upstream_revision_material(record: &UpstreamRecord) -> (Uuid, u64) {
     // A runtime refresh failure that requires an operator reconnect is a
     // status write without NOTIFY; fold it in so the periodic reconcile
     // rebuilds the view and routing stops picking the dead OAuth account.
-    let reconnect_required =
-        matches!(
-            record.kind,
-            UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-        ) && cc_lb_oauth_protocol::refresh_requires_reconnect(record.last_apply_error.as_deref());
+    let reconnect_required = match record.kind {
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+            cc_lb_oauth_protocol::refresh_requires_reconnect(record.last_apply_error.as_deref())
+        }
+        UpstreamKind::VertexCredential => {
+            cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                record.last_apply_error.as_deref(),
+            )
+        }
+        _ => false,
+    };
     let material = if reconnect_required {
         xxh3_64_with_seed(&material.to_le_bytes(), RECONNECT_REQUIRED_SEED)
     } else {

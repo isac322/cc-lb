@@ -616,6 +616,9 @@ async fn events_stream_retracts_failover_partials_without_leaking_scoped_finals(
             UpstreamStore::create(
                 storage.as_ref(),
                 UpstreamCreate {
+                    vertex: None,
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
                     id,
                     name: id.to_string(),
                     kind,

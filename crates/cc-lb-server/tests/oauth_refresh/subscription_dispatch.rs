@@ -288,6 +288,9 @@ async fn create_subscription_upstream(
     let record = fixture
         .storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "subscription-oauth".to_owned(),
             kind,
@@ -1035,6 +1038,9 @@ async fn create_named_subscription_upstream(
     let record = fixture
         .storage
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: name.to_owned(),
             kind,

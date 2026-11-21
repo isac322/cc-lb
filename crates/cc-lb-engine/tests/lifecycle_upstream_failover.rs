@@ -4051,6 +4051,9 @@ async fn responses_websocket_reconnect_separates_durable_store_true_from_local_s
             let mut record = UpstreamStore::create(
                 storage.as_ref(),
                 UpstreamCreate {
+                    vertex: None,
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
                     id: Uuid::from_u128(id),
                     name: name.to_owned(),
                     kind: UpstreamKind::OpenaiApiKey,

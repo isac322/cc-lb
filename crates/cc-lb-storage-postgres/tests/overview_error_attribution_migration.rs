@@ -1,9 +1,6 @@
 use std::{str::FromStr, sync::Arc, time::Instant};
 
-use cc_lb_storage_api::{
-    MetaStore, RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore,
-    UsageRollupStore,
-};
+use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore, UsageRollupStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, Connection, PgPool,
@@ -149,54 +146,74 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
             let mut connection = sqlx::PgConnection::connect_with(&fixture.options).await?;
             sqlx::migrate!("./migrations")
                 .run_direct(Some(169), &mut connection, false).await?;
-            connection.close().await?;
             for (id, name, kind) in [
-                (0x1300, "named", UpstreamKind::OpenaiOauth),
-                (0x1301, "other", UpstreamKind::GeminiOauth),
+                (0x1300_u128, "named", "openai_oauth"),
+                (0x1301_u128, "other", "gemini_oauth"),
             ] {
-                storage.create(UpstreamCreate {
-                    id: Uuid::from_u128(id),
-                    name: name.to_owned(),
-                    kind,
-                    base_url: None,
-                    api_key_ciphertext: None,
-                    oauth_tokens: None,
-                    warmup_enabled: false,
-                    warmup_dialect_plugin: None,
-                    workspace_id: None,
-                    api_key_access: None,
-                }).await?;
+                sqlx::query(
+                    "INSERT INTO upstream_spec_v1
+                     (id,name,kind,base_url,enabled,warmup_enabled,warmup_dialect_plugin,
+                      spec_revision,created_at,updated_at,deleted_at,workspace_id,owner_epoch)
+                     VALUES ($1,$2,$3,NULL,TRUE,FALSE,NULL,1,NOW(),NOW(),NULL,NULL,0)",
+                )
+                .bind(Uuid::from_u128(id))
+                .bind(name)
+                .bind(kind)
+                .execute(storage.pool())
+                .await?;
             }
+            sqlx::query(
+                "INSERT INTO overview_excluded_error_rollups_v1
+                 (resolution,bucket_start_unix_secs,error_count,updated_at)
+                 VALUES ('minute',1800000000,4,NOW()),('hour',1800000000,4,NOW())",
+            )
+            .execute(storage.pool())
+            .await?;
             for (index, upstream_id, name, status) in [
                 (0, Some(Uuid::from_u128(0x1300)), Some("named"), 401),
                 (1, Some(Uuid::from_u128(0x1301)), Some("other"), 403),
                 (2, None, None, 404),
                 (3, None, Some("named"), 403),
             ] {
-                let ts = 1_800_000_000 + if index == 0 { 1 } else { 10 };
-                storage.append_request_event(&RequestEvent {
-                    ts,
-                    ts_ms: Some(ts * 1000),
-                    request_id: format!("identity-{index}"),
-                    event_id: Some(format!("identity-{index}")),
-                    upstream_id,
-                    upstream_name: name.map(str::to_owned),
-                    status,
-                    ..RequestEvent::default()
-                }).await?;
+                let request_id = format!("identity-{index}");
+                sqlx::query(
+                    "INSERT INTO request_events_v1
+                     (request_id,event_id,ts,list_ts_ms,list_status,duration_ms,upstream_id,upstream_name)
+                     VALUES ($1,$1,to_timestamp($2),$3,$4,0,$5,$6)",
+                )
+                .bind(&request_id)
+                .bind(1_800_000_000_i64 + if index == 0 { 1 } else { 10 })
+                .bind((1_800_000_000_i64 + if index == 0 { 1 } else { 10 }) * 1000)
+                .bind(status)
+                .bind(upstream_id)
+                .bind(name)
+                .execute(storage.pool())
+                .await?;
             }
             sqlx::raw_sql(
-                "INSERT INTO overview_excluded_error_rollups_v1
-                 (resolution,bucket_start_unix_secs,error_count,updated_at)
-                 VALUES ('minute',1800000000,4,NOW()),('hour',1800000000,4,NOW());
-                 INSERT INTO usage_rollup_checkpoints_v1 (id,value,value_xid)
+                "INSERT INTO usage_rollup_checkpoints_v1 (id,value,value_xid)
                  SELECT id,seq,tx_id
                  FROM (VALUES ('high_water'),('cost_components_backfill_upper'),
                               ('cost_components_backfill_cursor')) AS ids(id)
                  CROSS JOIN LATERAL
                      (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) AS last_event;
                  UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
-            ).execute(storage.pool()).await?;
+            )
+            .execute(storage.pool())
+            .await?;
+            sqlx::migrate!("./migrations")
+                .run_direct(None, &mut connection, false)
+                .await?;
+            connection.close().await?;
+            for id in [Uuid::from_u128(0x1300), Uuid::from_u128(0x1301)] {
+                let record = cc_lb_storage_api::UpstreamStore::get_by_id(storage, id)
+                    .await?
+                    .expect("legacy record");
+                assert!(
+                    record.vertex.is_none(),
+                    "previous-release records must keep vertex=None"
+                );
+            }
             let checkpoint = storage.usage_rollup_checkpoint().await?;
             if prune_history {
                 assert_eq!(

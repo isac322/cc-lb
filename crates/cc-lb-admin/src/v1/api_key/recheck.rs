@@ -12,9 +12,9 @@ use axum::{
 };
 use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
-    NormalizedApiKey,
+    NormalizedApiKey, normalize_api_key,
     preflight::{PreflightInput, PreflightMode, run_preflight},
-    remediation::{endpoint_operator_message, operator_message},
+    remediation::operator_message,
     resolve_stored_api_key,
     wire::PreflightVerdict,
 };
@@ -22,11 +22,13 @@ use cc_lb_storage_api::{
     ApiKeyClass, ApiKeyOrgCapability, Provider, RemediationCode, Storage, StorageError,
     UpstreamKind, UpstreamRecord, UpstreamStore,
 };
+use cc_lb_vertex_auth::vertex_credential_aad;
 use uuid::Uuid;
 
 use super::poll_enqueue::enqueue_usage_poll;
 use super::preflight::{
-    no_store, preserve_provider_metadata, provider_native_preflight, verdict_label,
+    PreflightRequest, no_store, operator_message_for_kind, preserve_provider_metadata,
+    provider_native_preflight, verdict_label, vertex_preflight,
 };
 use crate::v1::post_commit::complete_after_commit;
 use crate::v1::upstreams::{UpstreamError, audit_upstream_action, storage, upstream_base_url};
@@ -62,7 +64,11 @@ pub(super) async fn load_api_key_or_provider_upstream(
         .ok_or(UpstreamError::NotFound)?;
     if !matches!(
         record.kind,
-        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+        UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential
     ) {
         return Err(UpstreamError::NotApiKeyUpstream);
     }
@@ -79,6 +85,19 @@ pub(super) fn stored_api_key(
     state: &AdminState,
     record: &UpstreamRecord,
 ) -> Result<NormalizedApiKey, UpstreamError> {
+    if record.kind == UpstreamKind::VertexApiKey {
+        let ciphertext = record
+            .api_key_ciphertext
+            .as_deref()
+            .ok_or(UpstreamError::ApiKeyCredentialDecrypt)?;
+        let plaintext = state
+            .aead
+            .decrypt(ciphertext, record.id.as_bytes())
+            .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?;
+        let value =
+            std::str::from_utf8(&plaintext).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?;
+        return normalize_api_key(value).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt);
+    }
     resolve_stored_api_key(&state.aead, record).map_err(|error| {
         tracing::warn!(upstream_id = %record.id, ?error, "stored api key could not be resolved");
         UpstreamError::ApiKeyCredentialDecrypt
@@ -92,7 +111,12 @@ pub(crate) async fn recheck_upstream_api_key(
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
     let record = load_api_key_or_provider_upstream(storage, &id).await?;
-    let key = stored_api_key(&state, &record)?;
+    let key = if record.kind == UpstreamKind::VertexCredential {
+        normalize_api_key("vertex-credential")
+            .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?
+    } else {
+        stored_api_key(&state, &record)?
+    };
     let base_url = upstream_base_url(&record)?;
     let previous_details = storage.get_api_key_details(record.id).await?;
     let previous_usage_report = previous_details
@@ -106,6 +130,57 @@ pub(crate) async fn recheck_upstream_api_key(
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let mut outcome = if matches!(
+        record.kind,
+        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
+    ) {
+        let (project_id, location, express, api_version) = match record.vertex.as_ref() {
+            Some(config) => match &config.target {
+                cc_lb_storage_api::VertexTarget::Express => {
+                    (None, None, Some(true), Some(config.api_version))
+                }
+                cc_lb_storage_api::VertexTarget::Regional {
+                    project_id,
+                    location,
+                } => (
+                    Some(project_id.to_string()),
+                    Some(location.to_string()),
+                    Some(false),
+                    Some(config.api_version),
+                ),
+            },
+            None => (None, None, None, None),
+        };
+        let credential = if record.kind == UpstreamKind::VertexCredential {
+            let ciphertext = record
+                .api_key_ciphertext
+                .as_deref()
+                .ok_or(UpstreamError::ApiKeyCredentialDecrypt)?;
+            let bytes = state
+                .aead
+                .decrypt(ciphertext, &vertex_credential_aad(&record.id.to_string()))
+                .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?;
+            Some(String::from_utf8(bytes).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?)
+        } else {
+            None
+        };
+        vertex_preflight(
+            &state,
+            &PreflightRequest {
+                api_key_value: (record.kind == UpstreamKind::VertexApiKey)
+                    .then(|| key.as_str().to_owned()),
+                workspace_id: None,
+                base_url: Some(base_url.to_string()),
+                kind: Some(record.kind),
+                project_id,
+                location,
+                express,
+                google_credential: credential,
+                api_version,
+            },
+            record.kind,
+        )
+        .await?
+    } else if matches!(
         record.kind,
         UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
     ) {
@@ -127,7 +202,10 @@ pub(crate) async fn recheck_upstream_api_key(
     };
     if matches!(
         record.kind,
-        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+        UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential
     ) {
         preserve_provider_metadata(&mut outcome.access, previous_details.as_ref(), false);
     }
@@ -139,9 +217,11 @@ pub(crate) async fn recheck_upstream_api_key(
         && let Some(primary) = outcome.wire.remediation.first()
         && outcome.wire.verdict == PreflightVerdict::Rejected
     {
-        let on_anthropic = state.anthropic_org_api.applies_to(&base_url);
-        outcome.access.last_error =
-            Some(endpoint_operator_message(primary.code, on_anthropic).to_owned());
+        outcome.access.last_error = Some(operator_message_for_kind(
+            record.kind,
+            Some(primary.code),
+            false,
+        ));
     }
 
     // The snapshot is written against the revision the probe ran for. A PUT

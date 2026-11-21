@@ -1,5 +1,9 @@
 import { providerPlanLabel } from '../../lib/providerPlan';
-import { providerOf, upstreamTypeLabel } from '../../lib/providers';
+import {
+  providerOf,
+  upstreamAuthMode,
+  upstreamTypeLabel,
+} from '../../lib/providers';
 import {
   type Upstream,
   useUpstreamSubscriptionMetadata,
@@ -17,7 +21,7 @@ export function UpstreamPlanCaption({
   upstream: Upstream;
   showCredentialIcon?: boolean;
 }) {
-  const subscription = upstream.kind.endsWith('_oauth');
+  const subscription = upstreamAuthMode(upstream.kind) === 'subscription';
   const meta = useUpstreamSubscriptionMetadata(
     subscription ? upstream.id : null,
   );

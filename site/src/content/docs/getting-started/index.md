@@ -13,11 +13,11 @@ cc-lb puts an operator-managed endpoint in front of pooled Anthropic, OpenAI, an
 | [Build the binary](#build-the-binary) | You own the host toolchain and want a local release build. | `target/release/cc-lb` |
 | [Run the published container](#run-the-published-container) | You want the packaged server with no Rust checkout on the host. | `ghcr.io/isac322/cc-lb:1.0.1` |
 
-Both paths need an upstream, an admin token, a master key for encrypted credentials, and durable storage. The upstream may be Anthropic (`anthropic_api_key` or `anthropic_oauth`), OpenAI (`openai_api_key` or `openai_oauth`), or Gemini (`gemini_api_key` or `gemini_oauth`). See [upstream concepts](/docs/concepts/upstreams/) for credential paths and warm-up limits.
+Both paths need an upstream, an admin token, a master key for encrypted credentials, and durable storage. The upstream may be Anthropic (`anthropic_api_key` or `anthropic_oauth`), OpenAI (`openai_api_key` or `openai_oauth`), Gemini (`gemini_api_key` or `gemini_oauth`), or Vertex (`vertex_api_key` or `vertex_credential`). See [upstream concepts](/docs/concepts/upstreams/) for credential paths and warm-up limits.
 
 Shared native routes cover Anthropic `POST /v1/messages` and `POST /v1/messages/count_tokens`, OpenAI `POST /v1/responses` and `GET /v1/responses` WebSocket, and Gemini `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`. The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists supported provider-prefixed routes and credential restrictions.
 
-cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope.
+cc-lb does not translate between providers or act as a universal multi-provider gateway. Vertex AI Gemini is supported through scoped API-key and credential upstreams; Express and regional API-key targets support generate/stream/countTokens only because Google rejects API keys for cache, catalog, and Live, while regional credentials add approved cached-content create/use, publisher model-catalog list/get, and Live routes through Vertex. The catalog is a minimal publisher projection, not entitlement-aware; explicit cached-content billing remains Vertex-controlled; use least-privilege service accounts. Bedrock remains unsupported.
 
 ## Build the binary
 

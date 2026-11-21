@@ -5,7 +5,7 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::{ClockHandle, TestClock, unix_secs};
 use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
-    UpstreamUpdate,
+    UpstreamUpdate, credential_failure_is_terminal, has_sticky_credential_failure,
 };
 use cc_lb_storage_api::{StorageError, StorageResult, validate_identifier};
 use tokio::sync::Mutex;
@@ -38,6 +38,10 @@ impl UpstreamStore for MemoryUpstreamStore {
                 None => (None, false, 0),
             };
         let record = UpstreamRecord {
+            owner_epoch: 0,
+            vertex: create.vertex,
+            vertex_credential_type: create.vertex_credential_type,
+            vertex_quota_project_id: create.vertex_quota_project_id,
             id: create.id,
             name: create.name,
             kind: create.kind,
@@ -112,7 +116,9 @@ impl UpstreamStore for MemoryUpstreamStore {
         if let Some(name) = update.name.as_deref() {
             validate_identifier("upstream.name", name)?;
         }
+        let api_key_changed = update.api_key_ciphertext.is_some();
         self.mutate(id, Some(expected_revision), |record| {
+            let previous_vertex = record.vertex.clone();
             if let Some(name) = update.name {
                 record.name = name;
             }
@@ -133,6 +139,31 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
                 record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
+            }
+            if let Some(workspace_id) = update.workspace_id {
+                record.workspace_id = workspace_id;
+            }
+            if let Some(vertex) = update.vertex {
+                record.vertex = vertex;
+            }
+            if let Some(credential_type) = update.vertex_credential_type {
+                record.vertex_credential_type = credential_type;
+            }
+            if let Some(quota_project_id) = update.vertex_quota_project_id {
+                record.vertex_quota_project_id = quota_project_id;
+            }
+            if api_key_changed && record.kind == UpstreamKind::VertexCredential {
+                record.last_apply_error = None;
+            }
+            if (api_key_changed || previous_vertex != record.vertex)
+                && matches!(
+                    record.kind,
+                    UpstreamKind::GeminiApiKey
+                        | UpstreamKind::VertexApiKey
+                        | UpstreamKind::VertexCredential
+                )
+            {
+                record.owner_epoch += 1;
             }
             Ok(())
         })
@@ -162,6 +193,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             validate_identifier("upstream.name", name)?;
         }
         self.mutate(id, Some(expected_revision), |record| {
+            let previous_vertex = record.vertex.clone();
             if let Some(name) = update.name {
                 record.name = name;
             }
@@ -177,6 +209,28 @@ impl UpstreamStore for MemoryUpstreamStore {
             if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
                 record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
             }
+            if let Some(workspace_id) = update.workspace_id {
+                record.workspace_id = workspace_id;
+            }
+            if let Some(vertex) = update.vertex {
+                record.vertex = vertex;
+            }
+            if let Some(credential_type) = update.vertex_credential_type {
+                record.vertex_credential_type = credential_type;
+            }
+            if let Some(quota_project_id) = update.vertex_quota_project_id {
+                record.vertex_quota_project_id = quota_project_id;
+            }
+            if previous_vertex != record.vertex
+                && matches!(
+                    record.kind,
+                    UpstreamKind::GeminiApiKey
+                        | UpstreamKind::VertexApiKey
+                        | UpstreamKind::VertexCredential
+                )
+            {
+                record.owner_epoch += 1;
+            }
             Ok(())
         })
         .await
@@ -188,7 +242,21 @@ impl UpstreamStore for MemoryUpstreamStore {
         api_key_ciphertext: Option<Vec<u8>>,
     ) -> StorageResult<UpstreamRecord> {
         self.mutate_without_revision(id, |record| {
+            let changed = record.api_key_ciphertext.as_ref() != api_key_ciphertext.as_ref();
             record.api_key_ciphertext = api_key_ciphertext;
+            if changed
+                && matches!(
+                    record.kind,
+                    UpstreamKind::GeminiApiKey
+                        | UpstreamKind::VertexApiKey
+                        | UpstreamKind::VertexCredential
+                )
+            {
+                record.owner_epoch += 1;
+            }
+            if changed && record.kind == UpstreamKind::VertexCredential {
+                record.last_apply_error = None;
+            }
             Ok(())
         })
         .await
@@ -207,14 +275,24 @@ impl UpstreamStore for MemoryUpstreamStore {
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
+        let expected_revision = status.expected_spec_revision;
+        let last_apply_error = status.last_apply_error;
+        let last_apply_at_unix_secs = status.last_apply_at_unix_secs;
+        let last_warmup_at_unix_secs = status.last_warmup_at_unix_secs;
         self.mutate_without_revision(id, |record| {
-            if let Some(value) = status.last_apply_error {
+            if expected_revision.is_some_and(|expected| record.revision != expected) {
+                return Err(conflict("stale upstream spec revision"));
+            }
+            if let Some(value) = last_apply_error
+                && (!has_sticky_credential_failure(record.kind, record.last_apply_error.as_deref())
+                    || credential_failure_is_terminal(record.kind, value.as_deref()))
+            {
                 record.last_apply_error = value;
             }
-            if let Some(value) = status.last_apply_at_unix_secs {
+            if let Some(value) = last_apply_at_unix_secs {
                 record.last_apply_at_unix_secs = value;
             }
-            if let Some(value) = status.last_warmup_at_unix_secs {
+            if let Some(value) = last_warmup_at_unix_secs {
                 record.last_warmup_at_unix_secs = value;
             }
             Ok(())
@@ -372,6 +450,9 @@ fn store() -> Arc<MemoryUpstreamStore> {
 async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamRecord {
     store
         .create(UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -598,6 +679,9 @@ scenario!(
         assert!(s.get_by_id(r.id).await.unwrap().is_none());
         let e = s
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "system.bad".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -646,6 +730,9 @@ scenario!(
 
         let error = s
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "primary".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

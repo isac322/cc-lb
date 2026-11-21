@@ -53,6 +53,10 @@ pub fn lifecycle_with_records(
 
 pub fn api_key_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id,
         name: name.to_owned(),
         kind: StorageUpstreamKind::AnthropicApiKey,

@@ -3738,6 +3738,8 @@ pub(crate) mod tests {
                 canonical_models,
             }),
             gemini_oauth: false,
+            vertex: false,
+            vertex_location: None,
         }
     }
 

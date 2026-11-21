@@ -292,6 +292,9 @@ async fn openai_transform_response_wasm_plugin_relays_chunked_binary_stream_with
     UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: "binary-openai".to_owned(),
             kind: UpstreamKind::OpenaiApiKey,

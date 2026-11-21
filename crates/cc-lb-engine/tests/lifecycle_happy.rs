@@ -586,6 +586,10 @@ async fn invalid_key_is_rejected_at_the_authentication_boundary() {
 
 fn oauth_upstream_record() -> UpstreamRecord {
     UpstreamRecord {
+        owner_epoch: 0,
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: uuid::Uuid::from_u128(1),
         name: "oauth-db-primary".to_owned(),
         kind: StorageUpstreamKind::AnthropicOauth,

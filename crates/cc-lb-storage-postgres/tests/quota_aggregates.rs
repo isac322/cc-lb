@@ -651,6 +651,9 @@ async fn poll_fence(storage: &PostgresStorage) -> Result<SubscriptionQuotaPollFe
     let upstream = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: format!("quota-poll-{id}"),
             kind: UpstreamKind::AnthropicOauth,

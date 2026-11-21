@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  API_KEY_ACCESS_NOT_CHECKED,
+  apiKeyAccessOf,
   FinalRequestEventUpdateSchema,
   fetchWithAuth,
   RequestEventPartialSchema,
@@ -334,6 +336,55 @@ describe('UpstreamSchema', () => {
   it('requires the backend base URL field instead of silently stripping it', () => {
     const { base_url: _baseUrl, ...withoutBaseUrl } = fixture;
     expect(UpstreamSchema.safeParse(withoutBaseUrl).success).toBe(false);
+  });
+});
+
+describe('Vertex admin API compatibility', () => {
+  const base = {
+    id: 'vertex-1',
+    name: 'Vertex',
+    kind: 'vertex_credential',
+    enabled: true,
+    base_url: null,
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    spec_revision: 1,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      last_warmup_at_unix_secs: null,
+    },
+    vertex: {
+      project_id: 'runbear',
+      location: 'global',
+      api_version: 'v1beta1',
+      express: false,
+      credential_type: 'authorized_user',
+      principal_hint: 'operator@example.com',
+      quota_project_id: null,
+    },
+  };
+
+  it('QA-WEB-3 parses legacy, API-key Vertex, and credential Vertex payloads', () => {
+    expect(
+      UpstreamSchema.parse({
+        ...base,
+        kind: 'anthropic_oauth',
+        vertex: null,
+      }).kind,
+    ).toBe('anthropic_oauth');
+    expect(
+      UpstreamSchema.parse({ ...base, kind: 'vertex_api_key' }).vertex?.express,
+    ).toBe(false);
+    expect(UpstreamSchema.parse(base).vertex?.credential_type).toBe(
+      'authorized_user',
+    );
+    expect(
+      apiKeyAccessOf(UpstreamSchema.parse({ ...base, kind: 'vertex_api_key' })),
+    ).toBe(API_KEY_ACCESS_NOT_CHECKED);
+    expect(apiKeyAccessOf(UpstreamSchema.parse(base))).toBe(
+      API_KEY_ACCESS_NOT_CHECKED,
+    );
   });
 });
 

@@ -238,6 +238,9 @@ async fn oauth_complete_audit_failure_still_rebuilds_view() {
     let upstream: UpstreamRecord = UpstreamStore::create(
         &*harness.storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-complete-audit-failure".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -467,6 +470,9 @@ async fn oauth_complete_seed_failure_still_rebuilds_view() {
     let upstream: UpstreamRecord = UpstreamStore::create(
         &*harness.storage,
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-complete-seed-failure".to_owned(),
             kind: UpstreamKind::AnthropicOauth,

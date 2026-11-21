@@ -45,7 +45,11 @@ pub(crate) fn api_key_access_response(
 ) -> Option<ApiKeyAccessResponse> {
     if !matches!(
         record.kind,
-        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+        UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential
     ) {
         return None;
     }

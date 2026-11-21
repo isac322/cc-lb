@@ -1485,6 +1485,9 @@ async fn auth_05_cross_kind_and_unknown_ids_on_put() {
     let deleted = UpstreamStore::create(
         harness.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "deleted".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

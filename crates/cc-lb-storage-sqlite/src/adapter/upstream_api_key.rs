@@ -298,7 +298,7 @@ impl UpstreamApiKeyStore for SqliteStorage {
             sqlx::query(
                 "UPDATE upstream_spec_v1
                     SET owner_epoch = owner_epoch + 1, updated_at = unixepoch()
-                  WHERE id = ? AND kind = 'gemini_api_key' AND deleted_at IS NULL",
+                  WHERE id = ? AND kind IN ('gemini_api_key','vertex_api_key','vertex_credential') AND deleted_at IS NULL",
             )
             .bind(upstream_id.to_string())
             .execute(&mut *tx)
@@ -743,6 +743,18 @@ pub(crate) async fn write_api_key_access_in_tx(
     .await
     .map_err(map_sqlx_error)?
     .flatten();
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM upstream_spec_v1 WHERE id = ?")
+        .bind(upstream_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    let provider_report_state = if kind.as_deref() == Some("vertex_api_key") {
+        Some(ProviderReportState::NotApplicable.as_str())
+    } else {
+        access
+            .provider_report_state
+            .map(ProviderReportState::as_str)
+    };
     let project_changed = current_project_id != access.project_id;
     sqlx::query(
         "UPDATE upstream_api_key_details_v1
@@ -779,11 +791,7 @@ pub(crate) async fn write_api_key_access_in_tx(
     .bind(access.provider.map(provider_as_str))
     .bind(&access.project_id)
     .bind(access.project_source.map(ProviderProjectSource::as_str))
-    .bind(
-        access
-            .provider_report_state
-            .map(ProviderReportState::as_str),
-    )
+    .bind(provider_report_state)
     .bind(access.provider_report_status_metadata.as_deref())
     .bind(access.last_error.as_deref())
     .bind(optional_u64_to_i64(

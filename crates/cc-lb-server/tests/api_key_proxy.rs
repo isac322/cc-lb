@@ -94,6 +94,9 @@ impl ProxyHarness {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -121,6 +124,9 @@ impl ProxyHarness {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -195,6 +201,9 @@ impl ProxyHarness {
             .expect("managed key created");
         let stores = Stores {
             upstreams: self.storage.clone(),
+            vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+                self.storage.clone(),
+            )),
             principals: self.storage.clone(),
             plugin_registry: self.storage.clone(),
             upstream_rate_limits: self.storage.clone(),

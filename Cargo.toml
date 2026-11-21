@@ -32,6 +32,8 @@ rust-version = "1.99.1"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "2.2.1" }
+cc-lb-vertex-auth = { path = "crates/cc-lb-vertex-auth", version = "2.2.1" }
+cc-lb-signer-vertex = { path = "crates/cc-lb-signer-vertex", version = "2.2.1" }
 cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "2.2.1" }
 cc-lb-quota = { path = "crates/cc-lb-quota", version = "2.2.1" }
 cc-lb-request-log = { path = "crates/cc-lb-request-log", version = "2.2.1" }

@@ -17,7 +17,7 @@ Use the docs to:
 
 ## Supported scope
 
-The six shipped upstream kinds are `anthropic_api_key`, `anthropic_oauth`, `openai_api_key`, `openai_oauth`, `gemini_api_key`, and `gemini_oauth`.
+The eight shipped upstream kinds are `anthropic_api_key`, `anthropic_oauth`, `openai_api_key`, `openai_oauth`, `gemini_api_key`, `gemini_oauth`, `vertex_api_key`, and `vertex_credential`.
 
 Shared routes preserve each provider's native request and response format:
 
@@ -29,7 +29,7 @@ Shared routes preserve each provider's native request and response format:
 
 Provider-prefixed routes select a provider explicitly. See the [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) for supported operations and eligible credentials.
 
-cc-lb does not translate requests between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credential paths, and account-bound provider-management APIs such as files, uploads, and stored-response or conversation management are outside the supported proxy scope. Only the model catalog operations listed in the runtime endpoint reference are supported; account catalogs are excluded.
+cc-lb does not translate requests between providers or act as a universal multi-provider gateway. Vertex AI Gemini is supported through scoped `vertex_api_key` and `vertex_credential` upstreams; Express and regional API-key targets support generate, stream, and countTokens only because Google rejects API keys for cached-content creation, the publisher model catalog, and Live. Regional credential targets additionally support approved cached-content create/use, publisher model-catalog list/get, and Live routes through Vertex. The catalog is a minimal publisher projection, not entitlement-aware. Explicit cached-content billing remains Vertex-controlled; use least-privilege service accounts. Bedrock remains unsupported; ambient ADC/metadata-server credentials, external-account files, and account-bound provider-management APIs remain outside the supported proxy scope.
 
 cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 

@@ -177,6 +177,9 @@ async fn seed_provider_oauth_upstream(
     let upstream = UpstreamStore::create(
         server.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: format!("coupon-{upstream_id}"),
             kind,
@@ -524,6 +527,9 @@ async fn get_limit_resets_rejects_non_oauth_upstream() {
     let upstream = UpstreamStore::create(
         server.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "api-key-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -1183,6 +1189,9 @@ async fn list_limit_resets_filters_upstreams_and_preserves_unknown_snapshots() {
         UpstreamStore::create(
             server.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: format!("excluded-{id}"),
                 kind,

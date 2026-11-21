@@ -148,7 +148,7 @@ impl UpstreamAffinityStore for SqliteStorage {
                     .await
                     .map_err(map_sqlx_error)?;
                     let current_epoch = current
-                        .filter(|(_, kind)| kind == "gemini_api_key")
+                        .filter(|(_, kind)| matches!(kind.as_str(), "gemini_api_key" | "vertex_api_key" | "vertex_credential"))
                         .map(|(epoch, _)| epoch);
                     if current_epoch != Some(binding.owner_epoch) {
                         tx.rollback().await.map_err(map_sqlx_error)?;

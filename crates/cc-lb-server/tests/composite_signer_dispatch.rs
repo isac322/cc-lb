@@ -522,6 +522,9 @@ impl Fixture {
             upstreams: Arc::new(OrderedUpstreamStore {
                 inner: storage.clone(),
             }),
+            vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -566,6 +569,9 @@ impl Fixture {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
@@ -648,6 +654,9 @@ impl Fixture {
         UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id,
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,

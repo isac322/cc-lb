@@ -15,16 +15,19 @@ cc-lb is an operator-managed endpoint for Anthropic-compatible traffic. It keeps
 
 ## Supported scope
 
-The current public upstream contract supports six upstream kinds across bounded consistency-safe generation and token-count operations (`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`, `GET /v1/responses` WebSocket, and `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`):
+The current public upstream contract supports eight upstream kinds across bounded consistency-safe generation and token-count operations:
 
-- `anthropic_api_key`: an operator-configured Anthropic API-key upstream. Standard Console keys (workspace keys `sk-ant-api03-…` and personal or service-account keys `sk-ant-usr-…`) are checked before they are saved; Admin keys, Enterprise management keys, and OAuth tokens are rejected. Per-key usage is Anthropic's reported figures when the key's access allows it and cc-lb's estimates otherwise. Costs are list-price estimates, and the credit balance is not available through Anthropic's API.
-- `anthropic_oauth`: an Anthropic OAuth upstream managed through the admin surface.
-- `openai_api_key` and `openai_oauth`: OpenAI API-key and OAuth upstreams for `/v1/responses` HTTP and WebSocket routing.
-- `gemini_api_key` and `gemini_oauth`: Gemini API-key and OAuth upstreams for `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`. New Gemini subscription sign-ins use the Antigravity OAuth client with browser sign-in and localhost callback-URL paste; existing Gemini CLI enterprise grants keep their profile. Google retired Gemini CLI consumer login on [June 18, 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity/).
+- `anthropic_api_key` and `anthropic_oauth`: Anthropic API-key and OAuth upstreams.
+- `openai_api_key` and `openai_oauth`: OpenAI API-key and OAuth upstreams for Responses HTTP and WebSocket routing.
+- `gemini_api_key` and `gemini_oauth`: Gemini Developer API-key and OAuth upstreams.
+- `vertex_api_key`: Gemini through Vertex AI using an Express key or a regional project-bound API key.
+- `vertex_credential`: Gemini through regional Vertex AI using validated service-account, authorized-user, or impersonated-service-account credentials.
+
+Vertex uses native Gemini-shaped ingress and supports generate, stream, and countTokens. Express and regional API-key targets support only generate, stream, and countTokens and have no cached-content, model-catalog, or Live support: Google rejects API keys for those operations. Regional credential targets additionally support approved cached-content create/use, publisher model-catalog list/get, and Live WebSocket routes through Vertex. The model catalog is a minimal projection of Vertex's publisher catalog, not an entitlement-aware availability list. Explicit cached-content billing remains Vertex-controlled; cc-lb does not promise cache discounts or expose a billing receipt. Use least-privilege service accounts for regional credential upstreams. Bedrock, AWS SigV4, ambient ADC/metadata-server credentials, external-account files, and account-bound provider-management APIs remain unsupported. Vertex is excluded from subscription quota, warmup, keepalive, embeddings, prediction, Files, and OpenAI-compatible routes. See [`docs/vertex-ai-qa.md`](./docs/vertex-ai-qa.md) for the evidence matrix.
 
 OpenAI ChatGPT-subscription upstreams also serve public `/v1` Responses, Chat Completions, model, image, compaction, input-token, realtime, and optional transcription operations through translation and emulation. Operations requiring provider-owned state or lacking a subscription equivalent route to `openai_api_key` upstreams when ownership is unambiguous; unsupported operations remain explicit rejects. Codex-shaped requests remain unchanged, and cc-lb stores no request or response data.
 
-Bedrock, Vertex, and account-bound provider management APIs (files, uploads, model/account catalogs, stored-response or conversation management) are not part of the supported proxy scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
+cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 
 Shipped provider route support and credential eligibility do not establish full acceptance for the pinned Codex 0.169.0 or agy 1.5.9 clients; that acceptance remains unverified. See the [current-mode client boundary](./docs/runtime-management.md#current-mode-client-acceptance) and [client capability ledger](https://github.com/isac322/cc-lb/blob/master/docs/client-capabilities.json) for per-feature evidence and limits.
 

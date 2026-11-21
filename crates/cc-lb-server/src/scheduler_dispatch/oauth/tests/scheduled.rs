@@ -756,6 +756,9 @@ async fn create_usage_poll_upstream(
     let created = UpstreamStore::create(
         fixture.storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: upstream_id,
             name: format!("usage-poll-{kind:?}-{upstream_id}"),
             kind,

@@ -992,6 +992,9 @@ async fn seed_runtime_state(
             warmup_dialect_plugin: None,
             workspace_id: None,
             api_key_access: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
         },
     )
     .await?;
@@ -1067,6 +1070,9 @@ async fn seed_qa1005_keys(
             warmup_dialect_plugin: None,
             workspace_id: None,
             api_key_access: None,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
         },
     )
     .await?;

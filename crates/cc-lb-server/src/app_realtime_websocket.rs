@@ -81,6 +81,34 @@ fn transform_realtime_message(
     }
 }
 
+pub(crate) fn rewrite_vertex_live_setup_message(
+    message: UpstreamMessage,
+    cfg: &cc_lb_domain::VertexUpstreamConfig,
+) -> Result<UpstreamMessage, ()> {
+    match message {
+        UpstreamMessage::Text(frame) => {
+            let Some(payload) =
+                cc_lb_signer_vertex::rewrite_live_setup_model(frame.as_bytes(), cfg)
+                    .map_err(|_| ())?
+            else {
+                return Ok(UpstreamMessage::Text(frame));
+            };
+            Ok(UpstreamMessage::Text(
+                String::from_utf8(payload.to_vec()).map_err(|_| ())?.into(),
+            ))
+        }
+        UpstreamMessage::Binary(frame) => {
+            let Some(payload) =
+                cc_lb_signer_vertex::rewrite_live_setup_model(&frame, cfg).map_err(|_| ())?
+            else {
+                return Ok(UpstreamMessage::Binary(frame));
+            };
+            Ok(UpstreamMessage::Binary(payload))
+        }
+        other => Ok(other),
+    }
+}
+
 type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 fn websocket_http_error(error: &WebSocketError) -> Response<Body> {
@@ -278,18 +306,22 @@ pub(super) async fn gemini_live_websocket_handler(
     // The setup frame supplies the model, but cannot make a disabled, unbound,
     // or OAuth-only upstream eligible for Live. Reject that structural absence
     // as HTTP; leave the full model-specific routing pipeline after setup.
+    let view = state.dynamic_view.load();
     let candidates = cc_lb_engine::build_candidates(
-        &state.dynamic_view.load(),
+        &view,
         auth.principal_id(),
         cc_lb_engine::RequestKind::GeminiGenerateContent,
         &[],
         &HashMap::new(),
         state.clock.as_ref(),
     );
-    if !candidates
-        .iter()
-        .any(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::GeminiApiKey)
-    {
+    let records = view.upstreams_snapshot();
+    if !candidates.iter().any(|candidate| {
+        records
+            .iter()
+            .find(|record| record.id == candidate.upstream_id)
+            .is_some_and(cc_lb_engine::lifecycle::live_eligible)
+    }) {
         return observation.reject_no_eligible_upstream(cc_lb_domain::Provider::Gemini);
     }
     let request_span = tracing::Span::current();
@@ -396,6 +428,23 @@ pub(super) async fn gemini_live_websocket_handler(
                         let _ = downstream.send(Message::Close(None)).now_or_never();
                         return;
                     }
+                };
+                let first = if let Some(cfg) = session.vertex_config() {
+                    match rewrite_vertex_live_setup_message(first, cfg) {
+                        Ok(first) => first,
+                        Err(()) => {
+                            session.finish(
+                                RealtimeUsage::default(),
+                                RealtimeStreamMetrics::new(),
+                                RealtimeWebSocketTermination::ProxyRelayError,
+                                cc_lb_engine::realtime_websocket::RealtimeWebSocketDiagnostics::default(),
+                            );
+                            let _ = downstream.send(Message::Close(None)).now_or_never();
+                            return;
+                        }
+                    }
+                } else {
+                    first
                 };
                 let sent = tokio::select! {
                     sent = upstream.send(first) => Some(sent),
@@ -539,9 +588,27 @@ async fn relay_realtime_websocket(
                         Some(Ok(message @ UpstreamMessage::Pong(_))) => message,
                         Some(Ok(UpstreamMessage::Close(frame))) => {
                             if let Some(close) = frame.as_ref() {
+                                let reason = cc_lb_observability::RedactionPolicy::default()
+                                    .redact_text(close.reason.as_ref())
+                                    .chars()
+                                    .take(512)
+                                    .collect::<String>();
+                                if u16::from(close.code) == 1000 {
+                                    tracing::debug!(
+                                        close_code = u16::from(close.code),
+                                        close_reason = %reason,
+                                        "Upstream WebSocket closed normally"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        close_code = u16::from(close.code),
+                                        close_reason = %reason,
+                                        "Upstream WebSocket closed abnormally"
+                                    );
+                                }
                                 diagnostics = diagnostics.with_close(
                                     close.code.into(),
-                                    close.reason.as_str(),
+                                    close.reason.as_ref(),
                                 );
                             }
                             let frame = frame.map(upstream_close_frame);

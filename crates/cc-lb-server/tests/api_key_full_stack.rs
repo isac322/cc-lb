@@ -357,6 +357,9 @@ impl Stage {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: format!("{name}-{}", Uuid::new_v4().simple()),
                 kind: UpstreamKind::AnthropicApiKey,
@@ -837,6 +840,9 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
     let storage = stage.storage.clone();
     let stores = Stores {
         upstreams: storage.clone(),
+        vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+            storage.clone(),
+        )),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),

@@ -792,6 +792,10 @@ mod tests {
                     None => (None, false, 0),
                 };
             let record = UpstreamRecord {
+                owner_epoch: 0,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: create.id,
                 name: create.name,
                 kind: create.kind,
@@ -1472,6 +1476,9 @@ mod tests {
     async fn create_upstream(store: &MemoryUpstreamStore, name: &str) -> UpstreamRecord {
         store
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: UpstreamRecordId::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

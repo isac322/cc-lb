@@ -215,6 +215,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qa_poll_1_vertex_upstreams_are_excluded_from_scheduler_watchdogs() {
+        for kind in [UpstreamKind::VertexApiKey, UpstreamKind::VertexCredential] {
+            let mut upstream = oauth_upstream(kind);
+            upstream.api_key_ciphertext = Some(vec![1]);
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead()));
+            assert!(!WatchdogUpstreamFilter::OAuthUsagePoll.matches(&upstream, &aead()));
+            assert!(!WatchdogUpstreamFilter::Warmup.matches(&upstream, &aead()));
+        }
+    }
+
     /// OAU-03: no OAuth refresh, warmup-watchdog, or OAuth usage job is ever
     /// listed for an API-key upstream, even one carrying OAuth-shaped fields.
     #[test]
@@ -357,6 +368,10 @@ mod tests {
 
     fn oauth_upstream(kind: UpstreamKind) -> UpstreamRecord {
         UpstreamRecord {
+            owner_epoch: 0,
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "oauth-upstream".to_owned(),
             kind,

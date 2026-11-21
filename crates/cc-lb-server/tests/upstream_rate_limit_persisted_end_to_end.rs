@@ -36,6 +36,9 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "fake-anthropic".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,

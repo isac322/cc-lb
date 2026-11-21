@@ -16,6 +16,7 @@ import {
   PROVIDER_LABELS,
   type ProviderFamily,
   providerOf,
+  upstreamAuthMode,
 } from '../../../lib/providers';
 import {
   useCreateFromOauthDraft,
@@ -57,6 +58,7 @@ import {
   identityOfResult,
   useOAuthConnectSession,
 } from './useOAuthConnectSession';
+import { useVertexConnect } from './useVertexConnect';
 
 /** `apikey`: inside the API-key flow, which owns its own sub-steps. */
 type StepId =
@@ -66,6 +68,7 @@ type StepId =
   | 'paste'
   | 'finish'
   | 'apikey'
+  | 'vertex'
   | 'generic';
 
 const PENDING_INPUT_CLASS =
@@ -109,8 +112,24 @@ export function UpstreamConnectDialog({
   );
 }
 
-/** Replace key: the API-key flow alone, saving onto the existing upstream. */
+/** Replace key or credential on an existing upstream. */
 function ReplaceKeyDialogBody({
+  upstream,
+  onClose,
+}: {
+  upstream: Upstream;
+  onClose: () => void;
+}) {
+  if (
+    upstream.kind === 'vertex_api_key' ||
+    upstream.kind === 'vertex_credential'
+  ) {
+    return <VertexReplaceDialogBody upstream={upstream} onClose={onClose} />;
+  }
+  return <LegacyReplaceKeyDialogBody upstream={upstream} onClose={onClose} />;
+}
+
+function LegacyReplaceKeyDialogBody({
   upstream,
   onClose,
 }: {
@@ -153,6 +172,44 @@ function ReplaceKeyDialogBody({
           >
             {apiKey.body}
           </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function VertexReplaceDialogBody({
+  upstream,
+  onClose,
+}: {
+  upstream: Upstream;
+  onClose: () => void;
+}) {
+  const vertex = useVertexConnect({
+    replace: upstream,
+    onCancel: onClose,
+    onDone: onClose,
+  });
+  return (
+    <Modal
+      open
+      onOpenChange={(next) => {
+        if (!next && !vertex.busy) onClose();
+      }}
+      title={`Replace ${upstream.kind === 'vertex_credential' ? 'credential' : 'key'} for ${upstream.name}`}
+      description="The current connection keeps working until you save."
+      size="lg"
+      preventDismiss={vertex.busy}
+      footer={vertex.footer}
+    >
+      <div className="flex gap-5 min-h-[20rem]">
+        <StepRail steps={vertex.rail} activeIndex={vertex.activeIndex} />
+        <div className="min-w-0 flex-1">
+          <MobileStepLine
+            steps={vertex.rail}
+            activeIndex={vertex.activeIndex}
+          />
+          <div className="flash-text-active min-w-0">{vertex.body}</div>
         </div>
       </div>
     </Modal>
@@ -225,7 +282,20 @@ function ConnectDialogBody({
       onClose();
     },
   });
-  const inApiKeyFlow = isCreate && kind.endsWith('_api_key');
+  const vertex = useVertexConnect({
+    replace: null,
+    onCancel: () => requestClose(),
+    onDone: (created) => {
+      onCreated(created);
+      onClose();
+    },
+  });
+  const inApiKeyFlow =
+    isCreate &&
+    upstreamAuthMode(kind) === 'api_key' &&
+    kind !== 'vertex_api_key';
+  const inVertexFlow =
+    isCreate && (kind === 'vertex_api_key' || kind === 'vertex_credential');
 
   const outcome = session.outcome;
   useEffect(() => {
@@ -239,13 +309,13 @@ function ConnectDialogBody({
     if (step === 'signin') setStep('finish');
   }, [isCreate, outcome, provider, step]);
   const saving = createFromDraft.isPending;
-  const busy = session.completing || saving || apiKey.busy;
+  const busy = session.completing || saving || apiKey.busy || vertex.busy;
   const draftExpired =
     isCreate && step === 'finish' && session.phase === 'expired';
   const needsDiscardConfirm =
     isCreate && step === 'finish' && outcome !== null && !draftExpired;
 
-  const steps: Exclude<StepId, 'apikey'>[] = isCreate
+  const steps: Exclude<StepId, 'apikey' | 'vertex'>[] = isCreate
     ? provider === 'openai'
       ? session.flow === 'paste_code'
         ? ['provider', 'kind', 'signin', 'paste', 'finish']
@@ -260,22 +330,36 @@ function ConnectDialogBody({
       : provider === 'gemini'
         ? ['signin', 'paste', 'finish']
         : ['signin', 'paste', 'finish'];
-  const rail = inApiKeyFlow
+  const rail = inVertexFlow
     ? [
         stepMeta('provider', true, provider),
         stepMeta('kind', true, provider),
-        ...apiKey.rail,
+        ...vertex.rail,
       ]
-    : steps.map((id) => stepMeta(id, isCreate, provider));
-  const stepIndex = inApiKeyFlow
+    : inApiKeyFlow
+      ? [
+          stepMeta('provider', true, provider),
+          stepMeta('kind', true, provider),
+          ...apiKey.rail,
+        ]
+      : steps.map((id) => stepMeta(id, isCreate, provider));
+  const stepIndex = inVertexFlow
     ? step === 'provider'
       ? 0
       : step === 'kind'
         ? 1
-        : 2 + apiKey.activeIndex
-    : step === 'apikey'
-      ? 0
-      : Math.max(0, steps.indexOf(step));
+        : 2 + vertex.activeIndex
+    : inApiKeyFlow
+      ? step === 'provider'
+        ? 0
+        : step === 'kind'
+          ? 1
+          : 2 + apiKey.activeIndex
+      : step === 'apikey'
+        ? 0
+        : step === 'vertex'
+          ? 0
+          : Math.max(0, steps.indexOf(step as (typeof steps)[number]));
 
   const requestClose = () => {
     if (busy) return;
@@ -291,9 +375,12 @@ function ConnectDialogBody({
   };
 
   const continueFromKind = () => {
-    if (kind.endsWith('_oauth')) {
+    if (upstreamAuthMode(kind) === 'subscription') {
       setSessionWanted(true);
       setStep('signin');
+    } else if (kind === 'vertex_api_key' || kind === 'vertex_credential') {
+      setSessionWanted(false);
+      setStep('vertex');
     } else {
       setStep('apikey');
     }
@@ -342,13 +429,15 @@ function ConnectDialogBody({
         ? 'Choose how to connect this provider.'
         : step === 'apikey'
           ? 'Nothing is saved until you add the upstream.'
-          : isCreate
-            ? 'Nothing is saved until you confirm the account.'
-            : firstConnect
-              ? `Sign in with the ${PROVIDER_LABELS[provider]} account this upstream should use.`
-              : provider === 'openai' && session.flow !== 'paste_code'
-                ? 'The current connection keeps working until you finish signing in.'
-                : 'The current connection keeps working until you paste the new code.';
+          : step === 'vertex'
+            ? 'Nothing is saved until you add the upstream.'
+            : isCreate
+              ? 'Nothing is saved until you confirm the account.'
+              : firstConnect
+                ? `Sign in with the ${PROVIDER_LABELS[provider]} account this upstream should use.`
+                : provider === 'openai' && session.flow !== 'paste_code'
+                  ? 'The current connection keeps working until you finish signing in.'
+                  : 'The current connection keeps working until you paste the new code.';
 
   // Back and Cancel are sibling actions: same variant and size.
   const backButton = (to: StepId) => (
@@ -398,6 +487,8 @@ function ConnectDialogBody({
     );
   } else if (step === 'apikey') {
     footer = apiKey.footer;
+  } else if (step === 'vertex') {
+    footer = vertex.footer;
   } else if (isCreate) {
     footer = draftExpired ? (
       <Button
@@ -471,6 +562,8 @@ function ConnectDialogBody({
               ) : null}
 
               {step === 'apikey' ? apiKey.body : null}
+
+              {step === 'vertex' ? vertex.body : null}
 
               {step === 'signin' ? (
                 <div className="flex flex-col gap-4">
@@ -723,6 +816,8 @@ function stepMeta(
       return { title: 'Connect', hint: 'Choose a credential type' };
     case 'generic':
       return { title: 'Credential', hint: 'Paste and save' };
+    case 'vertex':
+      return { title: 'Google Cloud', hint: 'Add access' };
     case 'signin':
       return {
         title: 'Sign in',
@@ -799,19 +894,23 @@ function KindStep({
 }) {
   const descriptions: Record<
     ProviderFamily,
-    { subscription: string; apiKey: string }
+    { subscription: string; apiKey: string; googleCloud: string }
   > = {
     anthropic: {
       subscription: 'Claude Pro/Max',
       apiKey: 'Anthropic Console',
+      googleCloud: 'Not available for Anthropic',
     },
     openai: {
       subscription: 'ChatGPT Plus/Pro/Team via Codex',
       apiKey: 'OpenAI Platform',
+      googleCloud: 'Not available for OpenAI',
     },
     gemini: {
       subscription: 'Google AI Pro/Ultra via Gemini/Antigravity',
       apiKey: 'Google AI Studio',
+      googleCloud:
+        'Vertex AI with a project, service account or credential file',
     },
   };
   return (
@@ -825,7 +924,7 @@ function KindStep({
       >
         <KindOption
           value={`${provider}_oauth`}
-          selected={kind.endsWith('_oauth')}
+          selected={upstreamAuthMode(kind) === 'subscription'}
           icon={<UserRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Subscription"
           description={descriptions[provider].subscription}
@@ -833,12 +932,26 @@ function KindStep({
         />
         <KindOption
           value={`${provider}_api_key`}
-          selected={kind.endsWith('_api_key')}
+          selected={
+            provider === 'gemini'
+              ? kind === 'gemini_api_key'
+              : upstreamAuthMode(kind) === 'api_key'
+          }
           icon={<KeyRound className="w-4 h-4" strokeWidth={1.75} />}
           title="API key"
           description={descriptions[provider].apiKey}
           onActivate={onContinue}
         />
+        {provider === 'gemini' ? (
+          <KindOption
+            value="vertex_credential"
+            selected={kind === 'vertex_credential'}
+            icon={<UserRound className="w-4 h-4" strokeWidth={1.75} />}
+            title="Google Cloud"
+            description={descriptions.gemini.googleCloud}
+            onActivate={onContinue}
+          />
+        ) : null}
       </BaseRadioGroup>
     </div>
   );

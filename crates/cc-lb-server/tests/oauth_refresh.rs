@@ -135,6 +135,9 @@ impl Fixture {
         let scheduler_backend = sqlite_scheduler_backend(&scheduler_path, clock.clone()).await;
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
+            vertex_state: Arc::new(cc_lb_server::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
@@ -185,6 +188,9 @@ impl Fixture {
         let record = self
             .storage
             .create(UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,

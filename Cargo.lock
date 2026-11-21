@@ -664,6 +664,7 @@ dependencies = [
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-vertex-auth",
  "chrono",
  "fake-anthropic",
  "figment",
@@ -827,6 +828,7 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-signer-anthropic-key",
+ "cc-lb-signer-vertex",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -1164,10 +1166,12 @@ dependencies = [
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",
  "cc-lb-signer-anthropic-oauth",
+ "cc-lb-signer-vertex",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-vertex-auth",
  "chrono",
  "clap",
  "fake-anthropic",
@@ -1263,6 +1267,22 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "cc-lb-signer-vertex"
+version = "2.2.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-upstream",
+ "cc-lb-vertex-auth",
+ "http",
+ "serde_json",
+ "sonic-rs",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1410,6 +1430,26 @@ dependencies = [
  "http",
  "thiserror 2.0.21",
  "url",
+]
+
+[[package]]
+name = "cc-lb-vertex-auth"
+version = "2.2.1"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "cc-lb-clock",
+ "cc-lb-domain",
+ "chrono",
+ "http",
+ "metrics",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

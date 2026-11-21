@@ -108,8 +108,13 @@ export function ApiKeyAccessSection({
 }) {
   const access = apiKeyAccessOf(upstream);
   const anthropic = upstream.kind === 'anthropic_api_key';
+  const vertex = upstream.kind === 'vertex_api_key';
   const providerLabel =
-    upstream.kind === 'openai_api_key' ? 'OpenAI' : 'Gemini';
+    upstream.kind === 'openai_api_key'
+      ? 'OpenAI'
+      : vertex
+        ? 'Gemini on Vertex AI'
+        : 'Gemini';
   const recheck = useRecheckApiKey();
   const [ownEditing, setOwnEditing] = useState(false);
   const editing = workspaceEditing ?? ownEditing;
@@ -291,8 +296,13 @@ export function ApiKeyAccessSection({
             <ProviderAccessRows
               access={access}
               provider={
-                upstream.kind === 'openai_api_key' ? 'openai' : 'gemini'
+                upstream.kind === 'openai_api_key'
+                  ? 'openai'
+                  : vertex
+                    ? 'vertex'
+                    : 'gemini'
               }
+              vertex={vertex ? upstream.vertex : null}
             />
           ) : keyUsable ? (
             <>
@@ -345,9 +355,11 @@ const REPORT_LABEL: Record<ProviderReportState, string> = {
 function ProviderAccessRows({
   access,
   provider,
+  vertex,
 }: {
   access: ApiKeyAccess;
-  provider: 'openai' | 'gemini';
+  provider: 'openai' | 'gemini' | 'vertex';
+  vertex: Upstream['vertex'];
 }) {
   const state = access.provider_report_state;
   const projectSource =
@@ -359,40 +371,62 @@ function ProviderAccessRows({
           ? 'Project provenance unverified'
           : 'Project provenance unknown';
   const reportHint =
-    provider === 'gemini'
-      ? 'Provider reporting is not applicable to this Gemini API-key integration. Proxy estimates cover cc-lb traffic only, not organization totals.'
-      : state === 'reported'
-        ? 'Text-generation usage and costs from the organization administrator API, scoped to this project.'
-        : state === 'not_configured'
-          ? 'Configure the deployment’s OpenAI organization-admin credential → get reported text-generation usage and costs. The serving key alone cannot authorize reports.'
-          : state === 'denied'
-            ? 'Authorize the deployment’s OpenAI organization-admin credential for usage and costs → get reported figures.'
-            : state === 'stale'
-              ? 'The last administrator report is retained; the latest refresh did not succeed.'
-              : state === 'not_applicable'
-                ? 'Administrator reporting does not apply to this upstream. Proxy estimates cover cc-lb traffic only.'
-                : state == null
-                  ? 'Reporting status is unknown. The serving-key check does not verify administrator reporting access.'
-                  : 'Administrator reports are not available. Showing proxy estimates from cc-lb traffic.';
+    provider === 'vertex'
+      ? 'Provider reporting is not applicable to Vertex AI keys. Proxy estimates cover cc-lb traffic only.'
+      : provider === 'gemini'
+        ? 'Provider reporting is not applicable to this Gemini API-key integration. Proxy estimates cover cc-lb traffic only, not organization totals.'
+        : state === 'reported'
+          ? 'Text-generation usage and costs from the organization administrator API, scoped to this project.'
+          : state === 'not_configured'
+            ? 'Configure the deployment’s OpenAI organization-admin credential → get reported text-generation usage and costs. The serving key alone cannot authorize reports.'
+            : state === 'denied'
+              ? 'Authorize the deployment’s OpenAI organization-admin credential for usage and costs → get reported figures.'
+              : state === 'stale'
+                ? 'The last administrator report is retained; the latest refresh did not succeed.'
+                : state === 'not_applicable'
+                  ? 'Administrator reporting does not apply to this upstream. Proxy estimates cover cc-lb traffic only.'
+                  : state == null
+                    ? 'Reporting status is unknown. The serving-key check does not verify administrator reporting access.'
+                    : 'Administrator reports are not available. Showing proxy estimates from cc-lb traffic.';
+  const vertexCapabilities =
+    provider === 'vertex'
+      ? 'Generate, stream, and count content. Cached content, model catalog, and Live require a Vertex credential.'
+      : null;
   return (
     <>
       <DetailRow label="Provider">
-        {access.provider === 'openai'
+        {provider === 'openai'
           ? 'OpenAI'
-          : access.provider === 'gemini'
-            ? 'Gemini'
-            : access.provider === 'anthropic'
-              ? 'Anthropic'
-              : 'Unknown'}
+          : provider === 'vertex'
+            ? 'Gemini on Vertex AI'
+            : access.provider === 'gemini'
+              ? 'Gemini'
+              : access.provider === 'anthropic'
+                ? 'Anthropic'
+                : 'Unknown'}
       </DetailRow>
       <DetailRow label="Project">
         <div className="flex min-w-0 flex-col gap-1">
           <span className="break-all font-mono text-data">
-            {access.project_id ?? 'Unknown'}
+            {vertex?.express
+              ? 'Express (no project)'
+              : (vertex?.project_id ?? access.project_id ?? 'Unknown')}
           </span>
+          {vertex?.location ? (
+            <span className="text-caption text-text-muted">
+              Location: {vertex.location}
+            </span>
+          ) : null}
           <span className="text-caption text-text-muted">{projectSource}</span>
         </div>
       </DetailRow>
+      {vertexCapabilities ? (
+        <DetailRow label="Vertex capabilities">
+          <span className="text-caption text-text-muted">
+            {vertexCapabilities}
+          </span>
+        </DetailRow>
+      ) : null}
       <DetailRow label="Administrator reporting">
         <div className="flex flex-col items-start gap-1">
           <StatusBadge
@@ -406,14 +440,20 @@ function ProviderAccessRows({
             label={state == null ? 'Unknown' : REPORT_LABEL[state]}
           />
           <span className="text-caption text-text-muted">{reportHint}</span>
-          {provider === 'gemini' ? (
+          {provider === 'gemini' || provider === 'vertex' ? (
             <a
               className={ANCHOR_CLASS}
-              href="https://aistudio.google.com/docs/billing#monitor-usage"
+              href={
+                provider === 'vertex'
+                  ? 'https://console.cloud.google.com/billing'
+                  : 'https://aistudio.google.com/docs/billing#monitor-usage'
+              }
               target="_blank"
               rel="noopener noreferrer"
             >
-              Gemini usage and billing in AI Studio
+              {provider === 'vertex'
+                ? 'Google Cloud billing'
+                : 'Gemini usage and billing in AI Studio'}
             </a>
           ) : null}
         </div>
@@ -431,7 +471,9 @@ function ProviderAccessRows({
               ? 'Reported'
               : state === 'stale'
                 ? 'Last report'
-                : state == null && provider !== 'gemini'
+                : state == null &&
+                    provider !== 'gemini' &&
+                    provider !== 'vertex'
                   ? 'Unknown'
                   : 'Estimated'
           }
@@ -439,7 +481,7 @@ function ProviderAccessRows({
         <span className="mt-1 block text-caption text-text-muted">
           {state === 'reported' || state === 'stale'
             ? 'Provider report; serving-key verification is separate from administrator access.'
-            : state == null && provider !== 'gemini'
+            : state == null && provider !== 'gemini' && provider !== 'vertex'
               ? 'Reporting status unknown · cc-lb traffic estimates remain available'
               : 'Proxy estimates · cc-lb traffic only'}
         </span>

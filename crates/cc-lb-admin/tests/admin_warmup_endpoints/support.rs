@@ -55,6 +55,9 @@ pub async fn new_fixture() -> Fixture {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "warmup-primary".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
@@ -144,6 +147,9 @@ pub async fn new_gemini_fixture(
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id,
             name: "warmup-gemini".to_owned(),
             kind: UpstreamKind::GeminiOauth,

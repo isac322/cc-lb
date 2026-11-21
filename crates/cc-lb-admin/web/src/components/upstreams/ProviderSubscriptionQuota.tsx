@@ -1,6 +1,6 @@
 import { windowLabel } from '../../lib/api';
 import type { ProviderFamily } from '../../lib/providers';
-import { providerOf } from '../../lib/providers';
+import { providerOf, upstreamAuthMode } from '../../lib/providers';
 import { useSubscriptionQuotaLatest, useUpstreams } from '../../lib/queries';
 import { Card, CardBody, CardHeader, Skeleton } from '../ui/primitives';
 import { UPSTREAM_LATEST_WINDOWS_BY_PROVIDER } from './UpstreamUsageTable';
@@ -15,7 +15,7 @@ export function ProviderSubscriptionQuota({
     (upstream) => providerOf(upstream.kind) === provider,
   );
   const oauthIds = upstreams
-    .filter((upstream) => upstream.kind.endsWith('_oauth'))
+    .filter((upstream) => upstreamAuthMode(upstream.kind) === 'subscription')
     .map((upstream) => upstream.id)
     .join(',');
   const latest = useSubscriptionQuotaLatest({

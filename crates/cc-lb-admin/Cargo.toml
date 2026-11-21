@@ -43,6 +43,7 @@ cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-upstream.workspace = true
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
+cc-lb-vertex-auth = { path = "../cc-lb-vertex-auth" }
 tracing.workspace = true
 http.workspace = true
 http-body-util.workspace = true

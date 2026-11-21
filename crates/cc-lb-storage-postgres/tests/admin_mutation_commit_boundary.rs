@@ -489,6 +489,9 @@ fn tokens(ciphertext: &[u8]) -> EncryptedOAuthTokens {
 
 fn api_key_upstream(name: &str) -> UpstreamCreate {
     UpstreamCreate {
+        vertex: None,
+        vertex_credential_type: None,
+        vertex_quota_project_id: None,
         id: Uuid::new_v4(),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicApiKey,

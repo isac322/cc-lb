@@ -1642,3 +1642,169 @@ describe('save (UI-D-33, UI-R-03, D-UX1 inlineError)', () => {
     }
   });
 });
+
+test('QA-WEB-4 sends flat Express, Cloud API key, and credential-file bodies without browser persistence', async () => {
+  const created = upstream({ id: 'vertex-created', name: 'Vertex' });
+  route = (call) => {
+    if (call.path === PREFLIGHT) {
+      return { status: 200, body: BOUND };
+    }
+    if (call.path === UPSTREAMS) return { status: 200, body: created };
+    return { status: 404, body: {} };
+  };
+
+  const cloud = renderDialog({ mode: 'create' });
+  fireEvent.click(within(cloud.dialog).getByRole('button', { name: /Gemini/ }));
+  fireEvent.click(
+    within(cloud.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(cloud.dialog).getByRole('radio', { name: /Google Cloud/ }),
+  );
+  fireEvent.click(
+    within(cloud.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(cloud.dialog).getByRole('radio', { name: /Cloud API key/ }),
+  );
+  fireEvent.click(
+    within(cloud.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.change(within(cloud.dialog).getByLabelText('API key'), {
+    target: { value: 'AIza-cloud-key' },
+  });
+  fireEvent.change(within(cloud.dialog).getByLabelText('Project ID'), {
+    target: { value: 'runbear' },
+  });
+  fireEvent.click(
+    within(cloud.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  await act(async () => {});
+  expect(preflightCalls()[0]?.body).toEqual({
+    kind: 'vertex_api_key',
+    api_key_value: 'AIza-cloud-key',
+    project_id: 'runbear',
+    location: 'global',
+  });
+  cleanup();
+
+  const express = renderDialog({ mode: 'create' });
+  fireEvent.click(
+    within(express.dialog).getByRole('button', { name: /Gemini/ }),
+  );
+  fireEvent.click(
+    within(express.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(express.dialog).getByRole('radio', { name: /Google Cloud/ }),
+  );
+  fireEvent.click(
+    within(express.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(express.dialog).getByRole('radio', { name: /Express key/ }),
+  );
+  fireEvent.click(
+    within(express.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.change(within(express.dialog).getByLabelText('API key'), {
+    target: { value: 'AIza-express-key' },
+  });
+  fireEvent.click(
+    within(express.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  await act(async () => {});
+  expect(preflightCalls()[1]?.body).toEqual({
+    kind: 'vertex_api_key',
+    api_key_value: 'AIza-express-key',
+    express: true,
+  });
+  cleanup();
+
+  const credential = renderDialog({ mode: 'create' });
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: /Gemini/ }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('radio', { name: /Google Cloud/ }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('radio', { name: /Credential file/ }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  const json = '{"type":"authorized_user","quota_project_id":"runbear"}';
+  const pasteField = within(credential.dialog).getByLabelText(
+    'Paste credential JSON',
+  );
+  fireEvent.paste(pasteField, {
+    clipboardData: { getData: () => json },
+  });
+  expect((pasteField as HTMLTextAreaElement).value).toBe('');
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(credential.dialog).getByRole('button', { name: 'Add upstream' }),
+  );
+  await act(async () => {});
+  expect(calls.find((call) => call.path === UPSTREAMS)?.body).toMatchObject({
+    kind: 'vertex_credential',
+    google_credential: json,
+    location: 'global',
+  });
+  expect(localStorage.length).toBe(0);
+});
+
+test('Vertex permission copy for a forbidden preflight', async () => {
+  route = (call) =>
+    call.path === PREFLIGHT
+      ? { status: 200, body: FORBIDDEN }
+      : { status: 404, body: {} };
+  const { dialog } = renderDialog({ mode: 'create' });
+  fireEvent.click(within(dialog).getByRole('button', { name: /Gemini/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Google Cloud/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Cloud API key/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.change(within(dialog).getByLabelText('API key'), {
+    target: { value: 'AIza-forbidden' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Project ID'), {
+    target: { value: 'runbear' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  expect(
+    await within(dialog).findByText(
+      /roles\/aiplatform\.user and quota-project permissions/,
+    ),
+  ).toBeDefined();
+});
+
+test('QA-WEB-8 rejects malformed credential paste without a request', () => {
+  const before = calls.length;
+  const { dialog } = renderDialog({ mode: 'create' });
+  fireEvent.click(within(dialog).getByRole('button', { name: /Gemini/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Google Cloud/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.click(
+    within(dialog).getByRole('radio', { name: /Credential file/ }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  fireEvent.paste(within(dialog).getByLabelText('Paste credential JSON'), {
+    clipboardData: { getData: () => 'not-json' },
+  });
+  expect(within(dialog).getByRole('alert').textContent).toContain(
+    'Paste a JSON object',
+  );
+  expect(calls.length).toBe(before);
+});

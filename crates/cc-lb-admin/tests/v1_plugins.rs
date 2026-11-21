@@ -103,6 +103,9 @@ async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropi
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
             id: Uuid::new_v4(),
             name: "warning-openai".to_owned(),
             kind: cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey,

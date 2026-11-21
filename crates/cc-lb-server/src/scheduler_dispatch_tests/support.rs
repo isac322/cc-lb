@@ -71,6 +71,9 @@ impl Fixture {
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
                 id: Uuid::new_v4(),
                 name: "fake-upstream".to_owned(),
                 kind: upstream_kind,
@@ -156,6 +159,9 @@ impl Fixture {
                 warmup_dialect_plugin: None,
                 workspace_id: None,
                 api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
             },
         )
         .await
@@ -362,6 +368,9 @@ impl Fixture {
     ) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
+            vertex_state: Arc::new(crate::dynamic_view_builder::VertexState::new(
+                storage.clone(),
+            )),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
