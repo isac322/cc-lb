@@ -53,7 +53,7 @@ enum Backend {
         storage: Arc<SqliteStorage>,
     },
     Postgres {
-        isolated: crate::pg_template_helper::IsolatedPg,
+        isolated: Box<crate::pg_template_helper::IsolatedPg>,
         storage: Arc<PostgresStorage>,
     },
 }
@@ -82,7 +82,7 @@ impl Backend {
         let storage = PostgresStorage::new(pool, test_clock());
         storage.initialize().await.expect("postgres migrations");
         Some(Self::Postgres {
-            isolated,
+            isolated: Box::new(isolated),
             storage: Arc::new(storage),
         })
     }
@@ -152,7 +152,7 @@ impl Backend {
     async fn drop_schema(self) {
         if let Self::Postgres { isolated, storage } = self {
             storage.pool().close().await;
-            isolated
+            (*isolated)
                 .drop()
                 .await
                 .expect("drop isolated postgres database");

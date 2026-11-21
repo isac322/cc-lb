@@ -666,6 +666,7 @@ jobs:
         run: |
           set -euo pipefail
           sysroot="$(rustc --print sysroot)"
+          sysroot_real="$(realpath "$sysroot")"
           host="$(rustc -vV | awk '/^host:/ { print $2 }')"
           llvm_bin="$sysroot/lib/rustlib/$host/bin"
           out_dir="$HOME/.local/llvm-cov-bins"
@@ -675,12 +676,14 @@ jobs:
           for tool in llvm-profdata llvm-cov; do
             while IFS= read -r lib_path; do
               [ -n "$lib_path" ] || continue
-              case "$lib_path" in
-                "$sysroot"/*)
-                  cp -Ln "$lib_path" "$out_dir/lib/"
+              real_lib="$(realpath "$lib_path")"
+              case "$real_lib" in
+                "$sysroot"/*|"$sysroot_real"/*)
+                  base="$(basename "$lib_path")"
+                  [ -e "$out_dir/lib/$base" ] || cp -L "$lib_path" "$out_dir/lib/$base"
                   ;;
               esac
-            done < <(ldd "$out_dir/bin/$tool" | awk '/=> \// { print $3 }')
+            done < <(ldd "$llvm_bin/$tool" | awk '/=> \// { print $3 }')
             cat > "$out_dir/$tool" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
