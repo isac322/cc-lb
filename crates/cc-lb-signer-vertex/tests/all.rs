@@ -24,6 +24,10 @@ impl UpstreamDialect for DirectDialect {
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer inherited"));
         headers.insert("x-api-key", HeaderValue::from_static("stale-key"));
         headers.insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
             "x-goog-user-project",
             HeaderValue::from_static("stale-project"),
         );
@@ -81,5 +85,6 @@ async fn qa_url_1_public_signer_routes_url_and_strips_client_credentials() {
     );
     assert!(!signed.headers().contains_key(AUTHORIZATION));
     assert!(!signed.headers().contains_key("x-api-key"));
+    assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
     assert!(!signed.headers().contains_key("x-goog-user-project"));
 }

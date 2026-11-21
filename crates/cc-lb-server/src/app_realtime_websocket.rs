@@ -190,11 +190,53 @@ async fn connect_realtime_provider(
     }
 }
 
+pub(super) async fn codex_backend_root_handler(
+    State(state): State<ProxyState>,
+    OriginalUri(uri): OriginalUri,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
+    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response<Body> {
+    if method == axum::http::Method::GET
+        && let Ok(websocket) = websocket
+    {
+        return openai_realtime_websocket_handler(
+            State(state),
+            OriginalUri(uri),
+            headers,
+            provider_scope,
+            codex_backend,
+            websocket,
+        )
+        .await;
+    }
+
+    if let Err(error) = state.lifecycle.authenticate(&headers).await {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &error,
+            &method,
+            uri.path(),
+            Some(cc_lb_domain::Provider::Openai),
+            None,
+        );
+    }
+
+    provider_scope_error_response(
+        cc_lb_domain::Provider::Openai,
+        StatusCode::NOT_FOUND,
+        "operation_not_supported",
+        "requested operation is not supported",
+    )
+}
+
 pub(super) async fn openai_realtime_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     let Some(guard) = state.drain_controller.try_track() else {
@@ -231,6 +273,7 @@ pub(super) async fn openai_realtime_websocket_handler(
                 path: "/v1/realtime",
                 query: uri.query(),
                 model: model.as_deref(),
+                codex_backend: codex_backend.is_some(),
             },
             Bytes::new(),
         )
@@ -386,6 +429,7 @@ pub(super) async fn gemini_live_websocket_handler(
                             path: &path,
                             query: uri.query(),
                             model: model.as_deref(),
+                            codex_backend: false,
                         },
                         setup,
                     )

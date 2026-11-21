@@ -129,7 +129,8 @@ pub(crate) fn realtime_call_affinity_key(
     principal_id: &str,
     location: &str,
 ) -> Option<UpstreamAffinityKey> {
-    let call_id = location
+    let path = location.split('?').next().unwrap_or(location);
+    let call_id = path
         .trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -1169,5 +1170,30 @@ mod tests {
             gemini_cached_content_expiry(&serde_json::json!({"name": "cachedContents/abc"})),
             Err(UpstreamAffinityExtractionError::InvalidResponseAffinity)
         );
+    }
+
+    #[test]
+    fn realtime_call_affinity_key_extracts_call_id_and_ignores_query() {
+        let plain = realtime_call_affinity_key("principal-openai", "/v1/realtime/calls/rtc_123")
+            .expect("plain location");
+        let nested = realtime_call_affinity_key(
+            "principal-openai",
+            "/v1/realtime/calls/calls/rtc_123?intent=quicksilver",
+        )
+        .expect("nested location with query");
+        assert_eq!(plain, nested);
+        assert_eq!(plain.kind, UpstreamAffinityKind::OpenaiRealtimeCall);
+        assert_eq!(plain.value_sha256, digest("rtc_123"));
+
+        let uuid_key = realtime_call_affinity_key(
+            "principal-openai",
+            "/v1/realtime/calls/019eb97d-8e9a-7ff3-94b0-ea019babd5d7/",
+        )
+        .expect("uuid location with trailing slash");
+        assert_eq!(
+            uuid_key.value_sha256,
+            digest("019eb97d-8e9a-7ff3-94b0-ea019babd5d7")
+        );
+        assert_eq!(realtime_call_affinity_key("principal-openai", "/"), None);
     }
 }

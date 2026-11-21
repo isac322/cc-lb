@@ -8122,7 +8122,6 @@ impl Lifecycle {
         if status.is_success() && !body_collect_failed && !vertex_translation_failed {
             let mut affinity_keys = response_affinity_context.pending_request_keys.clone();
             if response_affinity_context.capability == ProviderCapability::OpenaiRealtimeCall
-                && status == StatusCode::CREATED
                 && let Some(location) = parts
                     .headers
                     .get(LOCATION)
@@ -8911,11 +8910,10 @@ impl Lifecycle {
                 .remove(http::header::ACCEPT_ENCODING);
         }
         let shape_context = shaped_ctx.dialect_shape_context();
-        // Codex's backend has no hangup route. A public hangup goes to the
-        // public Realtime origin with the OAuth token of the account that
-        // created the call; affinity already pinned this attempt to it.
+        // Codex's backend has no hangup route. Both public and Codex-alias
+        // hangups go to the Realtime origin with the OAuth token of the account
+        // that created the call; affinity already pinned this attempt to it.
         let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
-            && !ctx.codex_backend
             && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
                 == Some(ProviderCapability::OpenaiRealtimeHangup);
         let (shaped, capture_shaped_body) = match tracing::info_span!("proxy.shape").in_scope(

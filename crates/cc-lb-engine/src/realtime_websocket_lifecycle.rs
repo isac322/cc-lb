@@ -38,13 +38,22 @@ impl Lifecycle {
         target: RealtimeWebSocketTarget<'_>,
         setup: Bytes,
     ) -> Result<RealtimeWebSocketSession, WebSocketError> {
-        let RealtimeWebSocketTarget { path, query, model } = target;
+        let RealtimeWebSocketTarget {
+            path,
+            query,
+            model,
+            codex_backend,
+        } = target;
         let public_query = query.map(str::to_owned);
         let call_id = query.and_then(|query| {
             url::form_urlencoded::parse(query.as_bytes())
                 .find(|(key, _)| key == "call_id")
                 .map(|(_, value)| value.into_owned())
                 .filter(|call_id| !call_id.trim().is_empty())
+        });
+        let has_intent = query.is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .any(|(key, value)| key == "intent" && !value.trim().is_empty())
         });
         let RealtimeWebSocketObservation {
             observer,
@@ -125,8 +134,11 @@ impl Lifecycle {
                     "model is not allowed for this principal",
                 ));
             }
-            let allow_modelless =
-                matches!(kind, RealtimeWebSocketKind::Openai) && call_id.is_some();
+            let allow_modelless = matches!(kind, RealtimeWebSocketKind::Openai)
+                && (call_id.is_some()
+                    || (codex_backend
+                        && has_intent
+                        && !view.principal_view.has_model_allowlist(auth.principal_id())));
             if requested_model.is_none() && !allow_modelless {
                 return Err(WebSocketError::new(
                     400,
@@ -204,6 +216,7 @@ impl Lifecycle {
                 .canonical_model_id(
                     canonical_model_id(kind.provider(), model.unwrap_or_default()).to_owned(),
                 )
+                .codex_backend(codex_backend)
                 .build();
             let principal = Principal {
                 id: auth.principal_id().to_owned(),
@@ -221,24 +234,24 @@ impl Lifecycle {
                 &HashMap::new(),
                 &*self.clock,
             );
+            let openai_kind_eligible = |candidate_kind: CandidateUpstreamKind| {
+                if codex_backend {
+                    candidate_kind == CandidateUpstreamKind::OpenaiOauth
+                } else {
+                    matches!(
+                        candidate_kind,
+                        CandidateUpstreamKind::OpenaiApiKey | CandidateUpstreamKind::OpenaiOauth
+                    )
+                }
+            };
             if let Some(target) = sideband_upstream_id {
                 candidates.retain(|candidate| {
-                    candidate.upstream_id == target
-                        && matches!(
-                            candidate.kind,
-                            CandidateUpstreamKind::OpenaiApiKey
-                                | CandidateUpstreamKind::OpenaiOauth
-                        )
+                    candidate.upstream_id == target && openai_kind_eligible(candidate.kind)
                 });
             } else {
                 match kind {
-                    RealtimeWebSocketKind::Openai => candidates.retain(|candidate| {
-                        matches!(
-                            candidate.kind,
-                            CandidateUpstreamKind::OpenaiApiKey
-                                | CandidateUpstreamKind::OpenaiOauth
-                        )
-                    }),
+                    RealtimeWebSocketKind::Openai => candidates
+                        .retain(|candidate| openai_kind_eligible(candidate.kind)),
                     RealtimeWebSocketKind::Gemini => {
                         let records = view.upstreams_snapshot();
                         candidates.retain(|candidate| {
@@ -264,12 +277,7 @@ impl Lifecycle {
             }
             if let Some(target) = sideband_upstream_id {
                 filtered.candidates.retain(|candidate| {
-                    candidate.upstream_id == target
-                        && matches!(
-                            candidate.kind,
-                            CandidateUpstreamKind::OpenaiApiKey
-                                | CandidateUpstreamKind::OpenaiOauth
-                        )
+                    candidate.upstream_id == target && openai_kind_eligible(candidate.kind)
                 });
             }
             let terminal =
@@ -281,7 +289,11 @@ impl Lifecycle {
                     WebSocketError::new(
                         503,
                         error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
-                        "no eligible provider API-key upstream",
+                        if codex_backend {
+                            "no eligible OpenAI OAuth upstream"
+                        } else {
+                            "no eligible provider API-key upstream"
+                        },
                     )
                 }
             })?;

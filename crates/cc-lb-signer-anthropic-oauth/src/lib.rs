@@ -617,6 +617,7 @@ impl Signer for PersistedAnthropicOAuthSigner {
         let header_value = bearer_header_value(self.access_token.expose_secret())?;
         let headers = shaped.headers_mut();
         headers.remove("x-api-key");
+        headers.remove("x-openai-actor-authorization");
         // A workspace only scopes API keys; an OAuth request never carries one.
         headers.remove(cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER);
         headers.insert(AUTHORIZATION, header_value);
@@ -1251,6 +1252,10 @@ mod tests {
         let mut shaped = shaped_request();
         let headers = shaped.headers_mut();
         headers.insert("x-api-key", HeaderValue::from_static("sk-ant-inherited"));
+        headers.insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         headers.append(
             cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER,
             HeaderValue::from_static("wrkspc_client"),
@@ -1263,6 +1268,7 @@ mod tests {
         let signed = sign_request(signer.as_ref(), shaped).await.unwrap();
 
         assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
         assert!(
             !signed
                 .headers()

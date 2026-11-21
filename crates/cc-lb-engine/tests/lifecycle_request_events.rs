@@ -752,6 +752,7 @@ async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing()
                     path,
                     query: None,
                     model: Some(model),
+                    codex_backend: false,
                 },
                 Bytes::from_static(br#"{"setup":{"not_session_metadata":true}}"#),
             )
@@ -830,6 +831,7 @@ async fn realtime_relay_finish_publishes_typed_io_diagnostics_and_single_termina
                 path: "/v1/realtime",
                 query: None,
                 model: Some("gpt-realtime"),
+                codex_backend: false,
             },
             Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
         )

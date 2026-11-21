@@ -127,6 +127,7 @@ fn strip_client_credentials(headers: &mut http::HeaderMap) {
         "x-api-key",
         "x-goog-api-key",
         "api-key",
+        "x-openai-actor-authorization",
         "x-goog-user-project",
         "x-goog-iam-authorization-token",
         "x-goog-iam-authority-selector",

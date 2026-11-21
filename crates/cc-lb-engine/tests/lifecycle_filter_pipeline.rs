@@ -377,6 +377,7 @@ async fn realtime_provider_filters_see_bounded_precedence_identity_without_claud
                             path,
                             query: None,
                             model: Some(model),
+                            codex_backend: false,
                         },
                         Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
                     )

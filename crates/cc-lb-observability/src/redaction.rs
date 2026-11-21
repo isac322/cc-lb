@@ -62,13 +62,14 @@ pub fn sanitize_url_for_log(url: &str) -> Cow<'_, str> {
         Cow::Borrowed(url)
     }
 }
-const SECRET_PATTERNS: [&str; 16] = [
+const SECRET_PATTERNS: [&str; 17] = [
     r"sk-ant-[a-zA-Z0-9_-]+",
     r"sk-ant-ort01-[a-zA-Z0-9_-]+",
     r"Bearer\s+[a-zA-Z0-9._~\-/+]+",
     r"x-api-key:\s*\S+",
     r"x-goog-api-key:\s*\S+",
     r"api-key:\s*\S+",
+    r"x-openai-actor-authorization:\s*\S+",
     r"AIza[0-9A-Za-z_-]{20,}",
     r"\bya29\.[a-zA-Z0-9._~\-/+]+",
     r"\bAQ\.[A-Za-z0-9_-]{20,}",
@@ -81,11 +82,12 @@ const SECRET_PATTERNS: [&str; 16] = [
     r#""google_credential"\s*:\s*(?:"(?:[^"\\]|\\.)*"|\{[^}]*\})"#,
 ];
 
-const SENSITIVE_FIELDS: [&str; 12] = [
+const SENSITIVE_FIELDS: [&str; 13] = [
     "authorization",
     "x-api-key",
     "x-goog-api-key",
     "api-key",
+    "x-openai-actor-authorization",
     "api_key",
     "google_credential",
     "token",
@@ -110,13 +112,13 @@ static SECRET_REGEXES: Lazy<Result<Vec<Regex>, regex::Error>> = Lazy::new(|| {
 
 static SENSITIVE_JSON_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)("(?:authorization|x-api-key|x-goog-api-key|api-key|api_key|google_credential|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
+        r#"(?i)("(?:authorization|x-api-key|x-goog-api-key|api-key|x-openai-actor-authorization|api_key|google_credential|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
     )
 });
 
 static SENSITIVE_TEXT_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)\b(authorization|x-api-key|x-goog-api-key|api-key|api_key|google_credential|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
+        r#"(?i)\b(authorization|x-api-key|x-goog-api-key|api-key|x-openai-actor-authorization|api_key|google_credential|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
     )
 });
 

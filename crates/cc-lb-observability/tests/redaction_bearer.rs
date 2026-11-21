@@ -30,3 +30,19 @@ fn redacts_google_api_key_headers_and_query_values() {
     assert!(!output.contains("AIzaSySecret12345678901234567890"));
     assert!(output.matches(REDACTED).count() >= 2, "{output}");
 }
+
+#[test]
+fn redacts_openai_actor_authorization_in_header_json_and_text() {
+    let policy = RedactionPolicy::default();
+    let header_redacted = policy.redact_text("x-openai-actor-authorization: actor-secret-token");
+    assert!(!header_redacted.contains("actor-secret-token"));
+    assert!(header_redacted.contains(REDACTED));
+
+    let json_redacted = policy.redact_text(r#"{"x-openai-actor-authorization":"actor-json-secret"}"#);
+    assert!(!json_redacted.contains("actor-json-secret"));
+    assert!(json_redacted.contains(REDACTED));
+
+    let text_redacted = policy.redact_text("X-OpenAI-Actor-Authorization=actor-text-secret");
+    assert!(!text_redacted.contains("actor-text-secret"));
+    assert!(text_redacted.contains(REDACTED));
+}

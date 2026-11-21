@@ -2638,7 +2638,10 @@ fn codex_backend_http_routes(
         .route("/responses", post(lifecycle_handler))
         .route("/models", get(lifecycle_handler))
         .route("/alpha/search", post(lifecycle_handler))
+        .route("/images/generations", post(lifecycle_handler))
+        .route("/images/edits", post(lifecycle_handler))
         .route("/realtime/calls", post(lifecycle_handler))
+        .route("/realtime/calls/{call_id}/hangup", post(lifecycle_handler))
         .with_state(state.clone());
     wrap_scoped_proxy_routes(
         routes,
@@ -2673,7 +2676,27 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .nest(
             "/backend-api/codex",
             Router::new()
+                .route(
+                    "/",
+                    any(codex_backend_root_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .route("/responses", get(responses_websocket_handler))
+                .route(
+                    "/realtime",
+                    get(openai_realtime_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .layer(middleware::from_fn(rewrite_codex_backend_request))
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
@@ -3047,7 +3070,9 @@ mod input_tokens_ws;
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
-use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
+use realtime_websocket::{
+    codex_backend_root_handler, gemini_live_websocket_handler, openai_realtime_websocket_handler,
+};
 
 async fn responses_websocket_handler(
     State(state): State<ProxyState>,
