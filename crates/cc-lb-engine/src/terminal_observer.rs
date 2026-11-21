@@ -420,6 +420,12 @@ struct Inner {
     /// request, whether emitted at the HTTP handler entry or inside
     /// `Lifecycle::handle`.
     authentication_completed_emitted: AtomicBool,
+    limit_reservation: Mutex<
+        Option<(
+            Arc<cc_lb_control::api_keys::limit_engine::LimitEngine>,
+            String,
+        )>,
+    >,
 }
 
 #[derive(Default)]
@@ -487,6 +493,7 @@ impl LifecycleContext {
                 authn_reached: AtomicBool::new(false),
                 funding_ambiguous: AtomicBool::new(false),
                 authentication_completed_emitted: AtomicBool::new(false),
+                limit_reservation: Mutex::new(None),
             }),
         }
     }
@@ -839,6 +846,53 @@ impl LifecycleContext {
             _ => {}
         }
         self.inner.emit_or_buffer(event);
+    }
+
+    /// Attach or replace the admitted `LimitEngine` reservation directly so
+    /// stream activity heartbeats refresh its idle TTL losslessly even across
+    /// failover attempts or saturated subscriber channels.
+    pub(crate) fn attach_limit_reservation(
+        &self,
+        engine: Arc<cc_lb_control::api_keys::limit_engine::LimitEngine>,
+        reservation_id: String,
+    ) {
+        let mut slot = self
+            .inner
+            .limit_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = (!reservation_id.is_empty()).then_some((engine, reservation_id));
+    }
+
+    /// Clear any currently attached `LimitEngine` reservation (e.g., when a
+    /// failover attempt drops and refunds a prior reservation before retry).
+    pub(crate) fn clear_limit_reservation(&self) {
+        *self
+            .inner
+            .limit_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Emit a low-frequency stream activity heartbeat while an active request
+    /// continues to make progress. Checks `finalized` atomically so completed
+    /// observers skip work without acquiring `TerminalState`.
+    pub(crate) fn emit_request_activity(&self) {
+        if self.inner.finalized.load(Ordering::Acquire) {
+            return;
+        }
+        let target = self
+            .inner
+            .limit_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some((engine, reservation_id)) = target {
+            engine.touch_reservation_by_id(&reservation_id);
+        }
+        self.inner.emit_or_buffer(LifecycleEvent::RequestActivity {
+            event_id: self.inner.event_id.clone(),
+        });
     }
 
     /// Record the authenticated principal identity for this request.
@@ -2785,5 +2839,147 @@ mod tests {
             panic!("expected request termination");
         };
         assert!(funding_ambiguous);
+    }
+
+    fn direct_touch_fixture(
+        principal_id: &str,
+        key_id: &str,
+        req_id: &str,
+    ) -> (
+        Arc<cc_lb_control::api_keys::limit_engine::LimitEngine>,
+        cc_lb_control::api_keys::principal_view::PrincipalView,
+        cc_lb_storage_api::StoredApiKeyRecord,
+        cc_lb_control::api_keys::limit_engine::ReservationTtlSweeperHandle,
+        LifecycleContext,
+    ) {
+        use cc_lb_control::api_keys::{
+            concurrent_guard::KeyConcurrencyManager,
+            limit_engine::{LimitEngine, spawn_reservation_ttl_sweeper_with_max_ttl},
+            principal_view::PrincipalView,
+        };
+        use cc_lb_storage_api::{StoredApiKeyRecord, principal::Limit, principal::LimitKind};
+
+        let limits = vec![Limit {
+            kind: LimitKind::TotalTokens,
+            window_secs: 60,
+            cap_micros: 1_000,
+        }];
+        let view = PrincipalView::for_tests(
+            principal_id,
+            true,
+            vec!["gpt-5-codex".to_owned()],
+            limits,
+            std::collections::HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: key_id.to_owned(),
+            ..Default::default()
+        };
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000)),
+        );
+        let sweeper = spawn_reservation_ttl_sweeper_with_max_ttl(
+            engine.clone(),
+            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(900),
+            std::time::Duration::from_secs(30),
+        );
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer =
+            LifecycleContext::new(req_id.to_owned(), bus as Arc<dyn RequestEventBus>, &clock);
+        observer.mark_authn_reached();
+        (engine, view, record, sweeper, observer)
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn attach_limit_reservation_refreshes_limit_engine_directly_on_activity() {
+        let (engine, view, record, sweeper, observer) = direct_touch_fixture(
+            "direct-touch-principal",
+            "direct-touch-key",
+            "req_direct_touch",
+        );
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "direct-touch-principal",
+                "gpt-5-codex",
+                Some(100),
+                0,
+                None,
+            )
+            .expect("initial reservation");
+        let res_id = res.id().to_owned();
+        res.forget();
+        observer.attach_limit_reservation(engine.clone(), res_id.clone());
+
+        for _ in 0..4 {
+            tokio::time::advance(std::time::Duration::from_secs(90)).await;
+            observer.emit_request_activity();
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            engine.reconcile_by_id(&res_id, 5, 10, None),
+            "direct touch must preserve reservation past idle_ttl even without subscriber queue",
+        );
+        sweeper.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn attach_limit_reservation_replaces_previous_reservation_on_failover() {
+        let (engine, view, record, sweeper, observer) = direct_touch_fixture(
+            "failover-replace-principal",
+            "failover-replace-key",
+            "req_failover_replace",
+        );
+        let first = engine
+            .reserve(
+                &view,
+                &record,
+                "failover-replace-principal",
+                "gpt-5-codex",
+                Some(100),
+                0,
+                None,
+            )
+            .expect("first reservation");
+        let first_id = first.id().to_owned();
+        observer.attach_limit_reservation(engine.clone(), first_id.clone());
+
+        // Simulate failover discarding the first attempt's reservation and admitting a replacement.
+        drop(first);
+        observer.clear_limit_reservation();
+        assert!(!engine.refund_by_id(&first_id));
+
+        let second = engine
+            .reserve(
+                &view,
+                &record,
+                "failover-replace-principal",
+                "gpt-5-codex",
+                Some(200),
+                0,
+                None,
+            )
+            .expect("replacement reservation");
+        let second_id = second.id().to_owned();
+        second.forget();
+        observer.attach_limit_reservation(engine.clone(), second_id.clone());
+
+        for _ in 0..4 {
+            tokio::time::advance(std::time::Duration::from_secs(90)).await;
+            observer.emit_request_activity();
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            engine.reconcile_by_id(&second_id, 10, 20, None),
+            "heartbeats after failover must refresh the replacement reservation past idle_ttl",
+        );
+
+        observer.clear_limit_reservation();
+        observer.emit_request_activity();
+        sweeper.shutdown().await;
     }
 }

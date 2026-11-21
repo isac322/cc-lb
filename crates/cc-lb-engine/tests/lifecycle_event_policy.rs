@@ -182,6 +182,7 @@ fn lifecycle_event_assembler_matches_are_explicit_and_documented() {
             "Priced",
             "UpstreamQuotaFrameObserved",
             "RequestFundingObserved",
+            "RequestActivity",
             "CacheObserved",
         ],
     );
@@ -194,6 +195,7 @@ fn lifecycle_event_assembler_matches_are_explicit_and_documented() {
             "AuthCompleted",
             "LimitDecision",
             "RequestTerminated",
+            "RequestActivity",
             "AuthenticationCompleted",
         ],
     );

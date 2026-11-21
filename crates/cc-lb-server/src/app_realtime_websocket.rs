@@ -647,11 +647,22 @@ async fn relay_realtime_websocket(
         spawn_realtime_usage_worker(kind, Some(session.usage_observer()));
     let mut metrics = RealtimeStreamMetrics::new();
     let mut setup_pending = matches!(kind, RealtimeWebSocketKind::Openai);
+    let heartbeat_period = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL;
+    let mut activity_heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + heartbeat_period,
+        heartbeat_period,
+    );
+    activity_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let relay = async {
         let mut diagnostics =
             cc_lb_engine::realtime_websocket::RealtimeWebSocketDiagnostics::default();
         loop {
             tokio::select! {
+                _ = activity_heartbeat.tick() => {
+                    if metrics.heartbeat_due() {
+                        session.emit_request_activity();
+                    }
+                }
                 message = downstream.next() => {
                     let message = match message {
                         Some(Ok(Message::Text(frame))) => UpstreamMessage::Text(Bytes::from(frame).try_into().expect("valid client text")),
@@ -700,13 +711,18 @@ async fn relay_realtime_websocket(
                     // consume OpenAI's first-data-frame setup state.
                     if is_data {
                         setup_pending = false;
+                        if metrics.heartbeat_due() {
+                            session.emit_request_activity();
+                        }
                     }
                 }
                 message = upstream.next() => {
                     let message = match message {
                         Some(Ok(message @ UpstreamMessage::Text(_))) => {
                             if let UpstreamMessage::Text(frame) = &message {
-                                metrics.observe_frame(frame.as_bytes());
+                                if metrics.observe_frame(frame.as_bytes()) {
+                                    session.emit_request_activity();
+                                }
                                 metrics.observe_turn_boundary(kind, frame.as_bytes());
                                 metrics.observe_provider_metadata(kind, frame.as_bytes());
                                 if kind.may_report_usage(frame.as_bytes()) {
@@ -717,7 +733,9 @@ async fn relay_realtime_websocket(
                         }
                         Some(Ok(message @ UpstreamMessage::Binary(_))) => {
                             if let UpstreamMessage::Binary(frame) = &message {
-                                metrics.observe_frame(frame);
+                                if metrics.observe_frame(frame) {
+                                    session.emit_request_activity();
+                                }
                                 metrics.observe_turn_boundary(kind, frame);
                                 metrics.observe_provider_metadata(kind, frame);
                                 if kind.may_report_usage(frame) {
@@ -728,6 +746,9 @@ async fn relay_realtime_websocket(
                         }
                         Some(Ok(message @ UpstreamMessage::Ping(_))) => {
                             metrics.observe_ping();
+                            if metrics.heartbeat_due() {
+                                session.emit_request_activity();
+                            }
                             message
                         }
                         Some(Ok(message @ UpstreamMessage::Pong(_))) => message,

@@ -150,6 +150,7 @@ pub struct RealtimeStreamMetrics {
     started: Instant,
     first_frame_ms: Option<u64>,
     last_frame_ms: Option<u64>,
+    last_activity_heartbeat_ms: u64,
     event_count: u64,
     ping_count: u64,
     total_bytes: u64,
@@ -166,6 +167,7 @@ impl RealtimeStreamMetrics {
             started: Instant::now(),
             first_frame_ms: None,
             last_frame_ms: None,
+            last_activity_heartbeat_ms: 0,
             event_count: 0,
             ping_count: 0,
             total_bytes: 0,
@@ -175,12 +177,35 @@ impl RealtimeStreamMetrics {
         }
     }
 
-    pub fn observe_frame(&mut self, bytes: &[u8]) {
+    fn maybe_record_heartbeat(&mut self, elapsed_ms: u64, interval_ms: u64) -> bool {
+        if interval_ms > 0
+            && elapsed_ms.saturating_sub(self.last_activity_heartbeat_ms) >= interval_ms
+        {
+            self.last_activity_heartbeat_ms = elapsed_ms;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn heartbeat_due(&mut self) -> bool {
+        let interval_ms = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.maybe_record_heartbeat(elapsed_ms, interval_ms)
+    }
+
+    pub fn observe_frame(&mut self, bytes: &[u8]) -> bool {
         let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         self.first_frame_ms.get_or_insert(elapsed_ms);
         self.last_frame_ms = Some(elapsed_ms);
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+        let interval_ms = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.maybe_record_heartbeat(elapsed_ms, interval_ms)
     }
 
     /// Observe provider turn boundaries on the relay path, which sees every
@@ -524,6 +549,12 @@ impl RealtimeWebSocketSession {
     pub fn usage_observer(&self) -> RealtimeUsageObserver {
         RealtimeUsageObserver {
             observer: self.observer.clone(),
+        }
+    }
+
+    pub fn emit_request_activity(&self) {
+        if let Some(observer) = &self.observer {
+            observer.emit_request_activity();
         }
     }
 

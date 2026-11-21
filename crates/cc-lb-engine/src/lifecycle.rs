@@ -163,6 +163,74 @@ pub type Body = AxumBody;
 /// The version filter cold-starts older persisted observations.
 pub use cc_lb_domain::HASH_SCHEMA_VERSION;
 
+fn new_activity_heartbeat_interval() -> tokio::time::Interval {
+    let period = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL;
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+fn maybe_emit_chunk_heartbeat(
+    now: Instant,
+    last_heartbeat_at: &mut Instant,
+    heartbeat: &mut tokio::time::Interval,
+    observer: Option<&LifecycleContext>,
+) {
+    if now.saturating_duration_since(*last_heartbeat_at)
+        >= cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL
+    {
+        *last_heartbeat_at = now;
+        heartbeat.reset();
+        if let Some(o) = observer {
+            o.emit_request_activity();
+        }
+    }
+}
+
+async fn drive_with_activity_heartbeat<F: Future>(
+    fut: F,
+    observer: Option<&LifecycleContext>,
+) -> F::Output {
+    let Some(observer) = observer else {
+        return fut.await;
+    };
+    let mut heartbeat = new_activity_heartbeat_interval();
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut fut => return output,
+            _ = heartbeat.tick() => observer.emit_request_activity(),
+        }
+    }
+}
+
+async fn timed_body_frame_with_heartbeat<B>(
+    body: &mut B,
+    timing: &BodyIoTiming,
+    observer: Option<&LifecycleContext>,
+    last_heartbeat_at: &mut Instant,
+    heartbeat: &mut tokio::time::Interval,
+) -> Option<Result<http_body::Frame<B::Data>, B::Error>>
+where
+    B: http_body::Body + Unpin,
+{
+    let frame_fut = timed_body_frame(body, timing);
+    tokio::pin!(frame_fut);
+    loop {
+        tokio::select! {
+            biased;
+            frame = &mut frame_fut => return frame,
+            _ = heartbeat.tick() => {
+                *last_heartbeat_at = Instant::now();
+                if let Some(o) = observer {
+                    o.emit_request_activity();
+                }
+            }
+        }
+    }
+}
+
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
@@ -4833,15 +4901,21 @@ impl Lifecycle {
                     ));
                 }
             };
+            let reservation_id = active_limit
+                .as_ref()
+                .and_then(|limit| limit.reservation.as_ref())
+                .map(|reservation| reservation.id().to_owned())
+                .unwrap_or_default();
             if let Some(observer) = observer.as_ref() {
+                if let Some(engine) = self.limit_engine.as_ref()
+                    && !reservation_id.is_empty()
+                {
+                    observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
+                }
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                     event_id: observer.event_id().to_owned(),
                     decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                        reservation_id: active_limit
-                            .as_ref()
-                            .and_then(|limit| limit.reservation.as_ref())
-                            .map(|reservation| reservation.id().to_owned())
-                            .unwrap_or_default(),
+                        reservation_id,
                         amount: active_limit.as_ref().map_or(0, |limit| {
                             limit.request.max_tokens.unwrap_or(0).max(0) as u64
                         }),
@@ -6400,6 +6474,9 @@ impl Lifecycle {
                 // failure is unbilled, so RAII refunds that hold in full before
                 // the replacement is checked; never hold both estimates.
                 drop(reserved.take());
+                if let Some(o) = observer.as_ref() {
+                    o.clear_limit_reservation();
+                }
                 let limit_reserve_start = Instant::now();
                 active_limit = match self
                     .reserve_limit(
@@ -6462,15 +6539,21 @@ impl Lifecycle {
                     }
                 };
                 let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
+                let reservation_id = active_limit
+                    .as_ref()
+                    .and_then(|limit| limit.reservation.as_ref())
+                    .map(|reservation| reservation.id().to_owned())
+                    .unwrap_or_default();
                 if let Some(o) = observer.as_ref() {
+                    if let Some(engine) = self.limit_engine.as_ref()
+                        && !reservation_id.is_empty()
+                    {
+                        o.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
+                    }
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
                         decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                            reservation_id: active_limit
-                                .as_ref()
-                                .and_then(|limit| limit.reservation.as_ref())
-                                .map(|reservation| reservation.id().to_owned())
-                                .unwrap_or_default(),
+                            reservation_id,
                             amount: active_limit.as_ref().map_or(0, |limit| {
                                 limit.request.max_tokens.unwrap_or(0).max(0) as u64
                             }),
@@ -7602,6 +7685,8 @@ impl Lifecycle {
         }
         strip_hop_by_hop(&mut parts.headers);
         let body_collect_started = Instant::now();
+        let mut last_activity_heartbeat_at = body_collect_started;
+        let mut activity_heartbeat = new_activity_heartbeat_interval();
         let response_body_timing = BodyIoTiming::default();
         let mut response_body_timing_guard =
             BodyIoTimingObserverGuard::new(observer.clone(), response_body_timing.clone());
@@ -7620,18 +7705,34 @@ impl Lifecycle {
         let mut body_collect_failed = false;
         let mut body_limit_terminal = false;
         while !unexpected_catalog_sse
-            && let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await
+            && let Some(frame) = timed_body_frame_with_heartbeat(
+                &mut body,
+                &response_body_timing,
+                observer.as_ref(),
+                &mut last_activity_heartbeat_at,
+                &mut activity_heartbeat,
+            )
+            .await
         {
             match frame {
                 Ok(frame) => {
                     if let Ok(data) = frame.into_data() {
+                        let chunk_now = Instant::now();
+                        maybe_emit_chunk_heartbeat(
+                            chunk_now,
+                            &mut last_activity_heartbeat_at,
+                            &mut activity_heartbeat,
+                            observer.as_ref(),
+                        );
                         if first_body_chunk_at.is_none() {
-                            first_body_chunk_at = Some(Instant::now());
+                            first_body_chunk_at = Some(chunk_now);
                             if let Some(o) = observer.as_ref() {
                                 o.set_termination_timings(
                                     None,
                                     None,
-                                    Some(duration_to_ms(body_collect_started.elapsed())),
+                                    Some(duration_to_ms(
+                                        chunk_now.saturating_duration_since(body_collect_started),
+                                    )),
                                 );
                             }
                         }
@@ -9026,9 +9127,11 @@ impl Lifecycle {
 
         let dispatch_start = Instant::now();
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
-        let dispatch_result = REQUEST_STAGE_TIMINGS
-            .scope(stage_timings_carrier.clone(), signed.dispatch(dispatcher))
-            .await;
+        let dispatch_result = drive_with_activity_heartbeat(
+            REQUEST_STAGE_TIMINGS.scope(stage_timings_carrier.clone(), signed.dispatch(dispatcher)),
+            observer,
+        )
+        .await;
         let connection_snapshot = stage_timings_carrier.lock().unwrap().clone();
         timings.bulkhead_wait_ms = connection_snapshot.bulkhead_wait_ms;
         timings.dns_ms = connection_snapshot.dns_ms;
@@ -9363,6 +9466,8 @@ impl Lifecycle {
             let mut responses_error_context = ResponsesSseErrorContext::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
+            let mut last_activity_heartbeat_at = relay_start;
+            let mut activity_heartbeat = new_activity_heartbeat_interval();
             let mut message_start_at: Option<Instant> = None;
             let mut content_block_start_at: Option<Instant> = None;
             let mut first_content_delta_at: Option<Instant> = None;
@@ -9442,7 +9547,15 @@ impl Lifecycle {
                     // Reject known framing mismatches before polling; only a held-body replay runs after EOF.
                     break;
                 }
-                let frame = match timed_body_frame(&mut body, &stream_body_io_timing).await {
+                let frame = match timed_body_frame_with_heartbeat(
+                    &mut body,
+                    &stream_body_io_timing,
+                    observer.as_ref(),
+                    &mut last_activity_heartbeat_at,
+                    &mut activity_heartbeat,
+                )
+                .await
+                {
                     Some(frame) => frame,
                     None => {
                         upstream_body_eof = true;
@@ -9510,6 +9623,12 @@ impl Lifecycle {
                             let mut raw_chunk_done = false;
                             let mut provider_error_in_chunk = false;
                             let now = Instant::now();
+                            maybe_emit_chunk_heartbeat(
+                                now,
+                                &mut last_activity_heartbeat_at,
+                                &mut activity_heartbeat,
+                                observer.as_ref(),
+                            );
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
                                 if let Some(o) = observer.as_ref() {
@@ -24026,5 +24145,57 @@ mod keepalive_terminal_proof_tests {
             StatusCode::OK,
             false,
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn drive_with_activity_heartbeat_skips_short_waits_and_pulses_long_silent_waits() {
+        use std::{sync::Arc, time::Duration};
+
+        use cc_lb_clock::ClockHandle;
+        use cc_lb_control::RequestEventBus;
+
+        use crate::lifecycle::{LifecycleContext, drive_with_activity_heartbeat};
+
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut rx = bus.subscribe_lifecycle();
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+
+        let short_observer =
+            LifecycleContext::new("req-short-wait".to_owned(), bus.clone(), &clock);
+        short_observer.mark_authn_reached();
+        drive_with_activity_heartbeat(std::future::ready(()), Some(&short_observer)).await;
+        while let Ok(ev) = rx.try_recv() {
+            assert!(!matches!(
+                ev,
+                cc_lb_lifecycle::LifecycleEvent::RequestActivity { .. }
+            ));
+        }
+
+        let long_observer = LifecycleContext::new("req-long-wait".to_owned(), bus, &clock);
+        long_observer.mark_authn_reached();
+        let expected_id = long_observer.event_id().to_owned();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let drive = tokio::spawn(async move {
+            drive_with_activity_heartbeat(done_rx, Some(&long_observer)).await
+        });
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::task::yield_now().await;
+        }
+        let _ = done_tx.send(());
+        let _ = drive.await.expect("drive task completes");
+
+        let mut activity_count = 0usize;
+        while let Ok(ev) = rx.try_recv() {
+            if let cc_lb_lifecycle::LifecycleEvent::RequestActivity { event_id } = ev {
+                assert_eq!(event_id, expected_id);
+                activity_count += 1;
+            }
+        }
+        assert_eq!(
+            activity_count, 3,
+            "180s silent wait must emit three 60s activity heartbeats"
+        );
     }
 }

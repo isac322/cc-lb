@@ -154,7 +154,7 @@ fn unknown_and_known_zero_are_final_price_results() {
             );
             handle_event(&mut partials, 16, tests::terminated("request", 200));
             handle_event(&mut partials, 16, price("request", total));
-            sweep_orphans(&mut partials, Duration::ZERO);
+            sweep_orphans(&mut partials, Duration::ZERO, Duration::ZERO);
             let snapshot = snapshot.snapshot().into_vec();
             assert_eq!(
                 counter(&snapshot, "cc_lb_virtual_cost_usd_total", None),
@@ -201,7 +201,7 @@ fn unmetered_missing_model_and_missing_key_do_not_wait() {
             let mut partials = HashMap::new();
             feed(&mut partials, started("request", model, key, usage));
             handle_event(&mut partials, 16, tests::terminated("request", 400));
-            sweep_orphans(&mut partials, Duration::ZERO);
+            sweep_orphans(&mut partials, Duration::ZERO, Duration::ZERO);
             let snapshot = snapshot.snapshot().into_vec();
             assert_eq!(
                 counter(&snapshot, "cclb_api_key_requests_total", None),
@@ -242,7 +242,7 @@ fn missing_price_expires_without_reemitting_request() {
             started("request", Some("model"), Some("key"), true),
         );
         handle_event(&mut partials, 16, tests::terminated("request", 200));
-        sweep_orphans(&mut partials, Duration::ZERO);
+        sweep_orphans(&mut partials, Duration::ZERO, Duration::ZERO);
         handle_event(&mut partials, 16, price("request", Some(325)));
         handle_event(&mut partials, 16, tests::terminated("request", 200));
         let snapshot = snapshot.snapshot().into_vec();
@@ -283,7 +283,7 @@ fn cap_prefers_completed_waiter_over_older_inflight_request() {
             &mut partials,
             started("inflight", Some("model"), Some("key"), true),
         );
-        partials.get_mut("inflight").unwrap().inserted_at =
+        partials.get_mut("inflight").unwrap().last_activity_at =
             Instant::now().checked_sub(Duration::from_secs(60));
         feed(
             &mut partials,
@@ -330,7 +330,7 @@ fn unterminated_orphans_remain_silent_and_bounded() {
                 started(&index.to_string(), None, Some("key"), false).remove(0),
             );
         }
-        sweep_orphans(&mut partials, Duration::ZERO);
+        sweep_orphans(&mut partials, Duration::ZERO, Duration::ZERO);
         let snapshot = snapshot.snapshot().into_vec();
         assert_eq!(
             counter(&snapshot, "cclb_api_key_requests_total", None),
@@ -393,4 +393,66 @@ async fn shutdown_drains_prices_and_diagnoses_only_unresolved_costs() {
         ),
         Some(1)
     );
+}
+
+#[test]
+fn request_activity_extends_inflight_and_completed_waiter_survives_near_max_ttl() {
+    let mut partials = HashMap::new();
+    let idle_ttl = Duration::from_secs(300);
+    let max_ttl = Duration::from_secs(900);
+
+    // Unknown event_id must not create a zombie partial.
+    handle_event(
+        &mut partials,
+        16,
+        LifecycleEvent::RequestActivity {
+            event_id: "unknown-api-metrics".to_owned(),
+        },
+    );
+    assert!(!partials.contains_key("unknown-api-metrics"));
+
+    feed(
+        &mut partials,
+        started("long-stream", Some("model"), Some("key"), true),
+    );
+    let near_max_created = Instant::now()
+        .checked_sub(Duration::from_secs(840))
+        .expect("monotonic clock past 840s");
+    let stale_activity = Instant::now()
+        .checked_sub(Duration::from_secs(290))
+        .expect("monotonic clock past 290s");
+    {
+        let partial = partials.get_mut("long-stream").unwrap();
+        partial.created_at = Some(near_max_created);
+        partial.last_activity_at = Some(stale_activity);
+    }
+    handle_event(
+        &mut partials,
+        16,
+        LifecycleEvent::RequestActivity {
+            event_id: "long-stream".to_owned(),
+        },
+    );
+    assert_eq!(partials["long-stream"].created_at, Some(near_max_created));
+    sweep_orphans(&mut partials, idle_ttl, max_ttl);
+    assert!(partials.contains_key("long-stream"));
+
+    // Terminate the stream and age `created_at` past max_ttl while keeping
+    // `last_activity_at` within idle_ttl: the terminated waiter must still
+    // survive to join a late `Priced`.
+    handle_event(&mut partials, 16, tests::terminated("long-stream", 200));
+    assert!(partials.contains_key("long-stream"));
+    partials.get_mut("long-stream").unwrap().created_at = Some(
+        Instant::now()
+            .checked_sub(max_ttl + Duration::from_secs(60))
+            .expect("monotonic clock past 960s"),
+    );
+    sweep_orphans(&mut partials, idle_ttl, max_ttl);
+    assert!(
+        partials.contains_key("long-stream"),
+        "terminated waiter must not be swept on max_ttl while awaiting late Priced",
+    );
+
+    handle_event(&mut partials, 16, price("long-stream", Some(123)));
+    assert!(!partials.contains_key("long-stream"));
 }

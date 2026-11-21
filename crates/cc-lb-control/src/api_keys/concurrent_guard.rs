@@ -118,6 +118,10 @@ impl DurableConcurrencyHold {
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
+
+    pub fn hold_id(&self) -> uuid::Uuid {
+        self.hold_id
+    }
 }
 
 impl Drop for DurableConcurrencyHold {

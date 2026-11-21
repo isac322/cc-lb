@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_CACHE_OBS_MAP_CAP: usize = 4096;
-pub const DEFAULT_CACHE_OBS_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_CACHE_OBS_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_CACHE_OBS_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct CacheObservationSubscriberHandle {
@@ -39,14 +40,33 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> CacheObservationSubscriberHandle {
+    spawn_with_ttls(rx, bus, map_cap, ttl, ttl.max(DEFAULT_CACHE_OBS_MAX_TTL))
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    bus: Arc<dyn RequestEventBus>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> CacheObservationSubscriberHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, bus, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        bus,
+        map_cap,
+        idle_ttl,
+        max_ttl,
+        shutdown_rx,
+    ));
     CacheObservationSubscriberHandle { shutdown_tx, join }
 }
 
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     cache_control_block_count: Option<u64>,
     usage: UsageSnapshot,
     usage_seen: bool,
@@ -56,13 +76,14 @@ struct Partial {
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
     }
 
     fn touch(&mut self, now: Instant) {
-        self.inserted_at = Some(now);
+        self.last_activity_at = Some(now);
     }
 }
 
@@ -70,7 +91,8 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     bus: Arc<dyn RequestEventBus>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -87,7 +109,7 @@ async fn subscriber_loop(
                     None => break,
                 }
             }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, idle_ttl, max_ttl),
             _ = &mut shutdown => break,
         }
     }
@@ -105,6 +127,13 @@ fn handle_event(
 ) {
     let now = Instant::now();
     let event_id = event.event_id().clone();
+
+    if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+        if let Some(partial) = partials.get_mut(&event_id) {
+            partial.touch(now);
+        }
+        return;
+    }
 
     if let LifecycleEvent::RequestTerminated { .. } = &event {
         if let Some(partial) = partials.remove(&event_id) {
@@ -224,10 +253,19 @@ fn derive_cache_state(partial: &Partial) -> RequestCacheState {
     }
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
+    partials.retain(|_, p| {
+        let idle_live = p
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        let max_live = p
+            .created_at
+            .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+        idle_live && max_live
+    });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
@@ -241,7 +279,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some(oldest_key) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
+        .min_by_key(|(_, p)| p.last_activity_at.unwrap_or_else(Instant::now))
         .map(|(k, _)| k.clone())
     else {
         return;
@@ -683,5 +721,70 @@ mod tests {
             super::derive_cache_state(&partial),
             RequestCacheState::Unknown
         );
+    }
+
+    #[test]
+    fn request_activity_keeps_partial_alive_until_max_ttl_without_zombie() {
+        let bus = InMemoryBus::new();
+        let mut partials = std::collections::HashMap::new();
+        let idle_ttl = std::time::Duration::from_secs(300);
+        let max_ttl = std::time::Duration::from_secs(900);
+
+        super::handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: eid("unknown-cache-obs"),
+            },
+        );
+        assert!(!partials.contains_key("unknown-cache-obs"));
+
+        super::handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::ParseCompleted {
+                event_id: eid("cache-obs-active"),
+                result: Ok(ParseInfo::default()),
+            },
+        );
+        let aged_created = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(350))
+            .expect("monotonic clock past 350s");
+        let stale_activity = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(290))
+            .expect("monotonic clock past 290s");
+        {
+            let partial = partials.get_mut("cache-obs-active").unwrap();
+            partial.created_at = Some(aged_created);
+            partial.last_activity_at = Some(stale_activity);
+        }
+        super::handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: eid("cache-obs-active"),
+            },
+        );
+        assert_eq!(partials["cache-obs-active"].created_at, Some(aged_created));
+        super::sweep_orphans(&mut partials, idle_ttl, max_ttl);
+        assert!(partials.contains_key("cache-obs-active"));
+
+        let capped_created = std::time::Instant::now()
+            .checked_sub(max_ttl)
+            .expect("monotonic clock past max_ttl");
+        partials.get_mut("cache-obs-active").unwrap().created_at = Some(capped_created);
+        super::handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: eid("cache-obs-active"),
+            },
+        );
+        super::sweep_orphans(&mut partials, idle_ttl, max_ttl);
+        assert!(!partials.contains_key("cache-obs-active"));
     }
 }

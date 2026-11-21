@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_PRICING_MAP_CAP: usize = 4096;
-pub const DEFAULT_PRICING_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_PRICING_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_PRICING_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct PricingSubscriberHandle {
@@ -52,14 +53,33 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> PricingSubscriberHandle {
+    spawn_with_ttls(rx, bus, map_cap, ttl, ttl.max(DEFAULT_PRICING_MAX_TTL))
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    bus: Arc<dyn RequestEventBus>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> PricingSubscriberHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(pricing_loop(rx, bus, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(pricing_loop(
+        rx,
+        bus,
+        map_cap,
+        idle_ttl,
+        max_ttl,
+        shutdown_rx,
+    ));
     PricingSubscriberHandle { shutdown_tx, join }
 }
 
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     model: Option<String>,
     service_tier: Option<String>,
     input_tokens: u64,
@@ -80,9 +100,14 @@ struct Partial {
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
+    }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_activity_at = Some(now);
     }
 }
 
@@ -90,7 +115,8 @@ async fn pricing_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     bus: Arc<dyn RequestEventBus>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -107,7 +133,7 @@ async fn pricing_loop(
                     None => break,
                 }
             }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, idle_ttl, max_ttl),
             _ = &mut shutdown => break,
         }
     }
@@ -125,6 +151,13 @@ fn handle_event(
 ) {
     let now = Instant::now();
     let event_id = event.event_id().clone();
+
+    if matches!(event, LifecycleEvent::RequestActivity { .. }) {
+        if let Some(partial) = partials.get_mut(&event_id) {
+            partial.touch(now);
+        }
+        return;
+    }
 
     if matches!(event, LifecycleEvent::RequestTerminated { .. }) {
         if let Some(partial) = partials.remove(&event_id) {
@@ -155,7 +188,7 @@ fn handle_event(
     let partial = partials
         .entry(event_id)
         .or_insert_with(|| Partial::new(now));
-    partial.inserted_at = Some(now);
+    partial.touch(now);
     merge(partial, event);
 
     if partials.len() > map_cap {
@@ -249,13 +282,18 @@ fn event_cost_breakdown_from_pricing(
     breakdown.into()
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let before = partials.len();
     partials.retain(|_, partial| {
-        partial
-            .inserted_at
-            .is_none_or(|inserted_at| now.duration_since(inserted_at) < ttl)
+        let idle_live = partial
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        let max_live = partial
+            .created_at
+            .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+        idle_live && max_live
     });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
@@ -270,8 +308,8 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, partial)| partial.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(key, partial)| (key.clone(), partial.inserted_at))
+        .min_by_key(|(_, partial)| partial.last_activity_at.unwrap_or_else(Instant::now))
+        .map(|(key, partial)| (key.clone(), partial.last_activity_at))
     else {
         return;
     };
@@ -864,5 +902,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn request_activity_keeps_partial_alive_until_max_ttl_without_zombie() {
+        let bus = TestBus::new();
+        let mut partials = HashMap::new();
+        let idle_ttl = Duration::from_secs(300);
+        let max_ttl = Duration::from_secs(900);
+
+        handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: "unknown-pricing".to_owned(),
+            },
+        );
+        assert!(!partials.contains_key("unknown-pricing"));
+
+        handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::ParseCompleted {
+                event_id: "pricing-active".to_owned(),
+                result: Ok(ParseInfo {
+                    model: Some("claude-sonnet-4".to_owned()),
+                    ..Default::default()
+                }),
+            },
+        );
+        let aged_created = Instant::now()
+            .checked_sub(Duration::from_secs(350))
+            .expect("monotonic clock past 350s");
+        let stale_activity = Instant::now()
+            .checked_sub(Duration::from_secs(290))
+            .expect("monotonic clock past 290s");
+        {
+            let partial = partials.get_mut("pricing-active").unwrap();
+            partial.created_at = Some(aged_created);
+            partial.last_activity_at = Some(stale_activity);
+        }
+        handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: "pricing-active".to_owned(),
+            },
+        );
+        assert_eq!(partials["pricing-active"].created_at, Some(aged_created));
+        sweep_orphans(&mut partials, idle_ttl, max_ttl);
+        assert!(partials.contains_key("pricing-active"));
+
+        let capped_created = Instant::now()
+            .checked_sub(max_ttl)
+            .expect("monotonic clock past max_ttl");
+        partials.get_mut("pricing-active").unwrap().created_at = Some(capped_created);
+        handle_event(
+            &bus,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: "pricing-active".to_owned(),
+            },
+        );
+        sweep_orphans(&mut partials, idle_ttl, max_ttl);
+        assert!(!partials.contains_key("pricing-active"));
     }
 }
