@@ -9,9 +9,12 @@ mod realtime_websocket_lifecycle;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -1478,14 +1481,16 @@ mod cache_score_tests {
     use std::collections::BTreeMap;
 
     use super::{
-        HASH_SCHEMA_VERSION, anthropic_family_cache_pricing_summary,
+        HASH_SCHEMA_VERSION, StorageUpstreamKind, anthropic_family_cache_pricing_summary,
         anthropic_family_input_micros_per_million, build_cache_score,
-        cache_pricing_summary_for_model,
+        cache_pricing_summary_for_model, compat_service_tier_for_upstream,
     };
+    use crate::provider_capability::ProviderCapability;
     use cc_lb_domain::{
         CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, PrefixBytes, TtlClass,
         WarmCacheEntry,
     };
+
     use cc_lb_pricing::{
         CatalogSnapshot, CatalogStatus, NativePricingLifetime, NativePricingProvider,
         NativePricingRate, PriceCatalog, Pricing, ProviderNativePricing, TierRate, UsdPerMillion,
@@ -1751,6 +1756,30 @@ mod cache_score_tests {
             );
         }
     }
+    #[test]
+    fn oauth_compat_service_tier_tracks_sent_value() {
+        assert_eq!(
+            compat_service_tier_for_upstream(
+                ProviderCapability::OpenaiResponses,
+                StorageUpstreamKind::OpenaiOauth,
+                Some("auto"),
+                true,
+            )
+            .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            compat_service_tier_for_upstream(
+                ProviderCapability::OpenaiChatCompletions,
+                StorageUpstreamKind::OpenaiApiKey,
+                Some("auto"),
+                true,
+            )
+            .as_deref(),
+            Some("auto")
+        );
+    }
+
     #[test]
     fn native_cache_pricing_context_maps_rates_without_legacy_fallback() {
         let catalog = PriceCatalog::new_empty();
@@ -3136,6 +3165,31 @@ enum AttemptFailure {
 struct AttemptResponse {
     response: Response<Body>,
     compat_response_plan: Option<CompatResponsePlan>,
+}
+type ConcurrentAttemptFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AttemptResponse, AttemptFailure>> + Send + 'a>>;
+type ResponseBodyFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    StatusCode,
+                    HeaderMap,
+                    Result<Bytes, compat_response::CollectError>,
+                ),
+            > + Send
+            + 'a,
+    >,
+>;
+
+struct ConcurrentAttemptInputs<'a, 'r> {
+    authenticated: &'a crate::authn_rail::Authenticated,
+    reserved: Option<&'a Reserved>,
+    ctx: &'a RequestContext,
+    principal: &'a Principal,
+    routed: &'a RoutedUpstream<'r>,
+    signer: Arc<dyn Signer>,
+    observer: Option<&'a LifecycleContext>,
+    cache_metadata: &'a RequestCacheMetadata,
 }
 
 impl From<RawPassthroughError> for AttemptFailure {
@@ -6126,7 +6180,19 @@ impl Lifecycle {
             route_ms,
         )
         .with_cache_bundle(cache_metadata.bundles.for_upstream(resolved_record).clone());
+
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
+        let chat_fanout_n = (routed.record.kind == StorageUpstreamKind::OpenaiOauth
+            && request_capability == ProviderCapability::OpenaiChatCompletions)
+            .then(|| {
+                body_view
+                    .value()
+                    .and_then(|value| value.get("n"))
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 1)
+                    .map(|n| n.min(8) as usize)
+            })
+            .flatten();
 
         let mut active_limit: Option<ActiveLimit> = None;
         let mut reserved: Option<Reserved> = None;
@@ -6164,12 +6230,14 @@ impl Lifecycle {
         let mut keepalive_shaped_body = None;
         let mut compat_response_plan: Option<CompatResponsePlan>;
         let mut keepalive_request_dispatched_at = None;
+        let mut fanout_responses: Option<Vec<Response<Body>>>;
         let affinity_owner_epoch_required = request_capability
             == ProviderCapability::GeminiCachedContentsCreate
             || (request_capability.provider() == cc_lb_domain::Provider::Gemini
                 && request_affinity.is_some());
         let mut routed_owner_epoch;
-        let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
+        let (mut response, dispatch_started, dispatch_unix_secs, signer) = 'attempts: loop {
+            fanout_responses = None;
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
             // response status or timings under the new route.
@@ -6184,6 +6252,7 @@ impl Lifecycle {
                 );
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
             }
+
             routed_owner_epoch = if affinity_owner_epoch_required {
                 let owner_epoch = match self.upstream_affinity_store.as_ref() {
                     None => None,
@@ -6223,16 +6292,31 @@ impl Lifecycle {
                 Some(0)
             };
             let replacement_request = active_limit.as_ref().and_then(|limit| {
+                let capability =
+                    classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope);
                 let request = body_view.limit_request(
                     &ctx.canonical_model_id,
-                    classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
+                    capability,
                     &routed.cache_bundle.cache_breakpoints,
-                    use_image_rates_for_admission(
-                        classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
-                        &ctx.path,
-                    ),
+                    use_image_rates_for_admission(capability, &ctx.path),
                 );
-                (request != limit.request).then_some(request)
+                let multiplier = admission_fanout_multiplier(
+                    routed.record.kind,
+                    capability,
+                    request.fanout_multiplier,
+                );
+                let tier = compat_service_tier_for_upstream(
+                    capability.unwrap_or(ProviderCapability::OpenaiResponses),
+                    routed.record.kind,
+                    request.service_tier.as_deref(),
+                    ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
+                        policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
+                    }),
+                );
+                (request != limit.request
+                    || multiplier != limit.fanout_multiplier
+                    || tier != limit.service_tier)
+                    .then_some(request)
             });
             if !failover_entry || replacement_request.is_some() {
                 // Every prior attempt scope has ended. Its pre-processing
@@ -6382,41 +6466,96 @@ impl Lifecycle {
                     Some(dispatch_started),
                 );
             }
-            let mut response = match self
-                .run_upstream_attempt(
-                    auth,
-                    reserved.as_ref(),
-                    &ctx,
-                    &principal,
-                    &routed,
-                    signer.clone(),
-                    observer.as_ref(),
-                    &mut attempt_timings,
-                    &mut keepalive_shaped_body,
-                    &cache_metadata,
-                    &mut keepalive_request_dispatched_at,
-                )
-                .await
-            {
-                Ok(attempt) => {
-                    compat_response_plan = attempt.compat_response_plan;
-                    attempt.response
-                }
-                Err(failure) => {
-                    if matches!(failure, AttemptFailure::Sign(_))
-                        && let Some(next) = failover.next(self, &routed, FailoverReason::Sign)
-                    {
-                        routed = next;
-                        continue;
+            let mut response = if let Some(count) = chat_fanout_n.filter(|_| !failover_entry) {
+                let (results, first_timings, shaped_body, dispatched_at) = self
+                    .run_upstream_attempts_concurrently(
+                        count,
+                        ConcurrentAttemptInputs {
+                            authenticated: auth,
+                            reserved: reserved.as_ref(),
+                            ctx: &ctx,
+                            principal: &principal,
+                            routed: &routed,
+                            signer: signer.clone(),
+                            observer: observer.as_ref(),
+                            cache_metadata: &cache_metadata,
+                        },
+                    )
+                    .await;
+                attempt_timings = first_timings;
+                keepalive_shaped_body = shaped_body;
+                keepalive_request_dispatched_at = dispatched_at;
+                let mut attempts = Vec::with_capacity(results.len());
+                for result in results {
+                    match result {
+                        Ok(attempt) => attempts.push(attempt),
+                        Err(failure) => {
+                            if matches!(failure, AttemptFailure::Sign(_))
+                                && let Some(next) =
+                                    failover.next(self, &routed, FailoverReason::Sign)
+                            {
+                                routed = next;
+                                continue 'attempts;
+                            }
+                            return Ok(self.relay_attempt_failure(
+                                failure,
+                                request_capability,
+                                active_limit.as_ref(),
+                                observer.as_ref(),
+                                &attempt_timings,
+                                request_capability.provider(),
+                            ));
+                        }
                     }
-                    return Ok(self.relay_attempt_failure(
-                        failure,
-                        request_capability,
-                        active_limit.as_ref(),
+                }
+                let mut attempts = attempts.into_iter();
+                let first = attempts
+                    .next()
+                    .expect("fan-out produced at least one response");
+                let AttemptResponse {
+                    response: first_response,
+                    compat_response_plan: first_plan,
+                } = first;
+                compat_response_plan = first_plan;
+                fanout_responses = Some(attempts.map(|attempt| attempt.response).collect());
+                first_response
+            } else {
+                match self
+                    .run_upstream_attempt(
+                        auth,
+                        reserved.as_ref(),
+                        &ctx,
+                        &principal,
+                        &routed,
+                        signer.clone(),
                         observer.as_ref(),
-                        &attempt_timings,
-                        request_capability.provider(),
-                    ));
+                        &mut attempt_timings,
+                        &mut keepalive_shaped_body,
+                        &cache_metadata,
+                        &mut keepalive_request_dispatched_at,
+                    )
+                    .await
+                {
+                    Ok(attempt) => {
+                        compat_response_plan = attempt.compat_response_plan;
+                        attempt.response
+                    }
+                    Err(failure) => {
+                        if matches!(failure, AttemptFailure::Sign(_))
+                            && let Some(next) = failover.next(self, &routed, FailoverReason::Sign)
+                        {
+                            routed = next;
+                            continue;
+                        }
+                        return Ok(self.relay_attempt_failure(
+                            failure,
+                            request_capability,
+                            active_limit.as_ref(),
+                            observer.as_ref(),
+                            &attempt_timings,
+                            request_capability.provider(),
+                        ));
+                    }
                 }
             };
 
@@ -6471,6 +6610,7 @@ impl Lifecycle {
                     &mut attempt_timings,
                     Some(dispatch_started),
                 );
+                fanout_responses = None;
                 response = match self
                     .run_upstream_attempt(
                         auth,
@@ -6564,6 +6704,7 @@ impl Lifecycle {
             }
             break (response, dispatch_started, dispatch_unix_secs, signer);
         };
+        drop(failover);
         let mut precomputed_usage: Option<UsageCounts> = None;
         let chat_fanout_plan = compat_response_plan.as_ref().and_then(|plan| {
             let CompatResponseKind::Chat { plan } = &plan.kind else {
@@ -6604,58 +6745,81 @@ impl Lifecycle {
                 }
             }
             if compat_response_plan.is_some() {
+                let mut fanout_body_results = fanout_responses.take().map(|responses| async {
+                    Self::collect_response_bodies_concurrently(
+                        responses,
+                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                    )
+                    .await
+                });
+                let mut fanout_body_results = match fanout_body_results.take() {
+                    Some(future) => Some(future.await),
+                    None => None,
+                };
                 for _ in 1..plan.n {
-                    let attempt = match self
-                        .run_upstream_attempt(
-                            auth,
-                            reserved.as_ref(),
-                            &ctx,
-                            &principal,
-                            &routed,
-                            signer.clone(),
-                            observer.as_ref(),
-                            &mut attempt_timings,
-                            &mut keepalive_shaped_body,
-                            &cache_metadata,
-                            &mut keepalive_request_dispatched_at,
-                        )
-                        .await
-                    {
-                        Ok(attempt) => attempt,
-                        Err(failure) => {
-                            if let Some(usage) = precomputed_usage.as_ref()
-                                && let Some(observer) = observer.as_ref()
+                    let (status, headers, body_result) =
+                        if let Some(results) = fanout_body_results.as_mut() {
+                            results.remove(0)
+                        } else {
+                            let attempt_response = match self
+                                .run_upstream_attempt(
+                                    auth,
+                                    reserved.as_ref(),
+                                    &ctx,
+                                    &principal,
+                                    &routed,
+                                    signer.clone(),
+                                    observer.as_ref(),
+                                    &mut attempt_timings,
+                                    &mut keepalive_shaped_body,
+                                    &cache_metadata,
+                                    &mut keepalive_request_dispatched_at,
+                                )
+                                .await
                             {
-                                observer.set_usage_counts(usage, false);
-                            }
-                            return Ok(self.relay_attempt_failure(
-                                failure,
-                                request_capability,
-                                active_limit.as_ref(),
-                                observer.as_ref(),
-                                &attempt_timings,
-                                request_capability.provider(),
-                            ));
-                        }
-                    };
-                    if !attempt.response.status().is_success() {
-                        let (parts, body) = attempt.response.into_parts();
-                        let body = compat_response::collect_body(
-                            body,
-                            decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-                        )
-                        .await
-                        .unwrap_or_default();
-                        bodies.push(body.clone());
-                        let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
-                        precomputed_usage =
-                            crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                                .map(|usage| responses_usage_value_to_counts(&usage));
+                                Ok(attempt) => attempt.response,
+                                Err(failure) => {
+                                    if let Some(usage) = precomputed_usage.as_ref()
+                                        && let Some(observer) = observer.as_ref()
+                                    {
+                                        observer.set_usage_counts(usage, false);
+                                    }
+                                    return Ok(self.relay_attempt_failure(
+                                        failure,
+                                        request_capability,
+                                        active_limit.as_ref(),
+                                        observer.as_ref(),
+                                        &attempt_timings,
+                                        request_capability.provider(),
+                                    ));
+                                }
+                            };
+                            let (parts, body) = attempt_response.into_parts();
+                            (
+                                parts.status,
+                                parts.headers,
+                                compat_response::collect_body(
+                                    body,
+                                    decompression_output_budget_bytes(
+                                        self.config.messages_body_cap_bytes,
+                                    ),
+                                )
+                                .await,
+                            )
+                        };
+                    let body_failed = body_result.is_err();
+                    let body = body_result.unwrap_or_default();
+                    bodies.push(body.clone());
+                    let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
+                    precomputed_usage =
+                        crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
+                            .map(|usage| responses_usage_value_to_counts(&usage));
+                    if !status.is_success() {
                         let converted = match compat_response_plan.as_ref() {
                             Some(error_plan) => compat_response::convert_buffered_plan(
                                 error_plan,
-                                parts.status,
-                                parts.headers,
+                                status,
+                                headers,
                                 body,
                                 &|_| true,
                             ),
@@ -6673,35 +6837,16 @@ impl Lifecycle {
                         compat_response_plan = None;
                         break;
                     }
-                    let body = compat_response::collect_body(
-                        attempt.response.into_body(),
-                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-                    )
-                    .await;
-                    match body {
-                        Ok(body) => {
-                            bodies.push(body);
-                            // Keep the running total current so a later failure
-                            // still accounts every completed choice.
-                            let body_refs =
-                                bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
-                            precomputed_usage =
-                                crate::openai_compat::chat::responses_usage_from_sse_bodies(
-                                    &body_refs,
-                                )
-                                .map(|usage| responses_usage_value_to_counts(&usage));
-                        }
-                        Err(_) => {
-                            response = provider_error_response(
-                                request_capability,
-                                StatusCode::BAD_GATEWAY,
-                                "server_error",
-                                "upstream response exceeded the compatibility buffer",
-                                None,
-                            );
-                            compat_response_plan = None;
-                            break;
-                        }
+                    if body_failed {
+                        response = provider_error_response(
+                            request_capability,
+                            StatusCode::BAD_GATEWAY,
+                            "server_error",
+                            "upstream response exceeded the compatibility buffer",
+                            None,
+                        );
+                        compat_response_plan = None;
+                        break;
                     }
                 }
             }
@@ -6999,18 +7144,46 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = make_limit_request();
-        let max_input_estimate = limit_request.input_tokens_estimate;
+        let fanout_multiplier = admission_fanout_multiplier(
+            upstream_record.kind,
+            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
+            limit_request.fanout_multiplier,
+        );
+        let max_input_estimate = limit_request
+            .input_tokens_estimate
+            .saturating_mul(fanout_multiplier);
+        let local_cache_input = limit_request.local_cache_input.map(|mut input| {
+            input.uncached_input_tokens = input
+                .uncached_input_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_5m_tokens = input
+                .cache_prefix_5m_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_1h_tokens = input
+                .cache_prefix_1h_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input
+        });
+        let sent_service_tier = compat_service_tier_for_upstream(
+            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
+                .unwrap_or(ProviderCapability::OpenaiResponses),
+            upstream_record.kind,
+            limit_request.service_tier.as_deref(),
+            ctx.openai_oauth_compat
+                .as_ref()
+                .is_some_and(|policy| policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce),
+        );
         let cost_estimate = if limit_request.model.is_empty() {
             Some(0)
         } else {
             self.limit_cost_estimator.as_ref().and_then(|estimator| {
-                if let Some(input) = limit_request.local_cache_input {
+                if let Some(input) = local_cache_input {
                     estimator.estimate_max_with_local_cache_and_images(
                         &limit_request.model,
                         input,
                         limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         limit_request.use_image_rates,
-                        limit_request.service_tier.as_deref(),
+                        sent_service_tier.as_deref(),
                     )
                 } else {
                     let estimated_cache_tokens = limit_request.estimated_cache_tokens;
@@ -7022,7 +7195,7 @@ impl Lifecycle {
                         estimated_cache_tokens,
                         can_cross_cache_cliff,
                         limit_request.use_image_rates,
-                        limit_request.service_tier.as_deref(),
+                        sent_service_tier.as_deref(),
                     )
                 }
             })
@@ -7042,6 +7215,8 @@ impl Lifecycle {
                 Ok(Some(ActiveLimit {
                     subject,
                     request: limit_request,
+                    fanout_multiplier,
+                    service_tier: sent_service_tier,
                     reservation: Some(reservation),
                 }))
             }
@@ -7173,6 +7348,32 @@ impl Lifecycle {
                 _ => {}
             }
         }
+        // A translated OAuth Chat stream must not commit HTTP 200 before the
+        // first output-bearing event. If Responses fails in its prefix, the
+        // held headers can still carry the public provider error status/body.
+        if let Some(CompatResponseKind::Chat { plan }) =
+            compat_response_plan.as_ref().map(|plan| &plan.kind)
+            && plan.stream
+            && response.status().is_success()
+        {
+            response = match compat_response::inspect_chat_stream_response(
+                response,
+                compat_response::CHAT_STREAM_PREFIX_CAP_BYTES,
+            )
+            .await
+            {
+                Ok(compat_response::ChatStreamInspection::Ready(response))
+                | Ok(compat_response::ChatStreamInspection::Failed(response)) => response,
+                Err(error) => provider_error_response(
+                    response_affinity_context.capability,
+                    StatusCode::BAD_GATEWAY,
+                    "server_error",
+                    error.public_message(),
+                    None,
+                ),
+            };
+        }
+
         let status = response.status();
         // Audio endpoints also stream binary/text payloads without a JSON
         // `stream` flag. Buffered transforms apply to semantic JSON media
@@ -7954,6 +8155,136 @@ impl Lifecycle {
             numeric_attribute(Some(finalize_ms)).as_value(),
         );
         Response::from_parts(parts, Body::from(downstream_body))
+    }
+
+    async fn join_local(
+        mut futures: Vec<ConcurrentAttemptFuture<'_>>,
+    ) -> Vec<Result<AttemptResponse, AttemptFailure>> {
+        let mut futures = futures.drain(..).map(Some).collect::<Vec<_>>();
+        let mut outputs = (0..futures.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Result<AttemptResponse, AttemptFailure>>>>();
+        std::future::poll_fn(move |cx| {
+            let mut all_ready = true;
+            for index in 0..futures.len() {
+                let Some(mut future) = futures[index].take() else {
+                    continue;
+                };
+                match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(output)) => outputs[index] = Some(Ok(output)),
+                    Poll::Ready(Err(error)) => return Poll::Ready(vec![Err(error)]),
+                    Poll::Pending => {
+                        futures[index] = Some(future);
+                        all_ready = false;
+                    }
+                }
+            }
+            if all_ready {
+                Poll::Ready(outputs.iter_mut().filter_map(Option::take).collect())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+    async fn join_values<T: Send>(
+        mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>,
+    ) -> Vec<T> {
+        let mut futures = futures.drain(..).map(Some).collect::<Vec<_>>();
+        let mut outputs = (0..futures.len()).map(|_| None).collect::<Vec<Option<T>>>();
+        std::future::poll_fn(move |cx| {
+            let mut all_ready = true;
+            for index in 0..futures.len() {
+                let Some(mut future) = futures[index].take() else {
+                    continue;
+                };
+                match future.as_mut().poll(cx) {
+                    Poll::Ready(output) => outputs[index] = Some(output),
+                    Poll::Pending => {
+                        futures[index] = Some(future);
+                        all_ready = false;
+                    }
+                }
+            }
+            if all_ready {
+                Poll::Ready(outputs.iter_mut().filter_map(Option::take).collect())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    async fn collect_response_bodies_concurrently(
+        responses: Vec<Response<Body>>,
+        cap: usize,
+    ) -> Vec<(
+        StatusCode,
+        HeaderMap,
+        Result<Bytes, compat_response::CollectError>,
+    )> {
+        let mut futures: Vec<ResponseBodyFuture<'_>> = Vec::with_capacity(responses.len());
+        for response in responses {
+            let (parts, body) = response.into_parts();
+            futures.push(Box::pin(async move {
+                let result = compat_response::collect_body(body, cap).await;
+                (parts.status, parts.headers, result)
+            }));
+        }
+        Self::join_values(futures).await
+    }
+
+    async fn run_upstream_attempts_concurrently(
+        &self,
+        count: usize,
+        inputs: ConcurrentAttemptInputs<'_, '_>,
+    ) -> (
+        Vec<Result<AttemptResponse, AttemptFailure>>,
+        AttemptTimings,
+        Option<Bytes>,
+        Option<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
+    ) {
+        let ConcurrentAttemptInputs {
+            authenticated,
+            reserved,
+            ctx,
+            principal,
+            routed,
+            signer,
+            observer,
+            cache_metadata,
+        } = inputs;
+        let mut states = (0..count)
+            .map(|_| {
+                (
+                    AttemptTimings::default(),
+                    None::<Bytes>,
+                    None::<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut futures: Vec<ConcurrentAttemptFuture<'_>> = Vec::with_capacity(count);
+        for (timings, shaped_body, dispatched_at) in &mut states {
+            futures.push(Box::pin(self.run_upstream_attempt(
+                authenticated,
+                reserved,
+                ctx,
+                principal,
+                routed,
+                signer.clone(),
+                observer,
+                timings,
+                shaped_body,
+                cache_metadata,
+                dispatched_at,
+            )));
+        }
+        let results = Self::join_local(futures).await;
+        let (timings, shaped_body, dispatched_at) = states
+            .into_iter()
+            .next()
+            .expect("concurrent fan-out has at least one attempt");
+        (results, timings, shaped_body, dispatched_at)
     }
 
     /// Dispatch one attempt to `routed` (already announced with
@@ -11621,6 +11952,19 @@ fn use_image_rates_for_admission(capability: Option<ProviderCapability>, path: &
     ) || (capability == Some(ProviderCapability::OpenaiImages)
         && matches!(path, "/v1/images/edits" | "/v1/images/variations"))
 }
+fn admission_fanout_multiplier(
+    upstream_kind: StorageUpstreamKind,
+    capability: Option<ProviderCapability>,
+    requested: i64,
+) -> i64 {
+    if upstream_kind == StorageUpstreamKind::OpenaiOauth
+        && capability == Some(ProviderCapability::OpenaiChatCompletions)
+    {
+        requested
+    } else {
+        1
+    }
+}
 
 fn responses_usage_value_to_counts(usage: &Value) -> UsageCounts {
     let mut envelope = Map::new();
@@ -11880,6 +12224,7 @@ struct LimitRequest {
     use_image_rates: bool,
     stream: bool,
     service_tier: Option<String>,
+    fanout_multiplier: i64,
 }
 impl LimitRequest {
     /// Native Gemini operations use the normalized canonical model. Other
@@ -12011,15 +12356,39 @@ impl LimitRequest {
             service_tier: value
                 .and_then(|value| request_service_tier(value, capability))
                 .map(str::to_owned),
+            fanout_multiplier: i64::from(fanout_multiplier),
         }
     }
 }
 
 #[cfg(test)]
 mod limit_request_estimate_tests {
-    use super::{LimitRequest, ProviderCapability, RequestBodyView};
+    use super::{
+        LimitRequest, ProviderCapability, RequestBodyView, StorageUpstreamKind,
+        admission_fanout_multiplier,
+    };
     use bytes::Bytes;
     use serde_json::json;
+    #[test]
+    fn admission_fanout_scales_oauth_only() {
+        assert_eq!(
+            admission_fanout_multiplier(
+                StorageUpstreamKind::OpenaiOauth,
+                Some(ProviderCapability::OpenaiChatCompletions),
+                3,
+            ),
+            3
+        );
+        assert_eq!(
+            admission_fanout_multiplier(
+                StorageUpstreamKind::OpenaiApiKey,
+                Some(ProviderCapability::OpenaiChatCompletions),
+                3,
+            ),
+            1
+        );
+    }
+
     #[test]
     fn image_admission_rates_are_limited_to_image_capable_routes() {
         assert!(super::use_image_rates_for_admission(
@@ -12410,6 +12779,8 @@ fn collect_input_bytes(value: &Value, nodes: &mut usize, bytes: &mut usize) {
 struct ActiveLimit {
     subject: AuthLimitSubject,
     request: LimitRequest,
+    fanout_multiplier: i64,
+    service_tier: Option<String>,
     reservation: Option<LimitReservation>,
 }
 
@@ -13187,6 +13558,27 @@ fn request_reasoning_metadata(
         ),
         _ => (None, None),
     }
+}
+
+/// Return the service tier sent to the selected upstream after compatibility
+/// coercion, preserving raw values for non-OAuth traffic.
+fn compat_service_tier_for_upstream(
+    capability: ProviderCapability,
+    upstream_kind: StorageUpstreamKind,
+    requested: Option<&str>,
+    oauth_coerced: bool,
+) -> Option<String> {
+    let requested = requested?;
+    if matches!(
+        capability,
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiChatCompletions
+    ) && upstream_kind == StorageUpstreamKind::OpenaiOauth
+        && oauth_coerced
+        && matches!(requested, "auto" | "flex")
+    {
+        return Some("default".to_owned());
+    }
+    Some(requested.to_owned())
 }
 
 /// Normalize field names only. Keep the requested value, including unknown

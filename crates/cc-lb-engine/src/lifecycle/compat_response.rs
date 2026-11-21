@@ -9,6 +9,8 @@ use std::convert::Infallible;
 use crate::lifecycle::compat_request::{CompatResponseKind, CompatResponsePlan};
 use crate::openai_compat;
 
+pub(crate) const CHAT_STREAM_PREFIX_CAP_BYTES: usize = 1024 * 1024;
+
 /// Maximum number of bytes retained while collecting a response for a
 /// compatibility conversion. The caller supplies the configured request cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +163,111 @@ pub(crate) async fn inspect_truncation_response(
         }
     }
     Ok((Response::from_parts(parts, Body::from(held)), false))
+}
+/// Result of preflighting a translated Chat Completions stream.
+pub(crate) enum ChatStreamInspection {
+    /// The stream produced output (or a terminal success event); relay it
+    /// incrementally after the held prefix.
+    Ready(Response<Body>),
+    /// The stream failed before producing any output; return this public error
+    /// response instead of committing the translated HTTP 200 headers.
+    Failed(Response<Body>),
+}
+
+/// Hold a translated Chat stream until its first output-bearing event or a
+/// terminal event. This is the only point where a provider failure can still
+/// become an HTTP error: once the response headers are sent, later SSE errors
+/// must remain in-band.
+pub(crate) async fn inspect_chat_stream_response(
+    response: Response<Body>,
+    cap: usize,
+) -> Result<ChatStreamInspection, CollectError> {
+    let (parts, body) = response.into_parts();
+    let mut body = body;
+    let mut held = Vec::new();
+    let mut scan = Vec::new();
+    let mut decided = false;
+    while !decided {
+        let Some(frame) = body.frame().await else {
+            break;
+        };
+        let frame = frame.map_err(|_| CollectError::BodyRead)?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        held.extend_from_slice(&data);
+        scan.extend_from_slice(&data);
+        while let Some(end) = sse_event_end(&scan) {
+            let event = scan.drain(..end).collect::<Vec<_>>();
+            let Some(payload) = sse_data(&event) else {
+                continue;
+            };
+            if payload == b"[DONE]" {
+                decided = true;
+                break;
+            }
+            let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
+                continue;
+            };
+            let kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(kind, "response.failed" | "error") {
+                let (status, body) = chat_failure(&event).unwrap_or((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::to_vec(&json!({
+                        "error": {
+                            "message": "The upstream request failed.",
+                            "type": "server_error",
+                            "param": null,
+                            "code": "server_error"
+                        }
+                    }))
+                    .unwrap_or_default(),
+                ));
+                return Ok(ChatStreamInspection::Failed(json_response(status, body)));
+            }
+            if matches!(
+                kind,
+                "response.output_text.delta"
+                    | "response.refusal.delta"
+                    | "response.function_call_arguments.delta"
+            ) || (kind == "response.output_item.added"
+                && event
+                    .get("item")
+                    .and_then(|item| item.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("function_call"))
+            {
+                decided = true;
+                break;
+            }
+            if matches!(kind, "response.completed" | "response.incomplete") {
+                decided = true;
+                break;
+            }
+        }
+        if held.len() > cap {
+            break;
+        }
+    }
+    let stream = async_stream::stream! {
+        if !held.is_empty() {
+            yield Ok::<Bytes, Infallible>(Bytes::from(held));
+        }
+        while let Some(frame) = body.frame().await {
+            let Ok(frame) = frame else { break };
+            let Ok(data) = frame.into_data() else { continue };
+            if !data.is_empty() {
+                yield Ok::<Bytes, Infallible>(data);
+            }
+        }
+    };
+    Ok(ChatStreamInspection::Ready(Response::from_parts(
+        parts,
+        Body::from_stream(stream),
+    )))
 }
 
 #[derive(Debug)]
@@ -594,6 +701,78 @@ data: [DONE]\r\n\r\n";
             error,
             ChatConversionError::Collect(CollectError::IncompleteStream)
         ));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_prefix_failure_becomes_public_http_error() {
+        let response = Response::builder()
+            .body(Body::from(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}}\n\n",
+            ))
+            .expect("response");
+        let result = inspect_chat_stream_response(response, 4096)
+            .await
+            .expect("inspection");
+        let ChatStreamInspection::Failed(response) = result else {
+            panic!("expected public failure response");
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: Value = sonic_rs::from_slice(&body).expect("JSON error");
+        assert_eq!(value["error"]["code"], "context_length_exceeded");
+    }
+    #[tokio::test]
+    async fn chat_stream_prefix_over_cap_commits_headers_and_relay() {
+        let response = Response::builder()
+            .body(Body::from(format!(
+                "data: {{\"type\":\"response.created\",\"padding\":\"{}\"}}\n\n",
+                "x".repeat(32)
+            )))
+            .expect("response");
+        let result = inspect_chat_stream_response(response, 8)
+            .await
+            .expect("inspection");
+        let ChatStreamInspection::Ready(response) = result else {
+            panic!("expected committed stream");
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_prefix_output_remains_incremental() {
+        let response = Response::builder()
+            .body(Body::from_stream(async_stream::stream! {
+                yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                    b"data: {\"type\":\"response.created\",\"response\":{}}\n\n",
+                ));
+                yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n\
+                       data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                ));
+            }))
+            .expect("response");
+        let result = inspect_chat_stream_response(response, 4096)
+            .await
+            .expect("inspection");
+        let ChatStreamInspection::Ready(response) = result else {
+            panic!("expected ready stream");
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(
+            body.windows(b"response.output_text.delta".len())
+                .any(|window| window == b"response.output_text.delta")
+        );
     }
 
     #[tokio::test]
