@@ -517,6 +517,16 @@ impl Lifecycle {
             }
             let mut signed_headers = signed.headers().clone();
             strip_hop_by_hop(&mut signed_headers);
+            // The provider joins a sideband only when its `OpenAI-Alpha` matches
+            // the live call, and subscription calls are created with the
+            // quicksilver protocol. Public clients never send it; Codex does,
+            // so a client-supplied value is kept.
+            if record.kind == StorageUpstreamKind::OpenaiOauth && call_id.is_some() {
+                let (name, value) = crate::openai_compat::realtime::REALTIME_ALPHA_HEADER;
+                signed_headers
+                    .entry(name)
+                    .or_insert(http::HeaderValue::from_static(value));
+            }
             Ok(RealtimeWebSocketSession {
                 candidate: WebSocketCandidate {
                     upstream_id: id,

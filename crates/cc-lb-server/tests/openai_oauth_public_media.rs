@@ -40,6 +40,42 @@ async fn ws_handler(State(state): State<FakeState>, ws: WebSocketUpgrade) -> imp
         }
     })
 }
+/// The provider joins a sideband only when `OpenAI-Alpha` matches the live
+/// call, and otherwise rejects the handshake with a JSON error.
+async fn sideband_handler(
+    State(state): State<FakeState>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let alpha = headers
+        .get("openai-alpha")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    state.0.lock().unwrap().push((
+        "/v1/realtime".into(),
+        "WS".into(),
+        vec![("openai-alpha".into(), alpha.clone())],
+        vec![],
+    ));
+    if alpha != "quicksilver=v2" {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error":{
+                "message":"Sideband OpenAI-Alpha header does not match the live session.",
+                "type":"invalid_request_error",
+                "code":"observer_protocol_mismatch",
+                "param":"OpenAI-Alpha"
+            }})),
+        )
+            .into_response();
+    }
+    ws.on_upgrade(|mut socket: WebSocket| async move {
+        let _ = socket
+            .send(Message::Text(r#"{"type":"session.created"}"#.into()))
+            .await;
+    })
+}
 async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     let _method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -96,6 +132,7 @@ async fn spawn() -> Fake {
                     "/backend-api/codex/responses",
                     axum::routing::get(ws_handler),
                 )
+                .route("/v1/realtime", axum::routing::get(sideband_handler))
                 .fallback(fake)
                 .with_state(st),
         )
@@ -198,6 +235,37 @@ async fn openai_oauth_public_media_and_realtime_contract() {
         location.as_ref().and_then(|v| v.to_str().ok()),
         Some("/v1/realtime/calls/rtc_test1")
     );
+    // A public client joins the call's sideband without `OpenAI-Alpha`; cc-lb
+    // must add the protocol header the subscription call was created with.
+    {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{}/openai/v1/realtime?call_id=rtc_test1", s.proxy_addr)
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {key}").parse().unwrap(),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("sideband handshake succeeds");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
+            .await
+            .expect("sideband event arrives")
+            .expect("stream open")
+            .expect("frame");
+        assert_eq!(
+            first.into_text().unwrap().as_str(),
+            r#"{"type":"session.created"}"#
+        );
+        let rec = f.state.0.lock().unwrap();
+        let sideband = rec
+            .iter()
+            .find(|x| x.0 == "/v1/realtime")
+            .expect("sideband reached the provider");
+        assert_eq!(sideband.2[0].1, "quicksilver=v2");
+    }
     let r = c
         .post(format!(
             "http://{}/openai/v1/realtime/calls/rtc_test1/hangup",
