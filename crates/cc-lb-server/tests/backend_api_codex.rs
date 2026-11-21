@@ -14,7 +14,7 @@ async fn backend_codex_alias_preserves_native_requests_and_catalog_queries() {
     let native = br#"{"model":"gpt-test","input":"raw string","store":null,"metadata":{"x":"y"},"temperature":0.2,"service_tier":"auto","stream":false,"instructions":"keep","include":["reasoning.encrypted_content"],"prompt_cache_key":"cache","tools":[{"type":"local_shell"},{"type":"apply_patch"},{"type":"shell"},{"type":"mcp"},{"type":"computer"}]}"#;
     let response = client
         .post(format!(
-            "http://{}/backend-api/codex/responses?client=raw",
+            "http://{}/openai/backend-api/codex/responses?client=raw",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -70,7 +70,7 @@ async fn backend_codex_alias_preserves_native_requests_and_catalog_queries() {
 
     let catalog = client
         .get(format!(
-            "http://{}/backend-api/codex/models?client_version=X&client=raw",
+            "http://{}/openai/backend-api/codex/models?client_version=X&client=raw",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -107,7 +107,7 @@ async fn backend_codex_alias_preserves_native_requests_and_catalog_queries() {
 
     let compact = client
         .post(format!(
-            "http://{}/backend-api/codex/responses/compact",
+            "http://{}/openai/backend-api/codex/responses/compact",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -126,7 +126,7 @@ async fn backend_codex_alias_preserves_native_requests_and_catalog_queries() {
 
     let alpha = client
         .post(format!(
-            "http://{}/backend-api/codex/alpha/search",
+            "http://{}/openai/backend-api/codex/alpha/search",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -143,7 +143,7 @@ async fn backend_codex_alias_preserves_native_requests_and_catalog_queries() {
     let sdp = b"v=0\r\nnative";
     let realtime = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls",
+            "http://{}/openai/backend-api/codex/realtime/calls",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -187,7 +187,7 @@ async fn backend_codex_zstd_body_is_decoded_before_native_forwarding() {
     let compressed = zstd::bulk::compress(body, 1).unwrap();
     let response = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -248,7 +248,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     assert_eq!(status, 200);
     let response = client
         .get(format!(
-            "http://{}/backend-api/codex/models?client_version=X",
+            "http://{}/openai/backend-api/codex/models?client_version=X",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -261,7 +261,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     assert_eq!(catalog["models"][0]["slug"], "gpt-test");
     let denied = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -272,7 +272,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     assert_eq!(denied.status(), 403);
     let invalid = client
         .get(format!(
-            "http://{}/backend-api/codex/models?client_version=invalid",
+            "http://{}/openai/backend-api/codex/models?client_version=invalid",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -301,7 +301,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     );
     let invalid_sse = client
         .get(format!(
-            "http://{}/backend-api/codex/models?client_version=invalid_sse",
+            "http://{}/openai/backend-api/codex/models?client_version=invalid_sse",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -311,7 +311,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     assert_eq!(invalid_sse.status(), 502);
     let hangup = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/id/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/id/hangup",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -335,7 +335,7 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
 
     let unauthenticated = client
         .post(format!(
-            "http://{}/backend-api/wham/usage",
+            "http://{}/openai/backend-api/wham/usage",
             server.proxy_addr
         ))
         .body("must not be read")
@@ -345,7 +345,7 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
     assert_eq!(unauthenticated.status(), 401);
     let unauthenticated_compact = client
         .post(format!(
-            "http://{}/backend-api/codex/responses/compact",
+            "http://{}/openai/backend-api/codex/responses/compact",
             server.proxy_addr
         ))
         .body("{}")
@@ -355,7 +355,7 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
     assert_eq!(unauthenticated_compact.status(), 401);
     let unauthenticated_trace = client
         .post(format!(
-            "http://{}/backend-api/codex/memories/trace_summarize",
+            "http://{}/openai/backend-api/codex/memories/trace_summarize",
             server.proxy_addr
         ))
         .body("{}")
@@ -363,9 +363,38 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
         .await
         .unwrap();
     assert_eq!(unauthenticated_trace.status(), 401);
+    let unauth_root = client
+        .get(format!("http://{}/openai/backend-api", server.proxy_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_root.status(), 401);
+    let authenticated_root = client
+        .get(format!("http://{}/openai/backend-api", server.proxy_addr))
+        .bearer_auth(&server.managed_key.plaintext)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authenticated_root.status(), 404);
+    let root_body = authenticated_root.text().await.unwrap();
+    assert!(root_body.contains("operation_not_supported"), "{root_body}");
+
+    let authenticated_wham = client
+        .get(format!(
+            "http://{}/openai/backend-api/wham/usage",
+            server.proxy_addr
+        ))
+        .bearer_auth(&server.managed_key.plaintext)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authenticated_wham.status(), 404);
+    let wham_body = authenticated_wham.text().await.unwrap();
+    assert!(wham_body.contains("operation_not_supported"), "{wham_body}");
+
     let authenticated = client
         .post(format!(
-            "http://{}/backend-api/codex/memories/trace_summarize",
+            "http://{}/openai/backend-api/codex/memories/trace_summarize",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -376,6 +405,20 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
     assert_eq!(authenticated.status(), 404);
     let body = authenticated.text().await.unwrap();
     assert!(body.contains("operation_not_supported"), "{body}");
+
+    for (method, path) in [
+        (reqwest::Method::POST, "/backend-api/codex/responses"),
+        (reqwest::Method::GET, "/backend-api/codex/models"),
+        (reqwest::Method::POST, "/backend-api/wham/usage"),
+    ] {
+        let unprefixed = client
+            .request(method, format!("http://{}{path}", server.proxy_addr))
+            .bearer_auth(&server.managed_key.plaintext)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unprefixed.status(), 404, "{path}");
+    }
 
     let requests = fake.state.0.lock().unwrap().clone();
     assert!(
@@ -398,7 +441,7 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
         .count();
     let unknown = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -489,7 +532,7 @@ async fn backend_codex_mixed_pool_fails_over_only_between_oauth_upstreams() {
     assert_eq!(status, 200);
     let response = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -570,7 +613,7 @@ async fn backend_codex_api_key_only_principal_has_no_eligible_upstream() {
     assert_eq!(status, 201);
     let response = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -873,8 +916,8 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     let key = &server.managed_key.plaintext;
 
     for path in [
-        "/backend-api/codex/images/generations",
-        "/backend-api/codex/images/edits",
+        "/openai/backend-api/codex/images/generations",
+        "/openai/backend-api/codex/images/edits",
     ] {
         let unauth = client
             .post(format!("http://{}{path}", server.proxy_addr))
@@ -889,7 +932,7 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     let gen_payload = br#"{"model":"gpt-image-2","prompt":"a red fox","output":"png","background":"transparent","quality":"high","size":"1024x1024","stream":true}"#;
     let gen_resp = client
         .post(format!(
-            "http://{}/backend-api/codex/images/generations",
+            "http://{}/openai/backend-api/codex/images/generations",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -919,7 +962,7 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     let edit_payload = br#"{"model":"gpt-image-2","images":[{"image_url":"data:image/png;base64,Zm9v"},{"file_id":"file-image"}],"prompt":"add a red hat"}"#;
     let edit_resp = client
         .post(format!(
-            "http://{}/backend-api/codex/images/edits",
+            "http://{}/openai/backend-api/codex/images/edits",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1012,11 +1055,11 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
 
     for (path, body) in [
         (
-            "/backend-api/codex/images/generations",
+            "/openai/backend-api/codex/images/generations",
             json!({"model": "gpt-image-1.5", "prompt": "denied"}),
         ),
         (
-            "/backend-api/codex/images/edits",
+            "/openai/backend-api/codex/images/edits",
             json!({"model": "gpt-image-1.5", "images": [{"file_id": "f"}], "prompt": "denied"}),
         ),
     ] {
@@ -1031,7 +1074,7 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     }
     let allowed = client
         .post(format!(
-            "http://{}/backend-api/codex/images/edits",
+            "http://{}/openai/backend-api/codex/images/edits",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1055,7 +1098,7 @@ async fn backend_codex_images_edits_uses_files_cap_and_rejects_api_key_only_pool
     let large_prompt = "x".repeat(320);
     let gen_over_messages_cap = client
         .post(format!(
-            "http://{}/backend-api/codex/images/generations",
+            "http://{}/openai/backend-api/codex/images/generations",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1067,7 +1110,7 @@ async fn backend_codex_images_edits_uses_files_cap_and_rejects_api_key_only_pool
 
     let edit_over_messages_cap = client
         .post(format!(
-            "http://{}/backend-api/codex/images/edits",
+            "http://{}/openai/backend-api/codex/images/edits",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1117,8 +1160,8 @@ async fn backend_codex_images_edits_uses_files_cap_and_rejects_api_key_only_pool
         .count();
 
     for path in [
-        "/backend-api/codex/images/generations",
-        "/backend-api/codex/images/edits",
+        "/openai/backend-api/codex/images/generations",
+        "/openai/backend-api/codex/images/edits",
     ] {
         let resp = client
             .post(format!("http://{}{path}", server.proxy_addr))
@@ -1158,7 +1201,7 @@ async fn backend_codex_strips_actor_authorization_header_on_responses() {
 
     let response = client
         .post(format!(
-            "http://{}/backend-api/codex/responses",
+            "http://{}/openai/backend-api/codex/responses",
             server.proxy_addr
         ))
         .header("x-api-key", key)
@@ -1251,7 +1294,7 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
     let key = &server.managed_key.plaintext;
     let unauth_hangup = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
             server.proxy_addr
         ))
         .send()
@@ -1262,7 +1305,7 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
 
     let create_201 = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+            "http://{}/openai/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1282,7 +1325,7 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
 
     let hangup_201 = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1294,7 +1337,7 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
 
     let create_200 = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls?status=200",
+            "http://{}/openai/backend-api/codex/realtime/calls?status=200",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1306,7 +1349,7 @@ async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
 
     let hangup_200 = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/rtc_codex_200/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/rtc_codex_200/hangup",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -1398,7 +1441,7 @@ async fn backend_codex_hangup_never_routes_to_api_key_owner() {
 
     let codex_hangup = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/rtc_api_key_only/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/rtc_api_key_only/hangup",
             server.proxy_addr
         ))
         .bearer_auth(key)

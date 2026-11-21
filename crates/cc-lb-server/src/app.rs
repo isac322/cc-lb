@@ -2671,33 +2671,32 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
                         ),
                     ),
                 )
-                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
-        )
-        .nest(
-            "/backend-api/codex",
-            Router::new()
-                .route(
-                    "/",
-                    any(codex_backend_root_handler).layer(
-                        cc_lb_observability::trace_layer().make_span_with(
-                            cc_lb_observability::ProxyMakeSpan::with_route_template(
-                                proxy_route_template,
+                .nest(
+                    "/backend-api/codex",
+                    Router::new()
+                        .route(
+                            "/",
+                            any(codex_backend_root_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
                             ),
-                        ),
-                    ),
-                )
-                .route("/responses", get(responses_websocket_handler))
-                .route(
-                    "/realtime",
-                    get(openai_realtime_websocket_handler).layer(
-                        cc_lb_observability::trace_layer().make_span_with(
-                            cc_lb_observability::ProxyMakeSpan::with_route_template(
-                                proxy_route_template,
+                        )
+                        .route("/responses", get(responses_websocket_handler))
+                        .route(
+                            "/realtime",
+                            get(openai_realtime_websocket_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
                             ),
-                        ),
-                    ),
+                        )
+                        .layer(middleware::from_fn(rewrite_codex_backend_request)),
                 )
-                .layer(middleware::from_fn(rewrite_codex_backend_request))
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
@@ -2745,13 +2744,14 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             ),
         )
         .nest(
-            "/backend-api/codex",
+            "/openai/backend-api/codex",
             codex_backend_http_routes(state.clone(), request_id_state.clone(), timeout_secs),
         )
         .nest(
-            "/backend-api",
+            "/openai/backend-api",
             wrap_scoped_proxy_routes(
                 Router::new()
+                    .route("/", any(backend_api_not_found))
                     .route("/{*path}", any(backend_api_not_found))
                     .with_state(state.clone()),
                 state.clone(),

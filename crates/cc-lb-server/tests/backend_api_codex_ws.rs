@@ -13,7 +13,7 @@ async fn backend_codex_websocket_preserves_frames_query_and_authentication() {
     let key = &server.managed_key.plaintext;
 
     let mut request = format!(
-        "ws://{}/backend-api/codex/responses?trace=a%2Fb&beta=1",
+        "ws://{}/openai/backend-api/codex/responses?trace=a%2Fb&beta=1",
         server.proxy_addr
     )
     .into_client_request()
@@ -69,7 +69,7 @@ async fn backend_codex_websocket_preserves_frames_query_and_authentication() {
 
     let unauthenticated = client
         .get(format!(
-            "http://{}/backend-api/codex/models",
+            "http://{}/openai/backend-api/codex/models",
             server.proxy_addr
         ))
         .send()
@@ -86,7 +86,7 @@ async fn backend_codex_websocket_rejects_unauthenticated_upgrade() {
     let client = Client::new();
     openai_oauth_public_media::setup(&server, &fake, &client).await;
     let request = format!(
-        "ws://{}/backend-api/codex/responses?trace=a%2Fb",
+        "ws://{}/openai/backend-api/codex/responses?trace=a%2Fb",
         server.proxy_addr
     )
     .into_client_request()
@@ -118,7 +118,7 @@ async fn backend_codex_websocket_rejects_traversal_without_upstream_contact() {
     openai_oauth_public_media::setup(&server, &fake, &client).await;
     let response = client
         .get(format!(
-            "http://{}/backend-api/codex/..%2fresponses",
+            "http://{}/openai/backend-api/codex/..%2fresponses",
             server.proxy_addr
         ))
         .bearer_auth(&server.managed_key.plaintext)
@@ -189,7 +189,7 @@ async fn backend_codex_websocket_strips_actor_authorization_on_responses() {
     .await;
 
     let mut request = format!(
-        "ws://{}/backend-api/codex/responses?trace=strip",
+        "ws://{}/openai/backend-api/codex/responses?trace=strip",
         server.proxy_addr
     )
     .into_client_request()
@@ -316,7 +316,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
 
     // Unauthenticated upgrade is rejected before contacting upstream.
     let unauth_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
         server.proxy_addr
     )
     .into_client_request()
@@ -329,7 +329,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
 
     // Unknown call_id fails closed with 404 before contacting upstream.
     let mut missing_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_missing",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_missing",
         server.proxy_addr
     )
     .into_client_request()
@@ -345,7 +345,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
 
     // Standalone Codex realtime connect with `?intent=quicksilver` succeeds for unrestricted principal.
     let mut standalone_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver",
         server.proxy_addr
     )
     .into_client_request()
@@ -373,7 +373,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     // End-to-end call create -> sideband join (default and custom OpenAI-Alpha) -> hangup on same OAuth account.
     let call_resp = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+            "http://{}/openai/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -384,7 +384,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     assert_eq!(call_resp.status(), 201);
 
     let mut sideband_default_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_codex_1",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_codex_1",
         server.proxy_addr
     )
     .into_client_request()
@@ -405,7 +405,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     assert_eq!(sideband_frame["query"], "intent=quicksilver&call_id=rtc_codex_1");
 
     let mut sideband_custom_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_codex_1",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_codex_1",
         server.proxy_addr
     )
     .into_client_request()
@@ -465,7 +465,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
 
     let hangup_resp = client
         .post(format!(
-            "http://{}/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
+            "http://{}/openai/backend-api/codex/realtime/calls/rtc_codex_1/hangup",
             server.proxy_addr
         ))
         .bearer_auth(key)
@@ -519,7 +519,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     assert_eq!(status, 200);
 
     let mut modelless_restricted = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver",
         server.proxy_addr
     )
     .into_client_request()
@@ -533,7 +533,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     assert!(modelless_err.to_string().contains("400"), "{modelless_err}");
 
     let mut disallowed_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&model=gpt-other",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&model=gpt-other",
         server.proxy_addr
     )
     .into_client_request()
@@ -547,7 +547,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     assert!(disallowed_err.to_string().contains("403"), "{disallowed_err}");
 
     let mut allowed_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
         server.proxy_addr
     )
     .into_client_request()
@@ -622,7 +622,7 @@ async fn backend_codex_realtime_websocket_never_routes_to_api_key_or_api_key_cal
 
     // Standalone Codex realtime fails 503 when only API-key upstreams exist.
     let mut standalone_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
         server.proxy_addr
     )
     .into_client_request()
@@ -647,7 +647,7 @@ async fn backend_codex_realtime_websocket_never_routes_to_api_key_or_api_key_cal
     assert_eq!(public_call.status(), 201);
 
     let mut sideband_req = format!(
-        "ws://{}/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_api_key_only",
+        "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_api_key_only",
         server.proxy_addr
     )
     .into_client_request()
@@ -725,7 +725,7 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
         let unauth = client
             .request(
                 method.clone(),
-                format!("http://{}/backend-api/codex", server.proxy_addr),
+                format!("http://{}/openai/backend-api/codex", server.proxy_addr),
             )
             .send()
             .await
@@ -739,7 +739,7 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
         let auth_http = client
             .request(
                 method.clone(),
-                format!("http://{}/backend-api/codex", server.proxy_addr),
+                format!("http://{}/openai/backend-api/codex", server.proxy_addr),
             )
             .bearer_auth(key)
             .send()
@@ -753,7 +753,7 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
 
     // Standalone Codex realtime WS at `/backend-api/codex?intent=quicksilver` upgrades and strips actor header.
     let mut root_ws_req = format!(
-        "ws://{}/backend-api/codex?intent=quicksilver",
+        "ws://{}/openai/backend-api/codex?intent=quicksilver",
         server.proxy_addr
     )
     .into_client_request()
@@ -780,16 +780,44 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
     assert_eq!(frame["type"], "session.created");
     assert_eq!(frame["query"], "intent=quicksilver");
 
-    let recorded = fake.state.0.lock().unwrap();
-    let ws_req = recorded
-        .iter()
-        .find(|r| r.method == "WS" && r.path == "/v1/realtime")
-        .expect("root WS reached realtime_origin");
-    assert_eq!(ws_req.query, "intent=quicksilver");
-    assert!(
-        ws_req
-            .headers
+    let ws_count = {
+        let recorded = fake.state.0.lock().unwrap();
+        let ws_req = recorded
             .iter()
-            .all(|(name, _)| name != "x-openai-actor-authorization")
+            .find(|r| r.method == "WS" && r.path == "/v1/realtime")
+            .expect("root WS reached realtime_origin");
+        assert_eq!(ws_req.query, "intent=quicksilver");
+        assert!(
+            ws_req
+                .headers
+                .iter()
+                .all(|(name, _)| name != "x-openai-actor-authorization")
+        );
+        recorded.iter().filter(|r| r.method == "WS").count()
+    };
+    for path in [
+        "/backend-api/codex/responses",
+        "/backend-api/codex?intent=quicksilver",
+    ] {
+        let mut unprefixed = format!("ws://{}{path}", server.proxy_addr)
+            .into_client_request()
+            .unwrap();
+        unprefixed
+            .headers_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        let err = tokio_tungstenite::connect_async(unprefixed)
+            .await
+            .expect_err("unprefixed backend-api websocket must fail");
+        assert!(err.to_string().contains("404"), "{path}: {err}");
+    }
+    assert_eq!(
+        fake.state
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "WS")
+            .count(),
+        ws_count
     );
 }
