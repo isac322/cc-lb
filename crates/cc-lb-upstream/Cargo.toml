@@ -13,3 +13,7 @@ cc-lb-domain.workspace = true
 http.workspace = true
 thiserror.workspace = true
 url.workspace = true
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

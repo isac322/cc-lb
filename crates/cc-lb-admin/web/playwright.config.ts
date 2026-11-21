@@ -6,18 +6,21 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e',
   testIgnore: ['api-key/**', 'csp.spec.ts'],
-  fullyParallel: false,
+  fullyParallel: process.env.PW_FULLY_PARALLEL === '1' || Boolean(process.env.CI),
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: 1,
+  workers: process.env.PW_WORKERS ? Number(process.env.PW_WORKERS) : (process.env.CI ? 4 : 1),
   reporter: 'line',
   use: {
     baseURL: 'http://localhost:5173',
-    trace: 'on',
-    screenshot: 'on',
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'bun run dev',
+    command:
+      process.env.PW_USE_PREVIEW === '1'
+        ? 'bun run preview -- --host 0.0.0.0 --port 5173 --strictPort'
+        : 'bun run dev',
     port: 5173,
     reuseExistingServer: !process.env.CI,
   },

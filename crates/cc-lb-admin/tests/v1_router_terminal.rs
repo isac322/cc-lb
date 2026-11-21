@@ -1,8 +1,10 @@
 use crate::admin_test_common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
+use cc_lb_clock::TestClock;
 use cc_lb_storage_api::{AuditQueryScope, AuditStore};
 use serde_json::{Value, json};
 
@@ -79,14 +81,15 @@ async fn put_router_terminal_strategy_persists_and_audits() {
 
 #[tokio::test]
 async fn put_router_terminal_stale_revision_returns_409() {
-    let server = admin_test_common::spawn_admin_server().await;
+    let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+    let server = admin_test_common::spawn_admin_server_with_clock(clock.clone()).await;
     let (_, headers, created) = create_principal(&server.client, "router-terminal-stale").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    clock.advance(Duration::from_secs(1));
 
     let (status, _, first_update) = server
         .client

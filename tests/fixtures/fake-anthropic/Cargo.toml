@@ -36,5 +36,6 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }

@@ -1,0 +1,103 @@
+name: Setup WASM plugin test fixtures
+description: Restore or build prebuilt wasm32-unknown-unknown fixture plugins.
+
+inputs:
+  save-caches:
+    description: Whether to save WASM fixtures cache on miss (set false on fan-out shards).
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Compute WASM dependency lock hash
+      id: wasm-lock
+      shell: bash
+      run: |
+        set -euo pipefail
+        lock_hash="$(node -e '
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+          const lock = fs.readFileSync("Cargo.lock", "utf8");
+          const pkgs = new Map();
+          for (const block of lock.split(/\n(?=\[\[package\]\])/).slice(1)) {
+            const name = (/^name = "([^"]+)"/m.exec(block) || [])[1];
+            const version = (/^version = "([^"]+)"/m.exec(block) || [])[1];
+            const checksum = (/^checksum = "([^"]+)"/m.exec(block) || [])[1] || "";
+            if (!name || !version) continue;
+            const deps = [];
+            const depMatch = /^dependencies = \[([\s\S]*?)^\]/m.exec(block);
+            if (depMatch) {
+              for (const m of depMatch[1].matchAll(/"([^"\s]+)/g)) deps.push(m[1]);
+            }
+            const list = pkgs.get(name) || [];
+            list.push({ name, version, checksum, deps });
+            pkgs.set(name, list);
+          }
+          const roots = [
+            "cache-aware-wasmtime",
+            "wasmtime-shape-passthrough",
+            "wasmtime-filter-service-tier",
+            "wasmtime-filter-openai",
+            "wasmtime-dual-slot",
+            "cc-lb-pdk-wasmtime",
+            "cc-lb-pdk-wasmtime-macros",
+            "cc-lb-plugin-wire",
+          ];
+          const seen = new Set();
+          const out = [];
+          const q = [...roots];
+          while (q.length > 0) {
+            const cur = q.shift();
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            const entries = pkgs.get(cur) || [];
+            for (const e of entries) {
+              out.push(`${e.name}@${e.version}:${e.checksum}`);
+              for (const d of e.deps) q.push(d);
+            }
+          }
+          out.sort();
+          process.stdout.write(crypto.createHash("sha256").update(out.join("\n")).digest("hex"));
+        ')"
+        echo "hash=$lock_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Cache prebuilt WASM plugin fixtures
+      if: inputs.save-caches != 'false'
+      id: wasm-cache
+      uses: actions/cache@v6
+      with:
+        path: target/wasm32-unknown-unknown/release/*.wasm
+        key: wasm-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('plugins/**', 'crates/cc-lb-pdk-wasmtime/**', 'crates/cc-lb-pdk-wasmtime-macros/**', 'crates/cc-lb-plugin-wire/**') }}-${{ steps.wasm-lock.outputs.hash }}
+
+    - name: Restore prebuilt WASM plugin fixtures
+      if: inputs.save-caches == 'false'
+      id: wasm-cache-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: target/wasm32-unknown-unknown/release/*.wasm
+        key: wasm-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('plugins/**', 'crates/cc-lb-pdk-wasmtime/**', 'crates/cc-lb-pdk-wasmtime-macros/**', 'crates/cc-lb-plugin-wire/**') }}-${{ steps.wasm-lock.outputs.hash }}
+
+    - name: Build WASM plugin fixtures on cache miss
+      if: steps.wasm-cache.outputs.cache-hit != 'true' && steps.wasm-cache-restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        RUSTFLAGS="" CARGO_ENCODED_RUSTFLAGS="" \
+          cargo build --locked --target wasm32-unknown-unknown --release \
+          -p wasmtime-shape-passthrough \
+          -p wasmtime-filter-service-tier \
+          -p wasmtime-dual-slot \
+          -p cache-aware-wasmtime
+
+    - name: Verify WASM plugin fixtures exist
+      shell: bash
+      run: |
+        set -euo pipefail
+        for fixture in \
+          wasmtime_shape_passthrough.wasm \
+          wasmtime_filter_service_tier.wasm \
+          wasmtime_dual_slot.wasm \
+          cache_aware_wasmtime.wasm; do
+          test -s "target/wasm32-unknown-unknown/release/$fixture"
+        done

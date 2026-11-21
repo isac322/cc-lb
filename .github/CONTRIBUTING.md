@@ -26,9 +26,7 @@ Run the narrowest relevant checks for your change and report the commands and re
 
 [`AGENTS.md`](../AGENTS.md) records repository rules that apply to every change, including the authentication ordering in the request path, the SQLite storage backend, CI failure handling, and the JSON library policy.
 
-The coverage report downloads its binaries and runtime while the test shards run. Before collecting profiles, `scripts/wait-coverage-producers.mjs` requires the contract job and all four shards to finish successfully. API errors, failed jobs, and a 15-minute timeout fail the report. Run `node --test scripts/test-wait-coverage-producers.mjs` when changing this barrier.
-
-The barrier rejects workflow reruns because artifacts are scoped to the run rather than the attempt. Diagnose failed CI locally and push a verified fix to start a new run; do not rerun a failed workflow.
+Coverage jobs run across nine crate-partitioned CI runners defined in `.github/ci/cov-partitions.json`, upload sparse LLVM profraw/profdata and stripped coverage objects per partition, and merge them in `nextest-cov` via `scripts/export-merged-lcov.mjs` before running `scripts/coverage-gate.sh`. When changing partitions or coverage export, run `node scripts/check-cov-partitions.mjs` and `node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs`.
 
 The web workflow runs in the official Playwright container with browsers, fonts, and system libraries preinstalled. Keep its image tag aligned with the locked `playwright` package version; the workflow checks that match after dependency installation. Do not add runtime apt or browser installation steps. The existing visual tests and base-branch captures use the image's browsers and publish the same evidence artifacts.
 

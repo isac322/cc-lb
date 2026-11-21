@@ -5,7 +5,7 @@ use serde_json::Value;
 #[tokio::test]
 async fn fable_non_streaming_request_returns_exact_model_through_proxy() {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let request = r#"{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":false}"#;
 
     // When
@@ -29,7 +29,7 @@ async fn fable_non_streaming_request_returns_exact_model_through_proxy() {
 #[tokio::test]
 async fn fable_streaming_request_returns_exact_model_in_message_start_through_proxy() {
     // Given
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let request = r#"{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}"#;
 
     // When

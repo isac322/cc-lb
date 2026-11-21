@@ -18,8 +18,8 @@ use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProviderScope, Ups
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
@@ -593,7 +593,8 @@ async fn finite_gzip_eos_case(
 ) {
     let dir = tempfile::tempdir().expect("temporary directory");
     let storage = Arc::new(sqlite_storage(&dir, "gzip-eos.sqlite").await);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut update_rx = test_bus.bus.subscribe();
     let expected_plaintext = Bytes::from_static(
@@ -625,6 +626,7 @@ async fn finite_gzip_eos_case(
     let collected_body = body_join.join();
     let span_closed = span_closed_rx.recv_timeout(BOUNDED_WAIT);
     let terminal = receive_terminal(&mut lifecycle_rx).await;
+    test_bus.shutdown().await;
     let final_event = receive_final(&mut update_rx).await;
     lifecycle.shutdown().await;
 
@@ -973,16 +975,12 @@ async fn receive_final(
 }
 
 async fn sqlite_storage(dir: &tempfile::TempDir, file_name: &str) -> SqliteStorage {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite storage");
-    storage
-        .initialize()
-        .await
-        .expect("initialize sqlite storage");
-    storage
+    common::templated_sqlite_storage(
+        &dir.path().join(file_name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("open templated sqlite storage")
 }
 
 fn gzip_bytes(body: &Bytes) -> Bytes {

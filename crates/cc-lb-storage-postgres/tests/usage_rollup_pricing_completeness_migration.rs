@@ -106,7 +106,7 @@ async fn migration_166_to_168_is_metadata_only_and_never_repairs_history() -> Te
 
 #[tokio::test]
 async fn gemini_normal_and_nested_merges_preserve_pricing_classification() -> TestResult {
-    let Some(fixture) = Fixture::create(168).await? else {
+    let Some(fixture) = Fixture::create_templated().await? else {
         return Ok(());
     };
     let result: TestResult = async {
@@ -239,7 +239,7 @@ async fn historical_cost_components_recover_without_classifying_pricing() -> Tes
 #[tokio::test]
 async fn xid_seq_inversion_prune_and_bucket_recreation_never_repair_history() -> TestResult {
     for intact in [true, false] {
-        let Some(fixture) = Fixture::create(168).await? else {
+        let Some(fixture) = Fixture::create_templated().await? else {
             return Ok(());
         };
         let result: TestResult = async {
@@ -384,7 +384,7 @@ async fn xid_seq_inversion_prune_and_bucket_recreation_never_repair_history() ->
 
 #[tokio::test]
 async fn old_worker_gaps_and_new_live_classification_remain_additive() -> TestResult {
-    let Some(fixture) = Fixture::create(168).await? else {
+    let Some(fixture) = Fixture::create_templated().await? else {
         return Ok(());
     };
     let result: TestResult = async {
@@ -514,11 +514,43 @@ async fn shape(pool: &PgPool) -> TestResult<Vec<(String, String, String, Option<
 struct Fixture {
     database: String,
     options: PgConnectOptions,
-    admin: PgPool,
+    admin: Option<PgPool>,
+    isolated: Option<crate::pg_test_support::IsolatedPg>,
     storage: PostgresStorage,
 }
 
 impl Fixture {
+    async fn create_templated() -> TestResult<Option<Self>> {
+        let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
+            eprintln!(
+                "skipped: CI_POSTGRES_URL unset; PostgreSQL pricing migration assertions did not run"
+            );
+            return Ok(None);
+        };
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(&url).await?;
+        let options = isolated.connect_options();
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
+        let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
+        if let Err(error) = storage.initialize().await {
+            storage.pool().close().await;
+            let _ = isolated.drop().await;
+            return Err(error.into());
+        }
+        Ok(Some(Self {
+            database: String::new(),
+            options,
+            admin: None,
+            isolated: Some(isolated),
+            storage,
+        }))
+    }
+
     async fn create(version: i64) -> TestResult<Option<Self>> {
         let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
             eprintln!(
@@ -557,7 +589,8 @@ impl Fixture {
         let fixture = Self {
             database,
             options,
-            admin,
+            admin: Some(admin),
+            isolated: None,
             storage,
         };
         let setup: TestResult = async {
@@ -587,13 +620,22 @@ impl Fixture {
 
     async fn drop_schema(self) -> TestResult {
         self.storage.pool().close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.database
-        )))
-        .execute(&self.admin)
-        .await?;
-        self.admin.close().await;
+        if let Some(isolated) = self.isolated {
+            if let Some(admin) = self.admin {
+                admin.close().await;
+            }
+            isolated.drop().await?;
+            return Ok(());
+        }
+        if let Some(admin) = self.admin {
+            sqlx::query(AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.database
+            )))
+            .execute(&admin)
+            .await?;
+            admin.close().await;
+        }
         Ok(())
     }
 }

@@ -39,26 +39,90 @@ jobs:
   changes:
     name: Detect code changes
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions:
       contents: read
       pull-requests: read
+      actions: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      cov_cache_hit: ${{ steps.cov-lookup.outputs.hit == 'true' && 'true' || 'false' }}
     steps:
       - name: Filter changed paths
         id: filter
-        uses: dorny/paths-filter@v4
-        with:
-          predicate-quantifier: some-with-excludes
-          filters: |
-            code:
-              - '**'
-              - '!**/*.md'
-              - '!docs/**'
-              - '!LICENSE'
-              - '!.gitignore'
-              - '!.editorconfig'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if ! files=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename'); then
+            echo "::warning::gh api failed when listing PR files; falling back to code=true"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          code=false
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            case "$path" in
+              *.md|docs/*|LICENSE|.gitignore|.editorconfig) ;;
+              *)
+                code=true
+                break
+                ;;
+            esac
+          done <<<"$files"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Fetch lockfiles for coverage cache lookup
+        id: lockfiles
+        if: steps.filter.outputs.code == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p tools/workspace-hack
+          fetch_raw() {
+            local p=$1
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${p}?ref=${GITHUB_SHA}" \
+              -H "Accept: application/vnd.github.raw" > "$p"
+          }
+          rc=0
+          fetch_raw Cargo.lock & p1=$!
+          fetch_raw Cargo.toml & p2=$!
+          fetch_raw tools/workspace-hack/Cargo.toml & p3=$!
+          wait "$p1" || rc=1
+          wait "$p2" || rc=1
+          wait "$p3" || rc=1
+          if [ "$rc" -ne 0 ] || [ ! -s Cargo.lock ] || [ ! -s Cargo.toml ] || [ ! -s tools/workspace-hack/Cargo.toml ]; then
+            echo "::warning::failed to fetch lockfiles for cov cache lookup; falling back to seed-cov-cache"
+            rm -f Cargo.lock Cargo.toml tools/workspace-hack/Cargo.toml
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+      - name: Check whether coverage workspace cache exists for lock hash
+        id: cov-lookup
+        if: steps.lockfiles.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          prefix="target-ws-v4-${RUNNER_OS}-${RUNNER_ARCH}-cov-1.99.1-${LOCK_HASH}-"
+          if ! caches=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?key=${prefix}&per_page=100" 2>/dev/null); then
+            echo "::warning::gh api actions/caches lookup failed; falling back to cov_cache_hit=false"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          hit=$(jq -sr \
+            --arg cur "${GITHUB_REF}" \
+            --arg pr_ref "refs/pull/${PR_NUMBER}/merge" \
+            --arg base "refs/heads/${PR_BASE_REF}" \
+            --arg master "refs/heads/master" \
+            '[.[].actions_caches[]? | select(.ref == $cur or .ref == $pr_ref or ($base != "refs/heads/" and .ref == $base) or .ref == $master)] | if length > 0 then "true" else "false" end' \
+            <<<"$caches")
+          echo "hit=$hit" >> "$GITHUB_OUTPUT"
 
   fmt:
     needs: changes
@@ -66,26 +130,32 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust-tools
         with:
-          toolchain: 1.99.1
-          components: rustfmt
+          profile: fmt
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
+      - name: Validate coverage partitions and helpers
+        run: |
+          node scripts/check-cov-partitions.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs
 
   guard-crate-versions:
     name: guard crate versions
-    needs: changes
+    needs:
+      - changes
+      - promtool
     # release-plz owns literal crate versions. A dedicated release PR may bump
     # the shared workspace version for cc-lb-server after strict validation.
     # release-plz's own PRs remain exempt.
     if: >-
+      always() &&
       !cancelled() &&
       (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') &&
+      needs.promtool.result != 'skipped' &&
       github.event_name == 'pull_request' &&
       !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-26.04
@@ -94,9 +164,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
       - name: Validate managed crate version changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -129,14 +196,17 @@ jobs:
         run: python3 scripts/test_chart_metadata.py -v
       - name: Test Docker release alias selection
         run: node --test scripts/test_release_aliases.mjs
-      - name: Test coverage producer barrier
-        run: node --test scripts/test-wait-coverage-producers.mjs
       - name: Test client capture and coverage harness
         run: node --test tests/real-client/provider-e2e/client-harness/*.test.mjs tests/real-client/provider-e2e/codex169/*.test.mjs tests/real-client/provider-e2e/agy159/*.test.mjs
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27.4"
           cache: false
+      - name: Cache Go build cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('tests/real-client/provider-e2e/client-harness/linux-helper/**') }}
       - name: Test isolated Linux replay helper
         run: GO111MODULE=off go test ./tests/real-client/provider-e2e/client-harness/linux-helper
 
@@ -346,39 +416,105 @@ jobs:
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust-tools
         with:
-          toolchain: 1.99.1
-          components: clippy
-      - uses: ./.github/actions/setup-rust-cache
+          profile: clippy
+      - uses: ./.github/actions/setup-rust-target-cache
+        id: rust-cache
         with:
+          cache-job-key: clippy-${{ matrix.features }}
+          target-dir: target/debug
           stable-build-metadata: "true"
       - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          fi
+      - name: Save rolling Rust target cache
+        uses: ./.github/actions/save-rust-target-cache
+        with:
+          target-dir: target/debug
+          cache-paths: ${{ steps.rust-cache.outputs.cache-paths }}
+          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
+          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
+  seed-cov-cache:
+    needs: changes
+    if: >-
+      ${{
+        !cancelled() &&
+        (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') &&
+        (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.cov_cache_hit != 'true')
+      }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check whether coverage workspace cache exists for lock hash
+        id: cov-lookup
+        uses: actions/cache/restore@v6
+        with:
+          lookup-only: true
+          path: target/llvm-cov-target/debug
+          key: target-ws-v4-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-exact
+          restore-keys: |
+            target-ws-v4-${{ runner.os }}-${{ runner.arch }}-cov-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tools/workspace-hack/Cargo.toml') }}-
+      - name: Decide whether coverage seed is required
+        id: decide
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
+            echo "need_seed=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${{ steps.cov-lookup.outputs.cache-matched-key }}" ]; then
+            echo "need_seed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_seed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: ./.github/actions/setup-rust-tools
+        if: steps.decide.outputs.need_seed == 'true'
+        with:
+          profile: cov
+      - uses: ./.github/actions/setup-rust-target-cache
+        if: steps.decide.outputs.need_seed == 'true'
+        id: rust-cache
+        with:
+          cache-job-key: cov
+          target-dir: target/llvm-cov-target/debug
+          stable-build-metadata: "true"
+      - name: Build instrumented workspace coverage binaries
+        if: steps.decide.outputs.need_seed == 'true'
+        run: |
+          set -euo pipefail
+          eval "$(cargo llvm-cov show-env --sh)"
+          export CARGO_TARGET_DIR="$PWD/target/llvm-cov-target"
+          cargo nextest run --no-run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
+      - name: Save rolling coverage workspace cache
+        if: steps.decide.outputs.need_seed == 'true'
+        uses: ./.github/actions/save-rust-target-cache
+        with:
+          target-dir: target/llvm-cov-target/debug
+          cache-paths: ${{ steps.rust-cache.outputs.cache-paths }}
+          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
+          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: "true"
 
   cargo-deny:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    needs:
+      - changes
+      - promtool
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') && needs.promtool.result != 'skipped' }}
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust-tools
         with:
-          toolchain: 1.99.1
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.20.2
+          profile: deny
       - run: cargo deny check
 
   promtool:
@@ -396,416 +532,396 @@ jobs:
       - name: Validate Grafana dashboards
         run: scripts/validate-grafana-dashboard.sh
 
-  nextest-cov-runtime:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+  nextest-cov-part:
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    env:
-      SQLX_OFFLINE: "true"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,cargo-nextest
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli@0.9.0
-      - name: Export cargo-installed tools
-        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
-      - name: Package coverage runtime
-        run: bash scripts/coverage-runtime.sh pack coverage-runtime.tar.gz
-      - name: Smoke test coverage runtime offline
-        run: bash scripts/test-coverage-runtime.sh coverage-runtime.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-runtime
-          path: coverage-runtime.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-  nextest-cov-wasm:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    env:
-      CARGO_BUILD_JOBS: "4"
-      SQLX_OFFLINE: "true"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-      - name: Install wasm target for pinned toolchain
-        run: rustup target add wasm32-unknown-unknown
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
-          cache-job-key: "nextest-cov-wasm"
-      - name: Build wasm fixtures
-        run: |
-          cargo build --locked \
-            --target wasm32-unknown-unknown \
-            --release \
-            -p wasmtime-shape-passthrough \
-            -p wasmtime-filter-service-tier \
-            -p wasmtime-dual-slot \
-            -p cache-aware-wasmtime
-      - name: Verify canonical wasm fixtures
-        run: |
-          set -euo pipefail
-          for fixture in \
-            wasmtime_shape_passthrough.wasm \
-            wasmtime_filter_service_tier.wasm \
-            wasmtime_dual_slot.wasm \
-            cache_aware_wasmtime.wasm; do
-            test -s "target/wasm32-unknown-unknown/release/$fixture"
-          done
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-wasm-fixtures
-          path: target/wasm32-unknown-unknown/release/*.wasm
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-  nextest-cov-build:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 240
-    env:
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      SQLX_OFFLINE: "true"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-          components: llvm-tools-preview
-      - name: Install wasm targets for pinned toolchain
-        run: rustup target add wasm32-unknown-unknown
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
-          cache-job-key: "nextest-cov-0"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,cargo-nextest
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli@0.9.0
-      - name: Export cargo-installed tools
-        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
-
-      - name: Clean coverage artifacts
-        run: cargo llvm-cov clean --workspace
-
-
-      - name: Build and archive instrumented test binaries
-        run: |
-          CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
-            cargo llvm-cov nextest-archive \
-              --workspace \
-              --exclude cc-lb-loadgen \
-              --exclude cc-lb-stress-suite \
-              --all-features \
-              --archive-file nextest-archive.tar.zst
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-nextest-archive
-          path: |
-            nextest-archive.tar.zst
-            crates/cc-lb-admin/web/dist/**
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          fi
-  nextest-cov-contract:
-    needs:
-      - changes
-      - nextest-cov-build
-    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: ubuntu-26.04
-    env:
-      SQLX_OFFLINE: "true"
-      CC_LB_ADMIN_SKIP_SPA: "1"
-      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
-      LLVM_PROFILE_FILE_NAME: shard-0-%8m.profraw
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,cargo-nextest
-      - name: Export cargo-installed tools
-        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-nextest-archive
-      - name: Fetch contract test dependencies
-        run: cargo fetch --locked
-      - name: Run compile-fail contract tests
-        run: |
-          mkdir -p target/llvm-cov-target
-          cargo llvm-cov nextest \
-            --archive-file nextest-archive.tar.zst \
-            -E 'test(authn_rail_typestate_contracts)' \
-            --test-threads=2 \
-            --no-report
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-profraw-0
-          path: target/llvm-cov-target/*.profraw
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          fi
-  nextest-cov-shard:
-    needs:
-      - nextest-cov-build
-      - nextest-cov-runtime
-      - nextest-cov-wasm
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.nextest-cov-build.result == 'success' &&
-        needs.nextest-cov-runtime.result == 'success' &&
-        needs.nextest-cov-wasm.result == 'success'
-      }}
-    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: testpw
-          POSTGRES_DB: cc_lb_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-          --tmpfs /var/lib/postgresql:rw,size=2g
-
+        include:
+          - partition: server-lib
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: false
+          - partition: server-integ-1
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: true
+          - partition: server-integ-2
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: true
+          - partition: engine-lib
+            needs_postgres: false
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: engine-integ
+            needs_postgres: true
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: admin
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: false
+          - partition: storage-postgres
+            needs_postgres: true
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: storage-conformance-sqlite
+            needs_postgres: true
+            seed_sched_template: false
+            needs_wasm: false
+          - partition: sched-ext-integ
+            needs_postgres: true
+            seed_sched_template: true
+            needs_wasm: true
+          - partition: wasm-and-rest
+            needs_postgres: false
+            seed_sched_template: false
+            needs_wasm: true
     env:
       CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
       CC_LB_TEST_READY_TIMEOUT_SECS: "240"
-      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
       SQLX_OFFLINE: "true"
-      LLVM_PROFILE_FILE_NAME: profraw-ram/shard-${{ matrix.shard }}-%8m.profraw
-
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-nextest-archive
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-runtime
-          path: .
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-wasm-fixtures
-          path: target/wasm32-unknown-unknown/release
-      - name: Verify restored wasm fixtures
+      - name: Filter changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          for fixture in \
-            wasmtime_shape_passthrough.wasm \
-            wasmtime_filter_service_tier.wasm \
-            cache_aware_wasmtime.wasm; do
-            test -s "target/wasm32-unknown-unknown/release/$fixture"
+          code=false
+          page=1
+          while :; do
+            if ! resp=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100&page=${page}" 2>/dev/null); then
+              echo "::warning::gh api failed when listing PR files; falling back to code=true"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            count=$(jq 'length' <<<"$resp")
+            if [ "$count" -eq 0 ]; then
+              break
+            fi
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              case "$path" in
+                *.md|docs/*|LICENSE|.gitignore|.editorconfig) ;;
+                *)
+                  code=true
+                  break 2
+                  ;;
+              esac
+            done < <(jq -r '.[].filename' <<<"$resp")
+            if [ "$count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
           done
-      - name: Restore coverage runtime
-        run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
-      - name: Verify test tools
-        run: command -v cargo-llvm-cov cargo-nextest sqlx
-
-      - name: Preflight - CI_POSTGRES_URL must be set
-        run: |
-          if [ -z "${CI_POSTGRES_URL:-}" ]; then
-            echo "CI_POSTGRES_URL is empty; postgres service did not configure the env." >&2
-            exit 1
-          fi
-
-      - name: Preflight - psql must be available
-        run: |
-          if ! command -v psql >/dev/null 2>&1; then
-            echo "psql is unavailable; postgres client tools are required." >&2
-            exit 1
-          fi
-          psql --version
-
-      - name: Run Postgres migrations
-        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
-        env:
-          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
-
-      - name: Run test shard ${{ matrix.shard }}/4
-        run: |
-          mkdir -p /dev/shm/cc-lb-profraw target/llvm-cov-target
-          ln -sfn /dev/shm/cc-lb-profraw target/llvm-cov-target/profraw-ram
-          ln -sfn target/debug target/llvm-cov-target/debug
-          cargo llvm-cov nextest \
-            --archive-file nextest-archive.tar.zst \
-            -E 'not test(authn_rail_typestate_contracts)' \
-            --partition slice:${{ matrix.shard }}/4 \
-            --test-threads=4 \
-            --no-report
-          rm -f target/llvm-cov-target/profraw-ram
-          mv /dev/shm/cc-lb-profraw/*.profraw target/llvm-cov-target/
-      - uses: actions/upload-artifact@v7
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        if: steps.filter.outputs.code != 'false'
+      - uses: ./.github/actions/setup-rust-tools
+        if: steps.filter.outputs.code != 'false'
         with:
-          name: coverage-profraw-${{ matrix.shard }}
-          path: target/llvm-cov-target/*.profraw
+          profile: cov
+          save-caches: "false"
+      - uses: ./.github/actions/setup-rust-target-cache
+        if: steps.filter.outputs.code != 'false'
+        id: rust-cache
+        with:
+          cache-job-key: cov
+          target-dir: target/llvm-cov-target/debug
+          stable-build-metadata: "true"
+          save-caches: "false"
+      - uses: ./.github/actions/setup-wasm-fixtures
+        if: ${{ steps.filter.outputs.code != 'false' && matrix.needs_wasm }}
+        with:
+          save-caches: "false"
+      - uses: ./.github/actions/start-native-postgres
+        if: ${{ steps.filter.outputs.code != 'false' && matrix.needs_postgres }}
+        with:
+          async: "true"
+          seed-sched-template: "${{ matrix.seed_sched_template }}"
+      - name: Run coverage partition ${{ matrix.partition }}
+        if: steps.filter.outputs.code != 'false'
+        run: node scripts/run-cov-partition.mjs "${{ matrix.partition }}"
+      - uses: actions/upload-artifact@v7
+        if: steps.filter.outputs.code != 'false'
+        with:
+          name: coverage-part-${{ matrix.partition }}
+          path: target/cov-part-${{ matrix.partition }}.tar.zst
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
+
+  typestate-contracts:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust-tools
+        with:
+          profile: cov
+      - uses: ./.github/actions/setup-rust-target-cache
+        id: rust-cache
+        with:
+          cache-job-key: trybuild
+          target-dir: target/debug
+          extra-cache-paths: target/tests/trybuild
+          stable-build-metadata: "true"
+      - name: Run compile-fail contract tests
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          unset RUSTFLAGS
+          CC_LB_TRYBUILD_UNIFIED=1
+          CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' --cfg trybuild --verbose -A dead_code --diagnostic-width=140)"
+          export CC_LB_TRYBUILD_UNIFIED CARGO_ENCODED_RUSTFLAGS
+          cargo test \
+            -p cc-lb-engine \
+            --test typestate_contracts \
+            --all-features \
+            -- --exact authn_rail_trybuild::authn_rail_typestate_contracts --nocapture
+      - name: Save rolling trybuild cache
+        uses: ./.github/actions/save-rust-target-cache
+        with:
+          target-dir: target/debug
+          extra-cache-paths: target/tests/trybuild
+          cache-paths: ${{ steps.rust-cache.outputs.cache-paths }}
+          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
+          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
   nextest-cov:
     name: nextest-cov
     needs:
       - changes
-      - nextest-cov-build
-      - nextest-cov-runtime
+      - nextest-cov-part
     if: >-
       ${{
         !cancelled() &&
-        needs.nextest-cov-build.result == 'success' &&
-        needs.nextest-cov-runtime.result == 'success' &&
+        needs.nextest-cov-part.result == 'success' &&
+        needs.nextest-cov-part.outputs.code != 'false' &&
         (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
       }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
     permissions:
       contents: read
-      actions: read
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-nextest-archive
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-runtime
-          path: .
-      - name: Restore coverage runtime
-        run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
-
-      - name: Wait for every coverage producer to succeed
+      - name: Fetch coverage merge scripts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/wait-coverage-producers.mjs
-
-      - name: Collect every shard's raw profiles
+        run: |
+          set -euo pipefail
+          mkdir -p scripts .github/ci
+          fetch_raw() {
+            local p=$1
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${p}?ref=${GITHUB_SHA}" \
+              -H "Accept: application/vnd.github.raw" > "$p"
+          }
+          rc=0
+          fetch_raw scripts/export-merged-lcov.mjs & p1=$!
+          fetch_raw scripts/coverage-gate.sh & p2=$!
+          fetch_raw .github/ci/cov-partitions.json & p3=$!
+          wait "$p1" || rc=1
+          wait "$p2" || rc=1
+          wait "$p3" || rc=1
+          [ "$rc" -eq 0 ]
+          chmod +x scripts/coverage-gate.sh
+      - name: Restore lightweight LLVM coverage binaries
+        id: llvm-bins-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.local/llvm-cov-bins
+          key: llvm-cov-bins-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1
+      - name: Verify lightweight LLVM coverage binaries
+        id: llvm-check
+        run: |
+          set -euo pipefail
+          bin_dir="$HOME/.local/llvm-cov-bins"
+          if [ -x "$bin_dir/llvm-profdata" ] && [ -x "$bin_dir/llvm-cov" ] && \
+             "$bin_dir/llvm-profdata" --version >/dev/null 2>&1 && \
+             "$bin_dir/llvm-cov" --version >/dev/null 2>&1; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+      # This job skips the full checkout, so a cache miss must fetch the
+      # local action before using it. Check out into a subdirectory: a
+      # workspace-root checkout would delete the merge scripts fetched above.
+      - uses: actions/checkout@v7
+        if: steps.llvm-check.outputs.hit != 'true'
+        with:
+          path: .ci-actions
+          sparse-checkout: .github/actions
+      - uses: ./.ci-actions/.github/actions/setup-rust-tools
+        if: steps.llvm-check.outputs.hit != 'true'
+        with:
+          profile: cov
+      - name: Stage lightweight LLVM coverage binaries
+        if: steps.llvm-check.outputs.hit != 'true'
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          sysroot_real="$(realpath "$sysroot")"
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+          llvm_bin="$sysroot/lib/rustlib/$host/bin"
+          out_dir="$HOME/.local/llvm-cov-bins"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir/bin" "$out_dir/lib"
+          cp -L "$llvm_bin/llvm-profdata" "$llvm_bin/llvm-cov" "$out_dir/bin/"
+          for tool in llvm-profdata llvm-cov; do
+            while IFS= read -r lib_path; do
+              [ -n "$lib_path" ] || continue
+              real_lib="$(realpath "$lib_path")"
+              case "$real_lib" in
+                "$sysroot"/*|"$sysroot_real"/*)
+                  base="$(basename "$lib_path")"
+                  [ -e "$out_dir/lib/$base" ] || cp -L "$lib_path" "$out_dir/lib/$base"
+                  ;;
+              esac
+            done < <(ldd "$llvm_bin/$tool" | awk '/=> \// { print $3 }')
+            cat > "$out_dir/$tool" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export LD_LIBRARY_PATH="\$HOME/.local/llvm-cov-bins/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+          exec "\$HOME/.local/llvm-cov-bins/bin/$tool" "\$@"
+          EOF
+            chmod +x "$out_dir/$tool"
+          done
+          "$out_dir/llvm-profdata" --version
+          "$out_dir/llvm-cov" --version
+      - name: Save lightweight LLVM coverage binaries
+        if: steps.llvm-check.outputs.hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.local/llvm-cov-bins
+          key: llvm-cov-bins-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1
+      - name: Export LLVM coverage tool paths
+        run: |
+          set -euo pipefail
+          echo "LLVM_PROFDATA=$HOME/.local/llvm-cov-bins/llvm-profdata" >> "$GITHUB_ENV"
+          echo "LLVM_COV=$HOME/.local/llvm-cov-bins/llvm-cov" >> "$GITHUB_ENV"
+      - name: Download partition coverage archives
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-profraw-*
-          path: target/llvm-cov-target
+          pattern: coverage-part-*
+          path: target/cov-parts
           merge-multiple: true
-
-      - name: Generate workspace lcov report
+      - name: Merge LLVM profile data, export LCOV, and check per-package coverage gates
         run: |
-          tar --use-compress-program=unzstd -xf nextest-archive.tar.zst -C target/llvm-cov-target
-          cargo llvm-cov report \
-            --nextest-archive-file nextest-archive.tar.zst \
-            --lcov \
-            --output-path target/coverage.lcov \
-            --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-
-      - name: Check per-package coverage gates
-        run: scripts/coverage-gate.sh target/coverage.lcov
+          set -euo pipefail
+          mapfile -t partitions < <(jq -r '.partitions[].name' .github/ci/cov-partitions.json)
+          if [ "${#partitions[@]}" -eq 0 ]; then
+            echo "::error::no partitions found in .github/ci/cov-partitions.json" >&2
+            exit 1
+          fi
+          for name in "${partitions[@]}"; do
+            archive="target/cov-parts/cov-part-${name}.tar.zst"
+            if [ ! -s "$archive" ]; then
+              echo "::error::missing or empty partition archive: $archive" >&2
+              exit 1
+            fi
+          done
+          node scripts/export-merged-lcov.mjs target/cov-parts target/coverage.lcov
+          scripts/coverage-gate.sh target/coverage.lcov
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov-merged
+          path: target/coverage.lcov
+          compression-level: 1
+          if-no-files-found: error
+          retention-days: 1
 
   e2e:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-26.04
     env:
-      # Real-client E2E builds the server but does not run the fixture-backed
-      # Wasmtime integration suite.
+      # Real-client E2E builds the server with wasm fixture build skipped; prebuilt
+      # wasm fixtures for plugin-slots are restored via setup-wasm-fixtures.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: actions/setup-node@v7
+      - uses: ./.github/actions/setup-rust-tools
         with:
-          node-version: "24"
-      # Reinstall the pinned clients instead of transferring an expanded
-      # node_modules archive. install.sh keeps version and marker validation
-      # and lets the package managers reuse downloads within this job.
-      - uses: dtolnay/rust-toolchain@master
+          profile: e2e
+      - uses: ./.github/actions/setup-rust-target-cache
+        id: rust-cache
         with:
-          toolchain: 1.99.1
-      - uses: ./.github/actions/setup-rust-cache
-        with:
+          cache-job-key: std
+          target-dir: target/debug
           stable-build-metadata: "true"
-      - name: Install pinned real clients
-        run: tests/real-client/install.sh
-      - name: Run real-client matrix
-        run: tests/real-client/matrix.sh
-      - name: Verify independent plugin slots over HTTP
+      - uses: ./.github/actions/setup-wasm-fixtures
+      - name: Cache installed real-client CLIs
+        uses: actions/cache@v6
+        with:
+          path: target/test-bins
+          key: real-client-bins-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
+      - name: Run real-client matrix and plugin-slots suites in parallel
         run: |
-          rustup target add wasm32-unknown-unknown
-          cargo build --locked --release --target wasm32-unknown-unknown -p wasmtime-dual-slot
+          set -euo pipefail
+          mkdir -p /dev/shm/cc-lb-tmp
+          "$PWD/tests/real-client/install.sh" > "$RUNNER_TEMP/real-client-install.log" 2>&1 &
+          pid_install=$!
+          cargo build --locked -p cc-lb-server -p fake-anthropic
+          if ! wait "$pid_install"; then
+            cat "$RUNNER_TEMP/real-client-install.log" >&2 || true
+            exit 1
+          fi
+
+          TMPDIR=/dev/shm/cc-lb-tmp REAL_CLIENT_SKIP_BUILD=1 REAL_CLIENT_SKIP_INSTALL=1 REAL_CLIENT_JOBS=6 \
+            tests/real-client/matrix.sh &
+          pid_matrix=$!
+
           CC_LB_BIN="$PWD/target/debug/cc-lb" \
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots" \
           CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
-            node tests/real-client/provider-e2e/plugin-slots.mjs
+            node tests/real-client/provider-e2e/plugin-slots.mjs &
+          pid_slots=$!
+
           CC_LB_BIN="$PWD/target/debug/cc-lb" \
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots-lifecycle" \
-          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
-            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          fi
+          CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots-lifecycle.ledger" \
+            node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs &
+          pid_lifecycle=$!
+
+          rc=0
+          wait "$pid_matrix" || rc=1
+          wait "$pid_slots" || rc=1
+          wait "$pid_lifecycle" || rc=1
+          exit "$rc"
+      - name: Save rolling Rust target cache
+        uses: ./.github/actions/save-rust-target-cache
+        with:
+          target-dir: target/debug
+          cache-paths: ${{ steps.rust-cache.outputs.cache-paths }}
+          target-cache-hit: ${{ steps.rust-cache.outputs.target-cache-hit }}
+          lock-cache-hit: ${{ steps.rust-cache.outputs.lock-cache-hit }}
+          target-cache-key: ${{ steps.rust-cache.outputs.target-cache-key }}
+          keep-workspace-libs: "true"
+          save-target: "true"
+          force-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - name: Upload real-client evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -823,17 +939,15 @@ jobs:
       - guard-crate-versions
       - release-pr-artifacts
       - clippy
+      - seed-cov-cache
       - cargo-deny
       - promtool
-      - nextest-cov-runtime
-      - nextest-cov-wasm
-      - nextest-cov-build
-      - nextest-cov-contract
-      - nextest-cov-shard
+      - nextest-cov-part
+      - typestate-contracts
       - nextest-cov
       - e2e
     if: ${{ always() }}
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions: {}
     timeout-minutes: 5
     steps:
@@ -856,8 +970,7 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
-            cargo-deny promtool nextest-cov-runtime nextest-cov-wasm
-            nextest-cov-build nextest-cov-contract nextest-cov-shard nextest-cov e2e)
+            seed-cov-cache cargo-deny promtool nextest-cov-part typestate-contracts nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
             "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
@@ -868,6 +981,7 @@ jobs:
           }
           changes=$(result_of changes)
           code=$(jq -er '.changes.outputs.code // ""' <<<"$RESULTS")
+          cov_cache_hit=$(jq -er '.changes.outputs.cov_cache_hit // ""' <<<"$RESULTS")
           is_pr=false
           [[ $EVENT_NAME == pull_request ]] && is_pr=true
           # Code jobs skip only when change detection succeeded and found no
@@ -881,7 +995,9 @@ jobs:
           skip_ok() {
             case "$1" in
               changes) ! $is_pr ;;
+              nextest-cov-part) false ;;
               guard-crate-versions) $guard_skip_ok ;;
+              seed-cov-cache) $docs_only || { $is_pr && [[ $changes == success && $code == true && $cov_cache_hit == true ]]; } ;;
               release-pr-artifacts)
                 # Its own `if:`, or a legitimately skipped guard it needs.
                 ! $is_pr || [[ ${PR_TITLE,,} != "chore: release cc-lb v"* ]] ||
@@ -916,3 +1032,37 @@ jobs:
             esac
           done
           exit "$rc"
+
+  prune-master-caches:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    needs:
+      - seed-cov-cache
+      - clippy
+      - e2e
+      - typestate-contracts
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: write
+    timeout-minutes: 5
+    steps:
+      - name: Prune superseded master Rust target caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          caches_json=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/master&per_page=100" --jq '.actions_caches[]') || {
+            echo "::warning::failed to query master caches; skipping prune"
+            exit 0
+          }
+          [ -n "$caches_json" ] || exit 0
+          old_ids=$(jq -sr '
+            [ .[] | select(.key | startswith("target-ws-v4-")) ]
+            | map(. + {prefix: (.key | capture("^(?<p>target-ws-v4-.+?-1\\.99\\.1-)").p)})
+            | group_by(.prefix)
+            | map(sort_by(.created_at) | reverse | .[1:][] | .id)
+            | .[]
+          ' <<<"$caches_json") || true
+          for id in $old_ids; do
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || \
+              echo "::warning::failed to delete superseded cache ${id}"
+          done

@@ -12,6 +12,7 @@ name = "integration"
 path = "all.rs"
 
 [dev-dependencies]
+cc-lb-workspace-hack.workspace = true
 cc-lb-aead = { path = "../../crates/cc-lb-aead" }
 cc-lb-clock = { path = "../../crates/cc-lb-clock" }
 cc-lb-config = { path = "../../crates/cc-lb-config" }

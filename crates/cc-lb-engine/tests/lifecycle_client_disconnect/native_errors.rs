@@ -37,6 +37,21 @@ fn assert_local_responses_failure(body: &[u8], response_id: Option<&str>) -> Val
 const OUTPUT: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n";
 const CREATED: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_proxy_test\",\"object\":\"response\",\"status\":\"in_progress\"}}\n\n";
 
+async fn wait_for_terminated(events: &mut tokio::sync::broadcast::Receiver<LifecycleEvent>) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("lifecycle event delivered"),
+                LifecycleEvent::RequestTerminated { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("request terminates");
+}
+
 struct ContentLengthSseDispatch {
     body: Bytes,
 }
@@ -181,7 +196,8 @@ async fn responses_proxy_failures_preserve_native_terminal_schema_and_accounting
     ] {
         let dir = tempfile::tempdir()?;
         let storage = Arc::new(sqlite_storage(&dir).await?);
-        let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+        let mut bus =
+            TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
         let mut events = lifecycle_receiver(&bus);
         let mut updates = bus.bus.subscribe();
         let known_id = !matches!(fault, "absent_id" | "transform");
@@ -266,6 +282,7 @@ async fn responses_proxy_failures_preserve_native_terminal_schema_and_accounting
             .expect("native message");
         assert!(!message.contains("not delivered"));
         assert_stream_failure_once(&mut events, expected_type, 200, "upstream_stream_error").await;
+        bus.shutdown().await;
         assert_one_final(&mut updates).await;
         let rows = common::stored_request_events(storage.as_ref()).await?;
         assert_eq!(rows.len(), 1, "one persisted row for {fault}");
@@ -322,7 +339,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let lifecycle = lifecycle_with_upstream_kind(
         encoded_sse_dispatch(StatusCode::OK, Body::from(truncated), "gzip"),
@@ -368,6 +386,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
         "provider rate limit"
     );
 
+    wait_for_terminated(&mut events).await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -414,7 +434,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let lifecycle = lifecycle_with_upstream_kind(
         sse_dispatch(StatusCode::OK, Body::from(upstream_body.clone())),
@@ -457,6 +478,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
         }),
         "provider terminal must not gain a synthetic api_error: {events_json:?}",
     );
+    wait_for_terminated(&mut events).await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -491,7 +514,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let lifecycle = content_length_lifecycle(Bytes::from(upstream_body), &bus)
         .with_upstream_affinity_store(Arc::new(
@@ -522,6 +546,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     assert!(events_json.iter().all(|(_, value)| {
         value["error"]["type"] != "api_error" && value["response"]["error"]["code"] != "api_error"
     }));
+    wait_for_terminated(&mut events).await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -566,7 +592,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let lifecycle = lifecycle_with_upstream_kind(
         encoded_sse_dispatch(StatusCode::OK, Body::from_stream(body_stream), "gzip"),
@@ -609,6 +636,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
         }),
         "provider terminal must not gain a synthetic api_error: {events_json:?}",
     );
+    wait_for_terminated(&mut events).await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -650,7 +679,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
 "#;
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let store = Arc::new(crate::upstream_affinity::MemoryAffinityStore::default());
     store.fail_bind("forced affinity store failure");
@@ -687,6 +717,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
         !String::from_utf8_lossy(&body).contains("rate_limit_exceeded"),
         "failed affinity bind must not forward provider error details",
     );
+    wait_for_terminated(&mut events).await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -711,7 +743,7 @@ data: {"type":"response.output_text.delta","sequence_number":7,"response_id":"re
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let lifecycle = responses_replace_lifecycle_with_kind(
@@ -760,6 +792,7 @@ data: {"type":"response.output_text.delta","sequence_number":7,"response_id":"re
         "upstream_stream_error",
     )
     .await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
 
     let healthy_created = br#"event: response.created
@@ -779,7 +812,7 @@ data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_up
     healthy_body.extend_from_slice(completed);
     let healthy_dir = tempfile::tempdir()?;
     let healthy_storage = Arc::new(sqlite_storage(&healthy_dir).await?);
-    let healthy_bus =
+    let mut healthy_bus =
         TestLifecycleBus::new().with_assembler(healthy_storage as Arc<dyn StorageTrait>);
     let mut healthy_events = lifecycle_receiver(&healthy_bus);
     let mut healthy_updates = healthy_bus.bus.subscribe();
@@ -817,6 +850,7 @@ data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_up
         Some(Some("resp_downstream")),
     );
     assert_success_terminal(&mut healthy_events, 200).await;
+    healthy_bus.shutdown().await;
     assert_one_final(&mut healthy_updates).await;
     Ok(())
 }
@@ -864,7 +898,7 @@ data: {"type":"response.failed","sequence_number":9,"response":{"id":"resp_proxy
     };
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut events = lifecycle_receiver(&bus);
     let mut updates = bus.bus.subscribe();
     let dispatcher = sse_dispatch(StatusCode::OK, body);
@@ -914,6 +948,7 @@ data: {"type":"response.failed","sequence_number":9,"response":{"id":"resp_proxy
     // The provider event and the later body fault can produce multiple
     // StreamCompleted observations; only the request terminal is singular.
     assert_error_terminal(&mut events, 200, "upstream_stream_error").await;
+    bus.shutdown().await;
     assert_one_final(&mut updates).await;
     let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
@@ -998,7 +1033,8 @@ async fn principal_missing_after_authentication_uses_native_http_errors()
     ] {
         let dir = tempfile::tempdir()?;
         let storage = Arc::new(sqlite_storage(&dir).await?);
-        let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+        let mut bus =
+            TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
         let mut updates = bus.bus.subscribe();
         let mut events = lifecycle_receiver(&bus);
         let (kind, _, _) = provider_case(provider);
@@ -1037,6 +1073,7 @@ async fn principal_missing_after_authentication_uses_native_http_errors()
             "authenticated principal is unavailable",
         );
         assert_error_terminal(&mut events, 500, "principal_missing").await;
+        bus.shutdown().await;
         assert_one_final(&mut updates).await;
         let rows = common::stored_request_events(storage.as_ref()).await?;
         assert_eq!(rows.len(), 1);
@@ -1057,7 +1094,7 @@ async fn buffered_truncated_body_and_collected_unreadable_401_use_native_502()
         for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
             let dir = tempfile::tempdir()?;
             let storage = Arc::new(sqlite_storage(&dir).await?);
-            let bus =
+            let mut bus =
                 TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
             let mut updates = bus.bus.subscribe();
             let mut events = lifecycle_receiver(&bus);
@@ -1108,6 +1145,7 @@ async fn buffered_truncated_body_and_collected_unreadable_401_use_native_502()
             } else {
                 assert_error_terminal(&mut events, 502, "upstream_5xx").await;
             }
+            bus.shutdown().await;
             assert_one_final(&mut updates).await;
             let rows = common::stored_request_events(storage.as_ref()).await?;
             assert_eq!(rows.len(), 1);

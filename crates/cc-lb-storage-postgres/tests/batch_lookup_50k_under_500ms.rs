@@ -1,16 +1,11 @@
 use std::{
     error::Error,
-    str::FromStr,
     time::{Duration, Instant},
 };
 
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{
-    AssertSqlSafe,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
 use uuid::Uuid;
 
 const UPSTREAM_COUNT: usize = 5;
@@ -75,8 +70,7 @@ async fn batch_lookup_50k_rows_90percent_expired_under_500ms() -> TestResult {
 }
 
 struct Fixture {
-    url: String,
-    schema: String,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: sqlx::PgPool,
 }
 
@@ -86,28 +80,20 @@ impl Fixture {
             eprintln!("skipped: CI_POSTGRES_URL not set");
             return Ok(None);
         };
-        let schema = format!("test_batch_lookup_50k_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin_pool)
-            .await?;
-        admin_pool.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(
-                PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(&url).await?;
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
         // Real migrator, not a hand-picked subset — see the note in `prompt_cache_observation.rs`.
         PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
             .initialize()
             .await?;
 
-        Ok(Some(Self { url, schema, pool }))
+        Ok(Some(Self { isolated, pool }))
     }
 
     fn store(&self) -> PostgresStorage {
@@ -119,17 +105,7 @@ impl Fixture {
 
     async fn drop_schema(self) -> TestResult {
         self.pool.close().await;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            self.schema
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
+        self.isolated.drop().await?;
         Ok(())
     }
 }

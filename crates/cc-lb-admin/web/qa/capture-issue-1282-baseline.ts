@@ -1,8 +1,14 @@
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { type Browser, chromium, expect } from '@playwright/test';
-import type { createServer as CreateViteServer } from 'vite';
+import type {
+  createServer as CreateViteServer,
+  PreviewServer,
+  preview as PreviewViteServer,
+  ViteDevServer,
+} from 'vite';
 import { type FixtureState, installFixtures, PRINCIPAL_ID } from '../e2e/issue1282Fixture';
 
 const [appRoot, outputRoot, sourceSha, portArg = '5175'] = process.argv.slice(2);
@@ -12,13 +18,10 @@ if (!appRoot || !outputRoot || !sourceSha) {
 
 const port = Number(portArg);
 // The base worktree is runtime-selected and must use its own frozen Vite version.
-const { createServer }: { createServer: typeof CreateViteServer } = await import(
+const vite = (await import(
   pathToFileURL(resolve(appRoot, 'node_modules/vite/dist/node/index.js')).href
-);
-const server = await createServer({
-  root: appRoot,
-  server: { host: '127.0.0.1', port, strictPort: true },
-});
+)) as { createServer: typeof CreateViteServer; preview?: typeof PreviewViteServer };
+let server: ViteDevServer | PreviewServer | undefined;
 let browser: Browser | undefined;
 const deadline = Promise.withResolvers<never>();
 const readyTimer = setTimeout(
@@ -28,17 +31,36 @@ const readyTimer = setTimeout(
 
 try {
   // Resolve the server's actual listen promise; CLI log styling is not readiness.
-  await Promise.race([server.listen(), deadline.promise]);
+  if (typeof vite.preview === 'function' && existsSync(resolve(appRoot, 'dist/index.html'))) {
+    server = await Promise.race([
+      vite.preview({ root: appRoot, preview: { host: '127.0.0.1', port, strictPort: true } }),
+      deadline.promise,
+    ]);
+  } else {
+    const devServer = await vite.createServer({
+      root: appRoot,
+      server: { host: '127.0.0.1', port, strictPort: true },
+    });
+    server = devServer;
+    await Promise.race([devServer.listen(), deadline.promise]);
+  }
   clearTimeout(readyTimer);
   browser = await chromium.launch();
+  const launchedBrowser = browser;
   await mkdir(outputRoot, { recursive: true });
-  const captures = [];
+  const tasks: Array<{ viewport: { width: number; height: number }; theme: 'dark' | 'light' }> = [];
   for (const viewport of [
     { width: 390, height: 844 },
     { width: 1440, height: 900 },
   ]) {
     for (const theme of ['dark', 'light'] as const) {
-      const context = await browser.newContext({
+      tasks.push({ viewport, theme });
+    }
+  }
+  const perTaskCaptures = await Promise.all(
+    tasks.map(async ({ viewport, theme }) => {
+      const localCaptures = [];
+      const context = await launchedBrowser.newContext({
         viewport,
         colorScheme: theme,
         reducedMotion: 'reduce',
@@ -67,7 +89,7 @@ try {
           .toBe(true);
         const keepaliveFile = `keepalive-drawer-${width}-${theme}.png`;
         await page.screenshot({ path: resolve(outputRoot, keepaliveFile) });
-        captures.push({
+        localCaptures.push({
           state: 'keepalive-drawer', width, height, theme, file: keepaliveFile,
           shortLabel: await shortLabel.innerText(), longLabel: await longLabel.innerText(),
         });
@@ -85,7 +107,7 @@ try {
         ).toBeVisible();
         const catalogFile = `plugin-catalog-initial-error-${width}-${theme}.png`;
         await page.screenshot({ path: resolve(outputRoot, catalogFile) });
-        captures.push({
+        localCaptures.push({
           state: 'plugin-catalog-initial-error', width, height, theme, file: catalogFile,
           countText: await count.innerText(), alertCount: await page.getByRole('alert').count(),
         });
@@ -102,12 +124,14 @@ try {
         ).toBeVisible();
         const detailFile = `plugin-detail-usage-error-${width}-${theme}.png`;
         await page.screenshot({ path: resolve(outputRoot, detailFile) });
-        captures.push({ state: 'plugin-detail-usage-error', width, height, theme, file: detailFile });
+        localCaptures.push({ state: 'plugin-detail-usage-error', width, height, theme, file: detailFile });
       } finally {
         await context.close();
       }
-    }
-  }
+      return localCaptures;
+    }),
+  );
+  const captures = perTaskCaptures.flat();
   await writeFile(resolve(outputRoot, 'capture.json'), JSON.stringify({ sourceSha, fixture: 'issue1282Fixture', syntheticAdminApi: true, captures }, null, 2));
   console.log(`Captured baseline keepalive drawer and plugin error states in both viewports and themes for ${sourceSha}`);
 } finally {
@@ -115,6 +139,6 @@ try {
   try {
     await browser?.close();
   } finally {
-    await server.close();
+    await server?.close();
   }
 }

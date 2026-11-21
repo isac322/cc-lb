@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
@@ -16,9 +16,10 @@ use cc_lb_control::{
 };
 use cc_lb_domain::Upstream;
 use cc_lb_storage_api::MetaStore;
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite, open_sqlite_existing};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
+use sqlx::Connection as _;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
@@ -226,20 +227,78 @@ pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<Sqlite
     sqlite_storage_with_clock(dir, filename, system_clock()).await
 }
 
+pub async fn templated_sqlite_storage(path: &std::path::Path, clock: ClockHandle) -> SqliteStorage {
+    static TEMPLATE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    let bytes = TEMPLATE_BYTES.get_or_init(|| {
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+            && let Ok(cached) = std::fs::read(&shared)
+        {
+            return cached;
+        }
+        let generated = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build admin template sqlite runtime");
+            rt.block_on(async {
+                let dir = tempfile::tempdir().expect("admin template sqlite dir");
+                let template_path = dir.path().join("template.sqlite");
+                let url = format!("sqlite://{}", template_path.display());
+                let storage = open_sqlite(&url, Arc::new(SystemClock))
+                    .await
+                    .expect("open admin template sqlite");
+                storage
+                    .initialize()
+                    .await
+                    .expect("initialize admin template sqlite");
+                storage.pool().close().await;
+                let mut conn = sqlx::SqliteConnection::connect(&url)
+                    .await
+                    .expect("connect admin template sqlite for checkpoint");
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut conn)
+                    .await
+                    .expect("checkpoint admin template sqlite");
+                sqlx::query("PRAGMA journal_mode = DELETE")
+                    .execute(&mut conn)
+                    .await
+                    .expect("switch admin template sqlite journal mode");
+                conn.close().await.expect("close admin template sqlite");
+                std::fs::read(&template_path).expect("read admin template sqlite bytes")
+            })
+        })
+        .join()
+        .expect("admin template sqlite thread");
+        if let Some(shared) = std::env::var_os("CC_LB_SQLITE_TEMPLATE_PATH")
+            && !shared.is_empty()
+        {
+            let shared_path = std::path::PathBuf::from(shared);
+            if let Some(parent) = shared_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp_path =
+                shared_path.with_file_name(format!("template.sqlite.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp_path, &generated).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &shared_path);
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+        }
+        generated
+    });
+    std::fs::write(path, bytes).expect("write admin templated sqlite");
+    let url = format!("sqlite://{}", path.display());
+    open_sqlite_existing(&url, clock)
+        .await
+        .expect("admin templated sqlite opens")
+}
+
 pub async fn sqlite_storage_with_clock(
     dir: &std::path::Path,
     filename: &str,
     clock: ClockHandle,
 ) -> Arc<SqliteStorage> {
-    let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
-        .await
-        .expect("admin sqlite opens");
-    storage
-        .initialize()
-        .await
-        .expect("admin sqlite initializes");
-    Arc::new(storage)
+    Arc::new(templated_sqlite_storage(&dir.join(filename), clock).await)
 }
 
 impl AdminClient {

@@ -10,20 +10,89 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/setup-rustup-home
-
-    - uses: dtolnay/rust-toolchain@master
+    - uses: ./.github/actions/setup-rust-tools
       with:
-        toolchain: 1.99.1
+        profile: semver
 
-    - uses: ./.github/actions/setup-rust-cache
-      with:
-        stable-build-metadata: ${{ inputs.stable-build-metadata }}
+    - name: Resolve baseline crate versions and cache metadata
+      id: meta
+      shell: bash
+      env:
+        STABLE_META: ${{ inputs.stable-build-metadata }}
+        DEPS_HASH: ${{ hashFiles('crates/cc-lb-runtime-wasmtime/Cargo.toml', 'crates/cc-lb-plugin-conformance/Cargo.toml', 'crates/cc-lb-plugin-wire/Cargo.toml') }}
+      run: |
+        set -euo pipefail
+        tmp_idx="$(mktemp -d)"
+        trap 'rm -rf "$tmp_idx"' EXIT
 
-    - name: Install cargo-semver-checks
-      uses: taiki-e/install-action@v2
+        curl -fsSL https://index.crates.io/cc/-l/cc-lb-runtime-wasmtime -o "$tmp_idx/rw.json" || true &
+        pid_1=$!
+        curl -fsSL https://index.crates.io/cc/-l/cc-lb-plugin-conformance -o "$tmp_idx/pc.json" || true &
+        pid_2=$!
+        wait "$pid_1" || true
+        wait "$pid_2" || true
+
+        baseline_versions="$(node -e '
+          const fs = require("node:fs");
+          function latest(p) {
+            if (!fs.existsSync(p)) return "unknown";
+            const lines = fs.readFileSync(p, "utf8").trim().split(/\r?\n/).filter(Boolean);
+            for (let i = lines.length - 1; i >= 0; i -= 1) {
+              try {
+                const row = JSON.parse(lines[i]);
+                if (!row.yanked && row.vers) return row.vers;
+              } catch {}
+            }
+            return "unknown";
+          }
+          process.stdout.write(`${latest(process.argv[1])}_${latest(process.argv[2])}`);
+        ' "$tmp_idx/rw.json" "$tmp_idx/pc.json")"
+
+        {
+          echo "CARGO_TARGET_DIR=${GITHUB_WORKSPACE}/target/semver-target"
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_PROFILE_DEV_DEBUG=0"
+          echo "CC_LB_SKIP_WASM_FIXTURE_BUILD=1"
+          if [ "$STABLE_META" = "true" ]; then
+            echo "GIT_SHA=0000000"
+            echo "SOURCE_DATE_EPOCH=0"
+          fi
+        } >> "$GITHUB_ENV"
+
+        {
+          echo "baseline_versions=$baseline_versions"
+          echo "deps_manifest_hash=$DEPS_HASH"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Cache crates.io semver baseline rustdoc artifacts
+      id: baseline-cache
+      uses: actions/cache@v6
       with:
-        tool: cargo-semver-checks@0.51.0
+        path: target/semver-target/semver-checks/cache
+        key: semver-baseline-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-0.51.0-${{ steps.meta.outputs.baseline_versions }}
+
+    - name: Cache Cargo registry (all targets for semver-checks)
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+        key: cargo-registry-all-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-all-v1-${{ runner.os }}-
+          cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          cargo-registry-v2-${{ runner.os }}-
+
+    - name: Restore semver target dependency cache
+      id: target-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: target/semver-target/debug
+        key: semver-target-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-${{ steps.meta.outputs.deps_manifest_hash }}-exact
+        restore-keys: |
+          semver-target-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-${{ steps.meta.outputs.deps_manifest_hash }}-
+          semver-target-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-
 
     - name: Check published crates
       shell: bash
@@ -46,24 +115,8 @@ runs:
           fi
         }
 
-        # This package-only release gate checks only the approved runtime and
-        # conformance crates. Crate versions are owned by release-plz, so a PR
-        # cannot bump them. A breaking change declared with a
-        # conventional-commit marker (`type(scope)!:` subject or
-        # `BREAKING CHANGE:` footer) on a commit that touched the crate since
-        # its last release tag is checked as a major release, which is the bump
-        # release-plz will apply. Undeclared breaks are still rejected.
-        # Requires full history and tags.
-        #
-        # cc-lb-plugin-wire is intentionally excluded: its release is pending
-        # separately and must not block this approved package-only release.
-        # The release-plz trusted publish job validates the final package.
-        #
-        # Runtime/conformance publish dry-runs stay out of this preflight
-        # because unpublished workspace dependencies make them invalid here.
-        semver_check() {
+        resolve_release_type() {
           local crate="$1" pkgid version tag log
-          local args=(--package "$crate")
           pkgid="$(cargo pkgid -p "$crate")" || return 1
           version="${pkgid##*[@#]}"
           tag="$crate-v$version"
@@ -72,25 +125,68 @@ runs:
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
             log="$(git log --format='%s%n%b' "$tag..HEAD" -- "crates/$crate")" &&
             grep -Eq '^[a-z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:' <<<"$log"; then
-            echo "Declared breaking change to $crate since $tag; checking as a major release."
-            args+=(--release-type major)
+            echo "major"
+          else
+            echo "normal"
           fi
-          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 cargo semver-checks "${args[@]}"
         }
 
-        run_check "cargo semver-checks cc-lb-runtime-wasmtime" \
-          semver_check cc-lb-runtime-wasmtime
-        run_check "cargo semver-checks cc-lb-plugin-conformance" \
-          semver_check cc-lb-plugin-conformance
+        rt_wasmtime="$(resolve_release_type cc-lb-runtime-wasmtime)" || status=1
+        rt_conformance="$(resolve_release_type cc-lb-plugin-conformance)" || status=1
+
+        if [ "$status" -eq 0 ]; then
+          if [ "$rt_wasmtime" = "$rt_conformance" ]; then
+            args=(--package cc-lb-runtime-wasmtime --package cc-lb-plugin-conformance)
+            if [ "$rt_wasmtime" = "major" ]; then
+              echo "Declared breaking change to both crates; checking both as major releases."
+              args+=(--release-type major)
+            fi
+            run_check "cargo semver-checks cc-lb-runtime-wasmtime + cc-lb-plugin-conformance ($rt_wasmtime)" \
+              cargo semver-checks "${args[@]}"
+          else
+            for pair in "cc-lb-runtime-wasmtime:$rt_wasmtime" "cc-lb-plugin-conformance:$rt_conformance"; do
+              crate="${pair%%:*}"
+              rt="${pair##*:}"
+              args=(--package "$crate")
+              if [ "$rt" = "major" ]; then
+                echo "Declared breaking change to $crate; checking as a major release."
+                args+=(--release-type major)
+              fi
+              run_check "cargo semver-checks $crate ($rt)" cargo semver-checks "${args[@]}"
+            done
+          fi
+        fi
 
         exit "$status"
 
-    - name: Show sccache stats
-      if: always()
+    - name: Evaluate semver target lock hash and prune
+      if: success()
+      id: target-save-prep
       shell: bash
+      env:
+        MATCHED_KEY: ${{ steps.target-restore.outputs.cache-matched-key }}
+        DEPS_HASH: ${{ steps.meta.outputs.deps_manifest_hash }}
       run: |
-        if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-          "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-        elif command -v sccache >/dev/null 2>&1; then
-          sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+        set -euo pipefail
+        lock_files=(Cargo.lock)
+        shopt -s nullglob
+        for f in target/semver-target/semver-checks/local-*/Cargo.lock; do
+          lock_files+=("$f")
+        done
+        shopt -u nullglob
+        resolved_lock_hash="$(sha256sum "${lock_files[@]}" | sha256sum | cut -c1-16)"
+        target_key="semver-target-v1-${RUNNER_OS}-${RUNNER_ARCH}-1.99.1-${DEPS_HASH}-${resolved_lock_hash}"
+        echo "target_key=$target_key" >> "$GITHUB_OUTPUT"
+        if [ "$MATCHED_KEY" = "$target_key" ] || [ ! -d target/semver-target/debug ]; then
+          echo "should_save=false" >> "$GITHUB_OUTPUT"
+        else
+          node scripts/prune-rust-target.mjs --target-dir target/semver-target/debug
+          echo "should_save=true" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Save semver target dependency cache
+      if: success() && steps.target-save-prep.outputs.should_save == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: target/semver-target/debug
+        key: ${{ steps.target-save-prep.outputs.target_key }}

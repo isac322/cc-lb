@@ -147,16 +147,11 @@ async fn create_test_databases(base_url: &str) -> TestResult<TestDatabases> {
     let scheduler_url = database_url(base_url, &scheduler_name)?;
     let runtime_url = database_url(base_url, &runtime_name)?;
 
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        r#"CREATE DATABASE "{scheduler_name}""#
-    )))
-    .execute(&admin)
-    .await?;
-    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
-        r#"CREATE DATABASE "{runtime_name}""#
-    )))
-    .execute(&admin)
-    .await
+    crate::common::create_postgres_database(&admin, &scheduler_name, "CC_LB_PG_SCHED_TEMPLATE")
+        .await?;
+    if let Err(error) =
+        crate::common::create_postgres_database(&admin, &runtime_name, "CC_LB_PG_APP_TEMPLATE")
+            .await
     {
         let _ = drop_database(&admin, &scheduler_name).await;
         admin.close().await;

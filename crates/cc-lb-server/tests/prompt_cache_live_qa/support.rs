@@ -43,10 +43,14 @@ pub struct PersistedObservation {
 }
 
 pub async fn open_sqlite_pool(server: &common::TestServer) -> SqlitePool {
+    open_sqlite_pool_at(&server.sqlite_path).await
+}
+
+pub async fn open_sqlite_pool_at(sqlite_path: &std::path::Path) -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
-        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .connect(&format!("sqlite://{}", sqlite_path.display()))
         .await
         .expect("open test sqlite")
 }

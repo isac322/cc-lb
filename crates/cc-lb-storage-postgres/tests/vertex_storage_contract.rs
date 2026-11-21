@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use cc_lb_aead::AeadService;
 use cc_lb_storage_api::{
@@ -6,17 +6,13 @@ use cc_lb_storage_api::{
     UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{
-    AssertSqlSafe, Connection, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{Connection, PgPool, postgres::PgConnectOptions};
 use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct Fixture {
-    schema: String,
-    admin: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     options: PgConnectOptions,
 }
 
@@ -26,37 +22,17 @@ impl Fixture {
             eprintln!("skipped: CI_POSTGRES_URL unset; Vertex PostgreSQL QA did not run");
             return Ok(None);
         };
-        let schema = format!("vertex_storage_{}", Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin)
-            .await?;
-        let options = PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]);
-        Ok(Some(Self {
-            schema,
-            admin,
-            options,
-        }))
+        let isolated = crate::pg_test_support::IsolatedPg::create_empty(&url).await?;
+        let options = isolated.connect_options();
+        Ok(Some(Self { isolated, options }))
     }
 
     async fn pool(&self, max_connections: u32) -> TestResult<PgPool> {
-        Ok(PgPoolOptions::new()
-            .max_connections(max_connections)
-            .connect_with(self.options.clone())
-            .await?)
+        Ok(self.isolated.pool(max_connections).await?)
     }
 
     async fn drop(self) -> TestResult {
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            self.schema
-        )))
-        .execute(&self.admin)
-        .await?;
-        self.admin.close().await;
+        self.isolated.drop().await?;
         Ok(())
     }
 }

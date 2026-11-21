@@ -6,7 +6,6 @@
 //! adapters, so the production handlers and storage code run unmodified. The
 //! tests only use HTTP endpoints, SQL, and storage reads.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
@@ -21,7 +20,7 @@ use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_sqlite::SqliteStorage;
 use mock_anthropic_oauth_server::AppState as MockOAuthState;
 use serde_json::{Value, json};
-use sqlx::postgres::{PgConnectOptions, PgListener, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgListener, PgPool};
 use sqlx::{AssertSqlSafe, Connection};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -54,8 +53,7 @@ enum Backend {
         storage: Arc<SqliteStorage>,
     },
     Postgres {
-        url: String,
-        schema: String,
+        isolated: Box<crate::pg_template_helper::IsolatedPg>,
         storage: Arc<PostgresStorage>,
     },
 }
@@ -77,24 +75,14 @@ impl Backend {
             eprintln!("skip: CI_POSTGRES_URL not set");
             return None;
         };
-        let schema = format!("upstream_atomic_create_{}", Uuid::new_v4().simple());
-        let mut admin = sqlx::PgConnection::connect(&url)
+        let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&url)
             .await
-            .expect("postgres admin connection");
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&mut admin)
-            .await
-            .expect("create schema");
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(schema_options(&url, &schema))
-            .await
-            .expect("postgres pool");
+            .expect("create isolated postgres database");
+        let pool = isolated.pool(8).await.expect("postgres pool");
         let storage = PostgresStorage::new(pool, test_clock());
         storage.initialize().await.expect("postgres migrations");
         Some(Self::Postgres {
-            url,
-            schema,
+            isolated: Box::new(isolated),
             storage: Arc::new(storage),
         })
     }
@@ -162,28 +150,14 @@ impl Backend {
     }
 
     async fn drop_schema(self) {
-        if let Self::Postgres {
-            url,
-            schema,
-            storage,
-        } = self
-        {
+        if let Self::Postgres { isolated, storage } = self {
             storage.pool().close().await;
-            let mut admin = sqlx::PgConnection::connect(&url)
+            (*isolated)
+                .drop()
                 .await
-                .expect("postgres admin connection");
-            sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-                .execute(&mut admin)
-                .await
-                .expect("drop schema");
+                .expect("drop isolated postgres database");
         }
     }
-}
-
-fn schema_options(url: &str, schema: &str) -> PgConnectOptions {
-    PgConnectOptions::from_str(url)
-        .expect("postgres url")
-        .options([("search_path", schema)])
 }
 
 fn test_clock() -> ClockHandle {
@@ -439,12 +413,7 @@ async fn postgres_single_notify_with_credential_present(kind: Kind) {
     let Some(backend) = Backend::postgres().await else {
         return;
     };
-    let Backend::Postgres {
-        url,
-        schema,
-        storage,
-    } = &backend
-    else {
+    let Backend::Postgres { isolated, storage } = &backend else {
         unreachable!("Backend::postgres returns the Postgres variant");
     };
     let pool = storage.pool().clone();
@@ -452,10 +421,13 @@ async fn postgres_single_notify_with_credential_present(kind: Kind) {
     let name = format!("atomic-{}", Uuid::new_v4().simple());
     let (uri, body) = kind.create_request(&app, &name).await;
 
-    let mut listener = PgListener::connect(url).await.expect("listener");
+    let listener_pool = isolated.pool(1).await.expect("listener pool");
+    let mut listener = PgListener::connect_with(&listener_pool)
+        .await
+        .expect("listener");
     listener.listen(UPSTREAM_CHANNEL).await.expect("listen");
 
-    let mut locker = sqlx::PgConnection::connect_with(&schema_options(url, schema))
+    let mut locker = sqlx::PgConnection::connect_with(&isolated.connect_options())
         .await
         .expect("locker connection");
     let mut lock_tx = locker.begin().await.expect("lock transaction");
@@ -470,7 +442,7 @@ async fn postgres_single_notify_with_credential_present(kind: Kind) {
     let request_app = app.clone();
     let mut request =
         tokio::spawn(async move { call(&request_app, "POST", uri, Some(body)).await });
-    let relation = format!("{schema}.{}", kind.credential_table());
+    let relation = format!("{}.{}", isolated.schema_name(), kind.credential_table());
     tokio::select! {
         () = wait_until_lock_waiter(&pool, &relation) => {}
         finished = &mut request => {
@@ -535,6 +507,7 @@ async fn postgres_single_notify_with_credential_present(kind: Kind) {
     );
 
     drop(listener);
+    listener_pool.close().await;
     drop(locker);
     backend.drop_schema().await;
 }

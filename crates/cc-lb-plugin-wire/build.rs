@@ -9,6 +9,7 @@ struct SchemaEntry {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     let entries = [
         SchemaEntry {
             impl_generics: "",
@@ -364,21 +365,30 @@ fn main() {
     ];
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));
-    fs::write(
-        out_dir.join("wire_schema_impls.rs"),
-        render_schema_impls(&entries),
-    )
-    .expect("write generated V1 WireSchema impls");
-    fs::write(
-        out_dir.join("wire_schema_v2_impls.rs"),
-        render_schema_impls(&v2_entries),
-    )
-    .expect("write generated V2 WireSchema impls");
-    fs::write(
-        out_dir.join("wire_schema_v3_impls.rs"),
-        render_schema_impls(&v3_entries),
-    )
-    .expect("write generated V3 WireSchema impls");
+    write_if_changed(
+        &out_dir.join("wire_schema_impls.rs"),
+        render_schema_impls(&entries).as_bytes(),
+    );
+    write_if_changed(
+        &out_dir.join("wire_schema_v2_impls.rs"),
+        render_schema_impls(&v2_entries).as_bytes(),
+    );
+    write_if_changed(
+        &out_dir.join("wire_schema_v3_impls.rs"),
+        render_schema_impls(&v3_entries).as_bytes(),
+    );
+}
+
+fn write_if_changed(path: &std::path::Path, contents: &[u8]) {
+    if fs::read(path).ok().as_deref() == Some(contents) {
+        return;
+    }
+    fs::write(path, contents).unwrap_or_else(|error| {
+        panic!(
+            "failed to write generated schema impl {}: {error}",
+            path.display()
+        );
+    });
 }
 
 fn render_schema_impls(entries: &[SchemaEntry]) -> String {

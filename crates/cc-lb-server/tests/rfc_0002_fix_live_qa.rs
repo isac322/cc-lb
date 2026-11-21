@@ -91,7 +91,7 @@ async fn wait_for_row_count(pool: &SqlitePool, where_clause: &str, expected: i64
                 "timed out waiting for count_request_events(WHERE {where_clause}) == {expected}; last={actual}"
             );
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -228,15 +228,40 @@ async fn wait_metric_delta(
         if tokio::time::Instant::now() >= deadline {
             return post;
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(10)).await;
     }
 }
 
-async fn post_happy(server: &common::TestServer) -> common::RawResponse {
+trait QaProxyServer {
+    fn proxy_addr(&self) -> SocketAddr;
+    fn key_plaintext(&self) -> &str;
+}
+
+impl QaProxyServer for common::TestServer {
+    fn proxy_addr(&self) -> SocketAddr {
+        self.proxy_addr
+    }
+
+    fn key_plaintext(&self) -> &str {
+        &self.managed_key.plaintext
+    }
+}
+
+impl QaProxyServer for common::InProcessServer {
+    fn proxy_addr(&self) -> SocketAddr {
+        self.proxy_addr
+    }
+
+    fn key_plaintext(&self) -> &str {
+        &self.managed_key.plaintext
+    }
+}
+
+async fn post_happy(server: &impl QaProxyServer) -> common::RawResponse {
     common::http_post(
-        server.proxy_addr,
+        server.proxy_addr(),
         "/v1/messages",
-        &server.managed_key.plaintext,
+        server.key_plaintext(),
         HAPPY_BODY,
         &[],
     )
@@ -244,10 +269,10 @@ async fn post_happy(server: &common::TestServer) -> common::RawResponse {
     .expect("post happy message")
 }
 
-async fn open_admin_sse(addr: SocketAddr) -> BufReader<TcpStream> {
+async fn open_admin_sse(addr: SocketAddr, admin_token: &str) -> BufReader<TcpStream> {
     let mut stream = TcpStream::connect(addr).await.expect("connect admin sse");
     let request = format!(
-        "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {admin_token}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -326,7 +351,7 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
 // ============================================================================
 #[tokio::test]
 async fn live_qa_2_oauth_usage_writes_one_classified_row() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
@@ -380,7 +405,7 @@ async fn live_qa_2_oauth_usage_writes_one_classified_row() {
 // ============================================================================
 #[tokio::test]
 async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
@@ -438,7 +463,7 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 /// leaving the row with NULL cost/cache and only partial usage.
 #[tokio::test]
 async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
 
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
@@ -449,7 +474,7 @@ async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     assert_eq!(response.status, 200);
 
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(10)).await;
 
     let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 
@@ -475,7 +500,7 @@ async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
 /// stream_* timings) are None on non-stream and would hide divergences.
 #[tokio::test]
 async fn live_qa_6c_assembler_populates_stream_fields() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -485,7 +510,7 @@ async fn live_qa_6c_assembler_populates_stream_fields() {
     assert_eq!(response.status, 200);
 
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(10)).await;
 
     let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 
@@ -501,7 +526,7 @@ async fn live_qa_6c_assembler_populates_stream_fields() {
 
 #[tokio::test]
 async fn lqa_1a_proxy_path_non_stream_returns_message_and_assembler_row() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let total_baseline = settled_row_count(&pool, "1=1").await;
     let assembler_baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
@@ -519,7 +544,7 @@ async fn lqa_1a_proxy_path_non_stream_returns_message_and_assembler_row() {
 
 #[tokio::test]
 async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_columns() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -552,7 +577,7 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_columns() {
 
 #[tokio::test]
 async fn lqa_2a_event_emission_happy_row_has_relational_columns() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -679,8 +704,8 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
 
 #[tokio::test]
 async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
-    let server = common::spawn_test_server().await;
-    let mut reader = open_admin_sse(server.admin_addr).await;
+    let server = common::spawn_inprocess_server().await;
+    let mut reader = open_admin_sse(server.admin_addr, server.admin_token).await;
 
     let response = post_happy(&server).await;
 
@@ -910,7 +935,7 @@ async fn lqa_5d_limit_reconcile_records_successful_reservation() {
 
 #[tokio::test]
 async fn lqa_5e_assembler_row_populates_identity_upstream_and_latency_stages() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -935,7 +960,7 @@ async fn lqa_5e_assembler_row_populates_identity_upstream_and_latency_stages() {
 
 #[tokio::test]
 async fn lqa_5f_assembler_row_records_anthropic_upstream_uuid_name_and_model() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -951,7 +976,7 @@ async fn lqa_5f_assembler_row_records_anthropic_upstream_uuid_name_and_model() {
 
 #[tokio::test]
 async fn lqa_6a_upstream_rate_limit_state_persists_request_and_token_observations() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -968,7 +993,7 @@ async fn lqa_6a_upstream_rate_limit_state_persists_request_and_token_observation
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for upstream_rate_limit_state_v1 rows; last={count}");
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(10)).await;
     }
     let rows = sqlx::query("SELECT value FROM upstream_rate_limit_state_v1 ORDER BY key ASC")
         .fetch_all(&pool)
@@ -995,7 +1020,7 @@ async fn lqa_6a_upstream_rate_limit_state_persists_request_and_token_observation
 
 #[tokio::test]
 async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
@@ -1083,7 +1108,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_typed_upstream_error() {
 #[tokio::test]
 async fn lqa_6e_admin_sse_keeps_up_with_fifty_final_frames_without_lag() {
     let server = common::spawn_test_server().await;
-    let mut reader = open_admin_sse(server.admin_addr).await;
+    let mut reader = open_admin_sse(server.admin_addr, "admin-token").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
     let mut set = JoinSet::new();

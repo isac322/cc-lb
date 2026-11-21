@@ -18,6 +18,9 @@ async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
         .create_if_missing(true)
         .foreign_keys(true);
     let mut connection = SqliteConnection::connect_with(&options).await?;
+    sqlx::query("PRAGMA synchronous = OFF;")
+        .execute(&mut connection)
+        .await?;
     let migrator = Migrator::new(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/migrations"
@@ -150,6 +153,9 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
         .create_if_missing(true)
         .foreign_keys(true);
     let mut connection = SqliteConnection::connect_with(&options).await?;
+    sqlx::query("PRAGMA synchronous = OFF;")
+        .execute(&mut connection)
+        .await?;
     let migrator = Migrator::new(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/migrations"

@@ -10,3 +10,7 @@ autotests = false
 [[test]]
 name = "integration"
 path = "tests/all.rs"
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

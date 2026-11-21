@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use cc_lb_storage_api::{
@@ -6,10 +6,7 @@ use cc_lb_storage_api::{
     UpstreamPlanTierRecord,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
 use tokio::{runtime::Runtime, sync::Barrier};
 use uuid::Uuid;
 
@@ -148,38 +145,29 @@ async fn upsert_override_after_barrier(
 }
 
 struct Fixture {
-    url: String,
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("plan_tier_concurrency_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-
-        let pool = schema_pool(url, &schema, 4).await?;
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error);
+            }
+        };
         PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock))
             .initialize()
             .await?;
 
-        Ok(Self {
-            url: url.to_owned(),
-            schema,
-            admin_pool,
-            pool,
-        })
+        Ok(Self { isolated, pool })
     }
 
     async fn storage(&self) -> Result<PostgresStorage> {
-        let pool = schema_pool(&self.url, &self.schema, 1).await?;
+        let pool = self.isolated.pool(1).await?;
         Ok(PostgresStorage::new(
             pool,
             Arc::new(cc_lb_clock::SystemClock),
@@ -188,38 +176,12 @@ impl Fixture {
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-async fn schema_pool(url: &str, schema: &str, max_connections: u32) -> Result<PgPool> {
-    Ok(PgPoolOptions::new()
-        .max_connections(max_connections)
-        .connect_with(PgConnectOptions::from_str(url)?.options([("search_path", schema)]))
-        .await?)
 }
 
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL")
         .ok()
         .or_else(|| std::env::var("PG_URL").ok())
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

@@ -23,6 +23,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write
     steps:
       - name: Check out triggering revision
         uses: actions/checkout@v7
@@ -146,6 +147,20 @@ jobs:
         with:
           path: ${{ runner.temp }}/docker-mounts.tar
           key: ${{ env.CACHE_KEY }}
+
+      - name: Prune superseded dev-image caches
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_KEY: ${{ env.CACHE_KEY }}
+        run: |
+          set -euo pipefail
+          stale_keys=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select((.key | startswith("docker-mounts-off-arm64-") or startswith("docker-mounts-thin-arm64-")) and .key != env.CURRENT_KEY) | .key')
+          while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            gh cache delete "$key" || true
+          done <<<"$stale_keys"
       - name: Verify remote image platform and revision
         env:
           IMAGE: ghcr.io/isac322/cc-lb:dev

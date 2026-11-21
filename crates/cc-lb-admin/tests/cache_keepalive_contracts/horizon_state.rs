@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    str::FromStr,
     sync::Arc,
 };
 
@@ -38,22 +37,10 @@ async fn selected_horizon_state_matrix_postgres() {
         eprintln!("skip: CI_POSTGRES_URL is required for PostgreSQL horizon parity");
         return;
     };
-    let schema = format!("ka_horizon_{}", uuid::Uuid::new_v4().simple());
-    let options = sqlx::postgres::PgConnectOptions::from_str(&url).expect("PostgreSQL URL");
-    let admin = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(options.clone())
+    let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&url)
         .await
-        .expect("PostgreSQL admin pool");
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .expect("create isolated schema");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options.options([("search_path", schema.as_str())]))
-        .await
-        .expect("isolated pool");
+        .expect("create isolated postgres database");
+    let pool = isolated.pool(2).await.expect("isolated pool");
     let clock = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         pool,
@@ -81,11 +68,10 @@ async fn selected_horizon_state_matrix_postgres() {
     })
     .await;
     storage.pool().close().await;
-    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-        .execute(&admin)
+    isolated
+        .drop()
         .await
-        .expect("drop isolated schema");
-    admin.close().await;
+        .expect("drop isolated postgres database");
     if let Err(error) = outcome {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());

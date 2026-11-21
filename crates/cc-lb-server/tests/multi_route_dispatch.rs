@@ -6,7 +6,7 @@ use crate::common;
 
 #[tokio::test]
 async fn multi_route_dispatch() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_inprocess_server().await;
     let messages = common::http_post(
         server.proxy_addr,
         "/v1/messages",
@@ -88,7 +88,7 @@ async fn multi_route_dispatch() {
     assert_eq!(event.get::<i64, _>("list_cost_usd_micros"), 0);
 }
 
-async fn open_test_sqlite_pool(server: &common::TestServer) -> SqlitePool {
+async fn open_test_sqlite_pool(server: &common::InProcessServer) -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
@@ -120,6 +120,6 @@ async fn wait_for_count_tokens_event(pool: &SqlitePool) -> sqlx::sqlite::SqliteR
             tokio::time::Instant::now() < deadline,
             "timed out waiting for count_tokens request event"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }

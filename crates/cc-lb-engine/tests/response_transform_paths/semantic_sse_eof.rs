@@ -159,7 +159,7 @@ async fn observe_with_sse_hook(
 ) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-eof.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
@@ -188,6 +188,7 @@ async fn observe_with_sse_hook(
     })
     .await
     .expect("request terminates after downstream EOF");
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     Ok(Observation {
@@ -206,7 +207,7 @@ async fn observe_eof_with_keepalive(
 ) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-eof-keepalive.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = with_test_limit_subject(
@@ -245,6 +246,7 @@ async fn observe_eof_with_keepalive(
     })
     .await
     .expect("request terminates after downstream EOF");
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     Ok(Observation {
@@ -284,7 +286,7 @@ async fn observe_drop_after_terminal_with_keepalive(
 ) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-drop.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = if let Some((config, enqueuer)) = keepalive {
@@ -346,6 +348,7 @@ async fn observe_drop_after_terminal_with_keepalive(
     })
     .await
     .expect("request terminates after downstream drop");
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     Ok(Observation {
@@ -1673,7 +1676,7 @@ async fn responses_semantic_sse_eof_failure_refunds_limits_with_or_without_usage
     for measured in [false, true] {
         let dir = tempfile::tempdir()?;
         let storage = Arc::new(sqlite_storage(&dir, "responses-eof-limits.sqlite").await?);
-        let test_bus =
+        let mut test_bus =
             TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
         let mut rx = test_bus.bus.subscribe_lifecycle();
         let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
@@ -1740,6 +1743,7 @@ async fn responses_semantic_sse_eof_failure_refunds_limits_with_or_without_usage
         })
         .await?;
         reconcile.shutdown().await;
+        test_bus.shutdown().await;
         let mut rows = wait_for_events(storage.as_ref(), 1).await?;
         assert_eq!(rows.len(), 1);
         let observed = Observation {
@@ -2352,7 +2356,7 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "openai-chat-finish.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut events = test_bus.bus.subscribe_lifecycle();
     let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
@@ -2545,6 +2549,7 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
     })
     .await
     .expect("request terminates after downstream close");
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     let row = rows.remove(0);
@@ -2830,7 +2835,7 @@ async fn openai_responses_incomplete_terminal_close_reconciles_limits() -> TestR
 
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "responses-incomplete-limits.sqlite").await?);
-    let test_bus =
+    let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut events = test_bus.bus.subscribe_lifecycle();
     let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
@@ -2941,6 +2946,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
     assert_eq!(client_status, 200);
     assert_eq!(reason, TerminationReason::Success);
 
+    test_bus.shutdown().await;
     let mut rows = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(

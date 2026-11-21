@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind, RequestEventListQuery,
+    RequestEvent, RequestEventHistogramQuery, RequestEventKind, RequestEventListQuery,
     RequestEventStore, RequestEventStreamFilters,
 };
 use sqlx::Row;
@@ -10,12 +10,12 @@ const BASE: u64 = 1_800_000_000;
 
 async fn migrated_storage(name: &str) -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!("sqlite://{}", temp_dir.path().join(name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
-            .await
-            .expect("open sqlite");
-    storage.initialize().await.expect("initialize sqlite");
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join(name),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("initialize sqlite");
     (temp_dir, storage)
 }
 

@@ -25,3 +25,7 @@ serde_json.workspace = true
 serde_urlencoded = "0.7"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
 url.workspace = true
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

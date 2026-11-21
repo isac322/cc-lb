@@ -13,3 +13,7 @@ cc-lb-upstream.workspace = true
 http.workspace = true
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true, features = ["serde"] }
+
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true

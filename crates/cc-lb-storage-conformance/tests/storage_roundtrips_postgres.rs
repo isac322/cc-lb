@@ -2,7 +2,6 @@
 
 use std::{
     future::Future,
-    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -29,21 +28,20 @@ use cc_lb_storage_conformance::{
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
-    AssertSqlSafe, PgPool,
+    PgPool,
     postgres::{PgConnectOptions, PgListener, PgPoolOptions},
 };
 use tokio::{runtime::Runtime, sync::Barrier};
 
 struct PostgresConformanceBackend {
     url: String,
-    reused: tokio::sync::Mutex<Option<PostgresFixture>>,
+    reused: tokio::sync::Mutex<Option<(crate::pg_template_helper::IsolatedPg, PostgresFixture)>>,
     schema_tainted: AtomicBool,
 }
 
 #[derive(Clone)]
 struct PostgresFixture {
-    url: String,
-    schema: String,
+    options: PgConnectOptions,
     pool: PgPool,
 }
 
@@ -60,22 +58,11 @@ impl PostgresConformanceBackend {
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        let Some(fixture) = self.reused.lock().await.take() else {
+        let Some((isolated, fixture)) = self.reused.lock().await.take() else {
             return Ok(());
         };
         fixture.pool.close().await;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&fixture.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&fixture.schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-        Ok(())
+        isolated.drop().await
     }
 }
 
@@ -86,7 +73,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
 
     async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
         let mut reused = self.reused.lock().await;
-        if let Some(existing) = reused.as_ref()
+        if let Some((_, existing)) = reused.as_ref()
             && !self.schema_tainted.swap(false, Ordering::SeqCst)
         {
             sqlx::raw_sql(
@@ -126,47 +113,24 @@ impl ConformanceBackend for PostgresConformanceBackend {
             .await?;
             return Ok(existing.clone());
         }
-        if let Some(existing) = reused.take() {
+        if let Some((isolated, existing)) = reused.take() {
             existing.pool.close().await;
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(PgConnectOptions::from_str(&existing.url)?)
-                .await?;
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(&existing.schema)
-            )))
-            .execute(&admin_pool)
-            .await?;
-            admin_pool.close().await;
+            isolated.drop().await?;
         }
-        let schema = schema_name();
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(
-                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
+        let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&self.url).await?;
+        let options = isolated.connect_options();
+        let pool = match isolated.pool(8).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error);
+            }
+        };
         PostgresStorage::new(pool.clone(), system_clock())
             .initialize()
             .await?;
-        let fixture = PostgresFixture {
-            url: self.url.clone(),
-            schema,
-            pool,
-        };
-        *reused = Some(fixture.clone());
+        let fixture = PostgresFixture { options, pool };
+        *reused = Some((isolated, fixture.clone()));
         Ok(fixture)
     }
 
@@ -177,10 +141,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
     async fn open_independent(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
         let pool = PgPoolOptions::new()
             .max_connections(2)
-            .connect_with(
-                PgConnectOptions::from_str(&fixture.url)?
-                    .options([("search_path", fixture.schema.as_str())]),
-            )
+            .connect_with(fixture.options.clone())
             .await?;
         Ok(PostgresStorage::new(pool, system_clock()))
     }
@@ -1298,20 +1259,4 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
         "exactly one upload reports existed"
     );
     Ok(())
-}
-
-fn schema_name() -> String {
-    format!("storage_roundtrips_{}", uuid::Uuid::new_v4().simple())
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }
