@@ -161,7 +161,7 @@ PY
   if [ "$spa_hash" != "$prev_hash" ]; then
     echo "Admin SPA digest changed (${prev_hash:-none} -> ${spa_hash}); invalidating cc-lb-admin cache"
     rm -f "$spa_hash_file"
-    rm -rf "${target_profile_dir}/.fingerprint/cc-lb-admin-"* "${target_profile_dir}/deps/libcc_lb_admin-"*
+    rm -rf "${target_profile_dir}/.fingerprint/cc-lb-admin-"* "${target_profile_dir}/deps/libcc_lb_admin-"* "${target_profile_dir}/incremental/cc_lb_admin-"*
   else
     echo "Admin SPA digest unchanged (${spa_hash})"
   fi

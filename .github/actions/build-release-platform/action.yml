@@ -51,10 +51,12 @@ runs:
           mode_prefix="dryrun-"
         fi
         cache_prefix="cd-deps-fat-v2-${mode_prefix}${KEY_NAME}-${RUST_VERSION}"
+        prune_prefix="cd-deps-fat-v2-${mode_prefix}${KEY_NAME}-"
         legacy_prefix="cd-deps-fat-v1-${mode_prefix}${KEY_NAME}-"
         cache_key="${cache_prefix}-${DEPS_HASH}"
         {
           echo "cache_prefix=$cache_prefix"
+          echo "prune_prefix=$prune_prefix"
           echo "legacy_prefix=$legacy_prefix"
           echo "cache_key=$cache_key"
         } >> "$GITHUB_OUTPUT"
@@ -222,13 +224,26 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         CURRENT_KEY: ${{ steps.cache-meta.outputs.cache_key }}
-        CACHE_PREFIX: ${{ steps.cache-meta.outputs.cache_prefix }}-
+        PRUNE_PREFIX: ${{ steps.cache-meta.outputs.prune_prefix }}
         LEGACY_PREFIX: ${{ steps.cache-meta.outputs.legacy_prefix }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        KEY_NAME: ${{ inputs.key }}
         TARGET_REF: ${{ github.ref }}
       run: |
         set -euo pipefail
         stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
-          --jq '.actions_caches[] | select(((.key | startswith(env.CACHE_PREFIX)) or (.key | startswith(env.LEGACY_PREFIX))) and .key != env.CURRENT_KEY) | .id') || true
+          --jq '
+            .actions_caches[]
+            | select(
+                (
+                  (.key | startswith(env.PRUNE_PREFIX)) or
+                  (.key | startswith(env.LEGACY_PREFIX)) or
+                  (env.DRY_RUN != "true" and (.key | startswith("docker-mounts-fat-" + env.KEY_NAME + "-")))
+                )
+                and .key != env.CURRENT_KEY
+              )
+            | .id
+          ') || true
         for id in $stale_ids; do
           gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
         done

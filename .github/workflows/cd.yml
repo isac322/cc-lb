@@ -358,7 +358,19 @@ jobs:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          digest=$(tr -d '[:space:]' < "$RUNNER_TEMP/digests/docker-digest-arm64/digest-arm64.txt" 2>/dev/null || tr -d '[:space:]' < "$RUNNER_TEMP/digests/digest-arm64.txt")
+          if [ -f "$RUNNER_TEMP/digests/docker-digest-arm64/digest-arm64.txt" ]; then
+            digest_file="$RUNNER_TEMP/digests/docker-digest-arm64/digest-arm64.txt"
+          elif [ -f "$RUNNER_TEMP/digests/digest-arm64.txt" ]; then
+            digest_file="$RUNNER_TEMP/digests/digest-arm64.txt"
+          else
+            echo "::error::downloaded arm64 digest file not found under $RUNNER_TEMP/digests" >&2
+            exit 1
+          fi
+          digest=$(tr -d '[:space:]' < "$digest_file")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::invalid arm64 digest: '$digest'" >&2
+            exit 1
+          fi
           out=$(docker run --rm "${IMAGE}@${digest}" --version)
           printf '%s\n' "$out"
           grep -Fq "$EXPECTED_VERSION" <<<"$out"
@@ -386,7 +398,7 @@ jobs:
     needs: [prepare, build, build-arm64, smoke-arm64]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || (needs.build.result == 'success' && needs.build-arm64.result == 'success' && needs.smoke-arm64.result == 'success')) }}
     runs-on: ubuntu-slim
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write

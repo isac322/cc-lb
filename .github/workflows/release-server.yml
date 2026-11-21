@@ -216,7 +216,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write
     with:
       version: ${{ needs.prepare.outputs.version }}
       source_ref: ${{ needs.prepare.outputs.tag }}

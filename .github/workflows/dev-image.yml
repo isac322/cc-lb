@@ -37,7 +37,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref }}
-          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml', 'scripts/docker-build-musl.sh') }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/docker-build-musl.sh', 'Dockerfile') }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
@@ -46,11 +46,13 @@ jobs:
           if [ "$REF_NAME" = "refs/heads/dev" ]; then
             dry_run=false
             cache_prefix="dev-target-v2-arm64-${rust_version}"
+            prune_prefix="dev-target-v2-arm64-"
             legacy_prefix="dev-target-v1-arm64-"
             image_tag="ghcr.io/isac322/cc-lb:dev"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             dry_run=true
             cache_prefix="dev-target-dryrun-v2-arm64-${rust_version}"
+            prune_prefix="dev-target-dryrun-v2-arm64-"
             legacy_prefix="dev-target-dryrun-v1-arm64-"
             image_tag="cc-lb:dev-dry-run"
           else
@@ -67,6 +69,7 @@ jobs:
             echo "rust_version=$rust_version"
             echo "dry_run=$dry_run"
             echo "cache_prefix=$cache_prefix"
+            echo "prune_prefix=$prune_prefix"
             echo "legacy_prefix=$legacy_prefix"
             echo "lock_prefix=$lock_prefix"
             echo "cache_key=$cache_key"
@@ -96,7 +99,6 @@ jobs:
           key: ${{ steps.source.outputs.cache_key }}
           restore-keys: |
             ${{ steps.source.outputs.lock_prefix }}-
-            ${{ steps.source.outputs.cache_prefix }}-
 
       - name: Evaluate target cache and restore workspace mtimes
         id: target-match
@@ -193,7 +195,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_KEY: ${{ steps.source.outputs.cache_key }}
-          CACHE_PREFIX: ${{ steps.source.outputs.cache_prefix }}-
+          PRUNE_PREFIX: ${{ steps.source.outputs.prune_prefix }}
           LEGACY_PREFIX: ${{ steps.source.outputs.legacy_prefix }}
           DRY_RUN: ${{ steps.source.outputs.dry_run }}
           TARGET_REF: ${{ github.ref }}
@@ -204,7 +206,7 @@ jobs:
               .actions_caches[]
               | select(
                   (
-                    (.key | startswith(env.CACHE_PREFIX)) or
+                    (.key | startswith(env.PRUNE_PREFIX)) or
                     (.key | startswith(env.LEGACY_PREFIX)) or
                     (env.DRY_RUN != "true" and ((.key | startswith("docker-mounts-off-arm64-")) or (.key | startswith("docker-mounts-thin-arm64-"))))
                   )
