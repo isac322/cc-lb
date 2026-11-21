@@ -7555,7 +7555,15 @@ impl Lifecycle {
         let buffered_transform_required = compat_force_buffered
             || transform_ctx.gemini_oauth
             || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
+        let restricted_codex_models = transform_ctx.codex_backend
+            && response_affinity_context.capability == ProviderCapability::OpenaiModels
+            && self
+                .dynamic_view
+                .load()
+                .principal_view
+                .has_model_allowlist(&transform_ctx.principal.id);
         let force_buffered_response = compat_force_buffered
+            || restricted_codex_models
             || (gemini_catalog && status.is_success())
             || response_affinity_context.capability
                 == ProviderCapability::GeminiCachedContentsCreate;

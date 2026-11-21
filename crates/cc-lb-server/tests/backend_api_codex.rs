@@ -299,6 +299,16 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
             .iter()
             .any(|(name, _)| name == "accept-encoding")
     );
+    let invalid_sse = client
+        .get(format!(
+            "http://{}/backend-api/codex/models?client_version=invalid_sse",
+            server.proxy_addr
+        ))
+        .bearer_auth(&server.managed_key.plaintext)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_sse.status(), 502);
     let hangup = client
         .post(format!(
             "http://{}/backend-api/codex/realtime/calls/id/hangup",
@@ -328,7 +338,26 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
         .await
         .unwrap();
     assert_eq!(unauthenticated.status(), 401);
-
+    let unauthenticated_compact = client
+        .post(format!(
+            "http://{}/backend-api/codex/responses/compact",
+            server.proxy_addr
+        ))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated_compact.status(), 401);
+    let unauthenticated_trace = client
+        .post(format!(
+            "http://{}/backend-api/codex/memories/trace_summarize",
+            server.proxy_addr
+        ))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated_trace.status(), 401);
     let authenticated = client
         .post(format!(
             "http://{}/backend-api/codex/memories/trace_summarize",

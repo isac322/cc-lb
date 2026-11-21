@@ -1348,15 +1348,24 @@ impl ResponsesWebSocketGateway {
         connection_id: u64,
         frame: &Bytes,
     ) -> Result<WebSocketEventResult, WebSocketError> {
-        let quota_turn = self.observe_provider_metrics(connection_id, frame);
         let public_frame = self.oauth_public_frame(connection_id, frame);
+        let processing_frame = if self.codex_backend {
+            self.native_observation_frame(connection_id, frame)
+        } else {
+            public_frame.clone().unwrap_or_else(|| frame.clone())
+        };
+        let quota_turn = self.observe_provider_metrics(connection_id, &processing_frame);
         if public_frame.as_ref().is_some_and(Bytes::is_empty) {
             return Ok(WebSocketEventResult::default());
         }
-        let frame = public_frame.as_ref().unwrap_or(frame);
-        let transformed = self.transform_provider_frame(connection_id, frame);
+        let transformed = self.transform_provider_frame(connection_id, &processing_frame);
         let mut result = self
-            .observe_provider_message(connection_id, frame, transformed.as_ref().err(), quota_turn)
+            .observe_provider_message(
+                connection_id,
+                &processing_frame,
+                transformed.as_ref().err(),
+                quota_turn,
+            )
             .await?;
         match transformed {
             Ok(Some(frames)) => {
@@ -1364,9 +1373,8 @@ impl ResponsesWebSocketGateway {
                 result.frames = Some(frames);
             }
             Ok(None) => {
-                // Deliver the lane- or public-shape rewrite instead of the raw
-                // provider bytes, unless observation already suppressed it.
                 if result.forward
+                    && !self.codex_backend
                     && let Some(public_frame) = public_frame
                 {
                     result.forward = false;
@@ -1391,13 +1399,41 @@ impl ResponsesWebSocketGateway {
         }
         Ok(result)
     }
+    fn native_observation_frame(&self, connection_id: u64, frame: &Bytes) -> Bytes {
+        if frame.windows(11).any(|w| w == b"\"stream_id\"") {
+            return frame.clone();
+        }
+        let Some(lane) = self
+            .connection_lanes
+            .get(&connection_id)
+            .and_then(Option::as_ref)
+        else {
+            return frame.clone();
+        };
+        let Ok(encoded) = serde_json::to_vec(lane) else {
+            return frame.clone();
+        };
+        if frame.first() != Some(&b'{') {
+            return frame.clone();
+        }
+        let mut output = Vec::with_capacity(frame.len() + encoded.len() + 14);
+        output.extend_from_slice(b"{\"stream_id\":");
+        output.extend_from_slice(&encoded);
+        if frame.len() > 1 {
+            output.push(b',');
+            output.extend_from_slice(&frame[1..]);
+        } else {
+            output.push(b'}');
+        }
+        Bytes::from(output)
+    }
 
     fn oauth_public_frame(&self, connection_id: u64, frame: &Bytes) -> Option<Bytes> {
         let lane = self.connection_lanes.get(&connection_id)?.clone();
         let turn = self.turns.values().find(|turn| {
             turn.connection_id == Some(connection_id) && turn.sent && turn.lane == lane
         })?;
-        if !turn.prepared.oauth_transport {
+        if !turn.prepared.oauth_transport || self.codex_backend {
             return None;
         }
         if !turn.prepared.oauth_compat {
@@ -1450,7 +1486,6 @@ impl ResponsesWebSocketGateway {
         connection_id: u64,
         frame: &Bytes,
     ) -> Result<Option<Vec<Bytes>>, WebSocketError> {
-        // No JSON work, allocation, or guest call for connections without hooks.
         if !self.turns.values().any(|turn| {
             turn.connection_id == Some(connection_id)
                 && turn.plugin_request.as_ref().is_some_and(|(_, request)| {

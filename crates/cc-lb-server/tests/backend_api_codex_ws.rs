@@ -12,16 +12,6 @@ async fn backend_codex_websocket_preserves_frames_query_and_authentication() {
     openai_oauth_public_media::setup(&server, &fake, &client).await;
     let key = &server.managed_key.plaintext;
 
-    let unauthorized = format!(
-        "ws://{}/backend-api/codex/responses?trace=a%2Fb&beta=1",
-        server.proxy_addr
-    )
-    .into_client_request()
-    .unwrap();
-    let error = tokio_tungstenite::connect_async(unauthorized)
-        .await
-        .expect_err("unauthenticated WebSocket upgrade must fail");
-    assert!(error.to_string().contains("401"));
     let mut request = format!(
         "ws://{}/backend-api/codex/responses?trace=a%2Fb&beta=1",
         server.proxy_addr
@@ -38,8 +28,22 @@ async fn backend_codex_websocket_preserves_frames_query_and_authentication() {
         ))
         .await
         .unwrap();
-    let _ = socket.next().await.unwrap().unwrap();
-    let _ = socket.next().await.unwrap().unwrap();
+    let first_frame = match socket.next().await.unwrap().unwrap() {
+        Message::Text(frame) => frame.to_string(),
+        other => panic!("expected provider text frame, got {other:?}"),
+    };
+    let second_frame = match socket.next().await.unwrap().unwrap() {
+        Message::Text(frame) => frame.to_string(),
+        other => panic!("expected provider text frame, got {other:?}"),
+    };
+    assert_eq!(
+        first_frame,
+        r#"{"type":"response.created","response":{"id":"resp_tok","object":"response","status":"in_progress"}}"#
+    );
+    assert_eq!(
+        second_frame,
+        r#"{"type":"response.completed","response":{"id":"resp_tok","object":"response","status":"completed","usage":{"input_tokens":42,"output_tokens":0,"total_tokens":42}}}"#
+    );
 
     let (body, query) = {
         let records = fake.state.0.lock().unwrap();
@@ -72,6 +76,37 @@ async fn backend_codex_websocket_preserves_frames_query_and_authentication() {
         .await
         .unwrap();
     assert_eq!(unauthenticated.status(), 401);
+}
+
+#[tokio::test]
+async fn backend_codex_websocket_rejects_unauthenticated_upgrade() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fake = openai_oauth_public_media::spawn().await;
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    openai_oauth_public_media::setup(&server, &fake, &client).await;
+    let request = format!(
+        "ws://{}/backend-api/codex/responses?trace=a%2Fb",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("WebSocket auth handshake completed")
+    .expect_err("unauthenticated WebSocket upgrade must fail");
+    assert!(error.to_string().contains("401"));
+    assert!(
+        fake.state
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, _, headers, _)| { !headers.iter().any(|(name, _)| name == "request-id") })
+    );
 }
 
 #[tokio::test]

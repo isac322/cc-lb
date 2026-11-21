@@ -68,6 +68,16 @@ async fn fake(State(state): State<FakeState>, req: Request) -> Response {
     if path == "/codex/models" {
         if query
             .split('&')
+            .any(|pair| pair == "client_version=invalid_sse")
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(br#"{"catalog":[] }"#.as_slice()))
+                .unwrap();
+        }
+        if query
+            .split('&')
             .any(|pair| pair == "client_version=invalid")
         {
             return Response::builder()
