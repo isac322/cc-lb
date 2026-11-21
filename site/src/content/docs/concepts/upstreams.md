@@ -29,6 +29,14 @@ Provider-prefixed routes use `/anthropic/v1/...`, `/openai/v1/...`, or `/gemini/
 
 cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope. Supported model catalog routes are limited to those in the endpoint reference.
 
+## OpenAI OAuth public operations
+
+`openai_oauth` supports public Responses requests through translation, emulation, and response-shape conversion. Backend-shaped Codex requests remain byte-identical and pinned to their owning account. Public Responses, Chat Completions, models, compaction, input-token counting, images, realtime calls, and (when enabled) transcription are served as described in the [runtime endpoint reference](/docs/reference/source/runtime-management/#openai-endpoint-reference). Chat Completions is translated to Responses; WebSocket lanes are emulated per subscription account.
+
+Operations that require provider-owned state or have no subscription equivalent route only to an eligible `openai_api_key` upstream. This includes stored response/chat operations, account-owned resource families, hosted tools, prompts, background requests, and API-key-only families. Exactly one eligible API-key upstream is required for generic account-owned passthrough; cc-lb rejects when ownership cannot be chosen. It never translates requests across providers or fails over across an ownership boundary.
+
+Public realtime forwarding uses the origin `https://api.openai.com/` by default and is configurable through the restart-only `openai_public_api.realtime_origin` setting. Subscription transcription is disabled by default; enabling it sends audio to the upstream dictation endpoint, which retains audio for 30 days. cc-lb stores no request or response data.
+
 ## Anthropic HTTP fallback between upstreams
 
 For Anthropic HTTP requests, OAuth accounts that need a reconnect, and upstreams whose credentials failed to load, are left out of routing. If the chosen upstream cannot take a request because its credentials cannot be prepared or signed, or the provider answers `401` or `429`, cc-lb sends the same request to the next compatible upstream the routing filters pick: another OAuth account first, then an API key. A request tries at most three upstreams, and the last try goes to an API key when one is available. The client receives the last upstream's answer only when every allowed attempt fails.

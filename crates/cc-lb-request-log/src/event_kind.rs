@@ -90,6 +90,7 @@ impl RequestEventKind {
             "/v1/messages" => Self::Messages,
             "/v1/messages/count_tokens" | "/v1/responses/input_tokens" => Self::CountTokens,
             "/v1/responses" | "/v1/responses/compact" | "/v1/realtime" => Self::OpenaiResponses,
+            "/v1/realtime/calls" => Self::Other,
             "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" => {
                 Self::GeminiGenerateContent
             }
@@ -104,7 +105,7 @@ impl RequestEventKind {
             | "/v1/images/edits"
             | "/v1/images/variations"
             | "/v1beta/openai/images/generations" => Self::Images,
-            "/v1/alpha/search" | "/v1/memories/trace_summarize" => Self::CodexAuxiliary,
+            "/v1/alpha/search" => Self::CodexAuxiliary,
             p if p == "/v1beta/models"
                 || p.starts_with("/v1beta/models/") && !p.contains(':')
                 || p == "/v1beta/openai/models"

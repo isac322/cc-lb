@@ -492,10 +492,11 @@ describe('resolved editor model', () => {
     );
 
     expect(CONFIG_EDITOR_CATEGORIES).toHaveLength(7);
-    expect(new Set(roots).size).toBe(21);
+    expect(new Set(roots).size).toBe(23);
     expect(roots).toEqual(
       expect.arrayContaining([
         'listener',
+        'openai_public_api',
         'body',
         'timeouts',
         'request_event_retention_days',
@@ -510,6 +511,7 @@ describe('resolved editor model', () => {
         'event_bus',
         'cluster',
         'oauth',
+        'openai_oauth_compat',
         'subscription_quota',
         'runtime',
         'circuit_breaker',
@@ -600,6 +602,24 @@ describe('config editor information architecture', () => {
       sectionId: 'encryption',
       dangerous: true,
       presentation: 'env',
+    });
+  });
+  it('classifies OpenAI OAuth compatibility fields in the identity category', () => {
+    expect(
+      classifyConfigLeaf('openai_oauth_compat.transcription', 'enum'),
+    ).toMatchObject({
+      categoryId: 'identity',
+      sectionId: 'openai-oauth-compat',
+      presentation: 'enum',
+    });
+  });
+  it('classifies the public OpenAI realtime origin in network settings', () => {
+    expect(
+      classifyConfigLeaf('openai_public_api.realtime_origin', 'string'),
+    ).toMatchObject({
+      categoryId: 'network',
+      sectionId: 'openai-public-api',
+      presentation: 'url',
     });
   });
 
@@ -814,6 +834,48 @@ describe('config field guidance', () => {
     expect(paths).toEqual(
       expect.arrayContaining(['observability.request_diagnostics_log']),
     );
+  });
+  it('provides guidance for every OpenAI OAuth compatibility leaf', () => {
+    const keys = [
+      'store_true',
+      'sampling',
+      'logprobs',
+      'truncation_auto',
+      'prompt_cache_in_memory',
+      'service_tier',
+      'web_search_preview',
+      'metadata',
+      'max_tool_calls',
+      'background',
+      'hosted_tools',
+      'compact',
+      'chat_n',
+      'chat_stop',
+      'chat_seed_penalties',
+      'transcription',
+    ];
+    for (const key of keys) {
+      const guidance = resolveConfigFieldGuidance(
+        `openai_oauth_compat.${key}`,
+        undefined,
+        'enum',
+      );
+      expect(guidance.description, key).toBeTruthy();
+      expect(guidance.recommendation, key).toBeTruthy();
+    }
+    expect(
+      resolveConfigFieldGuidance('openai_oauth_compat.transcription')
+        .recommendation,
+    ).toContain('30 days');
+  });
+  it('provides guidance for the public OpenAI realtime origin', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'openai_public_api.realtime_origin',
+      undefined,
+      'string',
+    );
+    expect(guidance.description).toContain('realtime');
+    expect(guidance.recommendation).toContain('restart');
   });
 
   it('falls back to the schema description when the table omits one', () => {

@@ -137,7 +137,7 @@ evidence:
       proof_page: /docs/trust/
   proof_inventory:
     claimable:
-      - Anthropic, OpenAI, and Gemini API-key and OAuth upstream kinds with provider-prefixed routes for stateless generation, token-count, embedding, model-catalog, and Realtime/Live WebSocket operations — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs; docs/runtime-management.md
+      - Anthropic, OpenAI, and Gemini API-key and OAuth upstream kinds with provider-prefixed routes for stateless generation, token-count, embedding, model-catalog, and Realtime/Live WebSocket operations; OpenAI OAuth also translates selected public Responses and Chat Completions operations — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs; docs/runtime-management.md
       - Best-effort prompt-cache keepalive scheduler — crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30
       - Cost-first subscription preference routing — crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40
       - Filter and shape Wasmtime plugin runtime — crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60

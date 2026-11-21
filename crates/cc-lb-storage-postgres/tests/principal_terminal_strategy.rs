@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Result;
+use cc_lb_domain::{CoerceOrReject, OpenaiOauthCompatOverride};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::{
     MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, PrincipalUpdate,
@@ -40,6 +41,7 @@ async fn run_test(url: &str) -> Result<()> {
 
     default_strategy_is_first_pick(&storage).await?;
     update_strategy_to_random_roundtrips(&storage).await?;
+    oauth_compat_roundtrips(&storage).await?;
     unsupported_strategy_update_is_rejected(&fixture.pool, &storage).await?;
 
     fixture.drop_schema().await
@@ -95,6 +97,54 @@ async fn update_strategy_to_random_roundtrips(storage: &PostgresStorage) -> Resu
     );
     Ok(())
 }
+async fn oauth_compat_roundtrips(storage: &PostgresStorage) -> Result<()> {
+    let initial = OpenaiOauthCompatOverride {
+        store_true: Some(CoerceOrReject::Reject),
+        ..Default::default()
+    };
+    let mut create = principal_create("oauth-compat");
+    create.openai_oauth_compat = Some(initial);
+    let record = PrincipalStore::create(storage, create, 1_900_000_030).await?;
+    assert_eq!(record.openai_oauth_compat, Some(initial));
+
+    let fetched = PrincipalStore::get_by_id(storage, record.id)
+        .await?
+        .expect("record should exist");
+    assert_eq!(fetched.openai_oauth_compat, Some(initial));
+
+    let next = OpenaiOauthCompatOverride {
+        store_true: Some(CoerceOrReject::Coerce),
+        ..Default::default()
+    };
+    let updated = PrincipalStore::update(
+        storage,
+        record.id,
+        fetched.revision,
+        PrincipalUpdate {
+            openai_oauth_compat: Some(Some(next)),
+            ..PrincipalUpdate::default()
+        },
+        1_900_000_031,
+    )
+    .await?
+    .expect("record should exist");
+    assert_eq!(updated.openai_oauth_compat, Some(next));
+
+    let cleared = PrincipalStore::update(
+        storage,
+        record.id,
+        updated.revision,
+        PrincipalUpdate {
+            openai_oauth_compat: Some(None),
+            ..PrincipalUpdate::default()
+        },
+        1_900_000_032,
+    )
+    .await?
+    .expect("record should exist");
+    assert_eq!(cleared.openai_oauth_compat, None);
+    Ok(())
+}
 
 async fn unsupported_strategy_update_is_rejected(
     pool: &PgPool,
@@ -141,6 +191,7 @@ fn principal_create(name: &str) -> PrincipalCreate {
             cap_micros: 100,
         }],
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

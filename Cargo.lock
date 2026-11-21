@@ -732,6 +732,7 @@ dependencies = [
 name = "cc-lb-config"
 version = "2.2.1"
 dependencies = [
+ "cc-lb-domain",
  "cc-lb-oauth-protocol",
  "cc-lb-workspace-hack",
  "clap",
@@ -801,6 +802,7 @@ name = "cc-lb-domain"
 version = "2.2.1"
 dependencies = [
  "cc-lb-workspace-hack",
+ "schemars",
  "serde",
  "serde_json",
  "url",
@@ -4192,6 +4194,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -4200,6 +4203,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "rustls",

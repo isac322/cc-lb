@@ -358,7 +358,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   expect(detailPane.contains(detailShell)).toBe(true);
   expect(detailPane?.className).toContain('hidden');
   expect(detailPane?.className).toContain('md:flex');
-  expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(6);
+  expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(7);
   expect(detailShell.querySelector('details')).toBeNull();
   expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
 

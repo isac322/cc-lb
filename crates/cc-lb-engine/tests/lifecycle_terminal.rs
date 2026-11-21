@@ -697,6 +697,7 @@ fn principal() -> PrincipalRecord {
         updated_at_unix_secs: 0,
         router_terminal_strategy: TerminalStrategy::FirstPick,
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

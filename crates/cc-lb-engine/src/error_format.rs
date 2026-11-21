@@ -78,6 +78,30 @@ pub(crate) fn provider_error_body(
     Bytes::from(error.to_string())
 }
 
+pub(crate) fn compat_reject_body(reject: &crate::openai_compat::CompatReject) -> Bytes {
+    Bytes::from(
+        json!({"error": {
+            "message": &reject.message,
+            "type": "invalid_request_error",
+            "param": &reject.param,
+            "code": reject.code,
+        }})
+        .to_string(),
+    )
+}
+
+pub(crate) fn compat_reject_response(
+    reject: &crate::openai_compat::CompatReject,
+) -> Response<Body> {
+    let mut response = Response::new(Body::from(compat_reject_body(reject)));
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    response
+}
+
 pub(crate) fn provider_error_response(
     capability: ProviderCapability,
     status: StatusCode,

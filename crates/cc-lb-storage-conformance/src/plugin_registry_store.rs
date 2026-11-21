@@ -1759,6 +1759,7 @@ fn principal_create(seed: u8) -> PrincipalCreate {
             cap_micros: 100,
         }],
         cache_keepalive: None,
+        openai_oauth_compat: None,
     }
 }
 

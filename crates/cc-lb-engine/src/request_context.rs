@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cc_lb_domain::{CacheBreakpoint, CachePricingSummary, Provider};
+use cc_lb_domain::{CacheBreakpoint, CachePricingSummary, OpenaiOauthCompatPolicy, Provider};
 use cc_lb_routing::RoutingContext;
 use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, Method};
@@ -33,6 +33,10 @@ pub struct RequestContext {
     pub query: Option<String>,
     /// Buffered request body bytes, required by SigV4 and other signing schemes.
     pub body_bytes: Bytes,
+    /// Effective per-principal OpenAI subscription compatibility policy.
+    pub openai_oauth_compat: Option<OpenaiOauthCompatPolicy>,
+    /// Body-derived features that require an API-key upstream when available.
+    pub compat_api_key_only_features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
     /// Cache breakpoints extracted from the request for prompt cache optimization.
     pub cache_breakpoints: Vec<CacheBreakpoint>,
     /// Canonical model identifier resolved from the request.
@@ -88,6 +92,8 @@ pub struct ParsedRequestBuilder {
     path: String,
     query: Option<String>,
     body_bytes: Bytes,
+    openai_oauth_compat: Option<OpenaiOauthCompatPolicy>,
+    compat_api_key_only_features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
     cache_breakpoints: Vec<CacheBreakpoint>,
     canonical_model_id: String,
     cache_pricing: CachePricingSummary,
@@ -106,6 +112,8 @@ impl ParsedRequestBuilder {
             path: String::new(),
             query: None,
             body_bytes: Bytes::new(),
+            openai_oauth_compat: None,
+            compat_api_key_only_features: Vec::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
             cache_pricing: CachePricingSummary::default(),
@@ -164,6 +172,17 @@ impl ParsedRequestBuilder {
         self.body_bytes = body_bytes;
         self
     }
+    pub fn openai_oauth_compat(mut self, policy: Option<OpenaiOauthCompatPolicy>) -> Self {
+        self.openai_oauth_compat = policy;
+        self
+    }
+    pub fn compat_api_key_only_features(
+        mut self,
+        features: Vec<crate::openai_compat::request::ApiKeyOnlyFeature>,
+    ) -> Self {
+        self.compat_api_key_only_features = features;
+        self
+    }
 
     /// Sets prompt-cache breakpoints.
     pub fn cache_breakpoints(mut self, cache_breakpoints: Vec<CacheBreakpoint>) -> Self {
@@ -195,6 +214,8 @@ impl ParsedRequestBuilder {
             path: self.path,
             query: self.query,
             body_bytes: self.body_bytes,
+            openai_oauth_compat: self.openai_oauth_compat,
+            compat_api_key_only_features: self.compat_api_key_only_features,
             cache_breakpoints: self.cache_breakpoints,
             canonical_model_id: self.canonical_model_id,
             cache_pricing: self.cache_pricing,

@@ -2087,6 +2087,7 @@ fn limited_lifecycle_at(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: None,
+        openai_oauth_compat: None,
     };
     let authn = TestAuthn::with_principal_view(
         state.clone(),
@@ -3379,6 +3380,7 @@ fn explicit_native_lifecycle(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: None,
+        openai_oauth_compat: None,
     };
     let record = UpstreamRecord {
         id: upstream_id,

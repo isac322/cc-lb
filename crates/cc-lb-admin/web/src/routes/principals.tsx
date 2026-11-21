@@ -26,6 +26,7 @@ import { toast } from 'sonner';
 import * as z from 'zod';
 import { PrincipalsListEmpty } from '../components/onboarding/ListEmptyStates';
 import { CacheKeepaliveCard } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
+import { OpenaiOauthCompatCard } from '../components/principals/openai-oauth-compat/OpenaiOauthCompatCard';
 import {
   DetailHeader,
   DetailHeaderSkeleton,
@@ -262,6 +263,33 @@ function PrincipalDetailLoadingShell() {
                   <Skeleton className="h-7 w-20" />
                 </div>
                 <Skeleton className="h-3 w-32" />
+              </div>
+            ))}
+          </div>
+        </DetailSection>
+        <DetailSection
+          span="full"
+          data-testid="openai-oauth-compat-card"
+          title={<Skeleton as="span" className="block h-5 w-52" />}
+          description={<Skeleton as="span" className="block h-4 w-80" />}
+          action={
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-7 w-36" />
+              <Skeleton className="h-7 w-24" />
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div
+                key={index}
+                className="grid gap-2 md:grid-cols-[minmax(0,1fr)_22rem] md:items-center"
+              >
+                <div className="space-y-1">
+                  <Skeleton className="h-4 w-44" />
+                  <Skeleton className="h-3 w-72" />
+                </div>
+                <Skeleton className="h-9 w-full" />
               </div>
             ))}
           </div>
@@ -606,6 +634,15 @@ function PrincipalDetail({
         principal.allowed_upstreams.includes(upstream.id);
       return inScope && allowed && capabilitiesOf(upstream.kind).cacheKeepalive;
     }) ?? false;
+  const supportsOpenaiOauthCompat =
+    inventory.data?.upstreams.some((upstream) => {
+      const inScope =
+        scopedProviders === undefined || scopedProviders.includes('openai');
+      const allowed =
+        principal.allowed_upstreams.length === 0 ||
+        principal.allowed_upstreams.includes(upstream.id);
+      return inScope && allowed && upstream.kind === 'openai_oauth';
+    }) ?? false;
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
@@ -746,6 +783,11 @@ function PrincipalDetail({
         {supportsKeepalive ? (
           <fieldset className="contents" disabled={principalWritePending}>
             <CacheKeepaliveCard principal={principal} />
+          </fieldset>
+        ) : null}
+        {supportsOpenaiOauthCompat ? (
+          <fieldset className="contents" disabled={principalWritePending}>
+            <OpenaiOauthCompatCard principal={principal} />
           </fieldset>
         ) : null}
         {PrincipalsActivity ? (

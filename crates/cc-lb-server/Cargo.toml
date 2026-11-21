@@ -119,6 +119,7 @@ flate2.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+reqwest = { workspace = true, features = ["multipart"] }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-opentelemetry.workspace = true

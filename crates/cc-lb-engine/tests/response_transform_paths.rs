@@ -1056,7 +1056,9 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
                 handle_authenticated(&lifecycle, binary_response_request(path)),
             )
             .await
-            .expect("binary response headers do not await upstream EOF")
+            .unwrap_or_else(|_| {
+                panic!("{path} {content_type:?} hooks={with_hooks}: headers awaited upstream EOF")
+            })
             .expect("lifecycle handles binary response");
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
@@ -4637,6 +4639,7 @@ fn lifecycle_with_options_and_keepalive(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive,
+        openai_oauth_compat: None,
     };
     let mut authn = TestAuthn::with_principal_view(
         state,

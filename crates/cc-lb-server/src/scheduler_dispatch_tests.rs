@@ -1591,6 +1591,7 @@ impl cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsSink for RenewalD
 fn enable_openai_responses_keepalive(fixture: &Fixture) {
     let current = fixture.dynamic_view().load();
     let principal = cc_lb_storage_api::principal::PrincipalRecord {
+        openai_oauth_compat: None,
         id: uuid::Uuid::from_u128(1),
         name: "principal".to_owned(),
         kind: cc_lb_storage_api::principal::PrincipalKind::Machine,

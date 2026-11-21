@@ -251,6 +251,7 @@ pub(crate) mod error_codes {
     pub(crate) const ROUTE_NOT_FOUND: &str = "route_not_found";
     pub(crate) const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
     pub(crate) const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
+    pub(crate) const COMPAT_UNSUPPORTED_PARAMETER: &str = "compat_unsupported_parameter";
     pub(crate) const DRAIN_REJECTED: &str = "drain_rejected";
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
