@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, future::Future, str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
@@ -9,7 +9,7 @@ use cc_lb_storage_api::{
     RequestEventProjections, RequestEventStore, StorageError,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const PRINCIPAL_ID: &str = "principal-a";
@@ -2543,40 +2543,26 @@ async fn purged_session_reconstructs_display_reason_from_turn_case(url: &str) ->
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("cache_keepalive_reads_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
-            .execute(&admin_pool)
-            .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
-        Ok(Self {
-            schema,
-            admin_pool,
-            pool,
-        })
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error);
+            }
+        };
+        Ok(Self { isolated, pool })
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            self.schema
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
 }
 

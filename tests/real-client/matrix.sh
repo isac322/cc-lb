@@ -26,7 +26,9 @@ fi
 
 # Install and verify all 4 client binaries once upfront (in parallel) so
 # concurrent run.sh invocations do not repeat checks or contend on node_modules.
-"$SCRIPT_DIR/install.sh"
+if [ "${REAL_CLIENT_SKIP_INSTALL:-0}" != "1" ]; then
+  "$SCRIPT_DIR/install.sh"
+fi
 
 # Canonical matrix ordering preserved in matrix.txt.
 canonical_cases=(
@@ -43,9 +45,9 @@ canonical_cases=(
 
 # Run longest cases first to minimize tail latency under MAX_JOBS parallelism.
 scheduled_cases=(
+  "senpi custom"
   "senpi anthropic-affinity"
   "senpi anthropic-direct"
-  "senpi custom"
   "opencode anthropic-direct"
   "opencode custom"
   "claude-code anthropic-direct"

@@ -1,10 +1,10 @@
 name: Start native PostgreSQL on /dev/shm
-description: Initialize and start PostgreSQL in RAM (/dev/shm/pgdata), apply migrations to template DB, and export test env vars.
+description: Initialize and start PostgreSQL in RAM (/dev/shm/pgdata), apply migrations to template DBs, and export test env vars.
 
 runs:
   using: composite
   steps:
-    - name: Start native PostgreSQL and seed migrated template database
+    - name: Start native PostgreSQL and seed migrated template databases
       shell: bash
       run: |
         set -euo pipefail
@@ -25,7 +25,7 @@ runs:
 
         "$pg_bin/initdb" -D "$pgdata" -U postgres --auth=trust --encoding=UTF8 --locale=C.UTF-8 --no-sync
         "$pg_bin/pg_ctl" -D "$pgdata" -l /dev/shm/postgres.log \
-          -o "-k /dev/shm -p 5432 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200 -c shared_buffers=256MB -c checkpoint_timeout=1h" \
+          -o "-k /dev/shm -p 5432 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c autovacuum=off -c wal_level=minimal -c max_wal_senders=0 -c archive_mode=off -c jit=off -c bgwriter_lru_maxpages=0 -c work_mem=32MB -c maintenance_work_mem=128MB -c max_wal_size=2GB -c max_connections=300 -c shared_buffers=256MB -c checkpoint_timeout=1h" \
           start
 
         for _ in $(seq 1 60); do
@@ -44,16 +44,28 @@ runs:
 
         app_template_url="postgres://postgres:testpw@127.0.0.1:5432/cc_lb_app_template"
         sqlx migrate run --source crates/cc-lb-storage-postgres/migrations --database-url "$app_template_url"
+        psql -h 127.0.0.1 -p 5432 -U postgres -d cc_lb_app_template -v ON_ERROR_STOP=1 \
+          -c "INSERT INTO meta (key, value) VALUES ('backend_kind', 'postgres') ON CONFLICT (key) DO NOTHING;"
 
         psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
         UPDATE pg_database SET datistemplate = true WHERE datname = 'cc_lb_app_template';
         CREATE DATABASE cc_lb_test TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_0 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_1 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_2 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_3 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_4 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_5 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_6 TEMPLATE cc_lb_app_template;
+        CREATE DATABASE cc_lb_app_template_7 TEMPLATE cc_lb_app_template;
+        UPDATE pg_database SET datistemplate = true WHERE datname LIKE 'cc_lb_app_template_%';
         SQL
 
-        test_url="postgres://postgres:testpw@localhost:5432/cc_lb_test"
+        test_url="postgres://postgres:testpw@127.0.0.1:5432/cc_lb_test"
         {
           echo "CI_POSTGRES_URL=$test_url"
           echo "DATABASE_URL=$test_url"
           echo "DATABASE_URL_TEST=$test_url"
           echo "CC_LB_PG_APP_TEMPLATE=cc_lb_app_template"
+          echo "CC_LB_PG_APP_TEMPLATE_POOL_SIZE=8"
         } >> "$GITHUB_ENV"

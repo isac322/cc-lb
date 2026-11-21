@@ -286,13 +286,17 @@ async function main() {
     pkgArgs.push('--package', pkg);
   }
   const cargoArgs = run.cargo_args ?? [];
+  const extraFeatures = Array.isArray(run.extra_features) ? run.extra_features.filter(Boolean) : [];
+  const featureArgs = extraFeatures.length > 0 ? ['--features', extraFeatures.join(',')] : [];
+  const testThreads = Number.isInteger(part.test_threads) && part.test_threads > 0 ? part.test_threads : 4;
   const nextestArgs = [
     'nextest',
     'run',
     ...pkgArgs,
     ...cargoArgs,
     '--all-features',
-    '--test-threads=4',
+    ...featureArgs,
+    `--test-threads=${testThreads}`,
   ];
   if (run.filter_expr) {
     nextestArgs.push('-E', run.filter_expr);
@@ -338,7 +342,18 @@ async function main() {
 
     let objCount = 0;
     if (part.upload_objects !== false) {
-      const listArgs = ['nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', ...pkgArgs, ...cargoArgs, '--all-features'];
+      const listArgs = [
+        'nextest',
+        'list',
+        '--list-type',
+        'binaries-only',
+        '--message-format',
+        'json',
+        ...pkgArgs,
+        ...cargoArgs,
+        '--all-features',
+        ...featureArgs,
+      ];
       const listStdout = execFileSync('cargo', listArgs, {
         cwd: ROOT,
         env: covEnv,

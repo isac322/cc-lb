@@ -6,18 +6,19 @@
   ],
   "partitions": [
     {
-      "name": "server-integ-1",
+      "name": "server-1",
       "needs_postgres": true,
       "needs_wasm": true,
       "upload_objects": true,
+      "test_threads": 8,
       "runs": [
         {
           "packages": [
             "cc-lb-server"
           ],
-          "cargo_args": [
-            "--test",
-            "integration"
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
           ],
           "nextest_args": [
             "--partition",
@@ -27,18 +28,19 @@
       ]
     },
     {
-      "name": "server-integ-2",
+      "name": "server-2",
       "needs_postgres": true,
       "needs_wasm": true,
       "upload_objects": false,
+      "test_threads": 8,
       "runs": [
         {
           "packages": [
             "cc-lb-server"
           ],
-          "cargo_args": [
-            "--test",
-            "integration"
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
           ],
           "nextest_args": [
             "--partition",
@@ -48,18 +50,20 @@
       ]
     },
     {
-      "name": "server-unit",
+      "name": "storage-pg-conformance",
       "needs_postgres": true,
       "needs_wasm": false,
       "upload_objects": true,
+      "test_threads": 8,
       "runs": [
         {
           "packages": [
-            "cc-lb-server"
+            "cc-lb-storage-postgres",
+            "cc-lb-storage-conformance"
           ],
-          "cargo_args": [
-            "--lib",
-            "--bins"
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
           ]
         }
       ]
@@ -69,6 +73,7 @@
       "needs_postgres": true,
       "needs_wasm": true,
       "upload_objects": true,
+      "test_threads": 6,
       "runs": [
         {
           "packages": [
@@ -77,23 +82,10 @@
             "tests-integration",
             "tests-multi-replica"
           ],
-          "cargo_args": []
-        }
-      ]
-    },
-    {
-      "name": "engine",
-      "needs_postgres": true,
-      "needs_wasm": false,
-      "upload_objects": true,
-      "runs": [
-        {
-          "packages": [
-            "cc-lb-engine",
-            "cc-lb-property-tests"
-          ],
           "cargo_args": [],
-          "filter_expr": "not test(authn_rail_typestate_contracts)"
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
         }
       ]
     },
@@ -102,40 +94,36 @@
       "needs_postgres": true,
       "needs_wasm": false,
       "upload_objects": true,
+      "test_threads": 6,
       "runs": [
         {
           "packages": [
             "cc-lb-admin"
           ],
-          "cargo_args": []
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
+          ]
         }
       ]
     },
     {
-      "name": "storage-pg",
+      "name": "engine",
       "needs_postgres": true,
       "needs_wasm": false,
       "upload_objects": true,
+      "test_threads": 4,
       "runs": [
         {
           "packages": [
-            "cc-lb-storage-postgres"
+            "cc-lb-engine",
+            "cc-lb-property-tests"
           ],
-          "cargo_args": []
-        }
-      ]
-    },
-    {
-      "name": "storage-conformance",
-      "needs_postgres": true,
-      "needs_wasm": false,
-      "upload_objects": true,
-      "runs": [
-        {
-          "packages": [
-            "cc-lb-storage-conformance"
+          "cargo_args": [],
+          "extra_features": [
+            "cc-lb-storage-api/dto-roundtrip"
           ],
-          "cargo_args": []
+          "filter_expr": "not test(authn_rail_typestate_contracts)"
         }
       ]
     },
@@ -144,6 +132,7 @@
       "needs_postgres": false,
       "needs_wasm": true,
       "upload_objects": true,
+      "test_threads": 6,
       "runs": [
         {
           "packages": [

@@ -14,7 +14,6 @@
 //! rebinder gate; handlers and storage run unmodified.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,8 +34,7 @@ use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{AssertSqlSafe, Connection};
+use sqlx::Connection;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -499,8 +497,7 @@ async fn sqlite_stale_principal_if_match_returns_stale_revision() {
 }
 
 struct Pg {
-    url: String,
-    schema: String,
+    isolated: crate::pg_template_helper::IsolatedPg,
     storage: Arc<PostgresStorage>,
 }
 
@@ -509,53 +506,31 @@ async fn postgres() -> Option<Pg> {
         eprintln!("skip: CI_POSTGRES_URL not set");
         return None;
     };
-    let schema = format!("principal_post_commit_{}", Uuid::new_v4().simple());
-    let mut admin = sqlx::PgConnection::connect(&url)
+    let isolated = crate::pg_template_helper::IsolatedPg::create_templated(&url)
         .await
-        .expect("postgres admin connection");
-    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&mut admin)
-        .await
-        .expect("create schema");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(schema_options(&url, &schema))
-        .await
-        .expect("postgres pool");
+        .expect("create isolated postgres database");
+    let pool = isolated.pool(8).await.expect("postgres pool");
     let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await.expect("postgres migrations");
     Some(Pg {
-        url,
-        schema,
+        isolated,
         storage: Arc::new(storage),
     })
-}
-
-fn schema_options(url: &str, schema: &str) -> PgConnectOptions {
-    PgConnectOptions::from_str(url)
-        .expect("postgres url")
-        .options([("search_path", schema)])
 }
 
 impl Pg {
     async fn drop_schema(self) {
         self.storage.pool().close().await;
-        let mut admin = sqlx::PgConnection::connect(&self.url)
+        self.isolated
+            .drop()
             .await
-            .expect("postgres admin connection");
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA {} CASCADE",
-            self.schema
-        )))
-        .execute(&mut admin)
-        .await
-        .expect("drop schema");
+            .expect("drop isolated postgres database");
     }
 
     /// Holds the SHARE lock a `CREATE INDEX` on `audit_log_v1` takes, which
     /// blocks audit inserts while the principal tables stay writable.
     async fn block_audit_inserts(&self) -> sqlx::PgConnection {
-        let mut conn = sqlx::PgConnection::connect_with(&schema_options(&self.url, &self.schema))
+        let mut conn = sqlx::PgConnection::connect_with(&self.isolated.connect_options())
             .await
             .expect("postgres lock connection");
         sqlx::query("BEGIN")
@@ -570,7 +545,7 @@ impl Pg {
     }
 
     async fn wait_until_audit_insert_blocked(&self) {
-        let relation = format!("{}.audit_log_v1", self.schema);
+        let relation = format!("{}.audit_log_v1", self.isolated.schema_name());
         let waiting = async {
             loop {
                 let blocked: bool = sqlx::query_scalar(

@@ -14,7 +14,7 @@ path = "tests/all.rs"
 
 [features]
 default = ["sqlite"]
-sqlite = ["cc-lb-scheduler/sqlite"]
+sqlite = ["cc-lb-scheduler/default", "cc-lb-scheduler/sqlite"]
 postgres = ["cc-lb-scheduler/postgres"]
 
 [dependencies]

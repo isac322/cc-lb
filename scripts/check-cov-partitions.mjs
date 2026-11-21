@@ -98,6 +98,12 @@ export function validatePartitions(config, metadata, gatedPackages) {
     if (!part.name) errors.push('partition is missing a name');
     if (partitionNames.has(part.name)) errors.push(`duplicate partition name '${part.name}'`);
     partitionNames.add(part.name);
+    if (
+      part.test_threads !== undefined &&
+      (!Number.isInteger(part.test_threads) || part.test_threads < 1)
+    ) {
+      errors.push(`partition '${part.name}' has invalid test_threads '${part.test_threads}'`);
+    }
 
     const runs = part.runs ?? [];
     if (runs.length === 0) errors.push(`partition '${part.name}' has no runs`);
@@ -106,6 +112,13 @@ export function validatePartitions(config, metadata, gatedPackages) {
       const pkgs = run.packages ?? [];
       if (pkgs.length === 0) errors.push(`partition '${part.name}' has a run with no packages`);
       const cargoArgs = run.cargo_args ?? [];
+      const extraFeatures = run.extra_features ?? [];
+      if (
+        !Array.isArray(extraFeatures) ||
+        extraFeatures.some((f) => typeof f !== 'string' || f.length === 0)
+      ) {
+        errors.push(`partition '${part.name}' has invalid extra_features`);
+      }
       const shard = parsePartitionShard(run.nextest_args ?? []);
       if (shard?.invalid) {
         errors.push(`partition '${part.name}' has invalid nextest shard '${shard.invalid}'`);
@@ -118,6 +131,7 @@ export function validatePartitions(config, metadata, gatedPackages) {
           total: shard.total,
           packages: [...pkgs].sort(),
           cargoArgs,
+          extraFeatures: Array.isArray(extraFeatures) ? [...extraFeatures].sort() : [],
           filterExpr: run.filter_expr ?? null,
         });
         let group = shardGroups.get(shardKey);

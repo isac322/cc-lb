@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
@@ -7,7 +7,7 @@ use cc_lb_storage_api::{
     RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 fn postgres_url() -> Option<String> {
@@ -208,56 +208,25 @@ async fn append_request_event_leaves_projection_tables_empty_for_proxy_rows(
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("request_event_projections_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        let pool = schema_pool(url, &schema).await?;
-        Ok(Self {
-            schema,
-            admin_pool,
-            pool,
-        })
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        let pool = match isolated.pool(4).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error);
+            }
+        };
+        Ok(Self { isolated, pool })
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-async fn schema_pool(url: &str, schema: &str) -> Result<PgPool> {
-    let options = PgConnectOptions::from_str(url)?.options([("search_path", schema)]);
-    Ok(PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
-        .await?)
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        }),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

@@ -10,6 +10,10 @@ inputs:
     description: Optional newline-separated extra paths to save alongside target-dir.
     required: false
     default: ""
+  cache-paths:
+    description: Canonical multiline path list matching setup-rust-target-cache.outputs.cache-paths.
+    required: false
+    default: ""
   target-cache-hit:
     description: Value of setup-rust-target-cache.outputs.target-cache-hit
     required: true
@@ -42,6 +46,7 @@ runs:
       env:
         TARGET_DIR_INPUT: ${{ inputs.target-dir }}
         EXTRA_PATHS_INPUT: ${{ inputs.extra-cache-paths }}
+        CACHE_PATHS_INPUT: ${{ inputs.cache-paths }}
         KEEP_LIBS: ${{ inputs.keep-workspace-libs }}
       run: |
         set -euo pipefail
@@ -52,6 +57,10 @@ runs:
         if [ -d "$TARGET_DIR_INPUT" ]; then
           node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT" "${prune_flags[@]}"
           node scripts/ws-mtimes.mjs record --out "${TARGET_DIR_INPUT}/.ws-mtimes.json" --extra-dir crates/cc-lb-admin/web/dist
+          if [ -d "crates/cc-lb-admin/web/dist" ]; then
+            rm -rf "${TARGET_DIR_INPUT}/.admin-web-dist"
+            cp -a crates/cc-lb-admin/web/dist "${TARGET_DIR_INPUT}/.admin-web-dist"
+          fi
         fi
         if [ -n "$EXTRA_PATHS_INPUT" ]; then
           while IFS= read -r extra_path; do
@@ -64,16 +73,13 @@ runs:
         fi
         {
           echo "save_paths<<__EOF__"
-          if [ -e "$TARGET_DIR_INPUT" ]; then
+          if [ -n "$CACHE_PATHS_INPUT" ]; then
+            printf '%s\n' "$CACHE_PATHS_INPUT"
+          else
             echo "$TARGET_DIR_INPUT"
-          fi
-          if [ -e "crates/cc-lb-admin/web/dist" ]; then
-            echo "crates/cc-lb-admin/web/dist"
-          fi
-          if [ -n "$EXTRA_PATHS_INPUT" ]; then
-            while IFS= read -r extra_path; do
-              [ -n "$extra_path" ] && [ -e "$extra_path" ] && printf '%s\n' "$extra_path"
-            done <<<"$EXTRA_PATHS_INPUT"
+            if [ -n "$EXTRA_PATHS_INPUT" ]; then
+              printf '%s\n' "$EXTRA_PATHS_INPUT"
+            fi
           fi
           echo "__EOF__"
         } >> "$GITHUB_OUTPUT"

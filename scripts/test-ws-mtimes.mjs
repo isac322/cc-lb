@@ -88,3 +88,44 @@ test('ws-mtimes restores unchanged files and dirs while keeping modified/new ent
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+test('ws-mtimes preserves exact nanosecond timestamps and rejects v1 snapshots', () => {
+  const repo = initRepo();
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'ws-mtimes-ns-'));
+  try {
+    mkdirSync(path.join(repo, 'crates/hack'), { recursive: true });
+    const libPath = path.join(repo, 'crates/hack/lib.rs');
+    const dirPath = path.join(repo, 'crates/hack');
+    writeFileSync(libPath, 'pub fn ok() {}');
+    execFileSync('git', ['add', 'crates/hack'], { cwd: repo });
+
+    const exactNs = '1700000000123456789';
+    execFileSync(
+      'python3',
+      ['-c', 'import os, sys; ns = int(sys.argv[1]); [os.utime(p, ns=(ns, ns)) for p in sys.argv[2:]]', exactNs, libPath, dirPath],
+      { cwd: repo },
+    );
+    const recordedFileNs = statSync(libPath, { bigint: true }).mtimeNs;
+    const recordedDirNs = statSync(dirPath, { bigint: true }).mtimeNs;
+
+    const snap = path.join(scratch, 'mtimes-v2.json');
+    recordWorkspaceMtimes(repo, snap);
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    utimesSync(libPath, nowSec, nowSec);
+    utimesSync(dirPath, nowSec, nowSec);
+
+    const res = restoreWorkspaceMtimes(repo, snap);
+    assert.equal(res.restoredFiles, 1);
+    assert.equal(statSync(libPath, { bigint: true }).mtimeNs, recordedFileNs);
+    assert.equal(statSync(dirPath, { bigint: true }).mtimeNs, recordedDirNs);
+
+    // v1 snapshot safely marks corrupt/incompatible.
+    const v1Snap = path.join(scratch, 'mtimes-v1.json');
+    writeFileSync(v1Snap, JSON.stringify({ version: 1, files: {}, dirs: {} }));
+    assert.equal(restoreWorkspaceMtimes(repo, v1Snap).corrupt, true);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

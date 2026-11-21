@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Records and restores content-verified file and directory mtimes so Cargo keeps
-// unchanged workspace artifacts Fresh across fresh GitHub Actions checkouts.
+// Records and restores content-verified file and directory mtimes with exact
+// nanosecond precision so Cargo keeps unchanged workspace artifacts Fresh across
+// fresh GitHub Actions checkouts.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -9,11 +10,23 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+
+const SNAPSHOT_VERSION = 2;
+
+const PYTHON_SET_MTIMES_NS = `
+import json, os, sys
+if sys.platform == "linux":
+    import resource
+    limit = 256 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+for target_path, ns_str in json.load(sys.stdin):
+    ns = int(ns_str)
+    os.utime(target_path, ns=(ns, ns))
+`;
 
 function hashBuffer(buf) {
   return createHash('sha256').update(buf).digest('hex');
@@ -79,16 +92,37 @@ function computeDirDigests(rootDir, relFiles, fileHashes) {
   }
 
   const dirs = new Map();
-  // Sort shallow-to-deep? Digest depends only on immediate child markers (sorted).
   for (const [relDir, markers] of dirChildren) {
     const absDir = path.join(rootDir, relDir);
     if (!existsSync(absDir)) continue;
-    const st = lstatSync(absDir);
+    const st = lstatSync(absDir, { bigint: true });
     if (!st.isDirectory()) continue;
     const digest = hashBuffer(Buffer.from([...markers].sort().join('\n')));
-    dirs.set(relDir, { digest, mtimeMs: Math.floor(st.mtimeMs) });
+    dirs.set(relDir, { digest, mtimeNs: st.mtimeNs.toString() });
   }
   return dirs;
+}
+
+function applyMtimesNs(utimeOps) {
+  if (utimeOps.length === 0) return;
+  try {
+    execFileSync('python3', ['-c', PYTHON_SET_MTIMES_NS], {
+      input: JSON.stringify(utimeOps),
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['pipe', 'inherit', 'inherit'],
+    });
+    return;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+  for (const [targetPath, nsStr] of utimeOps) {
+    const ns = BigInt(nsStr);
+    const sec = Number(ns / 1_000_000_000n) + Number(ns % 1_000_000_000n) / 1e9;
+    utimesSync(targetPath, sec, sec);
+  }
 }
 
 export function recordWorkspaceMtimes(rootDir, outPath, extraDirs = []) {
@@ -104,11 +138,11 @@ export function recordWorkspaceMtimes(rootDir, outPath, extraDirs = []) {
   for (const relFile of [...relFiles].sort()) {
     const full = path.join(resolvedRoot, relFile);
     if (!existsSync(full)) continue;
-    const st = lstatSync(full);
+    const st = lstatSync(full, { bigint: true });
     if (!st.isFile() || st.isSymbolicLink()) continue;
     const sha256 = hashFile(full);
     fileHashes.set(relFile, sha256);
-    files[relFile] = { sha256, mtimeMs: Math.floor(st.mtimeMs) };
+    files[relFile] = { sha256, mtimeNs: st.mtimeNs.toString() };
   }
 
   const dirMap = computeDirDigests(resolvedRoot, new Set(fileHashes.keys()), fileHashes);
@@ -118,7 +152,7 @@ export function recordWorkspaceMtimes(rootDir, outPath, extraDirs = []) {
   }
 
   const snapshot = {
-    version: 1,
+    version: SNAPSHOT_VERSION,
     extraDirs: relExtraDirs,
     files,
     dirs,
@@ -138,16 +172,22 @@ export function restoreWorkspaceMtimes(rootDir, inPath) {
   } catch {
     return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
   }
-  if (!snapshot || snapshot.version !== 1 || typeof snapshot.files !== 'object') {
+  if (!snapshot || snapshot.version !== SNAPSHOT_VERSION || typeof snapshot.files !== 'object') {
     return { restoredFiles: 0, skippedFiles: 0, restoredDirs: 0, skippedDirs: 0, corrupt: true };
   }
 
   const resolvedRoot = path.resolve(rootDir);
   const recordedFiles = snapshot.files ?? {};
+  const hashedInPass1 = new Map();
+  const utimeOps = [];
   let restoredFiles = 0;
   let skippedFiles = 0;
 
   for (const [relFile, meta] of Object.entries(recordedFiles)) {
+    if (!meta || typeof meta.mtimeNs !== 'string' || !/^\d+$/.test(meta.mtimeNs)) {
+      skippedFiles += 1;
+      continue;
+    }
     const full = path.join(resolvedRoot, relFile);
     if (!existsSync(full)) {
       skippedFiles += 1;
@@ -158,35 +198,37 @@ export function restoreWorkspaceMtimes(rootDir, inPath) {
       skippedFiles += 1;
       continue;
     }
-    if (hashFile(full) !== meta.sha256) {
+    const sha256 = hashFile(full);
+    hashedInPass1.set(relFile, sha256);
+    if (sha256 !== meta.sha256) {
       skippedFiles += 1;
       continue;
     }
-    const sec = Math.floor(meta.mtimeMs) / 1000;
-    utimesSync(full, sec, sec);
+    utimeOps.push([full, meta.mtimeNs]);
     restoredFiles += 1;
   }
 
-  // Re-scan current non-ignored + extraDirs files to detect newly added or deleted files
-  // inside any tracked directory (e.g. a new SQL migration added in a PR).
+  // Re-scan current non-ignored + extraDirs files using cached Pass 1 hashes
+  // to avoid reading unchanged files twice while detecting added/deleted entries.
   const currentRelFiles = listWorkspaceRelFiles(resolvedRoot, snapshot.extraDirs ?? []);
   const currentHashes = new Map();
   for (const relFile of currentRelFiles) {
+    const prevHash = hashedInPass1.get(relFile);
+    if (prevHash !== undefined) {
+      currentHashes.set(relFile, prevHash);
+      continue;
+    }
     const full = path.join(resolvedRoot, relFile);
     if (!existsSync(full)) continue;
-    const st = statSync(full, { throwIfNoEntry: false });
-    if (!st || !st.isFile()) continue;
-    const recorded = recordedFiles[relFile];
-    if (recorded && hashFile(full) === recorded.sha256) {
-      currentHashes.set(relFile, recorded.sha256);
-    } else {
-      currentHashes.set(relFile, hashFile(full));
-    }
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.isSymbolicLink()) continue;
+    currentHashes.set(relFile, hashFile(full));
   }
   const currentDirDigests = computeDirDigests(resolvedRoot, new Set(currentHashes.keys()), currentHashes);
 
   const recordedDirs = snapshot.dirs ?? {};
-  // Restore bottom-up (deepest path first) so child touches cannot reset parent dir mtimes.
+  // Restore bottom-up (deepest path first) after all files so child touches
+  // cannot reset parent dir mtimes.
   const sortedDirs = Object.keys(recordedDirs).sort((a, b) => {
     const depthDiff = b.split('/').length - a.split('/').length;
     return depthDiff !== 0 ? depthDiff : a.localeCompare(b);
@@ -198,14 +240,22 @@ export function restoreWorkspaceMtimes(rootDir, inPath) {
     const rec = recordedDirs[relDir];
     const cur = currentDirDigests.get(relDir);
     const fullDir = path.join(resolvedRoot, relDir);
-    if (!cur || cur.digest !== rec.digest || !existsSync(fullDir)) {
+    if (
+      !rec ||
+      typeof rec.mtimeNs !== 'string' ||
+      !/^\d+$/.test(rec.mtimeNs) ||
+      !cur ||
+      cur.digest !== rec.digest ||
+      !existsSync(fullDir)
+    ) {
       skippedDirs += 1;
       continue;
     }
-    const sec = Math.floor(rec.mtimeMs) / 1000;
-    utimesSync(fullDir, sec, sec);
+    utimeOps.push([fullDir, rec.mtimeNs]);
     restoredDirs += 1;
   }
+
+  applyMtimesNs(utimeOps);
 
   return { restoredFiles, skippedFiles, restoredDirs, skippedDirs };
 }

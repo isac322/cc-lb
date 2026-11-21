@@ -62,7 +62,7 @@ function isKeepableWorkspaceLib(entryName) {
     entryName.endsWith('.so') ||
     entryName.endsWith('.dylib') ||
     entryName.endsWith('.a') ||
-    (entryName.startsWith('lib') && entryName.endsWith('.d'))
+    entryName.endsWith('.d')
   );
 }
 

@@ -501,19 +501,28 @@ fn png_pair() -> [String; 2] {
 async fn encoding_contract(provider: Provider) {
     let harness = Harness::start(provider).await;
     let control = harness.key("healthy-text", INPUT_CAP).await;
+    let compact = harness.key("compact", INPUT_CAP).await;
+    let uncompressed = harness.key("uncompressed", INPUT_CAP).await;
+
     harness
         .send(&control, &provider.text_request("hello"), 200)
         .await;
-    harness.assert_settled_once(&control).await;
     assert_eq!(harness.state.request_count(), 1, "healthy text dispatch");
-    for (encoding, encoded) in ["compact", "uncompressed"].into_iter().zip(png_pair()) {
-        let key = harness.key(encoding, INPUT_CAP).await;
+
+    let [compact_encoded, uncompressed_encoded] = png_pair();
+    for (key, encoded) in [
+        (&compact, compact_encoded),
+        (&uncompressed, uncompressed_encoded),
+    ] {
         let request = provider.image_request(&encoded);
         let before = harness.state.request_count();
-        harness.send(&key, &request, 200).await;
+        harness.send(key, &request, 200).await;
         harness.state.assert_forwarded_image(before, &request);
-        harness.assert_settled_once(&key).await;
     }
+
+    harness.assert_settled_once(&control).await;
+    harness.assert_settled_once(&compact).await;
+    harness.assert_settled_once(&uncompressed).await;
 }
 
 #[tokio::test]
@@ -526,53 +535,67 @@ async fn gemini_generate_content_admits_identical_rgb_pixels_independent_of_png_
     encoding_contract(Provider::Gemini).await;
 }
 
-#[tokio::test]
-async fn native_images_preserve_exact_four_thousand_input_floor() {
+async fn four_thousand_input_floor_contract(provider: Provider) {
     let compact = &png_pair()[0];
-    for provider in [Provider::OpenAi, Provider::Gemini] {
-        let harness = Harness::start(provider).await;
-        let rejected = harness.key("floor-3999", 3_999).await;
-        harness
-            .send(&rejected, &provider.image_request(compact), 429)
-            .await;
-        assert_eq!(
-            harness.state.request_count(),
-            0,
-            "below-floor rejection is pre-dispatch"
-        );
-        let admitted = harness.key("floor-4000", 4_000).await;
-        harness.hydrate_empty_key(&admitted).await;
-        harness
-            .send(&admitted, &provider.image_request(compact), 200)
-            .await;
-        assert_eq!(
-            harness.state.request_count(),
-            1,
-            "exact floor dispatches once"
-        );
-        harness.assert_settled_once(&admitted).await;
-    }
+    let harness = Harness::start(provider).await;
+    let rejected = harness.key("floor-3999", 3_999).await;
+    harness
+        .send(&rejected, &provider.image_request(compact), 429)
+        .await;
+    assert_eq!(
+        harness.state.request_count(),
+        0,
+        "below-floor rejection is pre-dispatch"
+    );
+    let admitted = harness.key("floor-4000", 4_000).await;
+    harness.hydrate_empty_key(&admitted).await;
+    harness
+        .send(&admitted, &provider.image_request(compact), 200)
+        .await;
+    assert_eq!(
+        harness.state.request_count(),
+        1,
+        "exact floor dispatches once"
+    );
+    harness.assert_settled_once(&admitted).await;
 }
 
 #[tokio::test]
-async fn multiple_unavailable_pixel_references_exceed_cap_before_provider_dispatch() {
-    for provider in [Provider::OpenAi, Provider::Gemini] {
-        let harness = Harness::start(provider).await;
-        let key = harness.key("reference-images", INPUT_CAP).await;
-        harness.hydrate_empty_key(&key).await;
-        harness.send(&key, &provider.reference_request(), 429).await;
-        assert_eq!(
-            harness.state.request_count(),
-            0,
-            "reference images must accumulate without provider calls"
-        );
-        // A rejected image request must not poison the key's healthy text path.
-        harness
-            .send(&key, &provider.text_request("hello"), 200)
-            .await;
-        assert_eq!(harness.state.request_count(), 1);
-        harness.assert_settled_once(&key).await;
-    }
+async fn openai_native_images_preserve_exact_four_thousand_input_floor() {
+    four_thousand_input_floor_contract(Provider::OpenAi).await;
+}
+
+#[tokio::test]
+async fn gemini_native_images_preserve_exact_four_thousand_input_floor() {
+    four_thousand_input_floor_contract(Provider::Gemini).await;
+}
+
+async fn unavailable_pixel_references_contract(provider: Provider) {
+    let harness = Harness::start(provider).await;
+    let key = harness.key("reference-images", INPUT_CAP).await;
+    harness.hydrate_empty_key(&key).await;
+    harness.send(&key, &provider.reference_request(), 429).await;
+    assert_eq!(
+        harness.state.request_count(),
+        0,
+        "reference images must accumulate without provider calls"
+    );
+    // A rejected image request must not poison the key's healthy text path.
+    harness
+        .send(&key, &provider.text_request("hello"), 200)
+        .await;
+    assert_eq!(harness.state.request_count(), 1);
+    harness.assert_settled_once(&key).await;
+}
+
+#[tokio::test]
+async fn openai_multiple_unavailable_pixel_references_exceed_cap_before_provider_dispatch() {
+    unavailable_pixel_references_contract(Provider::OpenAi).await;
+}
+
+#[tokio::test]
+async fn gemini_multiple_unavailable_pixel_references_exceed_cap_before_provider_dispatch() {
+    unavailable_pixel_references_contract(Provider::Gemini).await;
 }
 
 #[tokio::test]

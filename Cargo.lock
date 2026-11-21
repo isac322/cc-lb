@@ -1299,6 +1299,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-upstream",
  "cc-lb-vertex-auth",
+ "cc-lb-workspace-hack",
  "http",
  "serde_json",
  "sonic-rs",
@@ -1467,6 +1468,7 @@ dependencies = [
  "base64 0.23.1",
  "cc-lb-clock",
  "cc-lb-domain",
+ "cc-lb-workspace-hack",
  "chrono",
  "http",
  "metrics",
@@ -1483,6 +1485,7 @@ dependencies = [
 name = "cc-lb-workspace-hack"
 version = "2.2.1"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "apalis",
  "apalis-core",
@@ -1493,6 +1496,7 @@ dependencies = [
  "blake3",
  "bstr",
  "bumpalo",
+ "bytes",
  "cc",
  "chrono",
  "constant_time_eq",
@@ -1518,6 +1522,7 @@ dependencies = [
  "log",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "mime_guess",
  "num-traits",
  "once_cell",
  "opentelemetry",
@@ -1548,6 +1553,7 @@ dependencies = [
  "smallvec",
  "sonic-rs",
  "sqlx",
+ "subtle",
  "syn 2.0.119",
  "syn 3.0.9",
  "sync_wrapper",

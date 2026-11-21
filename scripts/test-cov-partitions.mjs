@@ -123,6 +123,52 @@ test('validatePartitions rejects missing target or duplicate target coverage', (
   assert.ok(err2.some((e) => e.includes('pkg-a:lib') && e.includes('multiple runs')));
 });
 
+test('validatePartitions validates extra_features and test_threads', () => {
+  const valid = {
+    excluded: ['pkg-ex'],
+    partitions: [
+      {
+        name: 'p1',
+        test_threads: 8,
+        runs: [{ packages: ['pkg-a', 'pkg-b'], cargo_args: [], extra_features: ['pkg-b/feat'] }],
+      },
+    ],
+  };
+  assert.deepEqual(validatePartitions(valid, META, new Set(['pkg-a', 'pkg-b'])), []);
+
+  const mismatchedShards = {
+    excluded: ['pkg-ex'],
+    partitions: [
+      {
+        name: 'p1-s1',
+        upload_objects: true,
+        runs: [
+          {
+            packages: ['pkg-a'],
+            cargo_args: [],
+            extra_features: ['pkg-a/dto-roundtrip'],
+            nextest_args: ['--partition', 'hash:1/2'],
+          },
+        ],
+      },
+      {
+        name: 'p1-s2',
+        upload_objects: false,
+        runs: [{ packages: ['pkg-a'], cargo_args: [], nextest_args: ['--partition', 'hash:2/2'] }],
+      },
+      { name: 'p2', runs: [{ packages: ['pkg-b'], cargo_args: [] }] },
+    ],
+  };
+  const errMismatch = validatePartitions(mismatchedShards, META, new Set(['pkg-a']));
+  assert.ok(errMismatch.some((e) => e.includes('missing shard hash:2/2')));
+
+  const badThreads = {
+    excluded: ['pkg-ex'],
+    partitions: [{ name: 'p1', test_threads: 0, runs: [{ packages: ['pkg-a', 'pkg-b'], cargo_args: [] }] }],
+  };
+  assert.ok(validatePartitions(badThreads, META, new Set(['pkg-a'])).some((e) => e.includes('invalid test_threads')));
+});
+
 test('extractGatedPackages parses scripts/coverage-gate.sh format', () => {
   const gated = extractGatedPackages('set("cc-lb-engine", 60); set("cc-lb-server", 60)');
   assert.deepEqual([...gated].sort(), ['cc-lb-engine', 'cc-lb-server']);

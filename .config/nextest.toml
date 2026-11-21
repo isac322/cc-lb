@@ -7,6 +7,9 @@ max-threads = 1
 [test-groups.pg-price-catalog]
 max-threads = 1
 
+[test-groups.pg-heavy-xmin]
+max-threads = 1
+
 [[profile.default.overrides]]
 filter = 'test(authn_rail_typestate_contracts)'
 threads-required = 2
@@ -35,6 +38,11 @@ filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_po
 priority = 90
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/crash_recovery::|request_event_filter_index_plans::|usage_rollup_pricing_completeness_migration::|overview_error_attribution_migration::/)'
-threads-required = 4
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/overview_error_attribution_migration::|usage_rollup_pricing_completeness_migration::/)'
+priority = 95
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/crash_recovery::|request_event_filter_index_plans::/)'
+test-group = 'pg-heavy-xmin'
+threads-required = 2
 priority = 100

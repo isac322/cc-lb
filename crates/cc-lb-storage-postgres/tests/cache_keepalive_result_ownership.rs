@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,10 +16,7 @@ use cc_lb_storage_api::{
     cache_keepalive_job_key,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -686,8 +682,7 @@ where
 
 #[derive(Clone)]
 struct TestFixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: Arc<tokio::sync::Mutex<Option<crate::pg_test_support::IsolatedPg>>>,
     a: PostgresStorage,
     b: PostgresStorage,
     gate: Arc<Gate>,
@@ -695,15 +690,8 @@ struct TestFixture {
 
 impl TestFixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("cache_keepalive_result_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        let options = isolated.connect_options();
         let b_pool = PgPoolOptions::new()
             .max_connections(4)
             .connect_with(options.clone())
@@ -737,8 +725,7 @@ impl TestFixture {
             .await?;
         let a = PostgresStorage::new(a_pool, Arc::new(SystemClock));
         Ok(Self {
-            schema,
-            admin_pool,
+            isolated: Arc::new(tokio::sync::Mutex::new(Some(isolated))),
             a,
             b,
             gate,
@@ -748,13 +735,9 @@ impl TestFixture {
     async fn drop_schema(self) -> Result<()> {
         self.a.pool().close().await;
         self.b.pool().close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
+        if let Some(isolated) = self.isolated.lock().await.take() {
+            isolated.drop().await?;
+        }
         Ok(())
     }
 }
@@ -906,13 +889,6 @@ fn assert_replacement_record(
     );
     ensure!(record.encrypted_payload == expected_payload);
     Ok(())
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(identifier.chars().all(|character| {
-        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-    }));
-    format!("\"{identifier}\"")
 }
 
 async fn replace_deployed_legacy_request(

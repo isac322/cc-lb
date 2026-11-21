@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+aho-corasick = { version = "1.1.5", features = ["perf-literal", "std"] }
 anyhow = { version = "1.0.104", features = ["std"] }
 apalis = { version = "1.0.0", default-features = false, features = ["catch-panic", "limit", "prometheus", "timeout"] }
 apalis-core = { version = "1.0.0", features = ["sleep"] }
@@ -17,6 +18,7 @@ base64_22 = { package = "base64", version = "0.22.1", features = ["alloc", "std"
 blake3 = { version = "1.8.7", features = ["std"] }
 bstr = { version = "1.13.1", features = ["alloc", "std", "unicode"] }
 bumpalo = { version = "3.20.3", features = ["allocator-api2"] }
+bytes = { version = "1.12.1", features = ["serde", "std"] }
 chrono = { version = "0.4.45", features = ["clock", "iana-time-zone", "now", "serde", "std", "wasmbind", "winapi"] }
 constant_time_eq = { version = "0.4.2", features = ["std"] }
 crossbeam-epoch = { version = "0.9.21", features = ["alloc", "std"] }
@@ -41,11 +43,13 @@ libsqlite3-sys = { version = "0.37.0", features = ["bundled", "unlock_notify"] }
 log = { version = "0.4.35", features = ["std"] }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
 metrics-util = { version = "0.20.4", features = ["debugging", "layer-filter", "layer-router", "layers", "recency", "registry", "storage"] }
+mime_guess = { version = "2.0.5", features = ["rev-mappings"] }
 num-traits = { version = "0.2.19", features = ["std"] }
 once_cell = { version = "1.21.4", features = ["alloc", "critical-section", "portable-atomic", "race", "std"] }
 opentelemetry = "0.33.1"
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "0.33.1", features = ["trace", "testing"] }
+portable-atomic = { version = "1.15.0", features = ["fallback"] }
 proc-macro2 = { version = "1.0.107", features = ["proc-macro"] }
 proptest = "1.12.0"
 quote = { version = "1.0.47", features = ["proc-macro"] }
@@ -70,6 +74,7 @@ simdutf8 = { version = "0.1.5", features = ["aarch64_neon", "public_imp", "std"]
 smallvec = { version = "1.16.4", default-features = false, features = ["const_generics", "const_new", "serde", "union"] }
 sonic-rs = "0.5.10"
 sqlx = { version = "0.9.0", features = ["any", "chrono", "derive", "json", "macros", "migrate", "postgres", "runtime-tokio", "sqlite", "sqlx-toml", "tls-rustls", "tls-rustls-ring", "tls-rustls-ring-webpki", "uuid"] }
+subtle = { version = "2.6.1", features = ["i128", "std"] }
 syn_3 = { package = "syn", version = "3.0.9", features = ["clone-impls", "derive", "extra-traits", "fold", "full", "parsing", "printing", "proc-macro", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", features = ["futures", "futures-core"] }
 tokio = { version = "1.54.1", features = ["bytes", "fs", "io-util", "libc", "macros", "mio", "net", "process", "rt", "rt-multi-thread", "signal", "signal-hook-registry", "socket2", "sync", "test-util", "time", "tokio-macros"] }
@@ -82,12 +87,13 @@ trybuild = "1.0.122"
 ulid = { version = "3.0.0", features = ["serde", "std", "uuid"] }
 uuid = { version = "1.29.0", features = ["rng", "serde", "sha1", "std", "v4", "v5", "v7"] }
 wasmtime = { version = "50.0.2", default-features = false, features = ["anyhow", "wat", "cranelift", "pooling-allocator", "threads", "gc", "gc-null", "component-model", "coredump"] }
-portable-atomic = { version = "1.15.0", features = ["fallback"] }
 
 [build-dependencies]
 cc = { version = "1.10.0", features = ["parallel"] }
+digest_11 = { package = "digest", version = "0.11.3", features = ["alloc", "block-api", "mac", "oid"] }
 proc-macro2 = { version = "1.0.107", features = ["proc-macro"] }
 quote = { version = "1.0.47", features = ["proc-macro"] }
+sha2_11 = { package = "sha2", version = "0.11.1", features = ["alloc", "oid"] }
 syn = { version = "2.0.119", features = ["clone-impls", "derive", "extra-traits", "full", "parsing", "printing", "proc-macro", "visit-mut"] }
 
 [lints.rust]

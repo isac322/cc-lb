@@ -52,6 +52,17 @@ export function buildIgnoreFilenameRegex(rootDir, cargoHome = '', rustupHome = '
 }
 
 function resolveLlvmTools() {
+  const resolveExplicit = (envName) => {
+    const candidate = process.env[envName];
+    if (candidate && existsSync(candidate)) return candidate;
+    return null;
+  };
+  const envProfdata = resolveExplicit('LLVM_PROFDATA');
+  const envCov = resolveExplicit('LLVM_COV');
+  if (envProfdata && envCov) {
+    return { profdata: envProfdata, cov: envCov };
+  }
+
   const sysroot = execFileSync('rustc', ['--print', 'sysroot'], { cwd: ROOT, encoding: 'utf8' }).trim();
   const vv = execFileSync('rustc', ['-vV'], { cwd: ROOT, encoding: 'utf8' });
   const hostMatch = /^host:\s*(\S+)/m.exec(vv);
@@ -205,7 +216,7 @@ async function main() {
 
     const absOut = path.resolve(outLcov);
     mkdirSync(path.dirname(absOut), { recursive: true });
-    const mergedProfdata = path.join(path.dirname(absOut), 'merged.profdata');
+    const mergedProfdata = path.join(extractRoot, 'merged.profdata');
     const profListFile = path.join(extractRoot, 'profdata-list.txt');
     writeFileSync(profListFile, `${profdataFiles.join('\n')}\n`, 'utf8');
     execFileSync(tools.profdata, ['merge', '-sparse', '-f', profListFile, '-o', mergedProfdata], {
@@ -217,7 +228,13 @@ async function main() {
     const rustupHome = process.env.RUSTUP_HOME || path.join(os.homedir(), '.rustup');
     const ignoreRegex = buildIgnoreFilenameRegex(ROOT, cargoHome, rustupHome);
 
-    const covArgs = ['export', '-format=lcov', `-instr-profile=${mergedProfdata}`, `-ignore-filename-regex=${ignoreRegex}`];
+    const covArgs = [
+      'export',
+      '-format=lcov',
+      '-num-threads=4',
+      `-instr-profile=${mergedProfdata}`,
+      `-ignore-filename-regex=${ignoreRegex}`,
+    ];
     for (const obj of objectFiles) {
       covArgs.push('-object', obj);
     }

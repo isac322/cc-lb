@@ -3,7 +3,6 @@
 //! queued inside it too. A record decode or notification failure therefore
 //! rolls the mutation back instead of leaving a committed change plus an error.
 
-use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -547,33 +546,30 @@ fn principal_create(name: &str) -> PrincipalCreate {
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
     options: PgConnectOptions,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("admin_commit_boundary_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
         // `pg_catalog` follows the test schema so a schema-local function can
         // deterministically shadow `pg_notify` for the rollback case.
-        let options = PgConnectOptions::from_str(url)?
-            .options([("search_path", format!("{schema},pg_catalog"))]);
-        let pool = PgPoolOptions::new()
+        let options = isolated.connect_options_with_pg_catalog();
+        let pool = match PgPoolOptions::new()
             .max_connections(4)
             .connect_with(options.clone())
-            .await?;
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
         Ok(Self {
-            schema,
-            admin_pool,
+            isolated,
             pool,
             options,
         })
@@ -589,25 +585,6 @@ impl Fixture {
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

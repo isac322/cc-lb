@@ -113,14 +113,6 @@ impl Transport {
     }
 }
 
-const CONTRACTS: [(Provider, Transport); 5] = [
-    (Provider::OpenAi, Transport::Json),
-    (Provider::OpenAi, Transport::Sse),
-    (Provider::OpenAi, Transport::WebSocket),
-    (Provider::Gemini, Transport::Json),
-    (Provider::Gemini, Transport::Sse),
-];
-
 #[derive(Clone)]
 struct FixtureState {
     provider: Provider,
@@ -684,136 +676,202 @@ async fn gemini_generate_content_sse_cached_input_cost_contract() {
     known_rate_contract(Provider::Gemini, Transport::Sse).await;
 }
 
-#[tokio::test]
-async fn missing_native_cache_rate_keeps_projection_unknown_and_settles_admitted_liability() {
-    for (provider, transport) in CONTRACTS {
-        let harness = Harness::start(provider, None, 1_000_000_000).await;
+async fn missing_cache_rate_contract(provider: Provider, transport: Transport) {
+    let harness = Harness::start(provider, None, 1_000_000_000).await;
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "cached")
+            .await,
+        200
+    );
+    let bucket = harness.bucket(1).await;
+    assert_eq!(
+        bucket.get::<i64, _>("cost_usd_micros"),
+        ADMITTED_ESTIMATE,
+        "unknown actual must finalize the admitted estimate, not zero or ordinary-only cost: {provider:?}/{transport:?}"
+    );
+    assert_eq!(bucket.get::<i64, _>("input_tokens"), 1_000);
+    assert_eq!(bucket.get::<i64, _>("output_tokens"), 1);
+    let event = harness.event(transport, 1).await;
+    assert_usage(&event, transport, 1_000, 20_000);
+    for column in [
+        "list_cost_usd_micros",
+        "list_cost_input_micros",
+        "list_cost_output_micros",
+        "list_cost_cache_read_micros",
+        "list_cost_cache_write_micros",
+        "list_cost_cache_write_30m_micros",
+        "list_cost_cache_write_12h_micros",
+    ] {
         assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "cached")
-                .await,
-            200
+            event.get::<Option<i64>, _>(column),
+            None,
+            "unknown projection must not invent {column}"
         );
-        let bucket = harness.bucket(1).await;
-        assert_eq!(
-            bucket.get::<i64, _>("cost_usd_micros"),
-            ADMITTED_ESTIMATE,
-            "unknown actual must finalize the admitted estimate, not zero or ordinary-only cost: {provider:?}/{transport:?}"
-        );
-        assert_eq!(bucket.get::<i64, _>("input_tokens"), 1_000);
-        assert_eq!(bucket.get::<i64, _>("output_tokens"), 1);
-        let event = harness.event(transport, 1).await;
-        assert_usage(&event, transport, 1_000, 20_000);
-        for column in [
-            "list_cost_usd_micros",
-            "list_cost_input_micros",
-            "list_cost_output_micros",
-            "list_cost_cache_read_micros",
-            "list_cost_cache_write_micros",
-            "list_cost_cache_write_30m_micros",
-            "list_cost_cache_write_12h_micros",
-        ] {
-            assert_eq!(
-                event.get::<Option<i64>, _>(column),
-                None,
-                "unknown projection must not invent {column}"
-            );
-        }
-        // No cached usage needs no cache rate. Concurrency=1 also proves the
-        // unknown-priced request finalized instead of holding its reservation open.
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "uncached")
-                .await,
-            200
-        );
-        let uncached = harness.event(transport, 2).await;
-        assert_usage(&uncached, transport, 21_000, 0);
-        assert_cost(&uncached, 42_000, 0, 42_010);
-        let bucket = harness.bucket(2).await;
-        assert_eq!(
-            bucket.get::<i64, _>("cost_usd_micros"),
-            ADMITTED_ESTIMATE + 42_010
-        );
-        assert_eq!(bucket.get::<i64, _>("input_tokens"), 22_000);
-        assert_eq!(bucket.get::<i64, _>("output_tokens"), 2);
     }
+    // No cached usage needs no cache rate. Concurrency=1 also proves the
+    // unknown-priced request finalized instead of holding its reservation open.
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "uncached")
+            .await,
+        200
+    );
+    let uncached = harness.event(transport, 2).await;
+    assert_usage(&uncached, transport, 21_000, 0);
+    assert_cost(&uncached, 42_000, 0, 42_010);
+    let bucket = harness.bucket(2).await;
+    assert_eq!(
+        bucket.get::<i64, _>("cost_usd_micros"),
+        ADMITTED_ESTIMATE + 42_010
+    );
+    assert_eq!(bucket.get::<i64, _>("input_tokens"), 22_000);
+    assert_eq!(bucket.get::<i64, _>("output_tokens"), 2);
 }
 
 #[tokio::test]
-async fn explicit_zero_native_cache_rate_is_known_not_missing() {
-    for (provider, transport) in CONTRACTS {
-        let harness = Harness::start(provider, Some(0.0), 1_000_000_000).await;
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "cached")
-                .await,
-            200
-        );
-        let cached = harness.event(transport, 1).await;
-        assert_usage(&cached, transport, 1_000, 20_000);
-        assert_cost(&cached, 2_000, 0, 2_010);
-        assert_eq!(
-            harness.bucket(1).await.get::<i64, _>("cost_usd_micros"),
-            2_010
-        );
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "uncached")
-                .await,
-            200
-        );
-        assert_cost(&harness.event(transport, 2).await, 42_000, 0, 42_010);
-        assert_eq!(
-            harness.bucket(2).await.get::<i64, _>("cost_usd_micros"),
-            44_020
-        );
-    }
+async fn openai_responses_json_missing_native_cache_rate_keeps_projection_unknown() {
+    missing_cache_rate_contract(Provider::OpenAi, Transport::Json).await;
 }
 
 #[tokio::test]
-async fn corrected_native_cache_settlement_prevents_near_cap_followup_admission() {
-    for (provider, transport) in CONTRACTS {
-        // Initial 8,010 fits even the 10,300 cold-start allowance. After hydration,
-        // a 100,000-micro one-token probe fits with the buggy 2,010 settlement
-        // (102,010 <= 103,000), but not the corrected 4,010 (104,010 > 103,000).
-        let harness = Harness::start(provider, Some(0.0000001), 103_000).await;
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "cached")
-                .await,
-            200
-        );
-        let bucket = harness.bucket(1).await;
-        assert_eq!(bucket.get::<i64, _>("cost_usd_micros"), 4_010);
-        harness.next_writer_flush().await;
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.probe_model(), "probe")
-                .await,
-            429,
-            "corrected settled cost must govern the next admission: {provider:?}/{transport:?}"
-        );
-        assert_eq!(
-            harness.fixture.state.request_count(),
-            1,
-            "rejected budget probe must never reach the provider"
-        );
-        // The rejected probe must not strand a live reservation or block a
-        // normal valid cache hit whose admission estimate is only 8,010.
-        assert_eq!(
-            harness
-                .send(provider, transport, provider.model(), "cached")
-                .await,
-            200
-        );
-        let allowed = harness.event(transport, 2).await;
-        assert_usage(&allowed, transport, 1_000, 20_000);
-        assert_cost(&allowed, 2_000, 2_000, 4_010);
-        assert_eq!(
-            harness.bucket(2).await.get::<i64, _>("cost_usd_micros"),
-            8_020
-        );
-        assert_eq!(harness.fixture.state.request_count(), 2);
-    }
+async fn openai_responses_sse_missing_native_cache_rate_keeps_projection_unknown() {
+    missing_cache_rate_contract(Provider::OpenAi, Transport::Sse).await;
+}
+
+#[tokio::test]
+async fn openai_responses_websocket_missing_native_cache_rate_keeps_projection_unknown() {
+    missing_cache_rate_contract(Provider::OpenAi, Transport::WebSocket).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_json_missing_native_cache_rate_keeps_projection_unknown() {
+    missing_cache_rate_contract(Provider::Gemini, Transport::Json).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_sse_missing_native_cache_rate_keeps_projection_unknown() {
+    missing_cache_rate_contract(Provider::Gemini, Transport::Sse).await;
+}
+
+async fn explicit_zero_cache_rate_contract(provider: Provider, transport: Transport) {
+    let harness = Harness::start(provider, Some(0.0), 1_000_000_000).await;
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "cached")
+            .await,
+        200
+    );
+    let cached = harness.event(transport, 1).await;
+    assert_usage(&cached, transport, 1_000, 20_000);
+    assert_cost(&cached, 2_000, 0, 2_010);
+    assert_eq!(
+        harness.bucket(1).await.get::<i64, _>("cost_usd_micros"),
+        2_010
+    );
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "uncached")
+            .await,
+        200
+    );
+    assert_cost(&harness.event(transport, 2).await, 42_000, 0, 42_010);
+    assert_eq!(
+        harness.bucket(2).await.get::<i64, _>("cost_usd_micros"),
+        44_020
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_json_explicit_zero_native_cache_rate_is_known() {
+    explicit_zero_cache_rate_contract(Provider::OpenAi, Transport::Json).await;
+}
+
+#[tokio::test]
+async fn openai_responses_sse_explicit_zero_native_cache_rate_is_known() {
+    explicit_zero_cache_rate_contract(Provider::OpenAi, Transport::Sse).await;
+}
+
+#[tokio::test]
+async fn openai_responses_websocket_explicit_zero_native_cache_rate_is_known() {
+    explicit_zero_cache_rate_contract(Provider::OpenAi, Transport::WebSocket).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_json_explicit_zero_native_cache_rate_is_known() {
+    explicit_zero_cache_rate_contract(Provider::Gemini, Transport::Json).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_sse_explicit_zero_native_cache_rate_is_known() {
+    explicit_zero_cache_rate_contract(Provider::Gemini, Transport::Sse).await;
+}
+
+async fn corrected_settlement_contract(provider: Provider, transport: Transport) {
+    // Initial 8,010 fits even the 10,300 cold-start allowance. After hydration,
+    // a 100,000-micro one-token probe fits with the buggy 2,010 settlement
+    // (102,010 <= 103,000), but not the corrected 4,010 (104,010 > 103,000).
+    let harness = Harness::start(provider, Some(0.0000001), 103_000).await;
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "cached")
+            .await,
+        200
+    );
+    let bucket = harness.bucket(1).await;
+    assert_eq!(bucket.get::<i64, _>("cost_usd_micros"), 4_010);
+    harness.next_writer_flush().await;
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.probe_model(), "probe")
+            .await,
+        429,
+        "corrected settled cost must govern the next admission: {provider:?}/{transport:?}"
+    );
+    assert_eq!(
+        harness.fixture.state.request_count(),
+        1,
+        "rejected budget probe must never reach the provider"
+    );
+    // The rejected probe must not strand a live reservation or block a
+    // normal valid cache hit whose admission estimate is only 8,010.
+    assert_eq!(
+        harness
+            .send(provider, transport, provider.model(), "cached")
+            .await,
+        200
+    );
+    let allowed = harness.event(transport, 2).await;
+    assert_usage(&allowed, transport, 1_000, 20_000);
+    assert_cost(&allowed, 2_000, 2_000, 4_010);
+    assert_eq!(
+        harness.bucket(2).await.get::<i64, _>("cost_usd_micros"),
+        8_020
+    );
+    assert_eq!(harness.fixture.state.request_count(), 2);
+}
+
+#[tokio::test]
+async fn openai_responses_json_corrected_native_cache_settlement_prevents_followup() {
+    corrected_settlement_contract(Provider::OpenAi, Transport::Json).await;
+}
+
+#[tokio::test]
+async fn openai_responses_sse_corrected_native_cache_settlement_prevents_followup() {
+    corrected_settlement_contract(Provider::OpenAi, Transport::Sse).await;
+}
+
+#[tokio::test]
+async fn openai_responses_websocket_corrected_native_cache_settlement_prevents_followup() {
+    corrected_settlement_contract(Provider::OpenAi, Transport::WebSocket).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_json_corrected_native_cache_settlement_prevents_followup() {
+    corrected_settlement_contract(Provider::Gemini, Transport::Json).await;
+}
+
+#[tokio::test]
+async fn gemini_generate_content_sse_corrected_native_cache_settlement_prevents_followup() {
+    corrected_settlement_contract(Provider::Gemini, Transport::Sse).await;
 }

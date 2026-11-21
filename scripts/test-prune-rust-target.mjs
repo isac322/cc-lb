@@ -80,11 +80,12 @@ test('pruneTargetDir removes workspace artifacts paired with fingerprints and pr
     assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'cc-lb-server-aaaaaaaaaaaaaaaa')), false);
     assert.equal(existsSync(path.join(debugDir, 'deps', 'libtokio-0123456789abcdef.rlib')), true);
 
-    // keepWorkspaceLibs=true preserves .rlib/.rmeta/.fingerprint/build while stripping executables & incremental.
+    // keepWorkspaceLibs=true preserves .rlib/.rmeta/.d/.fingerprint/build while stripping executables & incremental.
     touch(path.join(debugDir, 'cc-lb'));
     touch(path.join(debugDir, 'incremental', 'inc-2', 'work'));
     touch(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rlib'));
     touch(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rmeta'));
+    touch(path.join(debugDir, 'deps', 'cc_lb_server-1111111111111111.d'));
     touch(path.join(debugDir, 'deps', 'integration-2222222222222222'));
     touch(path.join(debugDir, '.fingerprint', 'cc-lb-server-1111111111111111', 'lib-cc_lb_server'));
     touch(path.join(debugDir, 'build', 'cc-lb-server-1111111111111111', 'out', 'meta.rs'));
@@ -95,8 +96,21 @@ test('pruneTargetDir removes workspace artifacts paired with fingerprints and pr
     assert.equal(existsSync(path.join(debugDir, 'deps', 'integration-2222222222222222')), false);
     assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rlib')), true);
     assert.equal(existsSync(path.join(debugDir, 'deps', 'libcc_lb_server-1111111111111111.rmeta')), true);
+    assert.equal(existsSync(path.join(debugDir, 'deps', 'cc_lb_server-1111111111111111.d')), true);
     assert.equal(existsSync(path.join(debugDir, '.fingerprint', 'cc-lb-server-1111111111111111')), true);
     assert.equal(existsSync(path.join(debugDir, 'build', 'cc-lb-server-1111111111111111', 'out', 'meta.rs')), true);
+
+    // Nested target/tests/trybuild/<triple>/debug layout with keepWorkspaceLibs=true.
+    const trybuildRoot = path.join(root, 'tests', 'trybuild');
+    const trybuildTripleDebug = path.join(trybuildRoot, 'x86_64-unknown-linux-gnu', 'debug');
+    touch(path.join(trybuildTripleDebug, 'deps', 'libcc_lb_server-3333333333333333.rmeta'));
+    touch(path.join(trybuildTripleDebug, 'deps', 'cc_lb_server-3333333333333333.d'));
+    touch(path.join(trybuildTripleDebug, 'incremental', 'inc-3', 'work'));
+    const trybuildRes = pruneTargetDir(trybuildRoot, SAMPLE_METADATA, { keepWorkspaceLibs: true });
+    assert.ok(trybuildRes.removedEntries >= 1);
+    assert.equal(existsSync(path.join(trybuildTripleDebug, 'incremental')), false);
+    assert.equal(existsSync(path.join(trybuildTripleDebug, 'deps', 'libcc_lb_server-3333333333333333.rmeta')), true);
+    assert.equal(existsSync(path.join(trybuildTripleDebug, 'deps', 'cc_lb_server-3333333333333333.d')), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

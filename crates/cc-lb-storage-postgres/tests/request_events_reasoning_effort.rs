@@ -1,12 +1,7 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, sync::Arc};
 
 use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -155,8 +150,7 @@ async fn thinking_level_migration_preserves_legacy_event() -> TestResult {
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     storage: PostgresStorage,
 }
 
@@ -170,29 +164,18 @@ impl Fixture {
             eprintln!("skipped: CI_POSTGRES_URL unset");
             return Ok(None);
         };
-        let schema = format!(
-            "cc_lb_app_test_reasoning_effort_{}",
-            Uuid::new_v4().simple()
-        );
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&database_url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-
-        let search_path = format!("{schema}, public");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(
-                PgConnectOptions::from_str(&database_url)?
-                    .options([("search_path", search_path.as_str())]),
-            )
-            .await?;
+        let isolated = if version.is_some() {
+            crate::pg_test_support::IsolatedPg::create_empty(&database_url).await?
+        } else {
+            crate::pg_test_support::IsolatedPg::create_templated(&database_url).await?
+        };
+        let pool = match isolated.pool(2).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = isolated.drop().await;
+                return Err(error.into());
+            }
+        };
         let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
         let initialized: TestResult = if let Some(version) = version {
             let mut connection = storage.pool().acquire().await?;
@@ -205,31 +188,16 @@ impl Fixture {
         };
         if let Err(error) = initialized {
             storage.pool().close().await;
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(&schema)
-            )))
-            .execute(&admin_pool)
-            .await?;
+            let _ = isolated.drop().await;
             return Err(error);
         }
 
-        Ok(Some(Self {
-            schema,
-            admin_pool,
-            storage,
-        }))
+        Ok(Some(Self { isolated, storage }))
     }
 
     async fn drop_schema(self) -> TestResult {
         self.storage.pool().close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
+        self.isolated.drop().await?;
         Ok(())
     }
 }
@@ -254,16 +222,4 @@ fn request_event(event_id: &str, reasoning_effort: Option<String>) -> RequestEve
         retry_overhead_ms: None,
         ..Default::default()
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

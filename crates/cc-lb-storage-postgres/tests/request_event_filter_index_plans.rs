@@ -18,7 +18,7 @@
 //! and chosen. This is the result for `source_kind`: the planner chooses it
 //! for list and histogram `source_kind` filters, so it stays on both backends.
 
-use std::{collections::BTreeSet, fmt::Write as _, str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, fmt::Write as _, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
@@ -30,8 +30,7 @@ use cc_lb_storage_postgres::{
     adapter::request_events::{explain_request_event_histogram, explain_request_event_list},
 };
 use serde_json::Value;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
-use uuid::Uuid;
+use sqlx::{AssertSqlSafe, PgPool};
 
 /// Outcome of the gate for 0137: `true` = Outcome A (index dropped).
 const LOWER_MODEL_INDEX_DROPPED: bool = true;
@@ -525,65 +524,24 @@ async fn run_gate(pool: &PgPool) -> Result<()> {
 }
 
 struct Fixture {
-    schema: String,
-    admin_pool: PgPool,
+    isolated: crate::pg_test_support::IsolatedPg,
     pool: PgPool,
 }
 
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
-        let schema = format!("request_event_filter_plans_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        match PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
-            .await
-        {
-            Ok(pool) => Ok(Self {
-                schema,
-                admin_pool,
-                pool,
-            }),
+        let isolated = crate::pg_test_support::IsolatedPg::create_templated(url).await?;
+        match isolated.pool(2).await {
+            Ok(pool) => Ok(Self { isolated, pool }),
             Err(error) => {
-                sqlx::query(AssertSqlSafe(format!(
-                    "DROP SCHEMA IF EXISTS {} CASCADE",
-                    quote_ident(&schema)
-                )))
-                .execute(&admin_pool)
-                .await
-                .context("drop schema after isolated pool creation failed")?;
-                admin_pool.close().await;
-                Err(error.into())
+                let _ = isolated.drop().await;
+                Err(error)
             }
         }
     }
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
+        self.isolated.drop().await
     }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        }),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }
