@@ -88,12 +88,14 @@ DOCKER_BUILDKIT=1 docker build \
 builder_t1=$(date +%s)
 echo "=== timing: builder image ready in $((builder_t1 - builder_t0))s ==="
 
-triple="$(docker run --rm -e "TARGETPLATFORM=${TARGET_PLATFORM}" "$builder_tag" xx-cargo --print-target-triple)"
-if [ -z "$triple" ]; then
-  echo "ERROR: failed to determine target triple for ${TARGET_PLATFORM}" >&2
+read -r triple host_toolchain <<EOF
+$(docker run --rm -e "TARGETPLATFORM=${TARGET_PLATFORM}" "$builder_tag" /bin/ash -eu -c 'printf "%s %s\n" "$(xx-cargo --print-target-triple)" "$(rustup default | cut -d" " -f1)"')
+EOF
+if [ -z "$triple" ] || [ -z "$host_toolchain" ]; then
+  echo "ERROR: failed to determine target triple ($triple) or toolchain ($host_toolchain) for ${TARGET_PLATFORM}" >&2
   exit 1
 fi
-echo "Resolved target triple: ${triple}"
+echo "Resolved target triple: ${triple} (toolchain: ${host_toolchain})"
 
 target_profile_dir="${CARGO_TARGET_DIR_HOST}/${triple}/release"
 mkdir -p "$CARGO_HOME_DIR" "$target_profile_dir"
@@ -170,11 +172,11 @@ host_uid="$(id -u)"
 host_gid="$(id -g)"
 
 env_args=(
-  -e "HOME=/tmp"
   -e "HOST_UID=${host_uid}"
   -e "HOST_GID=${host_gid}"
   -e "TARGETPLATFORM=${TARGET_PLATFORM}"
   -e "TARGET_TRIPLE=${triple}"
+  -e "RUSTUP_TOOLCHAIN=${host_toolchain}"
   -e "FEATURES=${FEATURES}"
   -e "SKIP_SPA=${SKIP_SPA}"
   -e "GIT_SHA=${GIT_SHA}"
@@ -209,6 +211,8 @@ docker run --rm \
   -w /src \
   "$builder_tag" \
   su-exec "${host_uid}:${host_gid}" /bin/ash -euo pipefail -c '
+    export HOME=/tmp
+    export GIT_CONFIG_GLOBAL=/tmp/gitconfig
     if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
     if [ "${SKIP_SPA}" = "1" ]; then
       rm -rf /src/crates/cc-lb-admin/web/dist
@@ -218,24 +222,24 @@ docker run --rm \
     fi
     RUSTC="$(rustup which rustc)"
     export RUSTC
+    PATH="$(dirname "$RUSTC"):${PATH}"
+    export PATH
     c_target_var="CFLAGS_$(printf "%s" "$TARGET_TRIPLE" | tr "-" "_")"
     export "${c_target_var}=--target=${TARGET_TRIPLE}"
-    git config --global --add safe.directory /src || true
+    git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory /src || true
 
     cargo metadata --no-deps --format-version 1 > /target/.cargo-metadata.json
 
-    cargo_args=(
-      build --release --locked
-      -p cc-lb-server --bin cc-lb
-      --no-default-features --features "${FEATURES}"
-      --config '\''target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]'\''
+    set -- build --release --locked \
+      -p cc-lb-server --bin cc-lb \
+      --no-default-features --features "${FEATURES}" \
+      --config '\''target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]'\'' \
       --target-dir /target
-    )
     if [ "${CARGO_TIMINGS}" = "1" ]; then
-      cargo_args+=(--timings)
+      set -- "$@" --timings
     fi
 
-    xx-cargo "${cargo_args[@]}"
+    xx-cargo "$@"
     install -Dm0755 "/target/${TARGET_TRIPLE}/release/cc-lb" "/out/${OUT_NAME}"
     xx-verify --static "/out/${OUT_NAME}"
   '
