@@ -56,26 +56,48 @@ scheduled_cases=(
   "pi custom"
 )
 
-# Pre-allocate 9 * 5 = 45 distinct ports in one Python call so parallel runs
-# cannot race on ephemeral port assignment.
+# Pre-allocate 9 * 5 = 45 distinct non-ephemeral ports in one call (unless passed
+# from the caller) so parallel runs cannot race on OS ephemeral port assignment.
 preallocated_ports=()
-while IFS= read -r port_group; do
-  preallocated_ports+=("$port_group")
-done < <(python3 - "${#scheduled_cases[@]}" <<'PY'
-import socket, sys
+if [ -n "${CC_LB_MATRIX_PORTS:-}" ]; then
+  IFS=';' read -ra preallocated_ports <<<"$CC_LB_MATRIX_PORTS"
+  if [ "${#preallocated_ports[@]}" -ne "${#scheduled_cases[@]}" ]; then
+    printf 'CC_LB_MATRIX_PORTS expected %d port groups, got %d\n' "${#scheduled_cases[@]}" "${#preallocated_ports[@]}" >&2
+    exit 1
+  fi
+else
+  while IFS= read -r port_group; do
+    preallocated_ports+=("$port_group")
+  done < <(python3 - "${#scheduled_cases[@]}" <<'PY'
+import random, socket, sys
 count = int(sys.argv[1])
+needed = count * 5
 socks = []
-for _ in range(count * 5):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    socks.append(s)
-ports = [str(s.getsockname()[1]) for s in socks]
-for s in socks:
-    s.close()
+start = random.randrange(12000)
+try:
+    for step in range(12000):
+        if len(socks) >= needed:
+            break
+        candidate = 20000 + ((start + step) % 12000)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(('127.0.0.1', candidate))
+            socks.append(s)
+        except OSError:
+            s.close()
+    while len(socks) < needed:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('127.0.0.1', 0))
+        socks.append(s)
+    ports = [str(s.getsockname()[1]) for s in socks]
+finally:
+    for s in socks:
+        s.close()
 for i in range(0, len(ports), 5):
     print(" ".join(ports[i:i + 5]))
 PY
-)
+  )
+fi
 
 running_keys=()
 running_pids=()

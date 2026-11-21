@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { allocateDistinctPorts } from './port-allocator.mjs';
 
 const retain = process.argv.includes('--retain');
 const legacy = process.argv.includes('--legacy-fixture');
@@ -73,18 +74,6 @@ const provider = http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(match.response);
 });
-async function freePort() {
-  const server = http.createServer();
-  try {
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
-    });
-    return server.address().port;
-  } finally {
-    if (server.listening) await new Promise(resolve => server.close(resolve));
-  }
-}
 let outputCreated = false;
 let providerPort;
 let proxyPort;
@@ -141,9 +130,12 @@ try {
   });
   providerPort = provider.address().port;
   await record('http-listener', `harness pid=${process.pid}; 127.0.0.1:${providerPort}`, `kill -TERM ${process.pid}`);
-  proxyPort = await freePort();
-  adminPort = await freePort();
-  const metricsPort = await freePort();
+  const [allocatedProxyPort, allocatedAdminPort, metricsPort] = await allocateDistinctPorts(
+    3,
+    'CC_LB_PLUGIN_SLOTS_PORTS',
+  );
+  proxyPort = allocatedProxyPort;
+  adminPort = allocatedAdminPort;
   token = randomBytes(32).toString('hex');
   Object.assign(endpoints, { admin: `http://127.0.0.1:${adminPort}`, proxy: `http://127.0.0.1:${proxyPort}`, provider: `http://127.0.0.1:${providerPort}` });
   await writeFile(config, `[runtime]\ndata_dir = ${JSON.stringify(path.join(out, 'data'))}\n[listener]\nproxy_addr = "127.0.0.1:${proxyPort}"\nadmin_addr = "127.0.0.1:${adminPort}"\nmetrics_addr = "127.0.0.1:${metricsPort}"\n[storage]\nkind = "sqlite"\npath = ${JSON.stringify(path.join(out, 'cc-lb.sqlite'))}\n[aead]\nkey_env = "CC_LB_MASTER_KEY"\n[[admin.auth.providers]]\nkind = "static_token"\nid = "local"\ntoken_env = "CC_LB_ADMIN_TOKEN"\n`, { mode: 0o600 });

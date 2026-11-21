@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
+import { allocateDistinctPorts } from './port-allocator.mjs';
 
 // Uses the actual built binary and WASM. Missing inputs are failures, never skips.
 function required(name) {
@@ -21,14 +22,28 @@ const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 await mkdir(root, { mode: 0o700 }); // Refuse reuse and preserve every run's evidence.
 await appendFile(ledger, `${JSON.stringify({ kind: 'scratch-directory', identifier: root,
   deleteCommand: `rm -r -- ${shellQuote(root)}`, createdAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+const lifecyclePorts = await allocateDistinctPorts(9, 'CC_LB_PLUGIN_SLOTS_LIFECYCLE_PORTS');
+const modePorts = new Map([
+  ['report', lifecyclePorts.slice(0, 3)],
+  ['ledger-child', lifecyclePorts.slice(3, 6)],
+  ['normal', lifecyclePorts.slice(6, 9)],
+]);
 
 async function runHarness(t, mode) {
   const output = path.join(root, `${mode}-$capture's-evidence`);
   const metadata = path.join(root, `${mode}-child.json`);
   const runLedger = path.join(root, `${mode}.ledger`);
   const child = spawn(process.execPath, ['--import', preload, harness], {
-    env: { ...process.env, CC_LB_BIN: bin, CC_LB_PLUGIN_WASM: wasm, CC_LB_QA_OUTPUT: output,
-      CC_LB_QA_LEDGER: runLedger, CC_LB_QA_FAULT_MODE: mode, CC_LB_QA_FAULT_METADATA: metadata },
+    env: {
+      ...process.env,
+      CC_LB_BIN: bin,
+      CC_LB_PLUGIN_WASM: wasm,
+      CC_LB_QA_OUTPUT: output,
+      CC_LB_QA_LEDGER: runLedger,
+      CC_LB_QA_FAULT_MODE: mode,
+      CC_LB_QA_FAULT_METADATA: metadata,
+      CC_LB_PLUGIN_SLOTS_PORTS: modePorts.get(mode).join(' '),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const closed = new Promise(resolve => child.once('close', resolve));
