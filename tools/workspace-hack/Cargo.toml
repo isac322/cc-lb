@@ -20,7 +20,7 @@ bstr = { version = "1.13.1", features = ["alloc", "std", "unicode"] }
 bumpalo = { version = "3.20.3", features = ["allocator-api2"] }
 bytes = { version = "1.12.1", features = ["serde", "std"] }
 chrono = { version = "0.4.45", features = ["clock", "iana-time-zone", "now", "serde", "std", "wasmbind", "winapi"] }
-constant_time_eq = { version = "0.4.2", features = ["std"] }
+constant_time_eq = { version = "0.6.1", features = ["std"] }
 crossbeam-epoch = { version = "0.9.21", features = ["alloc", "std"] }
 crypto-common = { version = "0.1.7", default-features = false, features = ["std"] }
 data-encoding = { version = "2.11.1", features = ["alloc", "std"] }
@@ -39,7 +39,7 @@ indexmap = { version = "2.14.2", features = ["serde", "std"] }
 insta = { version = "1.49.0", features = ["json"] }
 ipnet = { version = "2.12.2", features = ["serde", "std"] }
 libc = { version = "0.2.191", features = ["extra_traits", "std"] }
-libsqlite3-sys = { version = "0.37.0", features = ["bundled", "unlock_notify"] }
+libsqlite3-sys = { version = "0.40.0", features = ["bundled", "unlock_notify"] }
 log = { version = "0.4.35", features = ["std"] }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
 metrics-util = { version = "0.20.4", features = ["debugging", "layer-filter", "layer-router", "layers", "recency", "registry", "storage"] }
@@ -94,7 +94,7 @@ digest_11 = { package = "digest", version = "0.11.3", features = ["alloc", "bloc
 proc-macro2 = { version = "1.0.107", features = ["proc-macro"] }
 quote = { version = "1.0.47", features = ["proc-macro"] }
 sha2_11 = { package = "sha2", version = "0.11.1", features = ["alloc", "oid"] }
-syn = { version = "2.0.119", features = ["clone-impls", "derive", "extra-traits", "full", "parsing", "printing", "proc-macro", "visit-mut"] }
+syn = { version = "3.0.9", features = ["clone-impls", "derive", "extra-traits", "full", "parsing", "printing", "proc-macro", "visit-mut"] }
 
 [lints.rust]
 unused_crate_dependencies = "allow"
