@@ -140,7 +140,12 @@ jobs:
           STAGE_CTX: ${{ runner.temp }}/stage-ctx
         run: |
           set -euo pipefail
-          DOCKER_BUILDKIT=1 docker build \
+          # Disable provenance/SBOM attestations so `docker push` publishes a single
+          # linux/arm64 manifest without an unknown/unknown attestation entry.
+          docker buildx build \
+            --load \
+            --provenance=false \
+            --sbom=false \
             --file "${GITHUB_WORKSPACE}/Dockerfile" \
             --target distroless-prebuilt \
             --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
