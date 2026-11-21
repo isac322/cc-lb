@@ -337,8 +337,8 @@ impl IntervalSchedule {
     }
 }
 
-impl apalis_cron::Schedule<Utc> for IntervalSchedule {
-    fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
+impl crate::cron::Schedule for IntervalSchedule {
+    fn next_tick(&mut self) -> Option<crate::cron::Tick> {
         let tick_secs = match self.state {
             NextTickState::Unstarted => first_aligned_tick_secs(
                 cc_lb_clock::unix_secs(self.clock.now()),
@@ -355,7 +355,7 @@ impl apalis_cron::Schedule<Utc> for IntervalSchedule {
             return None;
         };
         self.advance_after(tick_secs);
-        Some(apalis_cron::Tick::new(tick_secs))
+        Some(crate::cron::Tick::new(tick_secs))
     }
 }
 
@@ -451,8 +451,8 @@ mod tests {
             clock,
         };
 
-        assert_eq!(apalis_cron::Schedule::next_tick(&mut schedule, &Utc), None);
-        assert_eq!(apalis_cron::Schedule::next_tick(&mut schedule, &Utc), None);
+        assert_eq!(crate::cron::Schedule::next_tick(&mut schedule), None);
+        assert_eq!(crate::cron::Schedule::next_tick(&mut schedule), None);
     }
 
     #[test]
@@ -483,10 +483,10 @@ mod tests {
         assert_eq!(job.kind(), "api_key_usage_poll");
         assert_eq!(schedule.interval_secs, 300);
         assert!(schedule.phase_secs <= 15);
-        let t1 = apalis_cron::Schedule::next_tick(&mut schedule, &Utc)
+        let t1 = crate::cron::Schedule::next_tick(&mut schedule)
             .expect("first tick")
             .get_timestamp();
-        let t2 = apalis_cron::Schedule::next_tick(&mut schedule, &Utc)
+        let t2 = crate::cron::Schedule::next_tick(&mut schedule)
             .expect("second tick")
             .get_timestamp();
         assert!(t1 > 1_800_000_000);
@@ -511,7 +511,7 @@ mod tests {
                 sched.phase_secs,
                 (0..count)
                     .map(|_| {
-                        apalis_cron::Schedule::next_tick(&mut sched, &Utc)
+                        crate::cron::Schedule::next_tick(&mut sched)
                             .expect("tick")
                             .get_timestamp()
                     })

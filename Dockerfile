@@ -58,7 +58,7 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target
 #            architecture.
-# git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
+# git:       derives CC_LB_GIT_SHA fallback when GIT_SHA is empty.
 # make:      tikv-jemalloc-sys builds its vendored jemalloc via autotools (runs
 #            `make` on BUILDPLATFORM); the rust:alpine image does not ship it.
 # sccache: Rust compiler cache; uses the S3/garage backend when creds are passed.
@@ -134,12 +134,26 @@ RUN config=.cargo/config.toml; \
 # fingerprints that could omit its embedded assets.
 RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
     --mount=type=cache,id=sccache,sharing=shared,target=/sccache <<'EOF'
-# An empty SOURCE_DATE_EPOCH makes ring's cc/clang C build abort; drop it unless
-# a real value was passed.
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
+if [ -n "${GIT_SHA:-}" ]; then
+  CC_LB_GIT_SHA="$(printf '%s' "${GIT_SHA}" | cut -c1-7)"
+else
+  CC_LB_GIT_SHA="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
+fi
+if [ -n "${CC_LB_GIT_SHA:-}" ]; then
+  export CC_LB_GIT_SHA
+else
+  unset CC_LB_GIT_SHA
+fi
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  CC_LB_BUILD_TIME="$(date -u -d "@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
+else
+  CC_LB_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+fi
+export CC_LB_BUILD_TIME
+# Never leak SOURCE_DATE_EPOCH into xx-cargo/cc 1.10.0 builds.
+unset SOURCE_DATE_EPOCH
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
-export GIT_SHA="${GIT_SHA}"
 if [ -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]; then
   unset CARGO_PROFILE_RELEASE_OPT_LEVEL
 else

@@ -14,8 +14,9 @@ Environment variables:
   OUT_BIN                              Required output binary path on host
   FEATURES                             Cargo features for cc-lb-server (default: sqlite,postgres)
   SKIP_SPA                             Set to 1 to skip prebuilt SPA validation/embedding (default: 0)
-  GIT_SHA                              Git revision passed to cc-lb-server build.rs
-  SOURCE_DATE_EPOCH                    Unix epoch passed to build.rs (unset if empty)
+  GIT_SHA                              Git revision embedded in cc-lb as CC_LB_GIT_SHA (7 chars)
+  BUILD_TIME_EPOCH                     Unix epoch formatted as UTC RFC3339 CC_LB_BUILD_TIME (fallback: SOURCE_DATE_EPOCH, then now)
+  SOURCE_DATE_EPOCH                    Legacy epoch fallback for CC_LB_BUILD_TIME (never leaked to xx-cargo/cc)
   CARGO_HOME_DIR                       Host Cargo home dir to bind-mount (default: $HOME/.cargo)
   CARGO_TARGET_DIR_HOST                Host Cargo target dir to bind-mount (default: $PWD/target)
   CARGO_PROFILE_RELEASE_OPT_LEVEL      Optional Cargo profile override
@@ -41,8 +42,22 @@ SKIP_SPA="${SKIP_SPA:-0}"
 CARGO_HOME_DIR="${CARGO_HOME_DIR:-$HOME/.cargo}"
 CARGO_TARGET_DIR_HOST="${CARGO_TARGET_DIR_HOST:-$repo_root/target}"
 GIT_SHA="${GIT_SHA:-$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)}"
-SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}"
+BUILD_TIME_EPOCH="${BUILD_TIME_EPOCH:-${SOURCE_DATE_EPOCH:-}}"
 CARGO_TIMINGS="${CARGO_TIMINGS:-0}"
+
+cc_lb_git_sha="${GIT_SHA:0:7}"
+cc_lb_build_time=$(
+  python3 - "$BUILD_TIME_EPOCH" <<'PY'
+import datetime, sys
+
+raw = sys.argv[1].strip()
+if raw:
+    dt = datetime.datetime.fromtimestamp(int(raw), tz=datetime.timezone.utc)
+else:
+    dt = datetime.datetime.now(datetime.timezone.utc)
+print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)
 
 # Parse base image versions from Dockerfile so rust-toolchain bumps update once.
 rust_version="$(sed -n -E 's/^FROM .* rust:([0-9]+\.[0-9]+\.[0-9]+)-alpine AS builder$/\1/p' "$repo_root/Dockerfile")"
@@ -183,8 +198,7 @@ env_args=(
   -e "TARGET_TRIPLE=${triple}"
   -e "FEATURES=${FEATURES}"
   -e "SKIP_SPA=${SKIP_SPA}"
-  -e "GIT_SHA=${GIT_SHA}"
-  -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
+  -e "CC_LB_BUILD_TIME=${cc_lb_build_time}"
   -e "OUT_NAME=${out_name}"
   -e "CARGO_TIMINGS=${CARGO_TIMINGS}"
   -e "XX_CARGO_NOLOCK=1"
@@ -192,6 +206,10 @@ env_args=(
   -e "CARGO_TARGET_DIR=/target"
   -e "CC_LB_SKIP_WASM_FIXTURE_BUILD=1"
 )
+
+if [ -n "$cc_lb_git_sha" ]; then
+  env_args+=(-e "CC_LB_GIT_SHA=${cc_lb_git_sha}")
+fi
 
 for var in \
   CARGO_PROFILE_RELEASE_OPT_LEVEL \
@@ -211,9 +229,7 @@ set -euo pipefail
 export HOME=/tmp
 export GIT_CONFIG_GLOBAL=/tmp/gitconfig
 
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-  unset SOURCE_DATE_EPOCH
-fi
+unset SOURCE_DATE_EPOCH
 
 if [ "${SKIP_SPA}" = "1" ]; then
   rm -rf /src/crates/cc-lb-admin/web/dist

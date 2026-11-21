@@ -46,9 +46,9 @@ metrics-util = { version = "0.20.4", features = ["debugging", "layer-filter", "l
 mime_guess = { version = "2.0.5", features = ["rev-mappings"] }
 num-traits = { version = "0.2.19", features = ["std"] }
 once_cell = { version = "1.21.4", features = ["alloc", "critical-section", "portable-atomic", "race", "std"] }
-opentelemetry = "0.33.1"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "internal-logs"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"] }
-opentelemetry_sdk = { version = "0.33.1", features = ["trace", "testing"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "internal-logs", "testing"] }
 portable-atomic = { version = "1.15.0", features = ["fallback"] }
 proc-macro2 = { version = "1.0.107", features = ["proc-macro"] }
 proptest = "1.12.0"
@@ -86,7 +86,7 @@ tracing-subscriber = { version = "0.3.23", features = ["alloc", "ansi", "env-fil
 trybuild = "1.0.122"
 ulid = { version = "3.0.0", features = ["serde", "std", "uuid"] }
 uuid = { version = "1.29.0", features = ["rng", "serde", "sha1", "std", "v4", "v5", "v7"] }
-wasmtime = { version = "50.0.2", default-features = false, features = ["anyhow", "wat", "cranelift", "pooling-allocator", "threads", "gc", "gc-null", "component-model", "coredump"] }
+wasmtime = { version = "50.0.2", default-features = false, features = ["anyhow", "cranelift", "pooling-allocator", "gc", "gc-null", "reexport-wasmparser"] }
 
 [build-dependencies]
 cc = { version = "1.10.0", features = ["parallel"] }

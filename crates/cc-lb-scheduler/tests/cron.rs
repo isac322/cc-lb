@@ -2,9 +2,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use apalis_cron::Schedule;
 use cc_lb_clock::{Clock, SystemClock};
-use cc_lb_scheduler::cron::WorkerBuilder;
+use cc_lb_scheduler::cron::{Schedule, Tick, WorkerBuilder};
 use chrono::{DateTime, Duration, Utc};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -37,12 +36,12 @@ impl FixedTicks {
     }
 }
 
-impl Schedule<Utc> for FixedTicks {
-    fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
+impl Schedule for FixedTicks {
+    fn next_tick(&mut self) -> Option<Tick> {
         self.polls.fetch_add(1, Ordering::SeqCst);
         let dt = self.ticks.lock().expect("fixed ticks lock").pop_front()?;
         let secs = u64::try_from(dt.timestamp()).unwrap_or(0);
-        Some(apalis_cron::Tick::new(secs))
+        Some(Tick::new(secs))
     }
 }
 

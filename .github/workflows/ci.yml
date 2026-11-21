@@ -141,7 +141,7 @@ jobs:
       - name: Validate coverage partitions and helpers
         run: |
           node scripts/check-cov-partitions.mjs
-          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
 
   guard-crate-versions:
     name: guard crate versions
@@ -252,8 +252,8 @@ jobs:
             jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
           rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
           deps_hash=$(node scripts/cd-deps-hash.mjs)
-          printf 'version=%s\ntarget_sha=%s\nrust_version=%s\ndeps_hash=%s\n' \
-            "$version" "$(git rev-parse HEAD)" "$rust_version" "$deps_hash" \
+          printf 'version=%s\ntarget_sha=%s\nbuild_time_epoch=%s\nrust_version=%s\ndeps_hash=%s\n' \
+            "$version" "$(git rev-parse HEAD)" "$(git log -1 --format=%ct)" "$rust_version" "$deps_hash" \
             >> "$GITHUB_OUTPUT"
 
       # release-plz 0.3.172 supports git-only releases, but its release command
@@ -339,6 +339,7 @@ jobs:
           OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
           CARGO_BUILD_JOBS: "4"
           GIT_SHA: ${{ steps.release.outputs.target_sha }}
+          BUILD_TIME_EPOCH: ${{ steps.release.outputs.build_time_epoch }}
           EXPECTED_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail

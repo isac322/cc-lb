@@ -29,6 +29,9 @@ inputs:
   github_token:
     description: GitHub token for pruning superseded release deps caches
     required: true
+  build_time_epoch:
+    description: Commit Unix epoch timestamp formatted into CC_LB_BUILD_TIME (ADR-0009)
+    required: true
 
 runs:
   using: composite
@@ -104,6 +107,7 @@ runs:
         OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
         CARGO_BUILD_JOBS: "4"
         GIT_SHA: ${{ inputs.sha }}
+        BUILD_TIME_EPOCH: ${{ inputs.build_time_epoch }}
       run: ./scripts/docker-build-musl.sh
 
     - name: Smoke-test native amd64 static binary

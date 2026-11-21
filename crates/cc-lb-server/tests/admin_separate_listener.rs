@@ -23,6 +23,10 @@ async fn admin_separate_listener() {
 
 #[tokio::test]
 async fn server_and_admin_build_metadata_agree() {
+    cc_lb_server::build_meta::init(
+        option_env!("CC_LB_GIT_SHA"),
+        option_env!("CC_LB_BUILD_TIME"),
+    );
     let server = common::spawn_test_server().await;
     let proxy_health = common::http_get(server.proxy_addr, "/healthz")
         .await

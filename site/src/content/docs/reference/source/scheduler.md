@@ -13,7 +13,7 @@ The system consists of the following components:
 - **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles and OAuth token refreshes.
 - **Singleton Jobs**: Periodic maintenance tasks that must produce at most one queued job per tick across the cluster. Examples include usage rollups, database pruning, and quota garbage collection.
 - **Watchdogs**: Periodic singleton jobs that scan active upstreams and enqueue missing entity jobs into Apalis storage.
-- **Cron Producers**: Every replica polls its own `apalis_cron::Schedule` and sleeps until each tick; a tick that has already elapsed fires immediately instead of erroring. Duplicate pushes for the same tick collide on the storage-level unique `(job_type, idempotency_key)` index, so exactly one job per tick is queued. Any Apalis worker on any replica can then claim and execute it. This follows the maintainer-recommended clustered-cron pattern (see [apalis#281](https://github.com/apalis-dev/apalis/issues/281) option 3).
+- **Cron Producers**: Every replica polls its own `cc_lb_scheduler::cron::Schedule` and sleeps until each tick; a tick that has already elapsed fires immediately instead of erroring. Duplicate pushes for the same tick collide on the storage-level unique `(job_type, idempotency_key)` index, so exactly one job per tick is queued. Any Apalis worker on any replica can then claim and execute it. This follows the maintainer-recommended clustered-cron pattern (see [apalis#281](https://github.com/apalis-dev/apalis/issues/281) option 3).
 
 ### Worker Layout Diagram
 

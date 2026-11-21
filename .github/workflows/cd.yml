@@ -42,6 +42,7 @@ jobs:
       packages: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      build_time_epoch: ${{ steps.source.outputs.build_time_epoch }}
       rust_version: ${{ steps.source.outputs.rust_version }}
       deps_hash: ${{ steps.source.outputs.deps_hash }}
       already_published: ${{ steps.existing.outputs.already_published }}
@@ -179,6 +180,7 @@ jobs:
           deps_hash=$(node scripts/cd-deps-hash.mjs)
           {
             echo "sha=$(git rev-parse HEAD)"
+            echo "build_time_epoch=$(git log -1 --format=%ct)"
             echo "rust_version=$rust_version"
             echo "deps_hash=$deps_hash"
           } >> "$GITHUB_OUTPUT"
@@ -286,6 +288,7 @@ jobs:
           smoke: ${{ matrix.smoke }}
           version: ${{ inputs.version }}
           sha: ${{ needs.prepare.outputs.sha }}
+          build_time_epoch: ${{ needs.prepare.outputs.build_time_epoch }}
           rust_version: ${{ needs.prepare.outputs.rust_version }}
           deps_hash: ${{ needs.prepare.outputs.deps_hash }}
           dry_run: ${{ needs.prepare.outputs.dry_run }}
@@ -318,6 +321,7 @@ jobs:
           smoke: 'false'
           version: ${{ inputs.version }}
           sha: ${{ needs.prepare.outputs.sha }}
+          build_time_epoch: ${{ needs.prepare.outputs.build_time_epoch }}
           rust_version: ${{ needs.prepare.outputs.rust_version }}
           deps_hash: ${{ needs.prepare.outputs.deps_hash }}
           dry_run: ${{ needs.prepare.outputs.dry_run }}

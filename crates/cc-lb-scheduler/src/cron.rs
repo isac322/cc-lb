@@ -9,10 +9,31 @@
 use apalis_core::backend::ext::pipe::{Pipe, PipeError, PipeExt};
 use apalis_core::backend::{TaskSink, TaskSinkError};
 use apalis_core::task::builder::TaskBuilder;
-use apalis_cron::Schedule;
-use chrono::Utc;
 use futures_util::stream::BoxStream;
 use thiserror::Error;
+
+/// Scheduled firing instant in Unix epoch seconds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Tick(u64);
+
+impl Tick {
+    /// Creates a [`Tick`] at `unix_secs`.
+    #[must_use]
+    pub const fn new(unix_secs: u64) -> Self {
+        Self(unix_secs)
+    }
+
+    /// Returns the Unix epoch timestamp in seconds for this tick.
+    #[must_use]
+    pub const fn get_timestamp(self) -> u64 {
+        self.0
+    }
+}
+
+/// Source of monotonically scheduled [`Tick`] instants for the singleton cron producer.
+pub trait Schedule {
+    fn next_tick(&mut self) -> Option<Tick>;
+}
 
 pub trait CronStreamPipeToStorageExt<Storage, Args>: Sized {
     fn pipe_to_storage(
@@ -117,7 +138,7 @@ impl<Job, S, Storage, JobFactory, Kind> WorkerBuilder<Job, S, Storage, JobFactor
 where
     Job: SingletonCronJob + Send + 'static,
     JobFactory: IntoJobFactory<Job>,
-    S: Schedule<Utc> + Unpin + Send + 'static,
+    S: Schedule + Unpin + Send + 'static,
     Storage: TaskSink<Job, Kind> + Send + 'static,
     Storage::Error: CronStorageError,
 {
@@ -140,7 +161,7 @@ where
             .max_ticks
             .is_none_or(|max_ticks| tick_count < max_ticks)
         {
-            let Some(tick) = self.schedule.next_tick(&Utc) else {
+            let Some(tick) = self.schedule.next_tick() else {
                 break;
             };
             let tick_secs = tick.get_timestamp();

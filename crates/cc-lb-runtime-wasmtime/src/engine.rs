@@ -130,8 +130,6 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
     let mut wcfg = Config::new();
     wcfg.strategy(Strategy::Cranelift)
         .cranelift_opt_level(OptLevel::Speed)
-        .wasm_component_model(false)
-        .wasm_threads(false)
         .wasm_memory64(false)
         .wasm_multi_memory(false)
         // reference-types is enabled — rustc 1.82+ targets it by default
@@ -152,15 +150,13 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
         //   trap so a plugin cannot trigger deep backtrace work as a
         //   DoS vector, and no wasm frames are ever captured into a
         //   host process report.
-        // - `coredump_on_trap(false)` prevents wasmtime from writing
-        //   guest coredumps (which would contain plugin linear memory,
-        //   including any secrets a filter/shape plugin observed
-        //   before the trap) to disk.
+        // - Wasmtime's `coredump`, `component-model`, and `threads` features are
+        //   disabled at compile time in Cargo.toml, so guest coredumps and
+        //   those proposals are omitted from the host binary altogether.
         // - `native_unwind_info(false)` drops native unwind tables from
         //   compiled modules; safe once backtraces are off, saves
         //   compile time and memory.
         .wasm_backtrace_max_frames(None)
-        .coredump_on_trap(false)
         .native_unwind_info(false)
         .max_wasm_stack(cfg.max_wasm_stack);
 
