@@ -691,11 +691,12 @@ async fn codex_media_realtime_ws(
         body: Vec::new(),
     });
     ws.on_upgrade(move |mut socket: WebSocket| async move {
-        if path == "/v1/realtime" {
+        if path == "/v1/realtime" || path == "/v1/live" || path.starts_with("/v1/live/") {
             let _ = socket
                 .send(Message::Text(
                     json!({
                         "type": "session.created",
+                        "path": path,
                         "query": query,
                         "alpha": alpha,
                     })
@@ -825,6 +826,11 @@ pub(crate) async fn spawn_codex_media_realtime_fake() -> CodexMediaRealtimeFake 
                     axum::routing::get(codex_media_realtime_ws),
                 )
                 .route("/v1/realtime", axum::routing::get(codex_media_realtime_ws))
+                .route("/v1/live", axum::routing::get(codex_media_realtime_ws))
+                .route(
+                    "/v1/live/{call_id}",
+                    axum::routing::get(codex_media_realtime_ws),
+                )
                 .fallback(codex_media_realtime_http)
                 .with_state(server_state),
         )

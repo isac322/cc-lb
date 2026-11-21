@@ -45,12 +45,19 @@ impl Lifecycle {
             codex_backend,
         } = target;
         let public_query = query.map(str::to_owned);
-        let call_id = query.and_then(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .find(|(key, _)| key == "call_id")
-                .map(|(_, value)| value.into_owned())
-                .filter(|call_id| !call_id.trim().is_empty())
-        });
+        let call_id = path
+            .strip_prefix("/v1/live/")
+            .map(str::trim)
+            .filter(|call_id| !call_id.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                query.and_then(|query| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == "call_id")
+                        .map(|(_, value)| value.into_owned())
+                        .filter(|call_id| !call_id.trim().is_empty())
+                })
+            });
         let has_intent = query.is_some_and(|query| {
             url::form_urlencoded::parse(query.as_bytes())
                 .any(|(key, value)| key == "intent" && !value.trim().is_empty())
@@ -136,8 +143,7 @@ impl Lifecycle {
             }
             let allow_modelless = matches!(kind, RealtimeWebSocketKind::Openai)
                 && (call_id.is_some()
-                    || (codex_backend
-                        && has_intent
+                    || ((path == "/v1/live" || (codex_backend && has_intent))
                         && !view.principal_view.has_model_allowlist(auth.principal_id())));
             if requested_model.is_none() && !allow_modelless {
                 return Err(WebSocketError::new(
@@ -436,7 +442,7 @@ impl Lifecycle {
                 } else {
                     if record.kind == StorageUpstreamKind::OpenaiOauth {
                         url = self.config.openai_realtime_origin.clone();
-                        url.set_path("/v1/realtime");
+                        url.set_path(path);
                         url.set_query(public_query.as_deref());
                     }
                     let scheme = match url.scheme() {
@@ -533,7 +539,9 @@ impl Lifecycle {
             // the live call, and subscription calls are created with the
             // quicksilver protocol. Public clients never send it; Codex does,
             // so a client-supplied value is kept.
-            if record.kind == StorageUpstreamKind::OpenaiOauth && call_id.is_some() {
+            if record.kind == StorageUpstreamKind::OpenaiOauth
+                && (call_id.is_some() || path == "/v1/live")
+            {
                 let (name, value) = crate::openai_compat::realtime::REALTIME_ALPHA_HEADER;
                 signed_headers
                     .entry(name)

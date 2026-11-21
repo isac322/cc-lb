@@ -821,3 +821,312 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
         ws_count
     );
 }
+
+#[tokio::test]
+async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fake = crate::backend_api_codex::spawn_codex_media_realtime_fake().await;
+    let server = common::spawn_test_server_with_openai_budget(&format!(
+        "[openai_public_api]\nrealtime_origin = \"{}\"\n",
+        fake.origin
+    ))
+    .await;
+    let client = Client::new();
+    let ups = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await
+    .1;
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        let _ = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::POST,
+            &format!("/admin/v1/upstreams/{id}/disable"),
+            None,
+            etag.as_deref(),
+        )
+        .await;
+    }
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-live-1",
+        &fake.base,
+        "acct-live-1",
+    )
+    .await;
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-live-2",
+        &fake.base,
+        "acct-live-2",
+    )
+    .await;
+    let (status, _, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/admin/v1/upstreams",
+        Some(serde_json::json!({
+            "name": "api-key-live",
+            "kind": "openai_api_key",
+            "base_url": format!("{}v1", fake.origin),
+            "api_key_value": "test-api-key",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let principals = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/principals",
+        None,
+        None,
+    )
+    .await
+    .1;
+    let principal_id = principals["principals"][0]["id"].as_str().unwrap().to_owned();
+    let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/admin/v1/principals/{principal_id}"),
+        None,
+        None,
+    )
+    .await;
+    let _ = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::PUT,
+        &format!("/admin/v1/principals/{principal_id}/router-terminal"),
+        Some(serde_json::json!({"strategy": "first-pick"})),
+        etag.as_deref(),
+    )
+    .await;
+    let key = &server.managed_key.plaintext;
+
+    // Unauthenticated `/live` and `/live/{call_id}` (including traversal paths) reject with 401 before upstream contact.
+    for path in [
+        "/openai/backend-api/codex/live",
+        "/openai/backend-api/codex/live/rtc_codex_1",
+        "/openai/backend-api/codex/live/..%2fadmin",
+    ] {
+        let req = format!("ws://{}{path}", server.proxy_addr)
+            .into_client_request()
+            .unwrap();
+        let err = tokio_tungstenite::connect_async(req)
+            .await
+            .expect_err("unauthenticated /live websocket must fail");
+        assert!(err.to_string().contains("401"), "{path}: {err}");
+    }
+    assert!(fake.state.0.lock().unwrap().is_empty());
+
+    // Authenticated traversal/invalid call_id returns 400 and unknown call_id returns 404 before upstream contact.
+    let mut bad_call_req = format!(
+        "ws://{}/openai/backend-api/codex/live/..%2fadmin",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    bad_call_req
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let bad_err = tokio_tungstenite::connect_async(bad_call_req)
+        .await
+        .expect_err("invalid call_id must fail");
+    assert!(bad_err.to_string().contains("400"), "{bad_err}");
+
+    let mut missing_call_req = format!(
+        "ws://{}/openai/backend-api/codex/live/rtc_missing",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    missing_call_req
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let missing_err = tokio_tungstenite::connect_async(missing_call_req)
+        .await
+        .expect_err("unknown live call_id must fail");
+    assert!(missing_err.to_string().contains("404"), "{missing_err}");
+    assert!(fake.state.0.lock().unwrap().is_empty());
+
+    // API-key call cannot be joined via `/openai/backend-api/codex/live/{call_id}`.
+    let api_call = client
+        .post(format!("http://{}/openai/v1/realtime/calls", server.proxy_addr))
+        .bearer_auth(key)
+        .header("content-type", "application/sdp")
+        .body("v=0\r\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api_call.status(), 201);
+    let mut api_sideband_req = format!(
+        "ws://{}/openai/backend-api/codex/live/rtc_api_key_only",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    api_sideband_req
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let api_sideband_err = tokio_tungstenite::connect_async(api_sideband_req)
+        .await
+        .expect_err("API-key call must not join on codex backend /live");
+    assert!(api_sideband_err.to_string().contains("404"), "{api_sideband_err}");
+
+    // Standalone V3 `/live` and root `/openai/backend-api/codex` with `OpenAI-Alpha: quicksilver=v2` reach `/v1/live`.
+    for (url, alpha_hdr) in [
+        (format!("ws://{}/openai/backend-api/codex/live", server.proxy_addr), None),
+        (
+            format!("ws://{}/openai/backend-api/codex", server.proxy_addr),
+            Some("quicksilver=v2"),
+        ),
+    ] {
+        let mut req = url.clone().into_client_request().unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        req.headers_mut()
+            .insert("x-openai-actor-authorization", "1".parse().unwrap());
+        if let Some(alpha) = alpha_hdr {
+            req.headers_mut()
+                .insert("openai-alpha", alpha.parse().unwrap());
+        }
+        let (mut ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("standalone v3 live ws connects");
+        let frame: serde_json::Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(frame["type"], "session.created", "{url}");
+        assert_eq!(frame["path"], "/v1/live", "{url}");
+        assert_eq!(frame["alpha"], "quicksilver=v2", "{url}");
+    }
+
+    // Create call -> join V3 sideband `/openai/backend-api/codex/live/rtc_codex_1` -> pinned to same OAuth account -> hangup.
+    let call_resp = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+            server.proxy_addr
+        ))
+        .bearer_auth(key)
+        .json(&serde_json::json!({"sdp": "v=offer\r\n", "session": {"type": "realtime"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(call_resp.status(), 201);
+
+    let mut sideband_req = format!(
+        "ws://{}/openai/backend-api/codex/live/rtc_codex_1",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    sideband_req
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    sideband_req
+        .headers_mut()
+        .insert("x-openai-actor-authorization", "1".parse().unwrap());
+    let (mut sideband_ws, _) = tokio_tungstenite::connect_async(sideband_req)
+        .await
+        .expect("v3 live sideband connects");
+    let sideband_frame: serde_json::Value = serde_json::from_str(
+        &sideband_ws
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sideband_frame["path"], "/v1/live/rtc_codex_1");
+    assert_eq!(sideband_frame["alpha"], "quicksilver=v2");
+
+    {
+        let recorded = fake.state.0.lock().unwrap();
+        let call_account = recorded
+            .iter()
+            .find(|r| r.path == "/backend-api/codex/realtime/calls")
+            .unwrap()
+            .headers
+            .iter()
+            .find(|(k, _)| k == "chatgpt-account-id")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        let sideband_ws_req = recorded
+            .iter()
+            .find(|r| r.method == "WS" && r.path == "/v1/live/rtc_codex_1")
+            .expect("sideband live WS reached realtime_origin");
+        assert!(
+            sideband_ws_req
+                .headers
+                .iter()
+                .any(|(k, v)| k == "chatgpt-account-id" && v == call_account)
+        );
+        assert!(
+            sideband_ws_req
+                .headers
+                .iter()
+                .all(|(k, _)| k != "x-openai-actor-authorization")
+        );
+    }
+
+    // Restricted principal must supply allowed `model` even on `/live`.
+    let (_, mut detail, etag) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/admin/v1/principals/{principal_id}"),
+        None,
+        None,
+    )
+    .await;
+    detail["allowed_models"] = serde_json::json!(["gpt-realtime"]);
+    let (status, _, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::PUT,
+        &format!("/admin/v1/principals/{principal_id}"),
+        Some(detail),
+        etag.as_deref(),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let mut restricted_live = format!(
+        "ws://{}/openai/backend-api/codex/live",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    restricted_live
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let restricted_err = tokio_tungstenite::connect_async(restricted_live)
+        .await
+        .expect_err("restricted principal without model on /live must be rejected");
+    assert!(restricted_err.to_string().contains("400"), "{restricted_err}");
+}

@@ -89,7 +89,10 @@ impl RequestEventKind {
         match path {
             "/v1/messages" => Self::Messages,
             "/v1/messages/count_tokens" | "/v1/responses/input_tokens" => Self::CountTokens,
-            "/v1/responses" | "/v1/responses/compact" | "/v1/realtime" => Self::OpenaiResponses,
+            "/v1/responses" | "/v1/responses/compact" | "/v1/realtime" | "/v1/live" => {
+                Self::OpenaiResponses
+            }
+            p if p.starts_with("/v1/live/") => Self::OpenaiResponses,
             "/v1/realtime/calls" => Self::Other,
             "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" => {
                 Self::GeminiGenerateContent
@@ -226,6 +229,9 @@ mod tests {
         for (path, expected) in [
             ("/v1/responses", RequestEventKind::OpenaiResponses),
             ("/v1/realtime", RequestEventKind::OpenaiResponses),
+            ("/v1/live", RequestEventKind::OpenaiResponses),
+            ("/v1/live/rtc_123", RequestEventKind::OpenaiResponses),
+            ("/openai/v1/live/rtc_123", RequestEventKind::OpenaiResponses),
             (
                 "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
                 RequestEventKind::GeminiGenerateContent,
