@@ -222,6 +222,29 @@ impl ApiKeyConcurrencyHoldStore for PostgresStorage {
         .rows_affected();
         Ok(deleted)
     }
+
+    async fn refresh_api_key_concurrency_holds(
+        &self,
+        hold_ids: &[Uuid],
+        now_unix_secs: u64,
+    ) -> StorageResult<u64> {
+        if hold_ids.is_empty() {
+            return Ok(0);
+        }
+        let rows_affected = sqlx::query(
+            "UPDATE api_key_concurrency_holds_v1 SET acquired_at_unix_secs = $1 WHERE hold_id = ANY($2::uuid[])",
+        )
+        .bind(u64_to_i64(
+            now_unix_secs,
+            "API-key concurrency hold refreshed_at",
+        )?)
+        .bind(hold_ids)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(rows_affected)
+    }
 }
 
 fn validate_delta(delta: &ApiKeyUsageBucketDelta) -> StorageResult<()> {

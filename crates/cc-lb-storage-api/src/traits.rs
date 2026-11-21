@@ -339,6 +339,15 @@ pub trait ApiKeyConcurrencyHoldStore: Send + Sync {
         now_unix_secs: u64,
         max_age_secs: u64,
     ) -> StorageResult<u64>;
+
+    /// Extends the lease (`acquired_at_unix_secs`) for still-live holds so
+    /// streams exceeding `max_age_secs` remain counted across replicas while
+    /// preserving the crash-leftover bound for dead writers.
+    async fn refresh_api_key_concurrency_holds(
+        &self,
+        hold_ids: &[uuid::Uuid],
+        now_unix_secs: u64,
+    ) -> StorageResult<u64>;
 }
 
 #[async_trait]

@@ -25,7 +25,8 @@ use crate::request_diagnostics_sink::{
     RequestDiagnosticsSink,
 };
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
-pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_ASSEMBLER_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_ASSEMBLER_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// After receiving `RequestTerminated`, the assembler holds the partial for
@@ -127,6 +128,30 @@ pub fn spawn_with_config(
     ttl: Duration,
     diagnostics: RequestDiagnosticsOptions,
 ) -> RequestEventAssemblerHandle {
+    spawn_with_ttls(
+        rx,
+        storage,
+        bus,
+        metrics,
+        map_cap,
+        ttl,
+        ttl.max(DEFAULT_ASSEMBLER_MAX_TTL),
+        diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    storage: Arc<dyn RequestEventStore>,
+    bus: Option<Arc<dyn RequestEventBus>>,
+    metrics: Arc<dyn EngineMetricsHook>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+    diagnostics: RequestDiagnosticsOptions,
+) -> RequestEventAssemblerHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let diagnostics_sink = diagnostics.sink.clone();
     let join = tokio::spawn(assembler_loop(
@@ -135,7 +160,8 @@ pub fn spawn_with_config(
         bus,
         metrics,
         map_cap,
-        ttl,
+        idle_ttl,
+        max_ttl,
         diagnostics,
         shutdown_rx,
     ));
@@ -162,7 +188,8 @@ struct CostBreakdownOptions {
 #[derive(Default)]
 struct Partial {
     event_id: EventId,
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     request_id: Option<String>,
     source_kind: Option<String>,
     event_kind: Option<RequestEventKind>,
@@ -260,13 +287,14 @@ impl Partial {
     fn new(now: Instant, event_id: EventId) -> Self {
         Self {
             event_id,
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
     }
 
     fn touch(&mut self, now: Instant) {
-        self.inserted_at = Some(now);
+        self.last_activity_at = Some(now);
     }
 
     fn orphan(event_id: EventId) -> Self {
@@ -544,6 +572,7 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
         | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
         | LifecycleEvent::RequestFundingObserved { .. }
+        | LifecycleEvent::RequestActivity { .. }
         | LifecycleEvent::Priced { .. }
         | LifecycleEvent::CacheObserved { .. } => None,
     }
@@ -610,7 +639,8 @@ async fn assembler_loop(
     bus: Option<Arc<dyn RequestEventBus>>,
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     diagnostics: RequestDiagnosticsOptions,
     mut shutdown: oneshot::Receiver<()>,
 ) {
@@ -645,7 +675,8 @@ async fn assembler_loop(
                     metrics.as_ref(),
                     &mut writer,
                     &mut partials,
-                    ttl,
+                    idle_ttl,
+                    max_ttl,
                 )
                 .await;
             }
@@ -1137,6 +1168,15 @@ async fn handle_event(
     let now_ms = unix_now_ms();
     let event_id = event.event_id().clone();
 
+    if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+        if let Some(partial) = partials.get_mut(&event_id)
+            && partial.termination.is_none()
+        {
+            partial.touch(now);
+        }
+        return;
+    }
+
     if let LifecycleEvent::RequestTerminated {
         reason,
         client_status,
@@ -1553,7 +1593,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         // Intentional no-op: `handle_event` consumes `RequestTerminated`
         // before `merge` runs; this arm exists only for exhaustiveness.
-        LifecycleEvent::RequestTerminated { .. } => {}
+        LifecycleEvent::RequestTerminated { .. } | LifecycleEvent::RequestActivity { .. } => {}
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost = Some(cost);
         }
@@ -1833,16 +1873,26 @@ async fn flush_expired_orphans(
     metrics: &dyn EngineMetricsHook,
     writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
 ) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let expired: Vec<EventId> = partials
         .iter()
         .filter_map(|(event_id, partial)| {
-            partial
-                .inserted_at
-                .filter(|inserted_at| now.duration_since(*inserted_at) >= ttl)
-                .map(|_| event_id.clone())
+            // Terminating partials are owned by `flush_expired_terminations`
+            // within `FINALIZATION_GRACE` and must never be overwritten as 499.
+            if partial.termination.is_some() {
+                return None;
+            }
+            let idle_expired = partial
+                .last_activity_at
+                .is_some_and(|last| now.duration_since(last) >= idle_ttl);
+            let max_expired = partial
+                .created_at
+                .is_some_and(|created| now.duration_since(created) >= effective_max_ttl);
+            (idle_expired || max_expired).then(|| event_id.clone())
         })
         .collect();
     for event_id in expired {
@@ -1884,8 +1934,8 @@ async fn evict_oldest(
 ) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        .min_by_key(|(_, p)| p.last_activity_at.unwrap_or_else(Instant::now))
+        .map(|(k, v)| (k.clone(), v.last_activity_at))
     else {
         return;
     };
@@ -3641,7 +3691,7 @@ mod tests {
         partials
             .get_mut(&event_id)
             .expect("renewal partial is present")
-            .inserted_at = Some(
+            .last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(30))
                 .expect("monotonic clock has advanced past 30 seconds"),
@@ -3653,6 +3703,7 @@ mod tests {
             &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
+            DEFAULT_ASSEMBLER_MAX_TTL,
         )
         .await;
 
@@ -3662,7 +3713,7 @@ mod tests {
         partials
             .get_mut(&event_id)
             .expect("renewal partial remains before the renewal threshold")
-            .inserted_at = Some(
+            .last_activity_at = Some(
             Instant::now()
                 .checked_sub(DEFAULT_ASSEMBLER_TTL)
                 .expect("monotonic clock has advanced past the renewal threshold"),
@@ -3674,6 +3725,7 @@ mod tests {
             &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
+            DEFAULT_ASSEMBLER_MAX_TTL,
         )
         .await;
         let rows = store.rows.lock().expect("capturing store lock");
@@ -3689,6 +3741,251 @@ mod tests {
             rows[0].error_code.as_deref(),
             Some("terminal_without_partial")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_activity_extends_idle_ttl_up_to_max_ttl_without_zombie_or_grace_clobber() {
+        let store = CapturingStore::default();
+        let bus = cc_lb_control::event_bus::InMemoryBus::new();
+        let mut bus_rx = bus.subscribe();
+        let metrics = noop_metrics();
+        let mut writer = RowWriter::default();
+        let mut partials = HashMap::new();
+
+        let idle_ttl = Duration::from_secs(300);
+        let max_ttl = Duration::from_secs(900);
+
+        // 1. RequestActivity for an unknown event_id must NOT create a zombie partial or publish UI partial.
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: eid("unknown-activity"),
+            },
+        )
+        .await;
+        assert!(!partials.contains_key("unknown-activity"));
+        assert!(bus_rx.try_recv().is_err());
+
+        // 2. Active partial kept alive by RequestActivity past idle_ttl completes with real outcome.
+        let active_id = eid("sliding-active");
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestStarted {
+                event_id: active_id.clone(),
+                request_id: "req-sliding-active".to_owned(),
+                ts_ms: 1_730_000_000_000,
+                stream: true,
+                source_kind: Some("proxy".to_owned()),
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+        while bus_rx.try_recv().is_ok() {}
+
+        let aged_created = Instant::now()
+            .checked_sub(Duration::from_secs(350))
+            .expect("monotonic clock past 350s");
+        let stale_activity = Instant::now()
+            .checked_sub(Duration::from_secs(290))
+            .expect("monotonic clock past 290s");
+        {
+            let partial = partials.get_mut(&active_id).unwrap();
+            partial.created_at = Some(aged_created);
+            partial.last_activity_at = Some(stale_activity);
+        }
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: active_id.clone(),
+            },
+        )
+        .await;
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "RequestActivity must not emit UI partials"
+        );
+        assert_eq!(partials[&active_id].created_at, Some(aged_created));
+        flush_expired_orphans(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            idle_ttl,
+            max_ttl,
+        )
+        .await;
+        assert!(
+            partials.contains_key(&active_id),
+            "active stream must survive past 300s idle_ttl via RequestActivity",
+        );
+
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestTerminated {
+                event_id: active_id.clone(),
+                reason: TerminationReason::Success,
+                client_status: 101,
+                duration_ms: 360_000,
+                first_body_chunk_ms: None,
+                first_content_delta_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                internal_errors: Vec::new(),
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                io_timings: Default::default(),
+                upstream_body_ms: None,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                event_kind: None,
+                funding_ambiguous: false,
+            },
+        )
+        .await;
+        // Terminate leaves it waiting during FINALIZATION_GRACE (200ms) or completes after grace.
+        // Force past max_ttl before grace finishes to prove flush_expired_orphans skips terminating partials!
+        if partials.contains_key(&active_id) {
+            partials.get_mut(&active_id).unwrap().created_at =
+                Instant::now().checked_sub(max_ttl + Duration::from_secs(1));
+            // RequestActivity must NOT extend a terminating partial or panic.
+            handle_event(
+                &store,
+                Some(&bus),
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                16,
+                LifecycleEvent::RequestActivity {
+                    event_id: active_id.clone(),
+                },
+            )
+            .await;
+            flush_expired_orphans(
+                &store,
+                Some(&bus),
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                idle_ttl,
+                max_ttl,
+            )
+            .await;
+            assert!(
+                partials.contains_key(&active_id),
+                "orphan sweep must not clobber a terminating partial in FINALIZATION_GRACE",
+            );
+            partials
+                .get_mut(&active_id)
+                .unwrap()
+                .termination
+                .as_mut()
+                .unwrap()
+                .deadline = Instant::now();
+            flush_expired_terminations(
+                &store,
+                Some(&bus),
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+            )
+            .await;
+        }
+        // Post-termination RequestActivity must not recreate a zombie partial.
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: active_id.clone(),
+            },
+        )
+        .await;
+        assert!(!partials.contains_key(&active_id));
+
+        // 3. Continuously active partial still gets swept once age >= max_ttl.
+        let capped_id = eid("hard-capped");
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestStarted {
+                event_id: capped_id.clone(),
+                request_id: "req-hard-capped".to_owned(),
+                ts_ms: 1_730_000_000_000,
+                stream: true,
+                source_kind: Some("proxy".to_owned()),
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+        partials.get_mut(&capped_id).unwrap().created_at = Instant::now().checked_sub(max_ttl);
+        handle_event(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: capped_id.clone(),
+            },
+        )
+        .await;
+        flush_expired_orphans(
+            &store,
+            Some(&bus),
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            idle_ttl,
+            max_ttl,
+        )
+        .await;
+        assert!(!partials.contains_key(&capped_id));
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        let active_row = rows
+            .iter()
+            .find(|r| r.event_id.as_deref() == Some(active_id.as_str()))
+            .expect("active row persisted");
+        assert_eq!(active_row.status, 101);
+        assert_eq!(active_row.duration_ms, 360_000);
+        let capped_row = rows
+            .iter()
+            .find(|r| r.event_id.as_deref() == Some(capped_id.as_str()))
+            .expect("hard-capped row persisted as orphan");
+        assert_eq!(capped_row.status, 499);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -3733,7 +4030,7 @@ mod tests {
         let oldest_id = eid("cap-evicted-terminated");
         let mut oldest = Partial::new(Instant::now(), oldest_id.clone());
         oldest.request_id = Some("req-cap-evicted-terminated".to_owned());
-        oldest.inserted_at = Some(
+        oldest.last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .expect("monotonic clock has advanced past 1 second"),
@@ -3812,7 +4109,7 @@ mod tests {
         partials
             .get_mut(&oldest_id)
             .expect("oldest partial is present")
-            .inserted_at = Some(
+            .last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .expect("monotonic clock has advanced past 1 second"),
@@ -5624,7 +5921,7 @@ mod tests {
         partials
             .get_mut(&ttl_orphan)
             .expect("ttl partial is present")
-            .inserted_at = Some(
+            .last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(2))
                 .expect("monotonic clock has advanced past 2 seconds"),
@@ -5636,13 +5933,14 @@ mod tests {
             &mut writer,
             &mut partials,
             Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .await;
 
         // Cap eviction: a terminated partial evicted when the map overflows.
         let evicted = eid("diag-path-evicted");
         let mut partial = partial_with_diagnostics(&evicted);
-        partial.inserted_at = Some(
+        partial.last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .expect("monotonic clock has advanced past 1 second"),
@@ -5702,7 +6000,7 @@ mod tests {
         let mut partials = HashMap::new();
         let event_id = eid("diag-late-terminal");
         let mut partial = partial_with_diagnostics(&event_id);
-        partial.inserted_at = Some(
+        partial.last_activity_at = Some(
             Instant::now()
                 .checked_sub(Duration::from_secs(2))
                 .expect("monotonic clock has advanced past 2 seconds"),
@@ -5716,6 +6014,7 @@ mod tests {
             &mut writer,
             &mut partials,
             Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .await;
         handle_event(

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -5,6 +7,17 @@ use crate::{
     AuthFailure, AuthInfo, LimitDecisionKind, ParseFailure, ParseInfo, RouteFailure, RouteInfo,
     StreamError, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
 };
+
+/// Default sliding idle TTL before an inactive partial or reservation is swept.
+pub const DEFAULT_LIFECYCLE_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Default hard upper bound on how long an active partial or reservation may
+/// stay live via [`LifecycleEvent::RequestActivity`] heartbeats.
+pub const DEFAULT_LIFECYCLE_MAX_TTL: Duration = Duration::from_secs(3600);
+
+/// Default minimum interval between throttled [`LifecycleEvent::RequestActivity`]
+/// emissions on an active stream.
+pub const DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Application-generated unique identifier for a single request lifecycle.
 ///
@@ -290,6 +303,11 @@ pub enum LifecycleEvent {
         event_id: EventId,
         cost: cc_lb_request_log::CostBreakdown,
     },
+    /// Low-frequency liveness heartbeat emitted while an active stream
+    /// continues to make progress. Refreshes sliding idle TTLs on already-
+    /// tracked partials and limit reservations up to their hard max-TTL cap
+    /// without creating new partials or publishing UI updates.
+    RequestActivity { event_id: EventId },
     /// Emitted by the cache-observation subscriber when the final
     /// prompt-cache state can be derived from the usage counters plus
     /// parse-time cache metadata. The assembler merges this into the
@@ -319,6 +337,7 @@ impl LifecycleEvent {
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
+            | Self::RequestActivity { event_id }
             | Self::Priced { event_id, .. }
             | Self::CacheObserved { event_id, .. } => event_id,
         }
@@ -344,6 +363,7 @@ impl LifecycleEvent {
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",
+            Self::RequestActivity { .. } => "request_activity",
             Self::Priced { .. } => "priced",
             Self::CacheObserved { .. } => "cache_observed",
         }

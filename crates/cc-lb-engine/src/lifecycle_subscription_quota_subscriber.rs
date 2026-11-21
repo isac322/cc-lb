@@ -27,7 +27,8 @@ use crate::subscription_quota_events::SubscriptionQuotaSink;
 use cc_lb_control::{RequestEventBus, SubscriptionQuotaCacheLike};
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
-pub const DEFAULT_SUBSCRIPTION_QUOTA_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_SUBSCRIPTION_QUOTA_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_SUBSCRIPTION_QUOTA_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct SubscriptionQuotaSubscriberHandle {
@@ -68,6 +69,30 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> SubscriptionQuotaSubscriberHandle {
+    spawn_with_ttls(
+        rx,
+        cache,
+        sink,
+        bus,
+        map_cap,
+        ttl,
+        ttl.max(DEFAULT_SUBSCRIPTION_QUOTA_MAX_TTL),
+    )
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
+    sink: Option<SubscriptionQuotaSink>,
+    bus: Option<Arc<dyn RequestEventBus>>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> SubscriptionQuotaSubscriberHandle {
+    let ttls = TtlBounds {
+        idle: idle_ttl,
+        max: max_ttl.max(idle_ttl),
+    };
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(subscriber_loop(
         rx,
@@ -75,15 +100,22 @@ pub fn spawn_with_config(
         sink,
         bus,
         map_cap,
-        ttl,
+        ttls,
         shutdown_rx,
     ));
     SubscriptionQuotaSubscriberHandle { shutdown_tx, join }
 }
 
+#[derive(Clone, Copy)]
+struct TtlBounds {
+    idle: Duration,
+    max: Duration,
+}
+
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     upstream_id: Option<Uuid>,
     websocket: bool,
     attempt_num: u32,
@@ -92,11 +124,16 @@ struct Partial {
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             upstream_id: None,
             websocket: false,
             attempt_num: 0,
         }
+    }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_activity_at = Some(now);
     }
 }
 
@@ -106,7 +143,7 @@ async fn subscriber_loop(
     sink: Option<SubscriptionQuotaSink>,
     bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
-    ttl: Duration,
+    ttls: TtlBounds,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -123,7 +160,7 @@ async fn subscriber_loop(
                     None => break,
                 }
             }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, ttls.idle, ttls.max),
             _ = &mut shutdown => break,
         }
     }
@@ -152,13 +189,20 @@ fn handle_event(
     let event_id = event.event_id().clone();
 
     match event {
+        LifecycleEvent::RequestActivity { .. } => {
+            if let Some(partial) = partials.get_mut(&event_id) {
+                partial.touch(now);
+            }
+            return;
+        }
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
         } => {
-            partials
+            let partial = partials
                 .entry(event_id)
-                .or_insert_with(|| Partial::new(now))
-                .websocket = info.method == "GET";
+                .or_insert_with(|| Partial::new(now));
+            partial.touch(now);
+            partial.websocket = info.method == "GET";
         }
         LifecycleEvent::UpstreamQuotaFrameObserved {
             upstream_id,
@@ -183,7 +227,7 @@ fn handle_event(
                 .entry(event_id)
                 .or_insert_with(|| Partial::new(now));
             partial.upstream_id = Some(upstream_id);
-            partial.inserted_at = Some(now);
+            partial.touch(now);
             partial.attempt_num = attempt_num;
         }
         LifecycleEvent::UpstreamResponseStarted {
@@ -298,10 +342,19 @@ fn system_time_unix_millis(t: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
+    partials.retain(|_, p| {
+        let idle_live = p
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        let max_live = p
+            .created_at
+            .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+        idle_live && max_live
+    });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
@@ -315,8 +368,8 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        .min_by_key(|(_, p)| p.last_activity_at.unwrap_or_else(Instant::now))
+        .map(|(k, v)| (k.clone(), v.last_activity_at))
     else {
         return;
     };

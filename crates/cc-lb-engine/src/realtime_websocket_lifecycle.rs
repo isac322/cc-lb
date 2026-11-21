@@ -518,15 +518,21 @@ impl Lifecycle {
                     ));
                 }
             };
+            let reservation_id = limit
+                .as_ref()
+                .and_then(|limit| limit.reservation.as_ref())
+                .map(|reservation| reservation.id().to_owned())
+                .unwrap_or_default();
             if let Some(observer) = observer.as_ref() {
+                if let Some(engine) = self.limit_engine.as_ref()
+                    && !reservation_id.is_empty()
+                {
+                    observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
+                }
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                     event_id: observer.event_id().to_owned(),
                     decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                        reservation_id: limit
-                            .as_ref()
-                            .and_then(|limit| limit.reservation.as_ref())
-                            .map(|reservation| reservation.id().to_owned())
-                            .unwrap_or_default(),
+                        reservation_id,
                         amount: limit.as_ref().map_or(0, |limit| {
                             limit.request.max_tokens.unwrap_or(0).max(0) as u64
                         }),

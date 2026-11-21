@@ -38,6 +38,7 @@ use cc_lb_control::api_keys::limit_engine::LimitEngine;
 trait ReservationSettlement {
     fn refund_by_id(&self, id: &str) -> bool;
     fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool;
+    fn touch_by_id(&self, id: &str) -> bool;
 }
 
 impl ReservationSettlement for LimitEngine {
@@ -50,10 +51,16 @@ impl ReservationSettlement for LimitEngine {
     fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool {
         LimitEngine::reconcile_by_id(self, id, input, output, cost)
     }
+
+    #[inline]
+    fn touch_by_id(&self, id: &str) -> bool {
+        LimitEngine::touch_reservation_by_id(self, id)
+    }
 }
 
 pub const DEFAULT_LIMIT_RECONCILE_MAP_CAP: usize = 4096;
-pub const DEFAULT_LIMIT_RECONCILE_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_LIMIT_RECONCILE_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_LIMIT_RECONCILE_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Same rationale as the assembler's grace period: `Priced` is emitted by
@@ -99,14 +106,39 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> LimitReconcileSubscriberHandle {
+    spawn_with_ttls(
+        rx,
+        engine,
+        map_cap,
+        ttl,
+        ttl.max(DEFAULT_LIMIT_RECONCILE_MAX_TTL),
+    )
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    engine: Arc<LimitEngine>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> LimitReconcileSubscriberHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, engine, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        engine,
+        map_cap,
+        idle_ttl,
+        max_ttl,
+        shutdown_rx,
+    ));
     LimitReconcileSubscriberHandle { shutdown_tx, join }
 }
 
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     reservation_id: Option<String>,
     usage: UsageSnapshot,
     usage_seen: bool,
@@ -131,13 +163,14 @@ impl TerminationInfo {
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
     }
 
     fn touch(&mut self, now: Instant) {
-        self.inserted_at = Some(now);
+        self.last_activity_at = Some(now);
     }
 }
 
@@ -145,7 +178,8 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     engine: Arc<LimitEngine>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -166,7 +200,7 @@ async fn subscriber_loop(
                 }
             }
             _ = finalization_tick.tick() => flush_expired_terminations(&engine, &mut partials),
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, idle_ttl, max_ttl),
             _ = &mut shutdown => break,
         }
     }
@@ -225,6 +259,18 @@ fn handle_event(
 ) {
     let now = Instant::now();
     let event_id = event.event_id().clone();
+
+    if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+        if let Some(partial) = partials.get_mut(&event_id)
+            && partial.termination.is_none()
+        {
+            partial.touch(now);
+            if let Some(reservation_id) = partial.reservation_id.as_deref() {
+                engine.touch_by_id(reservation_id);
+            }
+        }
+        return;
+    }
 
     if let LifecycleEvent::RequestTerminated { reason, .. } = &event {
         let existing = partials.remove(&event_id);
@@ -372,10 +418,22 @@ fn finalize(engine: &impl ReservationSettlement, partial: Partial, reason: &Term
     .increment(1);
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
+    partials.retain(|_, p| {
+        if p.termination.is_some() {
+            return true;
+        }
+        let idle_live = p
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        let max_live = p
+            .created_at
+            .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+        idle_live && max_live
+    });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
@@ -389,8 +447,8 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        .min_by_key(|(_, p)| p.last_activity_at.unwrap_or_else(Instant::now))
+        .map(|(k, v)| (k.clone(), v.last_activity_at))
     else {
         return;
     };
@@ -897,6 +955,10 @@ mod tests {
             self.reconciles.set(self.reconciles.get() + 1);
             self.engine.reconcile_by_id(id, input, output, cost)
         }
+
+        fn touch_by_id(&self, id: &str) -> bool {
+            self.engine.touch_reservation_by_id(id)
+        }
     }
 
     fn terminal_event(event_id: &str, reason: TerminationReason) -> LifecycleEvent {
@@ -1307,5 +1369,86 @@ mod tests {
                 Err(cc_lb_control::api_keys::limit_engine::RejectReason::CostRateLimit)
             ));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn request_activity_forwards_touch_to_reservation_and_respects_max_ttl() {
+        let (engine, view, record, _concurrency) = accounting_fixture();
+        let mut partials = HashMap::new();
+        let idle_ttl = Duration::from_secs(300);
+        let max_ttl = Duration::from_secs(900);
+
+        // Unknown event_id must not create a zombie partial.
+        handle_event(
+            engine.as_ref(),
+            &mut partials,
+            16,
+            LifecycleEvent::RequestActivity {
+                event_id: eid("unknown-reconcile"),
+            },
+        );
+        assert!(!partials.contains_key("unknown-reconcile"));
+
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "ws-accounting-principal",
+                "gpt-5-codex",
+                Some(100),
+                0,
+                Some(200),
+            )
+            .expect("reserve fixture");
+        let res_id = res.id().to_owned();
+        res.forget();
+        let active_id = eid("reconcile-active");
+        handle_event(
+            engine.as_ref(),
+            &mut partials,
+            16,
+            LifecycleEvent::LimitDecision {
+                event_id: active_id.clone(),
+                decision: LimitDecisionKind::Reserved {
+                    reservation_id: res_id.clone(),
+                    amount: 100,
+                    limit_reserve_ms: None,
+                },
+            },
+        );
+
+        // Advance past idle_ttl in 120s steps with RequestActivity heartbeats.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(120)).await;
+            handle_event(
+                engine.as_ref(),
+                &mut partials,
+                16,
+                LifecycleEvent::RequestActivity {
+                    event_id: active_id.clone(),
+                },
+            );
+            sweep_orphans(&mut partials, idle_ttl, max_ttl);
+            assert!(partials.contains_key(&active_id));
+        }
+        // Reservation record must also remain live on LimitEngine via forwarded touch_by_id
+        // and settle cleanly when finalized later.
+        assert!(engine.touch_reservation_by_id(&res_id));
+        assert!(engine.reconcile_by_id(&res_id, 10, 20, Some(0)));
+
+        // Continuously touched partial still expires once age >= max_ttl.
+        for _ in 0..6 {
+            tokio::time::advance(Duration::from_secs(120)).await;
+            handle_event(
+                engine.as_ref(),
+                &mut partials,
+                16,
+                LifecycleEvent::RequestActivity {
+                    event_id: active_id.clone(),
+                },
+            );
+        }
+        sweep_orphans(&mut partials, idle_ttl, max_ttl);
+        assert!(!partials.contains_key(&active_id));
     }
 }

@@ -225,6 +225,15 @@ impl ApiKeyConcurrencyHoldStore for SqliteStorage {
         let _ = (now_unix_secs, max_age_secs);
         Ok(0)
     }
+
+    async fn refresh_api_key_concurrency_holds(
+        &self,
+        hold_ids: &[Uuid],
+        now_unix_secs: u64,
+    ) -> StorageResult<u64> {
+        let _ = (hold_ids, now_unix_secs);
+        Ok(0)
+    }
 }
 
 fn validate_delta(delta: &ApiKeyUsageBucketDelta) -> StorageResult<()> {

@@ -36,9 +36,8 @@ fn install_tierless_pricing() {
 
 fn partial_with_model() -> Partial {
     Partial {
-        inserted_at: Some(Instant::now()),
         model: Some(MODEL.to_owned()),
-        ..Partial::default()
+        ..Partial::new(Instant::now())
     }
 }
 

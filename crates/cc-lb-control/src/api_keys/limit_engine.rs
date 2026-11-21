@@ -46,6 +46,9 @@ const API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS: u64 = if API_KEY_USAGE_WRITER_LEASE
 } else {
     90
 };
+/// Interval at which live Postgres concurrency holds refresh `acquired_at_unix_secs`
+/// (one-third of the 90s crash-leftover bound) so long streams stay counted across replicas.
+const API_KEY_CONCURRENCY_HOLD_REFRESH_INTERVAL_SECS: u64 = 30;
 const API_KEY_USAGE_PENDING_TARGET_ENTRIES: usize = 90_000;
 const API_KEY_USAGE_WRITER_INACTIVE_AFTER_SECS: u64 = 60;
 const API_KEY_USAGE_COMPACTION_BATCH_SIZE: usize = 1_000;
@@ -209,6 +212,7 @@ struct ReservationRecord {
     /// handoff releases concurrency while retaining token/cost liability.
     concurrent_guards: Vec<ConcurrentSlot>,
     created_at: Instant,
+    last_activity_at: Instant,
 }
 
 /// A concurrent-request slot held by a [`ReservationRecord`]: either the
@@ -390,6 +394,7 @@ impl LimitEngine {
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(API_KEY_USAGE_FLUSH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_hold_refresh_sec: Option<u64> = None;
             loop {
                 tokio::select! {
                     _ = task_cancel.cancelled() => {
@@ -410,16 +415,14 @@ impl LimitEngine {
                         if let Err(error) = refresh_remote_api_key_usage(&engine, &state, now_sec).await {
                             tracing::warn!(%error, "durable API-key usage refresh failed; freezing last remote snapshot");
                         }
-                        if state.backend_kind == BackendKind::Postgres
-                            && let Err(error) = state
-                                .storage
-                                .delete_expired_api_key_concurrency_holds(
-                                    now_sec,
-                                    API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS,
-                                )
-                                .await
-                        {
-                            tracing::warn!(%error, "expired API-key concurrency hold sweep failed");
+                        if state.backend_kind == BackendKind::Postgres {
+                            maintain_durable_concurrency_holds(
+                                &engine,
+                                state.storage.as_ref(),
+                                now_sec,
+                                &mut last_hold_refresh_sec,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -663,6 +666,7 @@ impl LimitEngine {
         );
 
         let id = Uuid::now_v7().to_string();
+        let now = Instant::now();
         self.inner.reservations.lock().insert(
             id.clone(),
             ReservationRecord {
@@ -671,7 +675,8 @@ impl LimitEngine {
                 admitted_cost_estimate_micros: cost_estimate_micros,
                 durable_bucket_widths,
                 concurrent_guards,
-                created_at: Instant::now(),
+                created_at: now,
+                last_activity_at: now,
             },
         );
 
@@ -733,6 +738,31 @@ impl LimitEngine {
             actual_output,
             actual_cost_micros,
         );
+    }
+
+    /// Collects hold IDs for all currently tracked in-flight durable
+    /// concurrency guards so the background sync loop can renew their leases.
+    fn live_durable_concurrency_hold_ids(&self) -> Vec<Uuid> {
+        let reservations = self.inner.reservations.lock();
+        reservations
+            .values()
+            .flat_map(|record| record.concurrent_guards.iter())
+            .filter_map(|slot| match slot {
+                ConcurrentSlot::Durable(hold) => Some(hold.hold_id()),
+                ConcurrentSlot::Local(_) => None,
+            })
+            .collect()
+    }
+
+    /// Refresh the sliding activity timestamp for an active reservation so
+    /// long-running streams are not prematurely evicted by the idle TTL.
+    pub fn touch_reservation_by_id(&self, id: &str) -> bool {
+        let mut map = self.inner.reservations.lock();
+        let Some(record) = map.get_mut(id) else {
+            return false;
+        };
+        record.last_activity_at = Instant::now();
+        true
     }
 
     /// Reconcile a reservation by ID.
@@ -1156,6 +1186,43 @@ where
         return None;
     }
     Some(tokio::task::block_in_place(|| handle.block_on(future)))
+}
+
+async fn maintain_durable_concurrency_holds(
+    engine: &LimitEngine,
+    store: &(impl ApiKeyConcurrencyHoldStore + ?Sized),
+    now_sec: u64,
+    last_hold_refresh_sec: &mut Option<u64>,
+) {
+    let should_refresh = last_hold_refresh_sec.is_none_or(|prev| {
+        now_sec.saturating_sub(prev) >= API_KEY_CONCURRENCY_HOLD_REFRESH_INTERVAL_SECS
+    });
+    if should_refresh {
+        let hold_ids = engine.live_durable_concurrency_hold_ids();
+        if hold_ids.is_empty() {
+            *last_hold_refresh_sec = Some(now_sec);
+        } else {
+            match store
+                .refresh_api_key_concurrency_holds(&hold_ids, now_sec)
+                .await
+            {
+                Ok(_) => *last_hold_refresh_sec = Some(now_sec),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        count = hold_ids.len(),
+                        "failed to refresh live API-key concurrency holds",
+                    );
+                }
+            }
+        }
+    }
+    if let Err(error) = store
+        .delete_expired_api_key_concurrency_holds(now_sec, API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS)
+        .await
+    {
+        tracing::warn!(%error, "expired API-key concurrency hold sweep failed");
+    }
 }
 
 /// Insert-then-count admission for `api_key_concurrency_holds_v1`.
@@ -1658,15 +1725,31 @@ impl ReservationTtlSweeperHandle {
     }
 }
 
-/// Spawn the TTL sweeper.
-///
-/// Every `tick_interval` the sweeper walks the engine's reservation map and
-/// refunds any reservation older than `ttl`.
+/// Spawn the TTL sweeper using the default hard max-TTL ceiling.
 pub fn spawn_reservation_ttl_sweeper(
     engine: Arc<LimitEngine>,
     ttl: Duration,
     tick_interval: Duration,
 ) -> ReservationTtlSweeperHandle {
+    spawn_reservation_ttl_sweeper_with_max_ttl(
+        engine,
+        ttl,
+        ttl.max(cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL),
+        tick_interval,
+    )
+}
+
+/// Spawn the TTL sweeper with explicit sliding idle TTL and hard max TTL.
+///
+/// Every `tick_interval` the sweeper walks the engine's reservation map and
+/// refunds any reservation inactive for `idle_ttl` or older than `max_ttl`.
+pub fn spawn_reservation_ttl_sweeper_with_max_ttl(
+    engine: Arc<LimitEngine>,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+    tick_interval: Duration,
+) -> ReservationTtlSweeperHandle {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let engine = Arc::downgrade(&engine);
     let join = tokio::spawn(async move {
@@ -1679,7 +1762,7 @@ pub fn spawn_reservation_ttl_sweeper(
                 _ = &mut shutdown_rx => break,
                 _ = ticker.tick() => {
                     let Some(engine) = engine.upgrade() else { break };
-                    sweep_expired(&engine, ttl);
+                    sweep_expired(&engine, idle_ttl, effective_max_ttl);
                 }
             }
         }
@@ -1687,13 +1770,17 @@ pub fn spawn_reservation_ttl_sweeper(
     ReservationTtlSweeperHandle { shutdown_tx, join }
 }
 
-fn sweep_expired(engine: &LimitEngine, ttl: Duration) {
+fn sweep_expired(engine: &LimitEngine, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let mut evicted = 0u64;
     let expired_ids: Vec<ReservationId> = {
         let map = engine.inner.reservations.lock();
         map.iter()
-            .filter(|(_, r)| now.duration_since(r.created_at) >= ttl)
+            .filter(|(_, r)| {
+                now.duration_since(r.last_activity_at) >= idle_ttl
+                    || now.duration_since(r.created_at) >= effective_max_ttl
+            })
             .map(|(k, _)| k.clone())
             .collect()
     };
@@ -2370,7 +2457,7 @@ mod tests {
             )
             .unwrap();
         assert!(reservation.is_active());
-        sweep_expired(&engine, Duration::ZERO);
+        sweep_expired(&engine, Duration::ZERO, Duration::ZERO);
         assert!(!reservation.is_active());
         assert!(
             !engine.refund_by_id(reservation.id()),
@@ -2625,7 +2712,11 @@ mod tests {
         // Advance the paused tokio clock past the TTL threshold so the
         // reservation's `created_at` is now considered expired.
         tokio::time::advance(Duration::from_millis(200)).await;
-        sweep_expired(&engine, Duration::from_millis(50));
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
             0,
@@ -2657,12 +2748,107 @@ mod tests {
         std::mem::forget(res);
         // Advance less than the TTL: reservation must survive the sweep.
         tokio::time::advance(Duration::from_millis(20)).await;
-        sweep_expired(&engine, Duration::from_millis(50));
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
             33,
         );
         assert!(engine.refund_by_id(&id));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn touch_reservation_extends_idle_ttl_up_to_hard_max_ttl() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(40),
+                0,
+                None,
+            )
+            .expect("reserve");
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+
+        assert!(!engine.touch_reservation_by_id("unknown-id"));
+
+        // Touch at 30ms and 60ms: total age reaches 80ms (> 50ms idle_ttl) while
+        // idle gap is only 20ms (< 50ms) and age < 120ms max_ttl.
+        tokio::time::advance(Duration::from_millis(30)).await;
+        assert!(engine.touch_reservation_by_id(&id));
+        tokio::time::advance(Duration::from_millis(30)).await;
+        assert!(engine.touch_reservation_by_id(&id));
+        tokio::time::advance(Duration::from_millis(20)).await;
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+        );
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            40,
+            "touched reservation must survive past idle_ttl",
+        );
+
+        // Touching again past max_ttl (80 + 40 = 120ms) cannot prevent hard-cap eviction.
+        tokio::time::advance(Duration::from_millis(40)).await;
+        assert!(engine.touch_reservation_by_id(&id));
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+        );
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            0,
+            "reservation must still expire at max_ttl despite recent activity",
+        );
+        assert!(!engine.touch_reservation_by_id(&id));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn touched_reservation_reconciles_cleanly_after_idle_ttl() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(40),
+                0,
+                None,
+            )
+            .expect("reserve");
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+
+        tokio::time::advance(Duration::from_millis(30)).await;
+        assert!(engine.touch_reservation_by_id(&id));
+        tokio::time::advance(Duration::from_millis(30)).await;
+        sweep_expired(
+            &engine,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+
+        assert!(engine.reconcile_by_id(&id, 5, 12, None));
+        assert!(!engine.touch_reservation_by_id(&id));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            12,
+        );
     }
 
     #[test]
@@ -3200,7 +3386,7 @@ mod tests {
                     .lock()
                     .contains_key(&reservation_id)
             );
-            sweep_expired(&engine_a, Duration::ZERO);
+            sweep_expired(&engine_a, Duration::ZERO, Duration::ZERO);
             assert!(!engine_a.refund_by_id(&reservation_id));
             assert!(!engine_a.reconcile_by_id(&reservation_id, 99, 99, Some(999)));
             assert!(!engine_a.reconcile_by_id(&reservation_id, 0, 0, Some(0)));
@@ -3375,6 +3561,22 @@ mod tests {
             holds.retain(|_, hold| hold.acquired_at_unix_secs > cutoff);
             Ok((before - holds.len()) as u64)
         }
+
+        async fn refresh_api_key_concurrency_holds(
+            &self,
+            hold_ids: &[Uuid],
+            now_unix_secs: u64,
+        ) -> Result<u64, StorageError> {
+            let mut holds = self.holds.lock();
+            let mut updated = 0_u64;
+            for hold_id in hold_ids {
+                if let Some(hold) = holds.get_mut(hold_id) {
+                    hold.acquired_at_unix_secs = now_unix_secs;
+                    updated += 1;
+                }
+            }
+            Ok(updated)
+        }
     }
 
     fn hold_for(key_id: &str, writer_epoch: Uuid, acquired_at: u64) -> ApiKeyConcurrencyHold {
@@ -3494,5 +3696,97 @@ mod tests {
         );
         drop(first);
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_durable_concurrency_holds_survive_past_max_age_and_release_on_handoff() {
+        let store = Arc::new(FakeConcurrencyHoldStore::default());
+        let storage_dyn: Arc<dyn Storage> = {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let database_url = format!(
+                "sqlite://{}",
+                directory.path().join("hold-refresh.sqlite").display()
+            );
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+            let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
+                .await
+                .expect("open sqlite");
+            storage_impl.initialize().await.expect("migrate sqlite");
+            Arc::new(storage_impl)
+        };
+        let t0 = 1_800_000_000_u64;
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(t0)),
+        );
+        let writer = Uuid::now_v7();
+        let live_hold = hold_for("key-long", writer, t0);
+        let live_hold_id = live_hold.hold_id;
+        let crashed_hold = hold_for("key-long", Uuid::now_v7(), t0);
+        let crashed_hold_id = crashed_hold.hold_id;
+        store
+            .insert_api_key_concurrency_hold(&live_hold)
+            .await
+            .expect("insert live hold");
+        store
+            .insert_api_key_concurrency_hold(&crashed_hold)
+            .await
+            .expect("insert crashed hold");
+
+        let res_id = "res-durable-refresh".to_owned();
+        let mono_now = Instant::now();
+        engine.inner.reservations.lock().insert(
+            res_id.clone(),
+            ReservationRecord {
+                key_id: "key-long".to_owned(),
+                reserved: Vec::new(),
+                admitted_cost_estimate_micros: None,
+                durable_bucket_widths: Vec::new(),
+                concurrent_guards: vec![ConcurrentSlot::Durable(DurableConcurrencyHold::new(
+                    storage_dyn,
+                    live_hold_id,
+                    "key-long".to_owned(),
+                ))],
+                created_at: mono_now,
+                last_activity_at: mono_now,
+            },
+        );
+        assert_eq!(
+            engine.live_durable_concurrency_hold_ids(),
+            vec![live_hold_id]
+        );
+
+        let mut last_refresh = None;
+        for elapsed in [30_u64, 60, 95] {
+            maintain_durable_concurrency_holds(
+                &engine,
+                store.as_ref(),
+                t0 + elapsed,
+                &mut last_refresh,
+            )
+            .await;
+        }
+        let holds = store.holds.lock();
+        assert!(
+            holds.contains_key(&live_hold_id),
+            "refreshed live hold must survive past the 90s crash-leftover bound"
+        );
+        assert_eq!(holds[&live_hold_id].acquired_at_unix_secs, t0 + 95);
+        assert!(
+            !holds.contains_key(&crashed_hold_id),
+            "unrefreshed crash leftover must still expire after 90s"
+        );
+        drop(holds);
+
+        let reservation = Reservation {
+            engine: Arc::downgrade(&engine.inner),
+            id: res_id,
+            forgotten: false,
+        };
+        reservation.handoff_after_response();
+        assert!(
+            engine.live_durable_concurrency_hold_ids().is_empty(),
+            "handoff must drop durable concurrency guards out of the live refresh set"
+        );
     }
 }

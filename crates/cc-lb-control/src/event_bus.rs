@@ -393,6 +393,34 @@ impl InMemoryBus {
             .assembler_overflow_in_flight
             .load(Ordering::Relaxed)
     }
+
+    fn try_send_activity(
+        &self,
+        slot: &Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+        drop_reason: &'static str,
+        event: &LifecycleEvent,
+    ) {
+        let tx = match slot.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+        match tx.try_send(event.clone()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                record_dropped_events_by(drop_reason, 1);
+                tracing::debug!(
+                    kind = dropped.kind(),
+                    event_id = %dropped.event_id(),
+                    drop_reason,
+                    "lifecycle subscriber mpsc full; dropping activity heartbeat",
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
 }
 
 impl Default for InMemoryBus {
@@ -414,6 +442,58 @@ impl RequestEventBus for InMemoryBus {
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
+        if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+            // Advisory heartbeat: keep broadcast listeners and stateful
+            // subscribers warm without spawning assembler overflow tasks or
+            // waking the stateless limit-rejection audit subscriber.
+            let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+            let targets = [
+                (
+                    &self.inner.lifecycle_writer_tx,
+                    "lifecycle_writer_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_assembler_tx,
+                    "lifecycle_assembler_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_pricing_tx,
+                    "lifecycle_pricing_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_limit_reconcile_tx,
+                    "lifecycle_limit_reconcile_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_cache_obs_tx,
+                    "lifecycle_cache_obs_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_rate_limit_header_tx,
+                    "lifecycle_rate_limit_header_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_subscription_quota_tx,
+                    "lifecycle_subscription_quota_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_api_key_metrics_tx,
+                    "lifecycle_api_key_metrics_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_cache_hit_miss_tx,
+                    "lifecycle_cache_hit_miss_activity_dropped",
+                ),
+                (
+                    &self.inner.lifecycle_routing_tier_tx,
+                    "lifecycle_routing_tier_activity_dropped",
+                ),
+            ];
+            for (slot, drop_reason) in targets {
+                self.try_send_activity(slot, drop_reason, &event);
+            }
+            return;
+        }
         if matches!(&event, LifecycleEvent::UpstreamQuotaFrameObserved { .. }) {
             // Account-only frames feed only the quota subscriber. A request
             // identity is required before the assembler may create a row.
@@ -934,5 +1014,56 @@ mod tests {
         let _rx = bus.attach_lifecycle_writer(1);
         bus.publish_lifecycle(sample_lifecycle_event("a"));
         bus.publish_lifecycle(sample_lifecycle_event("b"));
+    }
+
+    #[tokio::test]
+    async fn request_activity_fans_out_without_overflow_or_rejection_audit() {
+        let bus = InMemoryBus::new();
+        let mut broadcast_rx = bus.subscribe_lifecycle();
+        let mut writer_rx = bus.attach_lifecycle_writer(1);
+        let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+        let mut pricing_rx = bus.attach_lifecycle_pricing(1);
+        let mut reconcile_rx = bus.attach_lifecycle_limit_reconcile(1);
+        let mut cache_obs_rx = bus.attach_lifecycle_cache_observation(1);
+        let mut rate_limit_rx = bus.attach_lifecycle_rate_limit_header(1);
+        let mut quota_rx = bus.attach_lifecycle_subscription_quota(1);
+        let mut api_metrics_rx = bus.attach_lifecycle_api_key_metrics(1);
+        let mut cache_hit_rx = bus.attach_lifecycle_cache_hit_miss(1);
+        let mut routing_tier_rx = bus.attach_lifecycle_routing_tier(1);
+        let mut audit_rx = bus.attach_lifecycle_limit_rejection_audit(1);
+
+        let first = LifecycleEvent::RequestActivity {
+            event_id: "evt-1".into(),
+        };
+        bus.publish_lifecycle(first.clone());
+
+        assert_eq!(broadcast_rx.try_recv().expect("broadcast"), first);
+        assert_eq!(writer_rx.try_recv().expect("writer"), first);
+        assert_eq!(assembler_rx.try_recv().expect("assembler"), first);
+        assert_eq!(pricing_rx.try_recv().expect("pricing"), first);
+        assert_eq!(reconcile_rx.try_recv().expect("reconcile"), first);
+        assert_eq!(cache_obs_rx.try_recv().expect("cache_obs"), first);
+        assert_eq!(rate_limit_rx.try_recv().expect("rate_limit"), first);
+        assert_eq!(quota_rx.try_recv().expect("quota"), first);
+        assert_eq!(api_metrics_rx.try_recv().expect("api_metrics"), first);
+        assert_eq!(cache_hit_rx.try_recv().expect("cache_hit"), first);
+        assert_eq!(routing_tier_rx.try_recv().expect("routing_tier"), first);
+        assert!(
+            audit_rx.try_recv().is_err(),
+            "audit must skip RequestActivity"
+        );
+
+        // Fill assembler channel with a non-activity row, then send RequestActivity:
+        // must drop cleanly without spawning an overflow task.
+        bus.publish_lifecycle(sample_lifecycle_event("fill"));
+        assert_eq!(bus.assembler_overflow_in_flight(), 0);
+        bus.publish_lifecycle(LifecycleEvent::RequestActivity {
+            event_id: "evt-drop".into(),
+        });
+        assert_eq!(
+            bus.assembler_overflow_in_flight(),
+            0,
+            "full assembler channel must drop RequestActivity without spawning overflow tasks"
+        );
     }
 }
