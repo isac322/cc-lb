@@ -100,6 +100,7 @@ ARG SKIP_SPA="0"
 # standalone builds retain an explicit uncached fallback.
 ARG SCCACHE_LOCAL_MOUNT="0"
 ARG REQUIRE_SCCACHE="0"
+ARG CARGO_PROFILE_RELEASE_OPT_LEVEL=""
 ARG CARGO_PROFILE_RELEASE_LTO=""
 ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=""
 
@@ -139,6 +140,11 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
+if [ -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]; then
+  unset CARGO_PROFILE_RELEASE_OPT_LEVEL
+else
+  export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL}"
+fi
 if [ -z "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
   unset CARGO_PROFILE_RELEASE_LTO
 else
@@ -262,14 +268,21 @@ RUN /usr/local/bin/cc-lb --version && \
       /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
     fi
 
-# ---- Final: distroless static (DEFAULT target) ----
+# ---- Final base: distroless static runtime metadata ----
 # Ships passwd/group metadata, /tmp, and CA certificates in a small operational
 # base around the static binary. Digest-pinned for reproducible builds
 # (:nonroot is a rolling tag); bump alongside the other base images
 # (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless
-COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless-base
 USER 65532:65532
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
+
+# ---- Prebuilt static binary packaging (used by hosted CI/CD workflows) ----
+FROM distroless-base AS distroless-prebuilt
+COPY --link cc-lb /usr/local/bin/cc-lb
+
+# ---- Final: distroless static (DEFAULT target) ----
+FROM distroless-base AS distroless
+COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb

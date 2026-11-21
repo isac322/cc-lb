@@ -22,12 +22,12 @@ on:
         required: true
         type: string
       source_ref:
-        description: 'Immutable cc-lb source tag to build'
+        description: 'Immutable cc-lb source tag to build (or "dry-run" for no-push CI benchmark)'
         required: true
         type: string
 
 concurrency:
-  group: publish-docker-${{ inputs.version }}
+  group: publish-docker-${{ inputs.version }}-${{ inputs.source_ref == 'dry-run' && github.ref || 'release' }}
   cancel-in-progress: false
 
 permissions: {}
@@ -43,13 +43,31 @@ jobs:
     outputs:
       sha: ${{ steps.source.outputs.sha }}
       source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
+      rust_version: ${{ steps.source.outputs.rust_version }}
+      lock_hash: ${{ steps.source.outputs.lock_hash }}
       already_published: ${{ steps.existing.outputs.already_published }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
     steps:
+      - name: Determine execution mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$SOURCE_REF" = "dry-run" ]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.source_ref == 'dry-run') && github.sha || inputs.source_ref }}
           persist-credentials: false
+
       - name: Prepare image revision verifier
+        if: steps.mode.outputs.dry_run != 'true'
         run: |
           cat > "$RUNNER_TEMP/verify-image-revision.sh" <<'VERIFY_IMAGE_REVISION'
           #!/usr/bin/env bash
@@ -156,18 +174,26 @@ jobs:
 
       - name: Resolve source revision
         id: source
+        env:
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
         run: |
           set -euo pipefail
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "source_date_epoch=$(git log -1 --format=%ct)"
+            echo "rust_version=$rust_version"
+            echo "lock_hash=$LOCK_HASH"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate version and source ref
         env:
           VERSION: ${{ inputs.version }}
           SOURCE_REF: ${{ inputs.source_ref }}
+          DRY_RUN: ${{ steps.mode.outputs.dry_run }}
         run: |
           set -euo pipefail
-          if [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
+          if [ "$DRY_RUN" != "true" ] && [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
             echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
@@ -178,13 +204,12 @@ jobs:
           fi
 
       - name: Log in to ghcr.io
+        if: steps.mode.outputs.dry_run != 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v4
 
       - name: Inspect existing exact image
         id: existing
@@ -192,8 +217,13 @@ jobs:
           IMAGE: ghcr.io/isac322/cc-lb
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          DRY_RUN: ${{ steps.mode.outputs.dry_run }}
         run: |
           set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           error_file="$RUNNER_TEMP/image-inspect-error"
           if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>"$error_file"; then
             "$RUNNER_TEMP/verify-image-revision.sh" "$SOURCE_SHA" "$IMAGE:$VERSION"
@@ -206,61 +236,128 @@ jobs:
             exit 1
           fi
 
+      - name: Build Admin SPA once for all targets
+        if: steps.existing.outputs.already_published != 'true'
+        uses: ./.github/actions/setup-admin-spa
+
+      - name: Upload Admin SPA dist artifact
+        if: steps.existing.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: admin-spa-dist
+          path: crates/cc-lb-admin/web/dist
+          retention-days: 1
+          if-no-files-found: error
+
   build:
     name: build & push digest (${{ matrix.key }})
     needs: prepare
     if: needs.prepare.outputs.already_published != 'true'
-    runs-on: ${{ matrix.runner }}
+    # Fat LTO + CGU=1 is single-threaded; x86_64 outperforms ARM64 by ~1.4-1.6x.
+    runs-on: ubuntu-26.04
     timeout-minutes: 240
     permissions:
       contents: read
       packages: write
+      actions: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - key: amd64
             platform: linux/amd64
-            runner: ubuntu-26.04
-            host: amd64
             smoke: true
           - key: arm64
             platform: linux/arm64
-            runner: ubuntu-26.04-arm
-            host: arm64
-            smoke: true
+            smoke: false
           - key: armv7
             platform: linux/arm/v7
-            runner: ubuntu-26.04-arm
-            host: arm64
             smoke: false
           - key: ppc64le
             platform: linux/ppc64le
-            runner: ubuntu-26.04-arm
-            host: arm64
             smoke: false
     env:
-      # docker/build-push-action uploads a per-step build record artifact
-      # (docker-build-*); bound its retention so records do not outlive the
-      # debugging window they exist for.
       DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
-      CACHE_KEY: docker-mounts-fat-${{ matrix.key }}-${{ needs.prepare.outputs.sha }}
+      CACHE_PREFIX: cd-deps-fat-v1-${{ needs.prepare.outputs.dry_run == 'true' && 'dryrun-' || '' }}${{ matrix.key }}-${{ needs.prepare.outputs.rust_version }}
+      CACHE_KEY: cd-deps-fat-v1-${{ needs.prepare.outputs.dry_run == 'true' && 'dryrun-' || '' }}${{ matrix.key }}-${{ needs.prepare.outputs.rust_version }}-${{ needs.prepare.outputs.lock_hash }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ needs.prepare.outputs.dry_run == 'true' && needs.prepare.outputs.sha || inputs.source_ref }}
           persist-credentials: false
 
-      - name: Restore BuildKit cache mounts
-        id: cache-restore
+      - name: Download prebuilt Admin SPA dist
+        uses: actions/download-artifact@v7
+        with:
+          name: admin-spa-dist
+          path: crates/cc-lb-admin/web/dist
+
+      - name: Cache shared Cargo registry and git db (amd64 primary)
+        if: matrix.key == 'amd64'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v2-${{ runner.os }}-
+
+      - name: Restore shared Cargo registry and git db
+        if: matrix.key != 'amd64'
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/docker-mounts.tar
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v2-${{ runner.os }}-
+
+      - name: Restore release Cargo deps target cache
+        id: deps-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: target
           key: ${{ env.CACHE_KEY }}
           restore-keys: |
-            docker-mounts-fat-${{ matrix.key }}-
+            ${{ env.CACHE_PREFIX }}-
+
+      - name: Compile static binary with fat LTO
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
+          CARGO_BUILD_JOBS: "4"
+          GIT_SHA: ${{ needs.prepare.outputs.sha }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+        run: ./scripts/docker-build-musl.sh
+
+      - name: Smoke-test native amd64 static binary
+        if: matrix.smoke
+        env:
+          BIN_PATH: ${{ runner.temp }}/stage-ctx/cc-lb
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          out=$("$BIN_PATH" --version)
+          printf '%s\n' "$out"
+          grep -Fq "$EXPECTED_VERSION" <<<"$out"
+
+      - name: Upload dry-run arm64 binary for remote smoke
+        if: needs.prepare.outputs.dry_run == 'true' && matrix.key == 'arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: arm64-dryrun-bin
+          path: ${{ runner.temp }}/stage-ctx/cc-lb
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Log in to ghcr.io
+        if: needs.prepare.outputs.dry_run != 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -272,34 +369,6 @@ jobs:
         with:
           driver: docker-container
 
-      - name: Inject restored BuildKit cache mounts
-        if: steps.cache-restore.outputs.cache-matched-key != ''
-        env:
-          BUILDER: ${{ steps.buildx.outputs.name }}
-          HOST_ARCH: ${{ matrix.host }}
-        run: |
-          set -euo pipefail
-          ctx="$RUNNER_TEMP/buildkit-cache-inject"
-          rm -rf "$ctx"
-          mkdir -p "$ctx"
-          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
-          cat > "$ctx/Dockerfile" <<EOF
-          # syntax=docker/dockerfile:1
-          FROM alpine:3.24 AS inject
-          COPY docker-mounts.tar /docker-mounts.tar
-          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
-              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
-              tar -C / -xf /docker-mounts.tar && \
-              mkdir -p /out && \
-              du -sk /cargo-home /bun /sccache > /out/restored.txt
-          FROM scratch
-          COPY --from=inject /out/ /
-          EOF
-          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
-          cat "$ctx/out/restored.txt"
-          rm -rf "$ctx"
-
       - name: Derive exact labels
         id: meta
         uses: docker/metadata-action@v6
@@ -309,44 +378,22 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
 
-      - name: Build and push platform digest
+      - name: Package and push platform digest
         id: build_push
         uses: docker/build-push-action@v7
         with:
           builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          target: distroless
+          file: ${{ github.workspace }}/Dockerfile
+          context: ${{ runner.temp }}/stage-ctx
+          target: distroless-prebuilt
           platforms: ${{ matrix.platform }}
           provenance: true
           sbom: true
-          outputs: type=image,name=ghcr.io/isac322/cc-lb,push-by-digest=true,name-canonical=true,push=true
+          outputs: ${{ needs.prepare.outputs.dry_run == 'true' && 'type=cacheonly' || 'type=image,name=ghcr.io/isac322/cc-lb,push-by-digest=true,name-canonical=true,push=true' }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CARGO_BUILD_JOBS=4
-            SCCACHE_LOCAL_MOUNT=1
-            REQUIRE_SCCACHE=1
-            GIT_SHA=${{ needs.prepare.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.source_date_epoch }}
-
-      - name: Smoke-test native binary version
-        if: matrix.smoke
-        uses: docker/build-push-action@v7
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          target: smoke
-          outputs: type=cacheonly
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          build-args: |
-            CARGO_BUILD_JOBS=4
-            SCCACHE_LOCAL_MOUNT=1
-            REQUIRE_SCCACHE=1
-            GIT_SHA=${{ needs.prepare.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.source_date_epoch }}
-            EXPECTED_VERSION=${{ inputs.version }}
 
       - name: Write pushed platform digest
+        if: needs.prepare.outputs.dry_run != 'true'
         env:
           DIGEST: ${{ steps.build_push.outputs.digest }}
           KEY: ${{ matrix.key }}
@@ -359,6 +406,7 @@ jobs:
           printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest-$KEY.txt"
 
       - name: Upload platform digest
+        if: needs.prepare.outputs.dry_run != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: docker-digest-${{ matrix.key }}
@@ -366,57 +414,119 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - name: Extract populated BuildKit cache mounts
-        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
-        env:
-          BUILDER: ${{ steps.buildx.outputs.name }}
-          HOST_ARCH: ${{ matrix.host }}
+      - name: Prune release deps target cache
+        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
         run: |
           set -euo pipefail
-          ctx="$RUNNER_TEMP/buildkit-cache-extract"
-          rm -rf "$ctx" "$RUNNER_TEMP/docker-mounts.tar"
-          mkdir -p "$ctx"
-          cat > "$ctx/Dockerfile" <<EOF
-          # syntax=docker/dockerfile:1
-          FROM alpine:3.24 AS extract
-          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
-              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
-              mkdir -p /out && \
-              du -sk /cargo-home /bun /sccache > /out/extracted.txt && \
-              tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
-          FROM scratch
-          COPY --from=extract /out/ /
-          EOF
-          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
-          cat "$ctx/out/extracted.txt"
-          mv "$ctx/out/docker-mounts.tar" "$RUNNER_TEMP/docker-mounts.tar"
-          test -s "$RUNNER_TEMP/docker-mounts.tar"
-          rm -rf "$ctx"
+          echo "=== target size before prune ==="
+          du -sh target target/*/release || true
+          node scripts/prune-rust-target.mjs \
+            --target-dir target \
+            --metadata-file target/.cargo-metadata.json
+          echo "=== target size after prune ==="
+          du -sh target target/*/release || true
 
-      - name: Save BuildKit cache mounts
-        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+      - name: Save release deps target cache
+        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/docker-mounts.tar
+          path: target
           key: ${{ env.CACHE_KEY }}
+
+      - name: Prune superseded release deps caches
+        if: steps.deps-restore.outputs.cache-hit != 'true' && (needs.prepare.outputs.dry_run == 'true' || github.ref == 'refs/heads/master')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_KEY: ${{ env.CACHE_KEY }}
+          CACHE_PREFIX: ${{ env.CACHE_PREFIX }}-
+          TARGET_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
+            --jq '.actions_caches[] | select((.key | startswith(env.CACHE_PREFIX)) and .key != env.CURRENT_KEY) | .id') || true
+          for id in $stale_ids; do
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
+          done
+
+  smoke-arm64:
+    name: smoke-test native arm64 binary
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.already_published != 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 15
+    permissions:
+      packages: read
+    steps:
+      - name: Download arm64 digest (live)
+        if: needs.prepare.outputs.dry_run != 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: docker-digest-arm64
+          path: ${{ runner.temp }}/digests
+
+      - name: Log in to ghcr.io
+        if: needs.prepare.outputs.dry_run != 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run native arm64 container smoke test
+        if: needs.prepare.outputs.dry_run != 'true'
+        env:
+          IMAGE: ghcr.io/isac322/cc-lb
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          digest=$(tr -d '[:space:]' < "$RUNNER_TEMP/digests/docker-digest-arm64/digest-arm64.txt" 2>/dev/null || tr -d '[:space:]' < "$RUNNER_TEMP/digests/digest-arm64.txt")
+          out=$(docker run --rm "${IMAGE}@${digest}" --version)
+          printf '%s\n' "$out"
+          grep -Fq "$EXPECTED_VERSION" <<<"$out"
+
+      - name: Download dry-run arm64 binary
+        if: needs.prepare.outputs.dry_run == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: arm64-dryrun-bin
+          path: ${{ runner.temp }}/arm64-bin
+
+      - name: Run native arm64 binary smoke test (dry-run)
+        if: needs.prepare.outputs.dry_run == 'true'
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/arm64-bin/cc-lb"
+          out=$("$RUNNER_TEMP/arm64-bin/cc-lb" --version)
+          printf '%s\n' "$out"
+          grep -Fq "$EXPECTED_VERSION" <<<"$out"
 
   publish:
     name: assemble & verify image
-    needs: [prepare, build]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || needs.build.result == 'success') }}
-    runs-on: ubuntu-26.04
+    needs: [prepare, build, smoke-arm64]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || (needs.build.result == 'success' && needs.smoke-arm64.result == 'success')) }}
+    runs-on: ubuntu-slim
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Verify dry-run ubuntu-slim imagetools without daemon
+        if: needs.prepare.outputs.dry_run == 'true'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect ghcr.io/isac322/cc-lb:2.2.1 --raw >/dev/null
+          echo "dry-run publish verified on ubuntu-slim without Docker daemon"
+
       - uses: actions/checkout@v7
+        if: needs.prepare.outputs.dry_run != 'true'
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Prepare image revision verifier
+        if: needs.prepare.outputs.dry_run != 'true'
         run: |
           cat > "$RUNNER_TEMP/verify-image-revision.sh" <<'VERIFY_IMAGE_REVISION'
           #!/usr/bin/env bash
@@ -522,16 +632,15 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/verify-image-revision.sh"
 
       - name: Log in to ghcr.io
+        if: needs.prepare.outputs.dry_run != 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v4
-
       - name: Download platform digests
-        if: needs.prepare.outputs.already_published != 'true'
+        if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.already_published != 'true'
         uses: actions/download-artifact@v7
         with:
           pattern: docker-digest-*
@@ -539,7 +648,7 @@ jobs:
           merge-multiple: true
 
       - name: Assemble and push exact multi-arch image
-        if: needs.prepare.outputs.already_published != 'true'
+        if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.already_published != 'true'
         env:
           IMAGE: ghcr.io/isac322/cc-lb
           VERSION: ${{ inputs.version }}
@@ -558,6 +667,7 @@ jobs:
           docker buildx imagetools create --tag "$IMAGE:$VERSION" "${refs[@]}"
 
       - name: Select moving aliases
+        if: needs.prepare.outputs.dry_run != 'true'
         id: aliases
         uses: actions/github-script@v9
         env:
@@ -587,7 +697,7 @@ jobs:
             );
 
       - name: Reconcile moving aliases
-        if: steps.aliases.outputs.aliases != ''
+        if: needs.prepare.outputs.dry_run != 'true' && steps.aliases.outputs.aliases != ''
         env:
           ALIASES: ${{ steps.aliases.outputs.aliases }}
           IMAGE: ghcr.io/isac322/cc-lb
@@ -602,6 +712,7 @@ jobs:
           docker buildx imagetools create "${args[@]}" "$IMAGE:$VERSION"
 
       - name: Verify published image tags
+        if: needs.prepare.outputs.dry_run != 'true'
         env:
           ALIASES: ${{ steps.aliases.outputs.aliases }}
           IMAGE: ghcr.io/isac322/cc-lb

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -111,6 +111,52 @@ test('pruneTargetDir removes workspace artifacts paired with fingerprints and pr
     assert.equal(existsSync(path.join(trybuildTripleDebug, 'incremental')), false);
     assert.equal(existsSync(path.join(trybuildTripleDebug, 'deps', 'libcc_lb_server-3333333333333333.rmeta')), true);
     assert.equal(existsSync(path.join(trybuildTripleDebug, 'deps', 'cc_lb_server-3333333333333333.d')), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pruneTargetDir with keepLatestIncremental keeps only newest workspace hash dir and newest s-* session', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'prune-rust-inc-'));
+  try {
+    const releaseDir = path.join(root, 'aarch64-unknown-linux-musl', 'release');
+    const incDir = path.join(releaseDir, 'incremental');
+
+    const oldCrateHash = path.join(incDir, 'cc_lb_server-1111aaaa');
+    const newCrateHash = path.join(incDir, 'cc_lb_server-2222bbbb');
+    const nonWsCrate = path.join(incDir, 'tokio-3333cccc');
+    const strayFile = path.join(incDir, 'stray.lock');
+
+    const oldSess = path.join(newCrateHash, 's-1000-01');
+    const newSess = path.join(newCrateHash, 's-2000-02');
+    const workingSess = path.join(newCrateHash, 's-3000-03-working');
+    const crateLock = path.join(newCrateHash, 's-2000-02.lock');
+
+    touch(path.join(oldCrateHash, 's-0900-00', 'work.bin'));
+    touch(path.join(oldSess, 'dep-graph.bin'));
+    touch(path.join(newSess, 'dep-graph.bin'));
+    touch(path.join(workingSess, 'dep-graph.bin'));
+    touch(crateLock);
+    touch(path.join(nonWsCrate, 's-4000-01', 'work.bin'));
+    touch(strayFile);
+
+    utimesSync(oldSess, 1_700_000_100, 1_700_000_100);
+    utimesSync(newSess, 1_700_000_200, 1_700_000_200);
+    utimesSync(oldCrateHash, 1_700_000_100, 1_700_000_100);
+    utimesSync(newCrateHash, 1_700_000_200, 1_700_000_200);
+
+    const res = pruneTargetDir(root, SAMPLE_METADATA, {
+      keepWorkspaceLibs: true,
+      keepLatestIncremental: true,
+    });
+    assert.ok(res.removedEntries >= 5);
+    assert.equal(existsSync(strayFile), false);
+    assert.equal(existsSync(nonWsCrate), false);
+    assert.equal(existsSync(oldCrateHash), false);
+    assert.equal(existsSync(oldSess), false);
+    assert.equal(existsSync(workingSess), false);
+    assert.equal(existsSync(crateLock), false);
+    assert.equal(existsSync(path.join(newSess, 'dep-graph.bin')), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

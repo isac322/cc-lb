@@ -9,14 +9,14 @@ on:
 # A later push supersedes an older build; only the newest completed build may
 # publish the mutable dev tag.
 concurrency:
-  group: publish-dev-image-dev
+  group: publish-dev-image-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/dev'
+    if: github.ref == 'refs/heads/dev' || github.event_name == 'workflow_dispatch'
     name: build and verify dev image
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 240
@@ -28,140 +28,188 @@ jobs:
       - name: Check out triggering revision
         uses: actions/checkout@v7
         with:
-          # github.sha is the immutable commit that caused this push event.
+          # github.sha is the immutable commit that caused this push/dispatch event.
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Resolve source metadata
+      - name: Resolve source and cache metadata
         id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
-          echo "CACHE_KEY=docker-mounts-off-arm64-$sha" >> "$GITHUB_ENV"
+          source_date_epoch=$(git log -1 --format=%ct)
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          rust_version=$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          if [ "$REF_NAME" = "refs/heads/dev" ]; then
+            dry_run=false
+            cache_prefix="dev-target-v1-arm64-${rust_version}"
+            image_tag="ghcr.io/isac322/cc-lb:dev"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            dry_run=true
+            cache_prefix="dev-target-dryrun-v1-arm64-${rust_version}"
+            image_tag="cc-lb:dev-dry-run"
+          else
+            echo "::error::unexpected ref '$REF_NAME' for event '$EVENT_NAME'"
+            exit 1
+          fi
+          lock_prefix="${cache_prefix}-${LOCK_HASH}"
+          cache_key="${lock_prefix}-${sha}"
+          {
+            echo "sha=$sha"
+            echo "short_sha=${sha:0:7}"
+            echo "source_date_epoch=$source_date_epoch"
+            echo "version=$version"
+            echo "rust_version=$rust_version"
+            echo "dry_run=$dry_run"
+            echo "cache_prefix=$cache_prefix"
+            echo "lock_prefix=$lock_prefix"
+            echo "cache_key=$cache_key"
+            echo "image_tag=$image_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Admin SPA dist
+        uses: ./.github/actions/setup-admin-spa
+
+      - name: Cache shared Cargo registry and git db
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v2-${{ runner.os }}-
+
+      - name: Restore rolling dev Cargo target cache
+        id: target-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: target
+          key: ${{ steps.source.outputs.cache_key }}
+          restore-keys: |
+            ${{ steps.source.outputs.lock_prefix }}-
+            ${{ steps.source.outputs.cache_prefix }}-
+
+      - name: Evaluate target cache and restore workspace mtimes
+        id: target-match
+        env:
+          MATCHED_KEY: ${{ steps.target-restore.outputs.cache-matched-key }}
+          LOCK_PREFIX: ${{ steps.source.outputs.lock_prefix }}-
+        run: |
+          set -euo pipefail
+          if [ -n "$MATCHED_KEY" ] && [[ "$MATCHED_KEY" == "$LOCK_PREFIX"* ]]; then
+            echo "lock_cache_hit=true" >> "$GITHUB_OUTPUT"
+            node scripts/ws-mtimes.mjs restore --in target/aarch64-unknown-linux-musl/release/.ws-mtimes.json
+          else
+            echo "lock_cache_hit=false" >> "$GITHUB_OUTPUT"
+            if [ -n "$MATCHED_KEY" ]; then
+              echo "Lockfile/toolchain changed (matched $MATCHED_KEY); clearing stale target dir"
+              rm -rf target
+            fi
+          fi
+
+      - name: Compile static arm64 dev binary
+        env:
+          TARGET_PLATFORM: linux/arm64
+          OUT_BIN: ${{ runner.temp }}/stage-ctx/cc-lb
+          GIT_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_DATE_EPOCH: ${{ steps.source.outputs.source_date_epoch }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
+          CARGO_PROFILE_RELEASE_LTO: "off"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "64"
+          CARGO_INCREMENTAL: "1"
+          CARGO_BUILD_JOBS: "4"
+        run: ./scripts/docker-build-musl.sh
+
+      - name: Package and smoke-test distroless arm64 dev image
+        env:
+          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
+          EXPECTED_VERSION: ${{ steps.source.outputs.version }}
+          EXPECTED_SHORT_SHA: ${{ steps.source.outputs.short_sha }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          STAGE_CTX: ${{ runner.temp }}/stage-ctx
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --file "${GITHUB_WORKSPACE}/Dockerfile" \
+            --target distroless-prebuilt \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            --tag "${IMAGE_TAG}" \
+            "${STAGE_CTX}"
+          version_out=$(docker run --rm "${IMAGE_TAG}" --version)
+          printf '%s\n' "$version_out"
+          grep -Fq "$EXPECTED_VERSION" <<<"$version_out"
+          grep -Fq "$EXPECTED_SHORT_SHA" <<<"$version_out"
 
       - name: Log in to ghcr.io
+        if: steps.source.outputs.dry_run != 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore BuildKit cache mounts
-        id: cache-restore
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ runner.temp }}/docker-mounts.tar
-          key: ${{ env.CACHE_KEY }}
-          restore-keys: |
-            docker-mounts-off-arm64-
-            docker-mounts-thin-arm64-
-
-      - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          driver: docker-container
-
-      - name: Inject restored BuildKit cache mounts
-        if: steps.cache-restore.outputs.cache-matched-key != ''
+      - name: Push arm64 dev image
+        if: steps.source.outputs.dry_run != 'true'
         env:
-          BUILDER: ${{ steps.buildx.outputs.name }}
+          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
+        run: docker push "$IMAGE_TAG"
+
+      - name: Prune and save dev Cargo target cache
+        if: steps.target-restore.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          ctx="$RUNNER_TEMP/buildkit-cache-inject"
-          rm -rf "$ctx"
-          mkdir -p "$ctx"
-          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
-          cat > "$ctx/Dockerfile" <<'EOF'
-          # syntax=docker/dockerfile:1
-          FROM alpine:3.24 AS inject
-          COPY docker-mounts.tar /docker-mounts.tar
-          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-              --mount=type=cache,id=bun-linux-arm64,target=/bun \
-              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
-              tar -C / -xf /docker-mounts.tar && \
-              mkdir -p /out && \
-              du -sk /cargo-home /bun /sccache > /out/restored.txt
-          FROM scratch
-          COPY --from=inject /out/ /
-          EOF
-          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
-          cat "$ctx/out/restored.txt"
-          rm -rf "$ctx"
-      - name: Build and push arm64 dev image
-        uses: docker/build-push-action@v7
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          target: distroless
-          platforms: linux/arm64
-          push: true
-          tags: ghcr.io/isac322/cc-lb:dev
-          labels: |
-            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
-          build-args: |
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            CARGO_BUILD_JOBS=4
-            CARGO_PROFILE_RELEASE_LTO=off
-            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
-            SCCACHE_LOCAL_MOUNT=1
-            REQUIRE_SCCACHE=1
-          # Avoid an unknown/unknown attestation entry in the mutable tag. The
-          # remote verification below must see exactly one runnable platform.
-          provenance: false
+          node scripts/prune-rust-target.mjs \
+            --target-dir target \
+            --metadata-file target/.cargo-metadata.json \
+            --keep-workspace-libs \
+            --keep-latest-incremental
+          node scripts/ws-mtimes.mjs record \
+            --out target/aarch64-unknown-linux-musl/release/.ws-mtimes.json \
+            --extra-dir crates/cc-lb-admin/web/dist
+          du -sh target target/aarch64-unknown-linux-musl/release target/aarch64-unknown-linux-musl/release/incremental || true
 
-
-      - name: Extract populated BuildKit cache mounts
-        if: steps.cache-restore.outputs.cache-hit != 'true'
-        env:
-          BUILDER: ${{ steps.buildx.outputs.name }}
-        run: |
-          set -euo pipefail
-          ctx="$RUNNER_TEMP/buildkit-cache-extract"
-          rm -rf "$ctx" "$RUNNER_TEMP/docker-mounts.tar"
-          mkdir -p "$ctx"
-          cat > "$ctx/Dockerfile" <<'EOF'
-          # syntax=docker/dockerfile:1
-          FROM alpine:3.24 AS extract
-          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-              --mount=type=cache,id=bun-linux-arm64,target=/bun \
-              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
-              mkdir -p /out && \
-              du -sk /cargo-home /bun /sccache > /out/extracted.txt && \
-              tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
-          FROM scratch
-          COPY --from=extract /out/ /
-          EOF
-          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
-          cat "$ctx/out/extracted.txt"
-          mv "$ctx/out/docker-mounts.tar" "$RUNNER_TEMP/docker-mounts.tar"
-          test -s "$RUNNER_TEMP/docker-mounts.tar"
-          rm -rf "$ctx"
-
-      - name: Save BuildKit cache mounts
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+      - name: Upload dev Cargo target cache
+        if: steps.target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/docker-mounts.tar
-          key: ${{ env.CACHE_KEY }}
+          path: target
+          key: ${{ steps.source.outputs.cache_key }}
 
       - name: Prune superseded dev-image caches
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.target-restore.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CURRENT_KEY: ${{ env.CACHE_KEY }}
+          CURRENT_KEY: ${{ steps.source.outputs.cache_key }}
+          CACHE_PREFIX: ${{ steps.source.outputs.cache_prefix }}-
+          DRY_RUN: ${{ steps.source.outputs.dry_run }}
+          TARGET_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          stale_keys=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | select((.key | startswith("docker-mounts-off-arm64-") or startswith("docker-mounts-thin-arm64-")) and .key != env.CURRENT_KEY) | .key')
-          while IFS= read -r key; do
-            [ -n "$key" ] || continue
-            gh cache delete "$key" || true
-          done <<<"$stale_keys"
+          stale_ids=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/caches?ref=${TARGET_REF}&per_page=100" \
+            --jq '
+              .actions_caches[]
+              | select(
+                  (
+                    (.key | startswith(env.CACHE_PREFIX)) or
+                    (env.DRY_RUN != "true" and ((.key | startswith("docker-mounts-off-arm64-")) or (.key | startswith("docker-mounts-thin-arm64-"))))
+                  )
+                  and .key != env.CURRENT_KEY
+                )
+              | .id
+            ') || true
+          for id in $stale_ids; do
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null || true
+          done
+
       - name: Verify remote image platform and revision
+        if: steps.source.outputs.dry_run != 'true'
         env:
           IMAGE: ghcr.io/isac322/cc-lb:dev
           EXPECTED_REVISION: ${{ steps.source.outputs.sha }}
