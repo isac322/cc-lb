@@ -3423,9 +3423,68 @@ async fn send_responses_dispatch(
     connections: &mut HashMap<u64, WsProviderConnection>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
-        let result = gateway.connection_closed(connection_id, "provider connection is unavailable");
+        let mut result =
+            gateway.connection_closed(connection_id, "provider connection is unavailable");
+        if dispatch.control && result.errors.is_empty() {
+            result.errors.push(
+                WebSocketError::new(
+                    400,
+                    "response_not_found",
+                    "The interrupt target connection is no longer available",
+                )
+                .with_stream(dispatch.stream_id),
+            );
+        }
         return (result.dispatches, result.errors);
     };
+    if dispatch.control {
+        if !gateway.owns_connection(connection_id, connection.upstream_id) {
+            return (
+                Vec::new(),
+                vec![
+                    WebSocketError::new(
+                        400,
+                        "response_not_found",
+                        "The interrupt target connection is no longer available",
+                    )
+                    .with_stream(dispatch.stream_id),
+                ],
+            );
+        }
+        let frame = match gateway.frame_for_send(&dispatch) {
+            Ok(frame) => match String::from_utf8(frame.to_vec()) {
+                Ok(frame) => UpstreamMessage::Text(frame.into()),
+                Err(_) => {
+                    return (
+                        Vec::new(),
+                        vec![
+                            WebSocketError::new(
+                                400,
+                                "invalid_request_error",
+                                "WebSocket control message must be valid UTF-8",
+                            )
+                            .with_stream(dispatch.stream_id),
+                        ],
+                    );
+                }
+            },
+            Err(error) => return (Vec::new(), vec![error]),
+        };
+        if connection.sink.send(frame).await.is_err() {
+            if let Some(connection) = connections.remove(&connection_id) {
+                connection.task.abort();
+            }
+            let mut result = gateway.connection_closed(connection_id, "provider write failed");
+            if result.errors.is_empty() {
+                result.errors.push(
+                    WebSocketError::new(502, "upstream_connection_closed", "provider write failed")
+                        .with_stream(dispatch.stream_id),
+                );
+            }
+            return (result.dispatches, result.errors);
+        }
+        return (Vec::new(), Vec::new());
+    }
     gateway.assign_connection(
         dispatch.turn_id,
         connection_id,

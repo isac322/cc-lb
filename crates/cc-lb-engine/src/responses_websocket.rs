@@ -197,6 +197,10 @@ pub struct WebSocketDispatch {
     pub connection_id: Option<u64>,
     pub candidates: Vec<WebSocketCandidate>,
     pub stream_id: Option<String>,
+    /// Marks a pass-through control frame for an already-owned response
+    /// (for example, `response.interrupt`) rather than a response-creating
+    /// or steering-successor turn.
+    pub control: bool,
 }
 
 #[derive(Default)]
@@ -445,18 +449,23 @@ impl ResponsesWebSocketGateway {
         frame: Bytes,
     ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
         let body = parse_client_frame(&auth, &frame, self.byte_cap);
-        let repeated_steer = body.as_ref().ok().is_some_and(|body| {
-            body.get("type").and_then(Value::as_str) == Some("response.steer")
-                && body
-                    .get("previous_response_id")
+        let kind_str = body
+            .as_ref()
+            .ok()
+            .and_then(|body| body.get("type").and_then(Value::as_str));
+        let repeated_steer = kind_str == Some("response.steer")
+            && body.as_ref().ok().is_some_and(|body| {
+                body.get("previous_response_id")
                     .and_then(Value::as_str)
                     .is_some_and(|parent| self.successor_for_parent(parent).is_some())
-        });
+            });
+        let is_interrupt = kind_str == Some("response.interrupt");
+        let control_without_turn = repeated_steer || is_interrupt;
         let (observer, request_id) = self.lifecycle.websocket_observer("/v1/responses");
         let mut auth_info = observer
             .as_ref()
             .map(|_| self.lifecycle.websocket_auth_info(&auth));
-        if !repeated_steer
+        if !control_without_turn
             && let (Some(observer), Some(info)) = (observer.as_ref(), auth_info.take())
         {
             observe_authenticated_frame(observer, info);
@@ -469,7 +478,7 @@ impl ResponsesWebSocketGateway {
                     auth,
                     frame,
                     body,
-                    if repeated_steer {
+                    if control_without_turn {
                         None
                     } else {
                         observer.clone()
@@ -511,12 +520,17 @@ impl ResponsesWebSocketGateway {
                 .admit_steer(auth, frame, body, observer, request_id)
                 .await;
         }
+        if kind == "response.interrupt" {
+            return self.admit_interrupt(auth, frame, body);
+        }
         if kind != "response.create" {
-            return Err(WebSocketError::new(
-                400,
-                "invalid_request_error",
-                "Unsupported Responses WebSocket client event",
-            ));
+            let safe_kind = sanitize_client_event_type(kind);
+            let message = if safe_kind.is_empty() {
+                "Unsupported Responses WebSocket client event".to_owned()
+            } else {
+                format!("Unsupported Responses WebSocket client event: {safe_kind}")
+            };
+            return Err(WebSocketError::new(400, "invalid_request_error", message));
         }
         let lane = stream_id(&body)?;
         let previous = body
@@ -757,6 +771,7 @@ impl ResponsesWebSocketGateway {
                 connection_id: Some(owner.connection_id),
                 candidates: Vec::new(),
                 stream_id: lane,
+                control: false,
             }));
         }
         let body = owner.body.clone();
@@ -843,6 +858,69 @@ impl ResponsesWebSocketGateway {
         }
     }
 
+    /// Admit a `response.interrupt` control frame for an already-owned response
+    /// without starting a new turn or failing over across connections.
+    fn admit_interrupt(
+        &self,
+        auth: Authenticated,
+        frame: Bytes,
+        control: Value,
+    ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
+        let requested_lane = stream_id(&control)?;
+        let response_id = control
+            .get("response_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    400,
+                    "invalid_request_error",
+                    "response.interrupt requires response_id",
+                )
+                .with_stream(requested_lane.clone())
+            })?;
+        let owner = self.owners.get(response_id).cloned().ok_or_else(|| {
+            WebSocketError::new(
+                400,
+                "response_not_found",
+                "The interrupt target is not available on this WebSocket connection",
+            )
+            .with_stream(requested_lane.clone())
+        })?;
+        if requested_lane.is_some() && requested_lane != owner.lane {
+            return Err(WebSocketError::new(
+                400,
+                "response_not_found",
+                "The interrupt target belongs to another WebSocket lane",
+            )
+            .with_stream(requested_lane));
+        }
+        if owner.principal_id != auth.principal_id() {
+            return Err(WebSocketError::new(
+                400,
+                "response_not_found",
+                "The interrupt target is not owned by this client",
+            )
+            .with_stream(owner.lane));
+        }
+        if self.connections.get(&owner.connection_id) != Some(&owner.upstream_id) {
+            return Err(WebSocketError::new(
+                400,
+                "response_not_found",
+                "The interrupt target connection is no longer available",
+            )
+            .with_stream(owner.lane));
+        }
+        Ok(Some(WebSocketDispatch {
+            turn_id: owner.turn_id,
+            frame,
+            connection_id: Some(owner.connection_id),
+            candidates: Vec::new(),
+            stream_id: owner.lane,
+            control: true,
+        }))
+    }
+
     fn dispatch(&mut self, turn_id: u64) -> Option<WebSocketDispatch> {
         let turn = self.turns.get_mut(&turn_id)?;
         Some(WebSocketDispatch {
@@ -851,6 +929,7 @@ impl ResponsesWebSocketGateway {
             connection_id: turn.connection_id,
             candidates: std::mem::take(&mut turn.prepared.candidates),
             stream_id: turn.lane.clone(),
+            control: false,
         })
     }
 
@@ -1004,6 +1083,9 @@ impl ResponsesWebSocketGateway {
         &mut self,
         dispatch: &WebSocketDispatch,
     ) -> Result<Bytes, WebSocketError> {
+        if dispatch.control {
+            return Ok(dispatch.frame.clone());
+        }
         let (upstream_id, steer) = {
             let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
                 WebSocketError::new(
@@ -1037,6 +1119,11 @@ impl ResponsesWebSocketGateway {
             || dispatch.frame.clone(),
             |(_, request)| request.frame.clone(),
         ))
+    }
+
+    /// Report whether `connection_id` is currently owned by `upstream_id`.
+    pub fn owns_connection(&self, connection_id: u64, upstream_id: Uuid) -> bool {
+        self.connections.get(&connection_id) == Some(&upstream_id)
     }
     pub fn assign_connection(
         &mut self,
@@ -1248,6 +1335,7 @@ impl ResponsesWebSocketGateway {
                 connection_id: turn.connection_id,
                 candidates: Vec::new(),
                 stream_id: turn.lane.clone(),
+                control: false,
             });
         }
         ready
@@ -2693,6 +2781,20 @@ fn steering_id_bytes(id: &str) -> usize {
         .saturating_add(2 * std::mem::size_of::<usize>())
 }
 
+fn sanitize_client_event_type(kind: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let redacted = cc_lb_observability::RedactionPolicy::default().redact_text(kind);
+    let mut out = String::with_capacity(redacted.len().min(MAX_CHARS + 3));
+    for (count, ch) in redacted.chars().enumerate() {
+        if count == MAX_CHARS {
+            out.push_str("...");
+            break;
+        }
+        out.push(if ch.is_control() { '?' } else { ch });
+    }
+    out
+}
+
 fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     let reported = response
         .get("usage")
@@ -3925,5 +4027,37 @@ pub(crate) mod tests {
         assert_eq!(latency.sse_event_count, 0);
         assert_eq!(latency.content_delta_count, 0);
         assert_eq!(latency.ping_count, 0);
+    }
+
+    #[test]
+    fn sanitize_client_event_type_redacts_strips_control_and_truncates() {
+        assert_eq!(
+            sanitize_client_event_type("response.future_event"),
+            "response.future_event"
+        );
+        assert_eq!(sanitize_client_event_type(""), "");
+        assert_eq!(
+            sanitize_client_event_type("a\nb\rc\td"),
+            "a?b?c?d",
+            "control characters must be replaced safely"
+        );
+        let overlong = "x".repeat(70);
+        assert_eq!(
+            sanitize_client_event_type(&overlong),
+            format!("{}...", "x".repeat(64))
+        );
+        let bearer_secret = sanitize_client_event_type("Bearer super-secret-token-1234567890");
+        assert!(
+            !bearer_secret.contains("super-secret-token-1234567890"),
+            "bearer secret must be redacted: {bearer_secret}"
+        );
+        assert!(bearer_secret.contains("[REDACTED]"));
+        let api_key_secret =
+            sanitize_client_event_type("sk-ant-abcdefghijklmnopqrstuvwxyz1234567890");
+        assert!(
+            !api_key_secret.contains("abcdefghijklmnopqrstuvwxyz"),
+            "API key secret must be redacted: {api_key_secret}"
+        );
+        assert!(api_key_secret.contains("[REDACTED]"));
     }
 }

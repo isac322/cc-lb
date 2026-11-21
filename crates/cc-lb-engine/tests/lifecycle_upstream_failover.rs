@@ -4450,3 +4450,310 @@ async fn responses_websocket_queued_response_id_is_bound_before_creation_or_expo
             .contains("resp_queued_must_not_escape")
     );
 }
+
+#[tokio::test]
+async fn responses_websocket_interrupt_routes_to_owner_handles_ack_orderings_and_reconciles_once() {
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let reconcile_rx = bus.attach_lifecycle_limit_reconcile(128);
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_020,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 8,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 100_000,
+            },
+        ],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle
+            .with_static_limit_subject(
+                engine.clone(),
+                PRINCIPAL.to_owned(),
+                "ws-interrupt-key".to_owned(),
+                StoredApiKeyRecord {
+                    key_hash_b64: "ws-interrupt-key".to_owned(),
+                    status: KeyStatus::Active,
+                    ..Default::default()
+                },
+            )
+            .with_event_bus(bus)
+    });
+    let (mut gateway, dispatch_log) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_active_int"))
+            .await
+            .unwrap()
+            .forward
+    );
+    // Queue a second turn behind the active one on the same lane.
+    assert!(
+        websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .is_none()
+    );
+    assert_eq!(concurrency.current("ws-interrupt-key"), 2);
+
+    // 1. response.interrupt on active turn routes to connection 1 with control=true and raw bytes.
+    let interrupt = Bytes::from_static(
+        br#"{"type":"response.interrupt","response_id":"resp_active_int","mode":"discard_partial_items"}"#,
+    );
+    let auth = gateway.authenticate().await.unwrap();
+    let ctrl_dispatch = gateway
+        .client_message(auth, interrupt.clone())
+        .await
+        .expect("interrupt is admitted")
+        .expect("interrupt dispatches immediately");
+    assert!(ctrl_dispatch.control);
+    assert_eq!(ctrl_dispatch.connection_id, Some(1));
+    assert!(ctrl_dispatch.candidates.is_empty());
+    assert_eq!(ctrl_dispatch.stream_id.as_deref(), Some("main"));
+    assert_eq!(gateway.frame_for_send(&ctrl_dispatch).unwrap(), interrupt);
+    assert_eq!(
+        concurrency.current("ws-interrupt-key"),
+        2,
+        "interrupt must not acquire an extra limit slot"
+    );
+
+    // 2. Ordering 1: response.interrupt.failed and response.interrupt.accepted forward without terminating turn.
+    let failed_ack = Bytes::from_static(
+        br#"{"type":"response.interrupt.failed","stream_id":"main","response_id":"resp_active_int"}"#,
+    );
+    let failed_res = gateway.provider_message(1, &failed_ack).await.unwrap();
+    assert!(failed_res.forward);
+    assert!(failed_res.dispatches.is_empty());
+
+    let accepted_ack = Bytes::from_static(
+        br#"{"type":"response.interrupt.accepted","stream_id":"main","response_id":"resp_active_int"}"#,
+    );
+    let accepted_res = gateway.provider_message(1, &accepted_ack).await.unwrap();
+    assert!(accepted_res.forward);
+    assert!(accepted_res.dispatches.is_empty());
+
+    // 3. Turn terminates cleanly with response.incomplete, releasing slot and advancing queued turn.
+    let incomplete = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_active_int","error":null,"incomplete_details":{"reason":"interrupted"},"usage":{"input_tokens":12,"output_tokens":3}}}"#,
+    );
+    let mut term = gateway.provider_message(1, &incomplete).await.unwrap();
+    assert!(term.forward);
+    assert_eq!(term.dispatches.len(), 1);
+    let queued = term.dispatches.pop().unwrap();
+    assert!(!queued.control);
+    websocket_send(&mut gateway, &queued, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_second_int"))
+            .await
+            .unwrap()
+            .forward
+    );
+    assert!(
+        gateway
+            .provider_message(1, &websocket_completed("main", "resp_second_int"))
+            .await
+            .unwrap()
+            .forward
+    );
+
+    // 4. Ordering 2: response.completed already arrived, then late interrupt + late acks still work cleanly.
+    let late_interrupt = Bytes::from_static(
+        br#"{"type":"response.interrupt","response_id":"resp_second_int","mode":"discard_partial_items"}"#,
+    );
+    let auth = gateway.authenticate().await.unwrap();
+    let late_dispatch = gateway
+        .client_message(auth, late_interrupt.clone())
+        .await
+        .expect("late interrupt for recent owner is admitted")
+        .expect("late interrupt dispatches");
+    assert!(late_dispatch.control);
+    assert_eq!(
+        gateway.frame_for_send(&late_dispatch).unwrap(),
+        late_interrupt
+    );
+
+    let late_ack = Bytes::from_static(
+        br#"{"type":"response.interrupt.accepted","stream_id":"main","response_id":"resp_second_int"}"#,
+    );
+    assert!(
+        gateway
+            .provider_message(1, &late_ack)
+            .await
+            .unwrap()
+            .forward
+    );
+    let late_failed = Bytes::from_static(
+        br#"{"type":"response.interrupt.failed","stream_id":"main","response_id":"resp_second_int"}"#,
+    );
+    assert!(
+        gateway
+            .provider_message(1, &late_failed)
+            .await
+            .unwrap()
+            .forward
+    );
+
+    gateway.close();
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+    reconcile.shutdown().await;
+    assert_eq!(concurrency.current("ws-interrupt-key"), 0);
+    assert!(dispatch_log.hosts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_interrupt_rejects_invalid_and_unowned_targets_and_reports_unknown_type()
+ {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_021,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let current = fixture.lifecycle.dynamic_view().load();
+    let other_lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(
+        crate::common::managed_authn("other-interrupt-principal"),
+        Arc::new(DynamicViewHolder::new(
+            DynamicViewBuilder::new(0)
+                .principal_view(Arc::new(PrincipalView::for_tests(
+                    "other-interrupt-principal",
+                    true,
+                    vec!["*".to_owned()],
+                    Vec::new(),
+                    HashMap::new(),
+                )))
+                .signer_factory(current.signer_factory.clone())
+                .upstream_records(current.upstreams_snapshot().to_vec())
+                .build(),
+        )),
+        fixture.dispatch.clone(),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    ));
+    let other_auth = other_lifecycle
+        .authenticate(messages_request(Bytes::new()).headers())
+        .await
+        .unwrap();
+
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+
+    // Missing and empty response_id -> 400 invalid_request_error.
+    for payload in [
+        br#"{"type":"response.interrupt"}"#.as_slice(),
+        br#"{"type":"response.interrupt","response_id":""}"#.as_slice(),
+    ] {
+        let auth = gateway.authenticate().await.unwrap();
+        let err = gateway
+            .client_message(auth, Bytes::from_static(payload))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.code, "invalid_request_error");
+        assert_eq!(err.message, "response.interrupt requires response_id");
+    }
+
+    // Unknown response_id -> 400 response_not_found.
+    let auth = gateway.authenticate().await.unwrap();
+    let err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.interrupt","response_id":"resp_missing"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, 400);
+    assert_eq!(err.code, "response_not_found");
+
+    // Unsupported event type preserves sanitized type name.
+    let auth = gateway.authenticate().await.unwrap();
+    let err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.future_event"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, 400);
+    assert_eq!(err.code, "invalid_request_error");
+    assert_eq!(
+        err.message,
+        "Unsupported Responses WebSocket client event: response.future_event"
+    );
+
+    // Admit and bind resp_owned on lane "main", connection 1.
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    // Before response.created arrives, interrupt is rejected as response_not_found.
+    websocket_send(&mut gateway, &first, 1).await;
+    let auth = gateway.authenticate().await.unwrap();
+    let before_created = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.interrupt","response_id":"resp_owned"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(before_created.code, "response_not_found");
+
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_owned"))
+            .await
+            .unwrap()
+            .forward
+    );
+
+    // Mismatched stream_id -> 400 response_not_found.
+    let auth = gateway.authenticate().await.unwrap();
+    let lane_err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(
+                br#"{"type":"response.interrupt","response_id":"resp_owned","stream_id":"other"}"#,
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(lane_err.status, 400);
+    assert_eq!(lane_err.code, "response_not_found");
+    assert_eq!(lane_err.stream_id.as_deref(), Some("other"));
+
+    // Wrong principal -> 400 response_not_found.
+    let principal_err = gateway
+        .client_message(
+            other_auth,
+            Bytes::from_static(br#"{"type":"response.interrupt","response_id":"resp_owned"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(principal_err.status, 400);
+    assert_eq!(principal_err.code, "response_not_found");
+
+    // Closed owning connection -> 400 response_not_found.
+    gateway.connection_closed(1, "closed");
+    let auth = gateway.authenticate().await.unwrap();
+    let closed_err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.interrupt","response_id":"resp_owned"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(closed_err.status, 400);
+    assert_eq!(closed_err.code, "response_not_found");
+}
